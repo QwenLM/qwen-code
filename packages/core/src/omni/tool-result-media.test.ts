@@ -135,6 +135,42 @@ describe('processToolResultOmniMedia', () => {
     expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key2');
   });
 
+  it('withholds the part with a text placeholder on a transport-guard rejection', async () => {
+    // A guard rejection is a policy verdict — keeping the part inline would
+    // deliver the exact bytes the guard was configured to reject. Must become
+    // a text placeholder, NOT stay inlineData, and NOT fail the whole batch.
+    const { OmniTransportGuardError } = await import('./guard.js');
+    deliverMock
+      .mockRejectedValueOnce(
+        new OmniTransportGuardError('x.png exceeds the omni upload limit'),
+      )
+      .mockResolvedValueOnce({
+        fileUri: 'oss://bucket/key3',
+        mimeType: 'image/png',
+        sha256: 'c'.repeat(64),
+        recognized: { modality: 'image' },
+        tokenEstimate: {
+          estimatedTokenCount: 1,
+          method: 'raw-resource-v1',
+          status: 'ok',
+        },
+        deduped: false,
+      });
+    const parts = [
+      inlinePart('image/png', PNG_BYTES),
+      inlinePart('image/png', PNG_BYTES),
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result[0]!.inlineData).toBeUndefined();
+    expect(result[0]!.text).toMatch(/withheld by the omni transport guard/);
+    expect(result[0]!.text).toMatch(/exceeds the omni upload limit/);
+    expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key3');
+  });
+
   it('keeps the part inline when staging-dir setup itself fails', async () => {
     // ~/.qwen/omni existing as a regular FILE makes mkdir fail with ENOTDIR.
     // That failure must degrade THIS part to inline like any other delivery

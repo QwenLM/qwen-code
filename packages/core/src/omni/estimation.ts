@@ -32,7 +32,8 @@ const VISUAL_PIXELS_PER_TOKEN = 32 * 32 * 2;
  *   audioTokens  = ceil(durationSeconds × 7)
  *   visualTokens = ceil(width × height × frameCount / (32 × 32 × 2))
  *
- * - static image → frameCount 1
+ * - static image → frameCount 1; animated image (GIF/APNG/animated WebP)
+ *   → real frameCount from the probe when reported
  * - video → frameCount from ceil(duration × frameRate); audio track of a
  *   video is NOT separately estimated in v1 (the visual term dominates and
  *   the raw formula is already a conservative upper bound)
@@ -68,11 +69,17 @@ export function estimateRawResourceTokens(
       };
     }
     case 'image': {
-      const { width, height } = media.metadata;
+      const { width, height, frameCount } = media.metadata;
       if (!usable(width) || !usable(height)) return unavailable;
+      // Animated images (GIF/APNG/animated WebP) carry their real frame
+      // count from the probe — a 300-frame GIF estimated as one frame would
+      // sail under the transport guard at ~1/300 of its real cost. Static
+      // images (and containers whose frame count ffprobe does not report)
+      // keep frameCount 1 per the design formula.
+      const frames = usable(frameCount) ? frameCount : 1;
       return {
         estimatedTokenCount: Math.ceil(
-          (width * height) / VISUAL_PIXELS_PER_TOKEN,
+          (width * height * frames) / VISUAL_PIXELS_PER_TOKEN,
         ),
         method: 'raw-resource-v1',
         status: 'ok',

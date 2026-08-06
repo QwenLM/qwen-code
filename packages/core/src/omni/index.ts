@@ -80,7 +80,12 @@ const debugLogger = createDebugLogger('omni');
  * (e.g. the object-store destination) with separator-based — not
  * ASCII-word-based — segment classes, so non-ASCII segments still match.
  */
-function sanitizeErrorMessage(err: unknown, knownPaths: string[] = []): string {
+// Exported for direct unit testing of the path shapes (visible only via the
+// module namespace; not re-exported from any barrel).
+export function sanitizeErrorMessage(
+  err: unknown,
+  knownPaths: string[] = [],
+): string {
   let msg = err instanceof Error ? err.message : String(err);
   for (const known of knownPaths) {
     if (known) msg = msg.split(known).join(path.basename(known));
@@ -255,7 +260,8 @@ export async function processMediaForOmniDelivery(
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
-      `Failed to store media in the omni object store: ${sanitizeErrorMessage(err, [filePath])}`,
+      `Failed to store media in the omni object store: ` +
+        `${sanitizeErrorMessage(err, [filePath, store.getOmniRootDir()])}`,
       { cause: err },
     );
   }
@@ -275,8 +281,12 @@ export async function processMediaForOmniDelivery(
     });
   } catch (err) {
     if (signal?.aborted) throw err;
+    // Upload errors can embed the object-store path (spawn/fs failures) —
+    // sanitize with the concrete path AND the store root, since a path with
+    // a space in a segment defeats the pattern pass (segment classes break
+    // at whitespace) and only exact replacement is immune.
     throw new OmniDeliveryError(
-      err instanceof Error ? err.message : String(err),
+      sanitizeErrorMessage(err, [objectPath, store.getOmniRootDir()]),
       { cause: err },
     );
   }

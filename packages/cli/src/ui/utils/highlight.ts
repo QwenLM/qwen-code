@@ -19,7 +19,7 @@ export type HighlightToken = {
 // full RFC 3986 charset — `%`, `?`, `&`, `=` are structural in a presigned
 // URL — while a filesystem ref keeps the narrower path charset.
 const HIGHLIGHT_REGEX =
-  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+)|(@(?:\\ |[a-zA-Z0-9_.:/-])+)/g;
+  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@[hH][tT][tT][pP][sS]?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+)|(@(?:\\ |[a-zA-Z0-9_.:/-])+)/g;
 
 // Mirrors the parser's trailing-punctuation trim: '.'/','/';'/':'/'!'/'?' at
 // the very end of a URL are prose, not part of the ref.

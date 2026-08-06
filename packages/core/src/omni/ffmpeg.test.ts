@@ -228,6 +228,54 @@ describe('probeMediaMetadata per-modality branches', () => {
     });
   });
 
+  it('reports frameCount for animated images (nb_frames)', async () => {
+    // Animated GIF/APNG/WebP report nb_frames on the video stream; the token
+    // estimator needs the real count — a 300-frame GIF estimated as a single
+    // frame would sail under the transport guard at ~1/300 of its real cost.
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'gif' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'gif',
+            width: 480,
+            height: 480,
+            nb_frames: '300',
+          },
+        ],
+      }),
+    }));
+    await expect(probeMediaMetadata('/anim.gif', 'image')).resolves.toEqual({
+      formatName: 'gif',
+      width: 480,
+      height: 480,
+      codec: 'gif',
+      frameCount: 300,
+    });
+  });
+
+  it('omits frameCount when nb_frames is absent or unusable', async () => {
+    for (const nb of [undefined, '0', 'N/A']) {
+      mockExecResult(() => ({
+        stdout: JSON.stringify({
+          format: { format_name: 'webp' },
+          streams: [
+            {
+              codec_type: 'video',
+              codec_name: 'webp',
+              width: 64,
+              height: 64,
+              ...(nb === undefined ? {} : { nb_frames: nb }),
+            },
+          ],
+        }),
+      }));
+      const result = await probeMediaMetadata('/i.webp', 'image');
+      expect(result.frameCount).toBeUndefined();
+    }
+  });
+
   it("audio with no audio stream yields undefined codec, not the video's", async () => {
     mockExecResult(() => ({
       stdout: JSON.stringify({

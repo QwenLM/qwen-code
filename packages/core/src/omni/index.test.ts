@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { isOmniVideoDeliveryActive } from './index.js';
 import { effectiveMaxDownloadFileBytes } from './index.js';
+import { sanitizeErrorMessage } from './index.js';
 
 function stubConfig(overrides: {
   omniEnabled?: boolean;
@@ -33,6 +34,39 @@ const DASHSCOPE_CGC = {
 
 afterEach(() => {
   delete process.env['QWEN_CODE_ENABLE_OMNI'];
+});
+
+describe('sanitizeErrorMessage', () => {
+  it('scrubs known paths exactly, including segments with spaces', () => {
+    // A space inside a segment defeats the pattern pass (segment classes
+    // break at whitespace — '/Users/john doe/…' would surface 'john doe');
+    // known-path exact replacement is the only mechanism immune to it.
+    const spaced = '/Users/john doe/.qwen/omni/objects/ab/abcd1234deadbeef.png';
+    const err = new Error(`EACCES: permission denied, open '${spaced}'`);
+    const out = sanitizeErrorMessage(err, [spaced]);
+    expect(out).not.toContain('john doe');
+    expect(out).toContain('abcd1234deadbeef.png');
+  });
+
+  it('scrubs a known store ROOT even when the full object path is unknown', () => {
+    // putFile can throw before objectPath is assigned; passing the store
+    // root as a known path still removes the user-identifying prefix.
+    const root = '/Users/john doe/.qwen/omni';
+    const err = new Error(
+      `ENOSPC: no space left on device, write '${root}/objects/cd/ef99.webm'`,
+    );
+    const out = sanitizeErrorMessage(err, [root]);
+    expect(out).not.toContain('john doe');
+    expect(out).toContain('ef99.webm');
+  });
+
+  it('pattern pass still collapses unknown space-free absolute paths', () => {
+    const err = new Error(
+      "ENOENT: no such file or directory, stat '/opt/data/media/clip.mp4'",
+    );
+    expect(sanitizeErrorMessage(err)).not.toContain('/opt/data');
+    expect(sanitizeErrorMessage(err)).toContain('clip.mp4');
+  });
 });
 
 describe('effectiveMaxDownloadFileBytes', () => {

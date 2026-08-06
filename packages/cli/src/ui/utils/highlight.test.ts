@@ -89,6 +89,16 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
+  it('should match the URL scheme case-insensitively, like the parser', () => {
+    // parseAllAtCommands matches /^https?:\/\//i — an uppercase scheme must
+    // not fall back to the narrower filesystem charset and half-paint.
+    const url = 'HTTPS://example.com/a.mp4?sig=abc%2Fdef';
+    expect(parseInputForHighlighting(`@${url} check`, 0)).toEqual([
+      { text: `@${url}`, type: 'file' },
+      { text: ' check', type: 'default' },
+    ]);
+  });
+
   it('should highlight a command in the middle when preceded by whitespace', () => {
     const text = 'I need /help with this';
     expect(parseInputForHighlighting(text, 0)).toEqual([

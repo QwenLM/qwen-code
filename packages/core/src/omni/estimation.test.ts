@@ -45,6 +45,22 @@ describe('estimateRawResourceTokens (raw-resource-v1)', () => {
     expect(est.status).toBe('ok');
   });
 
+  it('animated image: real frameCount from the probe, not 1', () => {
+    // A 480×480 300-frame GIF at one frame would estimate ~113 tokens and
+    // sail under any realistic guard threshold; the real estimate is ~33,750.
+    const est = estimateRawResourceTokens(
+      media('image', { width: 480, height: 480, frameCount: 300 }),
+    );
+    expect(est.estimatedTokenCount).toBe(Math.ceil((480 * 480 * 300) / 2048));
+    expect(est.status).toBe('ok');
+    // Degenerate frame counts fall back to the static single frame.
+    expect(
+      estimateRawResourceTokens(
+        media('image', { width: 480, height: 480, frameCount: 0 }),
+      ).estimatedTokenCount,
+    ).toBe(Math.ceil((480 * 480) / 2048));
+  });
+
   it('video: frameCount from duration × frameRate', () => {
     const est = estimateRawResourceTokens(
       media('video', {

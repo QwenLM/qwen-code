@@ -11,6 +11,7 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isOmniDeliveryActive, processMediaForOmniDelivery } from './index.js';
+import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore } from './storage.js';
 import { sniffMediaType } from './recognition.js';
 
@@ -38,7 +39,10 @@ const MAX_UPLOAD_BYTES_PER_TOOL_RESULT = 128 * 1024 * 1024;
  * - failure of any single part leaves that part inline (tool results were
  *   produced locally and already fit in memory — degrading to the S1-era
  *   inline behavior is safe here, unlike user-input delivery where inline
- *   silently violates the size contract; the failure is logged);
+ *   silently violates the size contract; the failure is logged) — EXCEPT
+ *   transport-guard rejections, which are policy verdicts rather than
+ *   transfer failures: those parts are withheld with a text placeholder,
+ *   never delivered inline (that would bypass the enabled guard);
  * - user aborts propagate.
  */
 export async function processToolResultOmniMedia(
@@ -109,6 +113,18 @@ export async function processToolResultOmniMedia(
       };
     } catch (err) {
       if (signal.aborted) throw err;
+      if (err instanceof OmniTransportGuardError) {
+        // A guard rejection is a policy verdict, not a transfer failure —
+        // keeping the part inline would deliver the exact bytes the guard
+        // was configured to reject (at greater request cost than the
+        // upload). Withhold the media and say so; the inline-degradation
+        // rationale ("produced locally, already in memory") covers only
+        // failures of the *transfer*.
+        changed = true;
+        return {
+          text: `[Tool media part withheld by the omni transport guard: ${err.message}]`,
+        };
+      }
       debugLogger.debug(
         `tool-result media upload failed, keeping inline: ${
           err instanceof Error ? err.message : String(err)

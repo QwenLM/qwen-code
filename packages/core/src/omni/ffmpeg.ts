@@ -135,6 +135,9 @@ export interface MediaProbeResult {
   frameRate?: number;
   /** Codec name of the primary stream for the modality. */
   codec?: string;
+  /** Frame count of the primary video stream (image: >1 means animated —
+   * GIF/APNG/animated WebP; absent when the container does not report it). */
+  frameCount?: number;
   /** Sample rate in Hz of the first audio stream (audio only). */
   sampleRateHz?: number;
   /** Channel count of the first audio stream (audio only). */
@@ -200,6 +203,7 @@ export async function probeMediaMetadata(
       height?: number;
       avg_frame_rate?: string;
       r_frame_rate?: string;
+      nb_frames?: string;
       sample_rate?: string;
       channels?: number;
     }>;
@@ -221,13 +225,22 @@ export async function probeMediaMetadata(
 
   const base: MediaProbeResult = { formatName: parsed.format?.format_name };
   switch (modality) {
-    case 'image':
+    case 'image': {
+      // Animated images (GIF/APNG/animated WebP) report nb_frames on their
+      // video stream; a single-frame image reports 1 or omits it. The token
+      // estimator needs the real count — an animated GIF estimated as one
+      // frame sails under the transport guard at ~1/300 of its real cost.
+      const nbFrames = Number(videoStream?.nb_frames);
       return {
         ...base,
         width: videoStream?.width,
         height: videoStream?.height,
         codec: videoStream?.codec_name,
+        ...(Number.isFinite(nbFrames) && nbFrames > 0
+          ? { frameCount: nbFrames }
+          : {}),
       };
+    }
     case 'audio':
       return {
         ...base,
