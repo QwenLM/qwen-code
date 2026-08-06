@@ -58,8 +58,9 @@ const SHELL_COMMAND_STAGNATION_THRESHOLD = STAGNATION_THRESHOLD;
 
 // Global tool call duplicate tracking: how many times the same (tool, args)
 // pair must appear across the entire turn (not necessarily consecutively)
-// before it is treated as a loop.
-const GLOBAL_DUPLICATE_THRESHOLD = 6;
+// before it is treated as a loop. Exported so the daemon's turn-loop guard
+// (ACP Session) applies the same stuck-repetition signal as this service.
+export const GLOBAL_DUPLICATE_THRESHOLD = 6;
 
 // Alternating pattern detection: number of complete AB cycles needed to
 // trip the detector (3 cycles = 6 calls: A B A B A B).
@@ -89,8 +90,9 @@ export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 // varies its arguments on every call (which no repetition signal catches) is
 // still bounded. With the default soft cap of 100 this is 1000 — high enough
 // that modern models making hundreds of legitimate calls per task are not
-// false-positived, while still bounding a pathological runaway.
-const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
+// false-positived, while still bounding a pathological runaway. Exported for
+// the daemon's turn-loop guard, same as GLOBAL_DUPLICATE_THRESHOLD above.
+export const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
 
 /**
  * Recursively canonicalizes a JSON-compatible value for stable hashing: object
@@ -113,6 +115,20 @@ function canonicalizeForHash(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+/**
+ * Stable identity of a (tool, args) call for repeat tracking: a sha256 over
+ * the canonicalized args (sorted object keys, preserved array order), so
+ * identical calls that differ only in field order hash to the same key and
+ * large payloads (e.g. write_file content) are retained as a fixed-size
+ * digest rather than the raw JSON. Shared with the daemon's turn-loop guard
+ * (ACP Session) so both runtimes key repeats the same way.
+ */
+export function getToolCallRepeatKey(toolName: string, args: unknown): string {
+  const argsString = JSON.stringify(canonicalizeForHash(args));
+  const keyString = `${toolName}:${argsString}`;
+  return createHash('sha256').update(keyString).digest('hex');
 }
 
 /**
@@ -226,9 +242,7 @@ export class LoopDetectionService {
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
-    const argsString = JSON.stringify(canonicalizeForHash(toolCall.args));
-    const keyString = `${toolCall.name}:${argsString}`;
-    return createHash('sha256').update(keyString).digest('hex');
+    return getToolCallRepeatKey(toolCall.name, toolCall.args);
   }
 
   /**

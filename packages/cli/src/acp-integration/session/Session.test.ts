@@ -684,6 +684,7 @@ describe('Session', () => {
       getMaxToolCallsPerTurn: vi
         .fn()
         .mockReturnValue(core.DEFAULT_MAX_TOOL_CALLS_PER_TURN),
+      isMaxToolCallsPerTurnExplicit: vi.fn().mockReturnValue(false),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getBackgroundTaskRegistry: vi
         .fn()
@@ -6448,6 +6449,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -6509,6 +6512,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -6573,6 +6578,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -6615,8 +6622,12 @@ describe('Session', () => {
       it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         // Pin the cap via the config mock — the daemon halts at whatever the
-        // resolved getter returns.
+        // resolved getter returns. An explicit value is a hard cap (core's
+        // released contract), so this turn stops on the call that exceeds it.
         mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(true);
         const functionCalls = Array.from({ length: 102 }, (_, index) => ({
           id: `read_${index}`,
           name: 'read_file',
@@ -6677,7 +6688,138 @@ describe('Session', () => {
         );
       });
 
-      it('does not start unstarted concurrent Agent calls after invalid parameter loop detection', async () => {
+      it('lets a productive turn continue past the default cap (adaptive)', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // Default cap (100) without an explicit setting: a turn of diverse
+        // calls — the /review orchestrator shape — must not be halted at the
+        // soft cap, mirroring core's adaptive checkTurnToolCallCap.
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 99,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        const calls = Array.from({ length: 5 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: `file_${index}.ts` },
+        }));
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: vi.fn().mockResolvedValue({
+                    llmContent: 'ok',
+                    returnDisplay: 'ok',
+                  }),
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-adaptive-cap',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected ?? false).toBe(false);
+        expect(result.parts).toHaveLength(5);
+      });
+
+      it('stops a turn on repeated identical calls even below the cap', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // Six identical (tool, args) calls trip the always-on repeat signal
+        // (core's checkGlobalDuplicate mirror) without any cap involvement.
+        const calls = Array.from({ length: 6 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: 'same.ts' },
+        }));
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: vi.fn().mockResolvedValue({
+                    llmContent: 'ok',
+                    returnDisplay: 'ok',
+                  }),
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-adaptive-cap-stuck',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after the same tool call repeated 6 times.',
+          ),
+        );
+      });
+
+      it('detects invalid parameter loops in concurrent Agent batches and skips the calls after the batch', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         const build = vi.fn().mockImplementation(() => {
           throw new Error('Invalid subagent_type: bad');
@@ -6711,6 +6853,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
         const result = await (
@@ -6734,13 +6878,21 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected).toBe(true);
+        // Agent-only batches run fully concurrent (no serial prefix), so
+        // every build() throws; the loop is detected on the third failure
+        // and only the calls AFTER the batch stay skipped.
         expect(
           result.parts
-            .slice(3)
+            .slice(0, 5)
+            .map((part) => part.functionResponse?.response?.['error']),
+        ).toEqual(
+          Array.from({ length: 5 }, () => 'Invalid subagent_type: bad'),
+        );
+        expect(
+          result.parts
+            .slice(5)
             .map((part) => part.functionResponse?.response?.['error']),
         ).toEqual([
-          'Skipped because loop detection stopped the current turn before this tool call could run.',
-          'Skipped because loop detection stopped the current turn before this tool call could run.',
           'Skipped because loop detection stopped the current turn before this tool call could run.',
         ]);
         expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
@@ -6758,7 +6910,7 @@ describe('Session', () => {
         );
       });
 
-      it('stops concurrent Agent batches after Promise.race observes loop detection', async () => {
+      it('detects invalid parameter loops in small concurrent Agent batches', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         const build = vi.fn().mockImplementation(() => {
           throw new Error('Invalid subagent_type: bad');
@@ -6783,6 +6935,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -6909,6 +7063,8 @@ describe('Session', () => {
               loopState: {
                 totalToolCalls: number;
                 invalidToolParamErrors: Map<string, number>;
+                toolCallKeyCounts: Map<string, number>;
+                maxToolCallKeyRepeat: number;
                 loopDetected: boolean;
               },
             ) => Promise<unknown>;
@@ -6920,6 +7076,8 @@ describe('Session', () => {
           {
             totalToolCalls: 0,
             invalidToolParamErrors: new Map(),
+            toolCallKeyCounts: new Map<string, number>(),
+            maxToolCallKeyRepeat: 0,
             loopDetected: false,
           },
         );
@@ -16786,6 +16944,107 @@ describe('Session', () => {
         expect(ids).toEqual(['call-a', 'call-b']);
       });
 
+      it('starts every Agent call of a fan-out concurrently, past the loop-detection threshold', async () => {
+        // Regression: the daemon once serialized the first three calls of a
+        // large batch before widening concurrency, which stretched /review
+        // fan-outs into several serial multi-minute agent runs. All five
+        // calls here must reach execute() before any result resolves; under
+        // the old serial prefix the fourth would not start until one of the
+        // first three finished, and this await deadlocks until the vitest
+        // timeout.
+        type Deferred<T> = {
+          promise: Promise<T>;
+          resolve: (v: T) => void;
+        };
+        const makeDeferred = <T>(): Deferred<T> => {
+          let resolve!: (v: T) => void;
+          const promise = new Promise<T>((r) => {
+            resolve = r;
+          });
+          return { promise, resolve };
+        };
+
+        const ids = ['call-a', 'call-b', 'call-c', 'call-d', 'call-e'];
+        const called: Record<string, Deferred<void>> = {};
+        const result: Record<string, Deferred<core.ToolResult>> = {};
+        for (const id of ids) {
+          called[id] = makeDeferred<void>();
+          result[id] = makeDeferred<core.ToolResult>();
+        }
+
+        const agentTool = {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            const id = args['_test_id'] as string;
+            return {
+              params: args,
+              eventEmitter: undefined,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue(`agent ${id}`),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockImplementation(() => {
+                called[id].resolve();
+                return result[id].promise;
+              }),
+            };
+          }),
+        };
+
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.AGENT ? agentTool : undefined,
+        );
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+
+        const sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: ids.map((id) => ({
+                    id,
+                    name: core.ToolNames.AGENT,
+                    args: { _test_id: id, subagent_type: 'explore' },
+                  })),
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = sendMessageStream;
+
+        const promptPromise = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'spawn five agents' }],
+        });
+
+        await Promise.all(ids.map((id) => called[id].promise));
+
+        for (const id of ids) {
+          result[id].resolve({
+            llmContent: `${id}-done`,
+            returnDisplay: id,
+          });
+        }
+
+        await promptPromise;
+
+        expect(sendMessageStream).toHaveBeenCalledTimes(2);
+        const followUp = sendMessageStream.mock.calls[1][1] as {
+          message: Array<{ functionResponse?: { id?: string } }>;
+        };
+        expect(
+          followUp.message
+            .filter((p) => p.functionResponse)
+            .map((p) => p.functionResponse?.id),
+        ).toEqual(ids);
+      });
+
       it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
         const previousMaxConcurrency =
           process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
@@ -19570,6 +19829,8 @@ describe('Session', () => {
       const toolLoopState = {
         totalToolCalls: 0,
         invalidToolParamErrors: new Map<string, number>(),
+        toolCallKeyCounts: new Map<string, number>(),
+        maxToolCallKeyRepeat: 0,
         loopDetected: false,
       };
 
@@ -20253,7 +20514,7 @@ describe('Session', () => {
       expect(siblingSignal?.aborted).toBe(true);
     });
 
-    it('aborts sibling Agent calls in the same batch after loop detection', async () => {
+    it('lets sibling Agent calls in a small batch finish when loop detection fires', async () => {
       let firstSiblingSignal: AbortSignal | undefined;
       let secondSiblingSignal: AbortSignal | undefined;
       const firstSiblingExecute = vi
@@ -20303,6 +20564,8 @@ describe('Session', () => {
       const toolLoopState = {
         totalToolCalls: 0,
         invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
+        toolCallKeyCounts: new Map<string, number>(),
+        maxToolCallKeyRepeat: 0,
         loopDetected: false,
       };
 
@@ -20334,8 +20597,17 @@ describe('Session', () => {
       expect(result.loopDetected).toBe(true);
       expect(firstSiblingExecute).toHaveBeenCalledOnce();
       expect(secondSiblingExecute).toHaveBeenCalledOnce();
-      expect(firstSiblingSignal?.aborted).toBe(true);
-      expect(secondSiblingSignal?.aborted).toBe(true);
+      // Agent-only batches run at full width (no serial prefix), so a batch
+      // this size never hits the capped race branch: the loop fired by the
+      // invalid call stops the turn without aborting mid-flight siblings —
+      // they finish and their results are kept instead of being killed.
+      expect(firstSiblingSignal?.aborted).toBe(false);
+      expect(secondSiblingSignal?.aborted).toBe(false);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'agent_invalid',
+        'agent_sibling_1',
+        'agent_sibling_2',
+      ]);
     });
 
     it('does not treat parent abort during nested Agent permission as explicit rejection', async () => {
