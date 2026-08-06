@@ -1153,9 +1153,12 @@ export function findingsSection(
       ? [
           // The line count makes under-reading visible: `read_file` truncates,
           // so an agent told only "read ALL of it" can stop after the first
-          // page and never know it saw a fraction of the list.
-          `The list is a file (${body.split('\n').length} lines). Read ALL of ` +
-            'it, right after your brief — page with a larger `offset` if a ' +
+          // page and never know it saw a fraction of the list. Count from the
+          // UNtrimmed content — that is what writeFindingsFile writes, so the
+          // number describes the file the agent actually reads (leading or
+          // trailing blank lines would otherwise shrink it).
+          `The list is a file (${content.split('\n').length} lines). Read ALL ` +
+            'of it, right after your brief — page with a larger `offset` if a ' +
             'read comes back `isTruncated`:',
           '',
           '```',

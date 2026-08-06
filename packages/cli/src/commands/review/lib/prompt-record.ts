@@ -219,7 +219,12 @@ export function readRecordedPrompts(
   const dir = promptRecordDir(planPath);
   let names: string[];
   try {
-    names = readdirSync(dir);
+    // Sorted: this module reasons per-record and pairs records against
+    // transcripts, and a filesystem-order walk (`readdir` is filename-hash
+    // order on ext4, not insertion order) makes the analysis order-sensitive —
+    // e.g. which record's state poisons a shared cache first. A deterministic
+    // walk removes that whole class.
+    names = readdirSync(dir).sort();
   } catch {
     return out; // Never run, or nothing to record. The caller decides what that means.
   }
