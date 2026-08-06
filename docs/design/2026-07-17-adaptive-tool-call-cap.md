@@ -139,6 +139,8 @@ When `S ≤ 0` the cap is disabled (`getMaxToolCallsPerTurn()` returns
   now mirrors the adaptive default (explicit value = hard cap; default =
   adaptive with the same stuck-repetition signal and hard backstop, reusing
   the thresholds and the `(tool,args)` repeat key exported from this module),
-  plus an always-on repeat check mirroring `checkGlobalDuplicate`. The
-  interactive TUI path that produced the reported false positive is fixed
-  here.
+  and mirrors `checkGlobalDuplicate` on the same side of the
+  `skipLoopDetection` gate as core (off by default, since this detector
+  class is the false-positive-prone one; the always-on stuck signal still
+  only acts past the soft cap, as argued above). The interactive TUI path
+  that produced the reported false positive is fixed here.

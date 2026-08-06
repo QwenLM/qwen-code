@@ -458,7 +458,7 @@ type QueueToolResultRecord = (
 type DaemonToolLoopState = {
   totalToolCalls: number;
   invalidToolParamErrors: Map<string, number>;
-  /** Per-turn counts of identical (tool, args) calls, keyed by JSON. */
+  /** Per-turn counts of identical (tool, args) calls, by repeat key. */
   toolCallKeyCounts: Map<string, number>;
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
@@ -519,54 +519,60 @@ function recordDaemonToolCalls(
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += calls.length;
   for (const call of calls) {
-    const key = getToolCallRepeatKey(
-      canonicalToolName(call.name ?? ''),
-      call.args ?? {},
-    );
+    const key = getToolCallRepeatKey(call.name ?? '', call.args ?? {});
     const count = (loopState.toolCallKeyCounts.get(key) ?? 0) + 1;
     loopState.toolCallKeyCounts.set(key, count);
     if (count > loopState.maxToolCallKeyRepeat) {
       loopState.maxToolCallKeyRepeat = count;
     }
   }
-  // Mirrors core's always-on checkGlobalDuplicate: the same (tool, args)
-  // pair repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn is
-  // a stuck loop, regardless of the cap. Applying it unconditionally — not
-  // only past the soft cap — matters here because the ACP path runs none of
-  // core's other detectors (consecutive-identical, alternating-pattern,
-  // stagnation); this repeat signal and the cap below are the daemon's only
-  // turn-level runaway backstops.
-  if (loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD) {
-    return recordDaemonLoopDetected(
-      config,
-      promptId,
-      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
-      loopState,
-    );
-  }
   // Same per-turn cap semantics as the core LoopDetectionService's
   // checkTurnToolCallCap (getMaxToolCallsPerTurn resolves
   // model.maxToolCallsPerTurn to an effective value, Infinity when disabled):
   // an explicitly configured value is a hard cap; the default is adaptive —
   // once past the soft cap, a productive turn (diverse calls) continues
-  // until a stuck-repetition signal or the hard backstop. Unlike core there
-  // is no in-session disable check — that flag is only set by the interactive
-  // loop-detection dialog, which has no ACP equivalent. The daemon once
-  // halted unconditionally at the cap, which killed long legitimate turns:
-  // a /review orchestrator needs well over 100 calls for one review.
-  // Evaluated once per batch rather than per call (core checks per call),
-  // so a turn can overshoot the cap by at most one batch.
+  // until the stuck-repetition signal (the same
+  // maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD condition core's cap
+  // uses) or the hard backstop. Unlike core there is no in-session disable
+  // check — that flag is only set by the interactive loop-detection dialog,
+  // which has no ACP equivalent — and this runs once per batch rather than
+  // per call, so a turn can overshoot the cap by at most one batch. No
+  // retry rollback is needed for these counters: on RETRY / MODEL_FALLBACK
+  // the daemon stream loops discard the failed attempt's accumulated calls
+  // (functionCalls.length = 0) before re-streaming, so a failed attempt's
+  // calls never reach this function to be double-counted.
   const cap = config.getMaxToolCallsPerTurn();
-  if (loopState.totalToolCalls <= cap) return false;
-  const explicitHardCap = config.isMaxToolCallsPerTurnExplicit();
-  const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
-  if (explicitHardCap || loopState.totalToolCalls > hardCap) {
+  if (loopState.totalToolCalls > cap) {
+    const explicitHardCap = config.isMaxToolCallsPerTurnExplicit();
+    const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
+    const stuck = loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
+    if (explicitHardCap || loopState.totalToolCalls > hardCap || stuck) {
+      return recordDaemonLoopDetected(
+        config,
+        promptId,
+        LoopType.TURN_TOOL_CALL_CAP,
+        `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
+        loopState,
+      );
+    }
+  }
+  // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
+  // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
+  // it. Gated on skipLoopDetection exactly as in core — that detector class
+  // is the historically false-positive-prone one (long turns legitimately
+  // re-run the same build/test/read), so it ships off by default, and its
+  // false positives would land hardest on exactly the long turns this
+  // adaptive cap exists to enable. The cap's stuck signal above stays
+  // always-on regardless.
+  if (
+    !config.getSkipLoopDetection() &&
+    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
+  ) {
     return recordDaemonLoopDetected(
       config,
       promptId,
-      LoopType.TURN_TOOL_CALL_CAP,
-      `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
+      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
     );
   }
@@ -7188,30 +7194,6 @@ export class Session implements SessionContext {
       return part;
     };
 
-    if (
-      recordDaemonToolCalls(
-        this.config,
-        promptId,
-        toolLoopState,
-        dedupedFunctionCalls,
-      )
-    ) {
-      return await finalizeRunToolResult({
-        parts: await Promise.all(
-          dedupedFunctionCalls.map((fc) =>
-            recordSkippedToolCall(
-              fc,
-              LOOP_DETECTED_SKIP_MESSAGE,
-              false,
-              ToolErrorType.UNKNOWN,
-            ),
-          ),
-        ),
-        stopAfterPermissionCancel: false,
-        loopDetected: true,
-      });
-    }
-
     type ExecutableBatch = {
       kind: 'execute';
       concurrent: boolean;
@@ -7346,7 +7328,10 @@ export class Session implements SessionContext {
         handledProviderToolCallIds.add(providerCallId);
       }
 
-      const isAgent = fc.name === ToolNames.AGENT;
+      // Canonical names match core's isToolCallConcurrencySafe predicate,
+      // where `task` is a live alias of the agent tool; concurrent batches
+      // are therefore agent-only.
+      const isAgent = canonicalToolName(fc.name ?? '') === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
@@ -7358,6 +7343,32 @@ export class Session implements SessionContext {
     const executableCalls = batches.flatMap((batch) =>
       batch.kind === 'execute' ? batch.calls : [],
     );
+    // Count only the calls that will actually execute: calls served from
+    // history as duplicates never run and must not accumulate repeat
+    // counts toward the stuck signal.
+    if (
+      recordDaemonToolCalls(
+        this.config,
+        promptId,
+        toolLoopState,
+        executableCalls,
+      )
+    ) {
+      return await finalizeRunToolResult({
+        parts: await Promise.all(
+          dedupedFunctionCalls.map((fc) =>
+            recordSkippedToolCall(
+              fc,
+              LOOP_DETECTED_SKIP_MESSAGE,
+              false,
+              ToolErrorType.UNKNOWN,
+            ),
+          ),
+        ),
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      });
+    }
     const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
       executableCalls.map((call) => call.name),
     );
@@ -7395,15 +7406,14 @@ export class Session implements SessionContext {
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
     // in input order regardless of resolution order.
     //
-    // The serial prefix and the sub-threshold concurrency cap below are
-    // loop-detection defences: they let the daemon observe repeated
-    // invalid-params failures one at a time before widening a fan-out.
-    // They apply only to batches that could carry non-agent calls.
-    // Agent-only batches (the /review-style fan-out) skip both: an invalid
-    // agent call fails in build() before any side effect, so the
-    // near-threshold check in the concurrent loop catches the loop just as
-    // fast, and serializing three multi-minute agent runs per batch cost
-    // reviews most of their wall time.
+    // Only agent-only batches reach here (the batcher above groups only
+    // agent calls into concurrent batches), so no invalid-params serial
+    // defence is needed: an invalid agent call fails in build() before any
+    // side effect. Batches wider than the concurrency cap are still
+    // observed incrementally — the Promise.race loop check and the
+    // near-threshold check below stop the turn mid-batch. Narrower batches
+    // start every call at once; a loop firing mid-batch lets the in-flight
+    // calls finish (results kept) before the turn reports the stop.
     const runBounded = async (
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
@@ -7411,25 +7421,10 @@ export class Session implements SessionContext {
       onStopAfterLoopDetected?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const configuredMaxConcurrency = parsePositiveIntegerEnv(
+      const maxConcurrency = parsePositiveIntegerEnv(
         process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
-      // Canonical names match core's isToolCallConcurrencySafe predicate,
-      // where `task` is a live alias of the agent tool. Batch-level on
-      // purpose: one non-agent call in the batch falls back to the defences
-      // for the whole batch rather than interleaving guarded and unguarded
-      // calls in one runner.
-      const allAgentCalls = calls.every(
-        (c) => canonicalToolName(c.name ?? '') === ToolNames.AGENT,
-      );
-      const maxConcurrency =
-        toolLoopState && !allAgentCalls
-          ? Math.min(
-              configuredMaxConcurrency,
-              DAEMON_INVALID_TOOL_PARAMS_THRESHOLD,
-            )
-          : configuredMaxConcurrency;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
       const fillLoopSkippedFrom = async (startIndex: number) => {
@@ -7449,53 +7444,8 @@ export class Session implements SessionContext {
           };
         }
       };
-      const fillPermissionSkippedFrom = async (startIndex: number) => {
-        for (let i = startIndex; i < calls.length; i++) {
-          if (results[i]) continue;
-          results[i] = {
-            parts: [await recordSkippedToolCall(calls[i])],
-            stopAfterPermissionCancel: false,
-          };
-        }
-      };
-      let startIndex = 0;
-      if (
-        toolLoopState &&
-        !allAgentCalls &&
-        calls.length > DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
-      ) {
-        startIndex = DAEMON_INVALID_TOOL_PARAMS_THRESHOLD;
-        for (let i = 0; i < startIndex; i++) {
-          if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
-            results[i] = {
-              parts: [await recordSkippedToolCall(calls[i])],
-              stopAfterPermissionCancel: false,
-            };
-            continue;
-          }
-          const r = await this.runTool(
-            runAbortSignal,
-            promptId,
-            calls[i],
-            onStopAfterPermissionCancel,
-            toolLoopState,
-            recordSkippedToolCall,
-            queueToolResultRecord,
-            executionCallIds.get(calls[i]),
-            onFullTurnModel,
-          );
-          results[i] = r;
-          if (r.loopDetected) {
-            await fillLoopSkippedFrom(i + 1);
-            return results;
-          }
-          if (r.stopAfterPermissionCancel) {
-            await fillPermissionSkippedFrom(i + 1);
-            return results;
-          }
-        }
-      }
-      for (let i = startIndex; i < calls.length; i++) {
+      let warnedWaitingForInFlight = false;
+      for (let i = 0; i < calls.length; i++) {
         const idx = i;
         if (toolLoopState?.loopDetected) {
           await fillLoopSkippedFrom(idx);
@@ -7521,6 +7471,18 @@ export class Session implements SessionContext {
         )
           .then((r) => {
             results[idx] = r;
+            if (
+              r.loopDetected &&
+              executing.size > 1 &&
+              !warnedWaitingForInFlight
+            ) {
+              warnedWaitingForInFlight = true;
+              debugLogger.warn(
+                `Loop detection stopped this ACP turn; waiting for ${
+                  executing.size - 1
+                } in-flight tool call(s) to settle before returning.`,
+              );
+            }
           })
           .finally(() => {
             executing.delete(p);

@@ -685,6 +685,9 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(core.DEFAULT_MAX_TOOL_CALLS_PER_TURN),
       isMaxToolCallsPerTurnExplicit: vi.fn().mockReturnValue(false),
+      // Mirrors the resolved settings default (cli/config.ts passes
+      // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
+      getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getBackgroundTaskRegistry: vi
         .fn()
@@ -6752,7 +6755,7 @@ describe('Session', () => {
         expect(result.parts).toHaveLength(5);
       });
 
-      it('stops a turn on repeated identical calls even below the cap', async () => {
+      it('does not halt on below-cap repeats while loop detection is skipped (default)', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
         mockConfig.isMaxToolCallsPerTurnExplicit = vi
@@ -6765,13 +6768,153 @@ describe('Session', () => {
           maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
-        // Six identical (tool, args) calls trip the always-on repeat signal
-        // (core's checkGlobalDuplicate mirror) without any cap involvement.
+        // Six identical (tool, args) calls below the cap — the shape core's
+        // checkGlobalDuplicate covers. Core gates that detector on
+        // skipLoopDetection (default true) because long turns legitimately
+        // re-run the same call, so the daemon default must let it run too.
         const calls = Array.from({ length: 6 }, (_, index) => ({
           id: `read_${index}`,
           name: 'read_file',
           args: { file_path: 'same.ts' },
         }));
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: vi.fn().mockResolvedValue({
+                    llmContent: 'ok',
+                    returnDisplay: 'ok',
+                  }),
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-below-cap-repeats-default',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected ?? false).toBe(false);
+        expect(result.parts).toHaveLength(6);
+      });
+
+      it('stops a turn on repeated identical calls below the cap when loop detection is enabled', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        const calls = Array.from({ length: 6 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: 'same.ts' },
+        }));
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: vi.fn().mockResolvedValue({
+                    llmContent: 'ok',
+                    returnDisplay: 'ok',
+                  }),
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-below-cap-repeats-opted-in',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after the same tool call repeated 6 times.',
+          ),
+        );
+      });
+
+      it('stops a stuck turn past the soft cap on the cap loop type (adaptive)', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 99,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // One diverse call plus six identical ones push the turn past the
+        // soft cap with the stuck-repetition signal: the adaptive cap halts
+        // on the cap loop type — core's tier order runs checkTurnToolCallCap
+        // before the gated global-duplicate check.
+        const calls = [
+          {
+            id: 'read_other',
+            name: 'read_file',
+            args: { file_path: 'other.ts' },
+          },
+          ...Array.from({ length: 6 }, (_, index) => ({
+            id: `read_${index}`,
+            name: 'read_file',
+            args: { file_path: 'same.ts' },
+          })),
+        ];
         mockToolRegistry.getTool.mockImplementation((name: string) =>
           name === 'read_file'
             ? {
@@ -6812,9 +6955,10 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected).toBe(true);
+        expect(result.parts).toHaveLength(7);
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
-            'Stopping ACP turn after the same tool call repeated 6 times.',
+            'Stopping ACP turn after 106 tool calls in one turn.',
           ),
         );
       });
@@ -16950,8 +17094,8 @@ describe('Session', () => {
         // fan-outs into several serial multi-minute agent runs. All five
         // calls here must reach execute() before any result resolves; under
         // the old serial prefix the fourth would not start until one of the
-        // first three finished, and this await deadlocks until the vitest
-        // timeout.
+        // first three finished, and the race below reports that regression
+        // with a named assertion instead of an opaque vitest timeout.
         type Deferred<T> = {
           promise: Promise<T>;
           resolve: (v: T) => void;
@@ -17023,7 +17167,24 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'spawn five agents' }],
         });
 
-        await Promise.all(ids.map((id) => called[id].promise));
+        let fanOutTimer: ReturnType<typeof setTimeout> | undefined;
+        const fanOutDeadline = new Promise<never>((_, reject) => {
+          fanOutTimer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'Agent fan-out did not start concurrently ' +
+                    '(serial-prefix regression).',
+                ),
+              ),
+            2000,
+          );
+        });
+        await Promise.race([
+          Promise.all(ids.map((id) => called[id].promise)),
+          fanOutDeadline,
+        ]);
+        clearTimeout(fanOutTimer);
 
         for (const id of ids) {
           result[id].resolve({

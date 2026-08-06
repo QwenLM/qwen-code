@@ -18,6 +18,7 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
+import { ToolNamesMigration } from '../tools/tool-names.js';
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
@@ -119,15 +120,18 @@ function canonicalizeForHash(value: unknown): unknown {
 
 /**
  * Stable identity of a (tool, args) call for repeat tracking: a sha256 over
- * the canonicalized args (sorted object keys, preserved array order), so
- * identical calls that differ only in field order hash to the same key and
- * large payloads (e.g. write_file content) are retained as a fixed-size
- * digest rather than the raw JSON. Shared with the daemon's turn-loop guard
- * (ACP Session) so both runtimes key repeats the same way.
+ * the canonicalized name and args (legacy aliases resolved, sorted object
+ * keys, preserved array order), so identical calls that differ only in
+ * field order — or in a legacy alias such as `task` vs `agent` — hash to
+ * the same key, and large payloads (e.g. write_file content) are retained
+ * as a fixed-size digest rather than the raw JSON. Shared with the daemon's
+ * turn-loop guard (ACP Session) so both runtimes key repeats the same way.
  */
 export function getToolCallRepeatKey(toolName: string, args: unknown): string {
+  const canonicalName =
+    (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
   const argsString = JSON.stringify(canonicalizeForHash(args));
-  const keyString = `${toolName}:${argsString}`;
+  const keyString = `${canonicalName}:${argsString}`;
   return createHash('sha256').update(keyString).digest('hex');
 }
 
