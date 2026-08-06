@@ -159,9 +159,37 @@ test('uploads an Extension archive from the manager @smoke', async ({
     buffer: Buffer.from('archive-content'),
   });
   await expect(
-    page.getByText('Select a .zip or .tar.gz Extension archive.'),
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: `${'扩'.repeat(84)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  for (const name of ['bad\\name.zip', 'bad\u007fname.zip']) {
+    await archiveInput.setInputFiles({
+      name,
+      mimeType: 'application/zip',
+      buffer: Buffer.from('archive-content'),
+    });
+    await expect(
+      page.getByText(
+        'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+  }
 
   await archiveInput.setInputFiles({
     name: 'empty.zip',
@@ -183,7 +211,15 @@ test('uploads an Extension archive from the manager @smoke', async ({
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
 
-  await page.getByLabel('Select a .zip or .tar.gz archive.').setInputFiles({
+  await archiveInput.setInputFiles({
+    name: 'demo.tar.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.tar.gz')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
     name: 'demo.zip',
     mimeType: 'application/zip',
     buffer: Buffer.from('archive-content'),
@@ -203,6 +239,14 @@ test('uploads an Extension archive from the manager @smoke', async ({
     page.getByRole('heading', { name: 'Add Extension' }),
   ).toHaveCount(0);
   await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await expect(page.getByRole('tab', { name: 'Source' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: demo.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
 });
 
 test('pastes long plain text as editable composer content @smoke', async ({

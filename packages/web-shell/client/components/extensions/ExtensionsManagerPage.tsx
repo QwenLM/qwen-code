@@ -119,6 +119,16 @@ import type { EmbeddedManagerPage } from '../plugins/manager-page';
 type Scope = 'user' | 'workspace';
 type InstallMethod = 'source' | 'archive';
 const MAX_EXTENSION_ARCHIVE_BYTES = 10 * 1024 * 1024;
+
+function isValidExtensionArchiveFilename(filename: string): boolean {
+  if (!/\.(?:zip|tar\.gz)$/i.test(filename)) return false;
+  if (new TextEncoder().encode(filename).length > 255) return false;
+  return !Array.from(filename).some((character) => {
+    const code = character.charCodeAt(0);
+    return character === '/' || character === '\\' || code < 32 || code === 127;
+  });
+}
+
 type ManagedExtensionEntry = DaemonExtensionEntry & {
   defaultActivation?: ExtensionActivationState;
   workspaceActivation?: 'inherit' | ExtensionActivationState;
@@ -935,7 +945,7 @@ export function ExtensionsManagerPage({
         (!installArchive ||
           installArchive.size === 0 ||
           installArchive.size > MAX_EXTENSION_ARCHIVE_BYTES ||
-          !/\.(?:zip|tar\.gz)$/i.test(installArchive.name))) ||
+          !isValidExtensionArchiveFilename(installArchive.name))) ||
       !operationsRecovered ||
       pendingInstall ||
       pendingMutation ||
@@ -1150,7 +1160,8 @@ export function ExtensionsManagerPage({
     installArchive.size > MAX_EXTENSION_ARCHIVE_BYTES;
   const archiveEmpty = installArchive !== null && installArchive.size === 0;
   const archiveInvalid =
-    installArchive !== null && !/\.(?:zip|tar\.gz)$/i.test(installArchive.name);
+    installArchive !== null &&
+    !isValidExtensionArchiveFilename(installArchive.name);
   const installInputReady =
     installMethod === 'archive'
       ? installArchive !== null &&

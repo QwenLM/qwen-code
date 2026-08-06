@@ -4873,7 +4873,7 @@ describe('createServeApp', () => {
       };
     };
 
-    it('installs an uploaded extension archive and removes the temporary file', async () => {
+    it('installs uploaded extension archives and removes the temporary files', async () => {
       let localSourcePath = '';
       let recordedSource = '';
       let uploadedContent = '';
@@ -4896,7 +4896,7 @@ describe('createServeApp', () => {
 
         const res = await request(app)
           .post(
-            '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+            '/workspace/extensions/install-archive?filename=DEMO.TAR.GZ&consent=true',
           )
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret')
@@ -4909,13 +4909,39 @@ describe('createServeApp', () => {
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'installed',
-            source: 'upload:demo.zip',
+            source: 'upload:DEMO.TAR.GZ',
             name: 'uploaded-ext',
           });
         });
-        expect(recordedSource).toMatch(/^upload:v1:[0-9a-f-]{36}:demo\.zip$/);
-        expect(localSourcePath).toMatch(/extension\.zip$/);
+        expect(recordedSource).toMatch(
+          /^upload:v1:[0-9a-f-]{36}:DEMO\.TAR\.GZ$/,
+        );
+        expect(localSourcePath).toMatch(/extension\.tar\.gz$/);
         expect(uploadedContent).toBe('archive-content');
+        expect(existsSync(localSourcePath)).toBe(false);
+
+        const maxLengthFilename = `${'a'.repeat(251)}.ZIP`;
+        const boundary = await request(app)
+          .post(
+            `/workspace/extensions/install-archive?filename=${maxLengthFilename}&consent=true`,
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from('boundary-content'));
+
+        expect(boundary.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            source: `upload:${maxLengthFilename}`,
+          });
+        });
+        expect(recordedSource).toMatch(/^upload:v1:[0-9a-f-]{36}:/);
+        expect(recordedSource.endsWith(`:${maxLengthFilename}`)).toBe(true);
+        expect(localSourcePath).toMatch(/extension\.zip$/);
+        expect(uploadedContent).toBe('boundary-content');
         expect(existsSync(localSourcePath)).toBe(false);
       } finally {
         restore();
@@ -5003,7 +5029,9 @@ describe('createServeApp', () => {
         async prepareExtensionInstall(options) {
           localSourcePath = options.localSourcePath ?? '';
           throw Object.assign(
-            new Error(`Could not read ${localSourcePath}: disk full`),
+            new Error(
+              `Could not read ${localSourcePath} from ${options.installMetadata.source}: disk full`,
+            ),
             { code: 'ENOSPC' },
           );
         },
@@ -5035,6 +5063,8 @@ describe('createServeApp', () => {
             code: 'ENOSPC',
           });
           expect(poll.body.error).toContain('<extension-upload-dir>');
+          expect(poll.body.error).toContain('upload:demo.zip');
+          expect(poll.body.error).not.toContain('upload:v1:');
           expect(poll.body.error).not.toContain(path.dirname(localSourcePath));
         });
         expect(bridge.extensionEvents.at(-1)).toMatchObject({
@@ -5044,13 +5074,16 @@ describe('createServeApp', () => {
         expect(JSON.stringify(bridge.extensionEvents.at(-1))).not.toContain(
           path.dirname(localSourcePath),
         );
+        expect(JSON.stringify(bridge.extensionEvents.at(-1))).not.toContain(
+          'upload:v1:',
+        );
         expect(existsSync(path.dirname(localSourcePath))).toBe(false);
       } finally {
         restore();
       }
     });
 
-    it('clears superseded archive operation state after settling', async () => {
+    it('rejects a superseded archive install that requests input', async () => {
       let releaseFirst: (() => void) | undefined;
       const firstBlocked = new Promise<void>((resolve) => {
         releaseFirst = resolve;
@@ -5072,6 +5105,11 @@ describe('createServeApp', () => {
             };
             requestSetting = manager.requestSetting?.bind(manager);
             await firstBlocked;
+            await requestSetting?.({
+              name: 'API key',
+              description: 'API key used by this extension',
+              envVar: 'API_KEY',
+            });
           }
           return testExtension(`uploaded-${installCount}`);
         },
@@ -5095,6 +5133,13 @@ describe('createServeApp', () => {
 
         const first = await upload();
         await vi.waitFor(() => expect(requestSetting).toBeDefined());
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body.status).toBe('running');
+        });
         const second = await upload();
         releaseFirst?.();
 
@@ -5107,7 +5152,10 @@ describe('createServeApp', () => {
             .get(`/workspace/extensions/operations/${second.body.operationId}`)
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
-          expect(firstPoll.body.status).toBe('succeeded');
+          expect(firstPoll.body.status).toBe('failed');
+          expect(firstPoll.body.error).toContain(
+            'cancelled by a new install request',
+          );
           expect(secondPoll.body.status).toBe('succeeded');
         });
 

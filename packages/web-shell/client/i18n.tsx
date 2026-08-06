@@ -1674,7 +1674,7 @@ const EN: Messages = {
     'Extension archives must be 10 MB or smaller.',
   'extensions.manage.archiveEmpty': 'The selected Extension archive is empty.',
   'extensions.manage.archiveInvalid':
-    'Select a .zip or .tar.gz Extension archive.',
+    'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installTitle': 'Add Extension',
@@ -4390,7 +4390,7 @@ const ZH: Messages = {
   'extensions.manage.archiveTooLarge': 'Extension 压缩包不能超过 10 MB。',
   'extensions.manage.archiveEmpty': '所选 Extension 压缩包为空。',
   'extensions.manage.archiveInvalid':
-    '请选择 .zip 或 .tar.gz Extension 压缩包。',
+    '请选择文件名有效且不超过 255 字节的 .zip 或 .tar.gz Extension 压缩包。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installTitle': '添加扩展',
