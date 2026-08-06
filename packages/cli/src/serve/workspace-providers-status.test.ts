@@ -134,6 +134,33 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('loads the catalog with the workspace proxy outside test mode', async () => {
+    await writeUserSettings({ proxy: 'http://settings-proxy.example:8080' });
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: { NODE_ENV: 'production' },
+    });
+
+    await provider(workspace, false);
+
+    expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledOnce();
+    expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledWith({
+      proxyUrl: 'http://settings-proxy.example:8080',
+    });
+  });
+
+  it('does not load the catalog when the explicit test gate fires', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {
+        NODE_ENV: 'test',
+        HTTPS_PROXY: 'http://env-proxy.example:8080',
+      },
+    });
+
+    await provider(workspace, false);
+
+    expect(coreMock.loadModelMetadataCatalog).not.toHaveBeenCalled();
+  });
+
   it('reports catalog modalities for configured workspace models', async () => {
     const provider = createWorkspaceProvidersStatusProvider({
       env: {},

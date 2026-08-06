@@ -1663,6 +1663,62 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('uses the registry catalog result for an initial provider with default credentials', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'gpt-4o' }],
+      },
+      generationConfig: { model: 'gpt-4o' },
+      modelMetadataCatalog: {
+        openai: {
+          models: {
+            'gpt-4o': {
+              modalities: { input: ['text', 'image', 'pdf'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      pdf: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'computed',
+      detail: 'loaded from models.dev catalog',
+    });
+  });
+
+  it('preserves caller modalities without a source map during construction', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'vendor-model',
+        baseUrl: 'https://vendor.example/v1',
+        modalities: { audio: true },
+      },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'vendor-model': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+    expect(
+      modelsConfig.getGenerationConfigSources()['modalities'],
+    ).toBeUndefined();
+  });
+
   it('preserves explicit settings modalities across auth sync and registry switches', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,

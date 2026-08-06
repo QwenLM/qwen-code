@@ -10,11 +10,22 @@ import * as path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { Storage } from '../config/storage.js';
 import {
   getCatalogModalities,
   loadModelMetadataCatalog,
   type ModelMetadataCatalog,
 } from './model-metadata-catalog.js';
+
+const runtimeFetchMock = vi.hoisted(() => ({
+  loadUndici: vi.fn(),
+}));
+
+vi.mock('../utils/runtimeFetchOptions.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/runtimeFetchOptions.js')>();
+  return { ...actual, loadUndici: runtimeFetchMock.loadUndici };
+});
 
 const catalog: ModelMetadataCatalog = {
   openrouter: {
@@ -48,6 +59,8 @@ function deferred<T>(): {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  runtimeFetchMock.loadUndici.mockReset();
   await Promise.all(
     tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true })),
   );
@@ -78,6 +91,132 @@ describe('getCatalogModalities', () => {
         modelId: 'vendor/missing-model',
       }),
     ).toBeUndefined();
+  });
+
+  it('uses attachment metadata when a catalog model omits input modalities', () => {
+    expect(
+      getCatalogModalities(
+        {
+          openai: {
+            models: { 'attach-model': { attachment: true } },
+          },
+        },
+        { providerId: 'openai', modelId: 'attach-model' },
+      ),
+    ).toEqual({ image: true });
+  });
+
+  it('resolves a unique credential environment key without endpoint evidence', () => {
+    expect(
+      getCatalogModalities(
+        {
+          vendor: {
+            env: ['VENDOR_API_KEY'],
+            models: {
+              'vendor-model': { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        { modelId: 'vendor-model', envKey: 'VENDOR_API_KEY' },
+      ),
+    ).toEqual({ image: true });
+  });
+
+  it('does not resolve an ambiguous credential environment key', () => {
+    expect(
+      getCatalogModalities(
+        {
+          first: {
+            env: ['SHARED_API_KEY'],
+            models: {
+              'shared-model': { modalities: { input: ['text', 'image'] } },
+            },
+          },
+          second: {
+            env: ['SHARED_API_KEY'],
+            models: {
+              'shared-model': { modalities: { input: ['text', 'video'] } },
+            },
+          },
+        },
+        { modelId: 'shared-model', envKey: 'SHARED_API_KEY' },
+      ),
+    ).toBeUndefined();
+  });
+
+  it('resolves an auth-type-only lookup without provider evidence', () => {
+    expect(
+      getCatalogModalities(
+        {
+          alibaba: {
+            models: {
+              'qwen-vl-max': { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        { authType: 'qwen-oauth', modelId: 'qwen-vl-max' },
+      ),
+    ).toEqual({ image: true });
+  });
+
+  it('suppresses auth-type fallback when credentials identify no provider', () => {
+    expect(
+      getCatalogModalities(
+        {
+          openai: {
+            models: {
+              'shared-model': { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        {
+          authType: 'openai',
+          modelId: 'shared-model',
+          envKey: 'UNKNOWN_API_KEY',
+        },
+      ),
+    ).toBeUndefined();
+  });
+
+  it('resolves catalog models through a divergent metadata id', () => {
+    expect(
+      getCatalogModalities(
+        {
+          vendor: {
+            models: {
+              'catalog-key': {
+                id: 'runtime-model-id',
+                modalities: { input: ['text', 'video'] },
+              },
+            },
+          },
+        },
+        { providerId: 'vendor', modelId: 'RUNTIME-MODEL-ID' },
+      ),
+    ).toEqual({ video: true });
+  });
+
+  it('selects the model-owning provider when catalog endpoints are shared', () => {
+    const sharedApi = 'https://shared.example.com/v1';
+    expect(
+      getCatalogModalities(
+        {
+          first: {
+            api: sharedApi,
+            models: {
+              'first-model': { modalities: { input: ['text'] } },
+            },
+          },
+          second: {
+            api: sharedApi,
+            models: {
+              'second-model': { modalities: { input: ['text', 'video'] } },
+            },
+          },
+        },
+        { modelId: 'second-model', baseUrl: sharedApi },
+      ),
+    ).toEqual({ video: true });
   });
 
   it('does not treat an unknown OpenAI-compatible endpoint as OpenAI', () => {
@@ -225,6 +364,28 @@ describe('getCatalogModalities', () => {
       ).toEqual({ image: true, video: true });
     },
   );
+
+  it('resolves an Idealab alias through production-shaped credentials', () => {
+    expect(
+      getCatalogModalities(
+        {
+          moonshotai: {
+            models: {
+              'kimi-k2.6': {
+                modalities: { input: ['text', 'image', 'video'] },
+              },
+            },
+          },
+        },
+        {
+          authType: 'openai',
+          modelId: 'bailian/kimi-k2.6',
+          baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+          envKey: 'IDEALAB_API_KEY',
+        },
+      ),
+    ).toEqual({ image: true, video: true });
+  });
 
   it('borrows original provider metadata for non-Alibaba gateways', () => {
     expect(
@@ -467,6 +628,51 @@ describe('loadModelMetadataCatalog', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('keeps valid providers and models from a partially malformed cache', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    await fs.writeFile(
+      cachePath,
+      JSON.stringify({
+        valid: {
+          models: {
+            'valid-model': { modalities: { input: ['text', 'image'] } },
+            'attachment-model': { attachment: true },
+            malformed: { modalities: {} },
+          },
+        },
+        empty: { models: {} },
+        malformed: { models: 'not-an-object' },
+      }),
+    );
+
+    const loaded = await loadModelMetadataCatalog({
+      cachePath,
+      fetch: vi.fn(),
+    });
+
+    expect(Object.keys(loaded)).toEqual(['valid']);
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'valid',
+        modelId: 'valid-model',
+      }),
+    ).toEqual({ image: true });
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'valid',
+        modelId: 'attachment-model',
+      }),
+    ).toEqual({ image: true });
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'valid',
+        modelId: 'malformed',
+      }),
+    ).toBeUndefined();
+  });
+
   it('rejects a fresh cache without valid model metadata', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
@@ -549,6 +755,46 @@ describe('loadModelMetadataCatalog', () => {
     );
   });
 
+  it('pins built-in modalities migrated from provider presets', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const loaded = await loadModelMetadataCatalog({
+      cachePath: path.join(dir, 'models-dev.json'),
+      fetch: async () => {
+        throw new Error('offline');
+      },
+    });
+
+    const expected = [
+      [
+        'alibaba-token-plan',
+        'qwen3.8-max-preview',
+        { image: true, video: true },
+      ],
+      ['alibaba-token-plan', 'kimi-k2.7-code', { image: true, video: true }],
+      [
+        'alibaba-token-plan-cn',
+        'qwen3.8-max-preview',
+        { image: true, video: true },
+      ],
+      ['alibaba-token-plan-cn', 'kimi-k2.7-code', { image: true, video: true }],
+      ['alibaba-coding-plan', 'qwen3.5-plus', { image: true, video: true }],
+      ['alibaba-coding-plan', 'qwen3.6-plus', { image: true, video: true }],
+      ['alibaba-coding-plan', 'kimi-k2.5', { image: true, video: true }],
+      ['alibaba-coding-plan-cn', 'qwen3.5-plus', { image: true }],
+      ['alibaba-coding-plan-cn', 'qwen3.6-plus', { image: true, video: true }],
+      ['alibaba-coding-plan-cn', 'kimi-k2.5', { image: true }],
+      ['minimax', 'MiniMax-M3', { image: true, video: true }],
+    ] as const;
+
+    for (const [providerId, modelId, modalities] of expected) {
+      expect(
+        getCatalogModalities(loaded, { providerId, modelId }),
+        `${providerId}/${modelId}`,
+      ).toEqual(modalities);
+    }
+  });
+
   it('publishes a background refresh to later loads in the same process', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
@@ -624,6 +870,165 @@ describe('loadModelMetadataCatalog', () => {
         modelId: 'gpt-4o',
       }),
     ).toEqual({ image: true, pdf: true });
+  });
+
+  it.each([
+    ['an HTTP error', () => new Response('unavailable', { status: 500 })],
+    [
+      'an oversized response body',
+      () => new Response(new Uint8Array(8 * 1024 * 1024 + 1)),
+    ],
+  ])('keeps the built-in snapshot for %s', async (_name, response) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    const fetchMock = vi.fn(async () => response());
+
+    const loaded = await loadModelMetadataCatalog({
+      cachePath,
+      fetch: fetchMock,
+    });
+
+    expect(Object.keys(loaded).length).toBeGreaterThan(1);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await expect(fs.stat(cachePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('publishes fetched metadata when the cache cannot be written', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const blockingFile = path.join(dir, 'not-a-directory');
+    await fs.writeFile(blockingFile, 'blocked');
+    const cachePath = path.join(blockingFile, 'models-dev.json');
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(catalog)));
+
+    await loadModelMetadataCatalog({ cachePath, fetch: fetchMock });
+    await vi.waitFor(async () => {
+      await expect(
+        loadModelMetadataCatalog({ cachePath, fetch: fetchMock }),
+      ).resolves.toEqual(catalog);
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('re-arms an unreferenced hourly refresh on the default path', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(catalog)));
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    await loadModelMetadataCatalog();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(
+        timeoutSpy.mock.calls.some(([, delay]) => delay === 60 * 60 * 1000),
+      ).toBe(true),
+    );
+
+    const refreshIndex = timeoutSpy.mock.calls.findIndex(
+      ([, delay]) => delay === 60 * 60 * 1000,
+    );
+    const refreshTimer = timeoutSpy.mock.results[refreshIndex]?.value as
+      | ReturnType<typeof setTimeout>
+      | undefined;
+    expect(refreshTimer).toBeDefined();
+    expect(refreshTimer?.hasRef()).toBe(false);
+    if (refreshTimer) clearTimeout(refreshTimer);
+  });
+
+  it('uses and closes the proxy dispatcher on a successful refresh', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    const undiciFetch = vi.fn(
+      async () => new Response(JSON.stringify(catalog)),
+    );
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    await loadModelMetadataCatalog({
+      cachePath,
+      proxyUrl: 'http://proxy.example:8080',
+    });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    expect(EnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://proxy.example:8080',
+      httpsProxy: 'http://proxy.example:8080',
+    });
+    expect(undiciFetch).toHaveBeenCalledWith(
+      'https://models.dev/api.json',
+      expect.objectContaining({
+        dispatcher: expect.anything(),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    await expect(
+      loadModelMetadataCatalog({
+        cachePath,
+        proxyUrl: 'http://proxy.example:8080',
+      }),
+    ).resolves.toEqual(catalog);
+  });
+
+  it('closes the proxy dispatcher and keeps the snapshot on rejection', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    const undiciFetch = vi.fn(async () => {
+      throw new Error('proxy offline');
+    });
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    const loaded = await loadModelMetadataCatalog({
+      cachePath,
+      proxyUrl: 'http://proxy.example:8080',
+    });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    expect(Object.keys(loaded).length).toBeGreaterThan(1);
+  });
+
+  it('aborts a hung catalog fetch through the timeout signal', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    const timeoutController = new AbortController();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(timeoutController.signal);
+    const fetchMock = vi.fn(
+      async (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener(
+            'abort',
+            () => reject(init.signal?.reason),
+            {
+              once: true,
+            },
+          );
+        }),
+    );
+
+    await loadModelMetadataCatalog({ cachePath, fetch: fetchMock });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    timeoutController.abort(new DOMException('timed out', 'TimeoutError'));
+    await vi.waitFor(() => expect(timeoutController.signal.aborted).toBe(true));
+
+    expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+    expect(fetchMock.mock.calls[0]?.[1].signal).toBe(timeoutController.signal);
   });
 
   it('does not publish or cache an invalid network catalog', async () => {

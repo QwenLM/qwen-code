@@ -1048,6 +1048,60 @@ describe('loadCliConfig', () => {
     ]);
   });
 
+  it('loads model metadata for production CLI sessions', async () => {
+    const originalNodeEnv = process.env['NODE_ENV'];
+    const originalVitest = process.env['VITEST'];
+    const originalVitestWorkerId = process.env['VITEST_WORKER_ID'];
+    process.env['NODE_ENV'] = 'production';
+    delete process.env['VITEST'];
+    delete process.env['VITEST_WORKER_ID'];
+    const catalogSpy = vi
+      .spyOn(ServerConfig, 'loadModelMetadataCatalog')
+      .mockResolvedValue({
+        openai: {
+          models: {
+            'gpt-4o': {
+              modalities: { input: ['text', 'image', 'pdf'] },
+            },
+          },
+        },
+      });
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'gpt-4o',
+    ];
+
+    try {
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        {
+          security: { auth: { selectedType: 'openai' } },
+          modelProviders: { openai: [{ id: 'gpt-4o' }] },
+        },
+        argv,
+      );
+
+      expect(catalogSpy).toHaveBeenCalledOnce();
+      expect(config.getModelsConfig().getGenerationConfig().modalities).toEqual(
+        { image: true, pdf: true },
+      );
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = originalNodeEnv;
+      if (originalVitest === undefined) delete process.env['VITEST'];
+      else process.env['VITEST'] = originalVitest;
+      if (originalVitestWorkerId === undefined) {
+        delete process.env['VITEST_WORKER_ID'];
+      } else {
+        process.env['VITEST_WORKER_ID'] = originalVitestWorkerId;
+      }
+    }
+  });
+
   it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
     delete process.env['QWEN_DEBUG_LOG_FILE'];
     process.argv = ['node', 'script.js', '--debug'];

@@ -58,10 +58,7 @@ export interface ModelMetadataLookup {
   envKey?: string;
 }
 
-export type ModelModalitiesSource =
-  | 'explicit'
-  | 'catalog'
-  | 'heuristic';
+export type ModelModalitiesSource = 'explicit' | 'catalog' | 'heuristic';
 
 interface CatalogState {
   current?: ModelMetadataCatalog;
@@ -83,46 +80,65 @@ function parseCatalog(text: string): ModelMetadataCatalog | undefined {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return undefined;
     }
+    const catalog: ModelMetadataCatalog = {};
     let modelCount = 0;
-    for (const provider of Object.values(parsed)) {
+    for (const [providerId, provider] of Object.entries(parsed)) {
       if (
         !provider ||
         typeof provider !== 'object' ||
         Array.isArray(provider)
       ) {
-        return undefined;
+        continue;
       }
       const { api, env, models } = provider as CatalogProvider;
-      if (api !== undefined && typeof api !== 'string') return undefined;
+      if (api !== undefined && typeof api !== 'string') continue;
       if (
         env !== undefined &&
         (!Array.isArray(env) || env.some((key) => typeof key !== 'string'))
       ) {
-        return undefined;
+        continue;
       }
       if (!models || typeof models !== 'object' || Array.isArray(models)) {
-        return undefined;
+        continue;
       }
-      if (Object.keys(models).length === 0) return undefined;
-      for (const model of Object.values(models)) {
+      const validModels: Record<string, CatalogModel> = {};
+      for (const [modelId, model] of Object.entries(models)) {
         if (Array.isArray(model)) {
           if (model.some((modality) => typeof modality !== 'string')) {
-            return undefined;
+            continue;
           }
         } else {
-          if (!model || typeof model !== 'object') return undefined;
+          if (!model || typeof model !== 'object') continue;
+          if (model.id !== undefined && typeof model.id !== 'string') continue;
+          if (
+            model.attachment !== undefined &&
+            typeof model.attachment !== 'boolean'
+          ) {
+            continue;
+          }
           const input = model.modalities?.input;
           if (
-            !Array.isArray(input) ||
-            input.some((modality) => typeof modality !== 'string')
+            input !== undefined &&
+            (!Array.isArray(input) ||
+              input.some((modality) => typeof modality !== 'string'))
           ) {
-            return undefined;
+            continue;
+          }
+          if (input === undefined && model.attachment !== true) {
+            continue;
           }
         }
+        validModels[modelId] = model;
         modelCount += 1;
       }
+      if (Object.keys(validModels).length === 0) continue;
+      catalog[providerId] = {
+        ...(api !== undefined ? { api } : {}),
+        ...(env !== undefined ? { env } : {}),
+        models: validModels,
+      };
     }
-    return modelCount > 0 ? (parsed as ModelMetadataCatalog) : undefined;
+    return modelCount > 0 ? catalog : undefined;
   } catch {
     return undefined;
   }
@@ -376,19 +392,23 @@ function resolveCatalogProviderId(
   catalog: ModelMetadataCatalog,
   lookup: ModelMetadataLookup,
 ): string | undefined {
-  const normalizedBaseUrl = normalizeUrl(lookup.baseUrl);
-  if (normalizedBaseUrl) {
-    const endpointMatch = Object.entries(catalog).find(
-      ([, provider]) => normalizeUrl(provider.api) === normalizedBaseUrl,
-    );
-    if (endpointMatch) return endpointMatch[0];
-  }
-
   const configuredProvider = findProviderByCredentials(
     lookup.baseUrl,
     lookup.envKey,
   );
   const sourceProviderId = configuredProvider?.id ?? lookup.providerId;
+  const normalizedBaseUrl = normalizeUrl(lookup.baseUrl);
+  if (normalizedBaseUrl) {
+    const endpointMatches = Object.entries(catalog).filter(
+      ([, provider]) => normalizeUrl(provider.api) === normalizedBaseUrl,
+    );
+    const modelMatch = endpointMatches.find(([providerId, provider]) =>
+      findCatalogModel(provider, providerId, sourceProviderId, lookup.modelId),
+    );
+    if (modelMatch) return modelMatch[0];
+    if (endpointMatches[0]) return endpointMatches[0][0];
+  }
+
   if (sourceProviderId === 'idealab') {
     const idealabProviderId = mapIdealabProvider(lookup.modelId);
     if (idealabProviderId && catalog[idealabProviderId]) {

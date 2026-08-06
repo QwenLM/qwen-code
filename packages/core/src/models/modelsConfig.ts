@@ -191,20 +191,28 @@ export class ModelsConfig {
       if (initialModel) {
         this.currentRegistryBaseUrl = initialModel.registryBaseUrl ?? null;
       }
-      this.applyCatalogModalities(
-        initialModelId,
-        initialModel?.baseUrl ?? this._generationConfig.baseUrl,
-        initialModel?.envKey ?? this._generationConfig.apiKeyEnvKey,
-      );
+      if (
+        initialModel &&
+        this.modelRegistry.getModalitiesSource(initialModel) === 'catalog' &&
+        this.canApplyCatalogModalities()
+      ) {
+        this._generationConfig.modalities =
+          initialModel.generationConfig.modalities;
+        this.generationConfigSources['modalities'] = {
+          kind: 'computed',
+          detail: 'loaded from models.dev catalog',
+        };
+      } else {
+        this.applyCatalogModalities(
+          initialModelId,
+          initialModel?.registryBaseUrl ?? this._generationConfig.baseUrl,
+          initialModel?.envKey ?? this._generationConfig.apiKeyEnvKey,
+        );
+      }
     }
   }
 
-  private applyCatalogModalities(
-    modelId: string,
-    baseUrl?: string,
-    envKey?: string,
-    replaceModelDerivedValue = false,
-  ): boolean {
+  private canApplyCatalogModalities(replaceModelDerivedValue = false): boolean {
     const source = this.generationConfigSources['modalities'];
     if (
       source === undefined &&
@@ -213,15 +221,22 @@ export class ModelsConfig {
     ) {
       return false;
     }
-    if (
-      !replaceModelDerivedValue &&
-      source &&
-      source.kind !== 'computed' &&
-      source.kind !== 'default' &&
-      source.kind !== 'unknown'
-    ) {
-      return false;
-    }
+    return (
+      replaceModelDerivedValue ||
+      source === undefined ||
+      source.kind === 'computed' ||
+      source.kind === 'default' ||
+      source.kind === 'unknown'
+    );
+  }
+
+  private applyCatalogModalities(
+    modelId: string,
+    baseUrl?: string,
+    envKey?: string,
+    replaceModelDerivedValue = false,
+  ): boolean {
+    if (!this.canApplyCatalogModalities(replaceModelDerivedValue)) return false;
 
     const modalities = getCatalogModalities(this.modelMetadataCatalog, {
       authType: this.currentAuthType,
