@@ -49,7 +49,8 @@ const hasTmux =
 // --help, not --version: freeze <=0.1.6 has no --version flag and would be
 // misdiagnosed as absent (mirrors the production probe).
 const hasFreeze =
-  spawnSync('freeze', ['--help'], { timeout: 10_000, killSignal: 'SIGKILL' }).status === 0;
+  spawnSync('freeze', ['--help'], { timeout: 10_000, killSignal: 'SIGKILL' })
+    .status === 0;
 // The server-death and signal probes need pgrep; without it they would parse
 // pid 0 and fail red on healthy code. error === undefined distinguishes
 // "binary absent" from "no match" (a --version gate would misfire on BSD
@@ -58,8 +59,7 @@ const hasPgrep =
   spawnSync('pgrep', ['-f', 'no-such-process-anywhere'], {
     timeout: 10_000,
     killSignal: 'SIGKILL',
-  })
-    .error === undefined;
+  }).error === undefined;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -390,9 +390,13 @@ describe('capture-tui without tmux (probe seam)', () => {
       // TERM-immune, like the measured wedge: without killSignal SIGKILL
       // the belt only SENDS a TERM this shim ignores, and the spawn blocks
       // past any deadline — the SIGKILL half of the belt is what this pins.
-      writeFileSync(join(binDir, 'tmux'), "#!/bin/sh\ntrap '' TERM\n/bin/sleep 30\n", {
-        mode: 0o755,
-      });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        "#!/bin/sh\ntrap '' TERM\n/bin/sleep 30\n",
+        {
+          mode: 0o755,
+        },
+      );
       const realPath = process.env['PATH'];
       const realBudget = probeBudget.timeoutMs;
       process.env['PATH'] = binDir;
@@ -622,7 +626,10 @@ describe('capture-tui without tmux (probe seam)', () => {
     // withStdio mocks the streams, so no in-process test can raise a real
     // EPIPE; a child whose stdout pipe closes early can. Without the guard
     // the refusal crashed on the async 'error' event and exited 1.
-    let captureTuiTs = join(process.cwd(), 'src/commands/review/capture-tui.ts');
+    let captureTuiTs = join(
+      process.cwd(),
+      'src/commands/review/capture-tui.ts',
+    );
     if (!existsSync(captureTuiTs)) {
       captureTuiTs = join(
         process.cwd(),
@@ -1053,6 +1060,41 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(statSync(join(dir, 'cap.json')).isDirectory()).toBe(true);
     expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+  });
+
+  it('a pre-existing DIRECTORY at the sentinel refuses — and survives', async () => {
+    // The sentinel clears as a PLAIN file: a directory at the path is a
+    // user's, so the unlink cannot remove it and the run refuses
+    // fail-closed — recursive removal deleted it on every run, fully
+    // successful ones included (measured).
+    mkdirSync(join(dir, 'cap.holder-ready'));
+    writeFileSync(join(dir, 'cap.holder-ready', 'user-file'), 'content');
+    const { stderr } = await withStdio(() => run());
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('--out is not writable');
+    expect(statSync(join(dir, 'cap.holder-ready')).isDirectory()).toBe(true);
+    expect(
+      readFileSync(join(dir, 'cap.holder-ready', 'user-file'), 'utf8'),
+    ).toBe('content');
+  });
+
+  it('a pre-existing DIRECTORY at the png path survives the ans-only run', async () => {
+    // No manifest → shaped=false → the clear phase protects the directory;
+    // the freeze torn-png cleanup is a plain rmSync, so the directory's
+    // EISDIR is swallowed and the otherwise-successful run never deletes
+    // what it did not write (recursive removal destroyed the tree and the
+    // run still reported success — measured).
+    mkdirSync(join(dir, 'cap.png'));
+    writeFileSync(join(dir, 'cap.png', 'user-file'), 'content');
+    await run();
+    expect(process.exitCode).toBeUndefined();
+    expect(statSync(join(dir, 'cap.png')).isDirectory()).toBe(true);
+    expect(readFileSync(join(dir, 'cap.png', 'user-file'), 'utf8')).toBe(
+      'content',
+    );
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
   });
 
   it('WARNS when kill-server fails twice — never an unqualified success', async () => {

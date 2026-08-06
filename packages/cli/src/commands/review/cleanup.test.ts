@@ -327,6 +327,73 @@ describe('runCleanup', () => {
         );
       });
 
+      it('scans /tmp even when TMUX_TMPDIR points elsewhere — tmux fell back', () => {
+        // tmux takes the first USABLE base: a stale profile-exported
+        // TMUX_TMPDIR pointing at an unusable path puts the socket under
+        // /tmp while a single-base sweep `[envBase || '/tmp']` scans only
+        // the env base and reports clean with the orphan still live
+        // (measured end-to-end: 'Nothing to clean' beside a live orphan).
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation((p: string) => p === tmpDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === tmpDir ? [orphan] : [],
+        );
+        runCleanup('local');
+        expect(mocks.readdirSync).toHaveBeenCalledWith(tmpDir);
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
+      it('reads TMUX_TMPDIR UNTRIMMED — tmux uses a padded value verbatim', () => {
+        // Measured against real tmux 3.4: with a trailing space in
+        // TMUX_TMPDIR the socket landed under the PADDED path, while a
+        // trimming sweep scanned a directory tmux never used and reported
+        // clean — re-adding .trim() must turn this red.
+        process.env['TMUX_TMPDIR'] = '/fake-tmp ';
+        const paddedDir = `/fake-tmp /tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation((p: string) => p === paddedDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === paddedDir ? [orphan] : [],
+        );
+        runCleanup('local');
+        expect(mocks.readdirSync).toHaveBeenCalledWith(paddedDir);
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
+      it('surfaces an unreadable socket dir — a scan failure is not a silent nothing', () => {
+        // A mode-000 tmux-<uid> or a filesystem hiccup makes readdirSync
+        // throw; the sweep must note the unreadable dir on stderr, must
+        // not claim 'Nothing to clean' while an orphan may be hiding, and
+        // must still clear the target-scoped lease. The swallowing mutant
+        // `catch {}` hid orphans for the holder's whole bounded window and
+        // shipped green.
+        mocks.existsSync.mockImplementation((p: string) =>
+          p.endsWith(`/tmux-${String(uid)}`),
+        );
+        mocks.readdirSync.mockImplementation((p: string) => {
+          if (p.endsWith(`/tmux-${String(uid)}`)) {
+            throw Object.assign(new Error('EACCES: permission denied'), {
+              code: 'EACCES',
+            });
+          }
+          return [];
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+        expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+          process.cwd(),
+          'local',
+        );
+      });
+
       it('reaps on the SECOND kill attempt — the sweep retry is real', () => {
         let calls = 0;
         mocks.execFileSync.mockImplementation((bin: string) => {

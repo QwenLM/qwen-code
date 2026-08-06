@@ -30,9 +30,7 @@ function logicalLinesOf(run) {
       joined.push(line.trim());
     }
   }
-  return joined
-    .map((l) => l.replace(/(^|\s)#.*$/, '').trim())
-    .filter(Boolean);
+  return joined.map((l) => l.replace(/(^|\s)#.*$/, '').trim()).filter(Boolean);
 }
 
 // Strip wrappers the shell resolves before the real command: env
@@ -70,9 +68,7 @@ describe('ci.yml capture tooling', () => {
     // package name word-anchored (tmuxinator must not count as tmux).
     const installLines = logicalLinesOf(steps[install].run);
     expect(
-      installLines.some((l) =>
-        /apt-get install[^\n]*\btmux(\s|$)/.test(l),
-      ),
+      installLines.some((l) => /apt-get install[^\n]*\btmux(\s|$)/.test(l)),
     ).toBe(true);
     expect(
       installLines.some((l) => /apt-get install[^\n]*\bzip unzip\b/.test(l)),
@@ -109,16 +105,24 @@ describe('ci.yml capture tooling', () => {
         /(^|[;&|]\s*|\bthen\s+|\belse\s+|\bdo\s+)(exit(\s+\d+)?|false|set\s+-\w*e\w*|set\s+-o\s+errexit)(\s|;|$)/,
       );
       // Each apt-get invocation — behind any wrapper — must have a guard
-      // AFTER it on its chain: one || echo before an unguarded trailing
-      // apt-get must not launder it.
+      // AFTER ITS OWN occurrence on the chain: one || echo before an
+      // unguarded trailing apt-get must not launder it, so the guard
+      // search starts at each occurrence in turn, never back at the first.
       const stmts = line
         .split(/;|&&|\|\||\bthen\b|\belse\b|\bdo\b/)
         .map((x) => unwrapCommand(x))
         .filter(Boolean);
+      let cursor = 0;
       for (const stmt of stmts) {
-        if (/^apt-get\b/.test(stmt) && !/^command\b/.test(stmt)) {
-          const at = line.indexOf('apt-get', 0);
-          expect(line.indexOf('|| echo', at), `${stmt} :: ${line}`).toBeGreaterThan(-1);
+        if (!/apt-get/.test(stmt)) continue;
+        const at = line.indexOf('apt-get', cursor);
+        if (at === -1) continue;
+        cursor = at + 'apt-get'.length;
+        if (/^apt-get\b/.test(stmt)) {
+          expect(
+            line.indexOf('|| echo', at),
+            `${stmt} :: ${line}`,
+          ).toBeGreaterThan(-1);
         }
       }
       // The ANNOTATION, not the emitter verb.
