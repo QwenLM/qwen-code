@@ -2612,7 +2612,7 @@ export const MessageList = memo(
             agentNotificationIsLatestBackground:
               notificationIndex === latestBackgroundNotificationIndex,
             latestBackgroundNotificationInLatestTurn:
-              latestBackgroundNotificationIndex > latestTurnStartIndex,
+              notificationIndex > latestTurnStartIndex,
           };
         }
       }
@@ -2620,7 +2620,7 @@ export const MessageList = memo(
         key: null,
         agentNotificationIsLatestBackground: false,
         latestBackgroundNotificationInLatestTurn:
-          latestBackgroundNotificationIndex > latestTurnStartIndex,
+          notificationIndex > latestTurnStartIndex,
       };
     }, [backgroundSummaryGraceActive, displayItems, latestTurnStartIndex]);
     const [isSessionTimelineVisible, setIsSessionTimelineVisible] =

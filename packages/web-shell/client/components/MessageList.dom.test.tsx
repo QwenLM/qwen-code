@@ -9,6 +9,10 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
+import {
+  TranscriptRenderModeProvider,
+  type TranscriptRenderMode,
+} from '../transcriptRenderMode';
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -132,7 +136,11 @@ function triggerResizeObservers() {
   }
 }
 
-const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+const mounted: Array<{
+  root: Root;
+  container: HTMLElement;
+  transcriptRenderMode: TranscriptRenderMode;
+}> = [];
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -173,9 +181,9 @@ const agentMsg = (id: string): ToolGroupMessage => ({
   tools: [
     {
       callId: `call-${id}`,
-      toolName: 'Task',
+      toolName: 'Agent',
       status: 'completed',
-      args: { subagent_type: 'explore' },
+      args: { subagent_type: 'explore', run_in_background: true },
     },
   ],
 });
@@ -219,9 +227,9 @@ const describedAgentMsg = (
   tools: [
     {
       callId: `call-${id}`,
-      toolName: 'Task',
+      toolName: 'Agent',
       status: 'completed',
-      args: { subagent_type: 'explore', description },
+      args: { subagent_type: 'explore', description, run_in_background: true },
     },
   ],
 });
@@ -258,6 +266,7 @@ function mount(
     };
     onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
     isResponding?: boolean;
+    transcriptRenderMode?: TranscriptRenderMode;
     hideFirstUserMessage?: boolean;
     firstTurnMetrics?: {
       durationMs?: number;
@@ -279,36 +288,44 @@ function mount(
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={opts.customization ?? {}}>
-          <MessageList
-            ref={ref}
-            messages={messages}
-            pendingApproval={null}
-            hideSessionTimeline={opts.hideSessionTimeline}
-            loadingTranscript={opts.loadingTranscript}
-            catchingUp={opts.catchingUp}
-            hasOlderHistory={opts.hasOlderHistory}
-            loadingOlderHistory={opts.loadingOlderHistory}
-            historyCapacityReached={opts.historyCapacityReached}
-            historyPaginationError={opts.historyPaginationError}
-            onLoadOlderHistory={opts.onLoadOlderHistory}
-            transcriptBlockCount={opts.transcriptBlockCount}
-            transcriptActivity={opts.transcriptActivity}
-            onReloadTranscript={opts.onReloadTranscript}
-            isResponding={opts.isResponding}
-            hideFirstUserMessage={opts.hideFirstUserMessage}
-            firstTurnMetrics={opts.firstTurnMetrics}
-            includeSubagentToolUsageInMetrics={
-              opts.includeSubagentToolUsageInMetrics
-            }
-            onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
-            failedPromptMessageId={opts.failedPromptMessageId}
-            onRetryFailedPrompt={opts.onRetryFailedPrompt}
-          />
+          <TranscriptRenderModeProvider
+            value={opts.transcriptRenderMode ?? 'interactive'}
+          >
+            <MessageList
+              ref={ref}
+              messages={messages}
+              pendingApproval={null}
+              hideSessionTimeline={opts.hideSessionTimeline}
+              loadingTranscript={opts.loadingTranscript}
+              catchingUp={opts.catchingUp}
+              hasOlderHistory={opts.hasOlderHistory}
+              loadingOlderHistory={opts.loadingOlderHistory}
+              historyCapacityReached={opts.historyCapacityReached}
+              historyPaginationError={opts.historyPaginationError}
+              onLoadOlderHistory={opts.onLoadOlderHistory}
+              transcriptBlockCount={opts.transcriptBlockCount}
+              transcriptActivity={opts.transcriptActivity}
+              onReloadTranscript={opts.onReloadTranscript}
+              isResponding={opts.isResponding}
+              hideFirstUserMessage={opts.hideFirstUserMessage}
+              firstTurnMetrics={opts.firstTurnMetrics}
+              includeSubagentToolUsageInMetrics={
+                opts.includeSubagentToolUsageInMetrics
+              }
+              onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+              failedPromptMessageId={opts.failedPromptMessageId}
+              onRetryFailedPrompt={opts.onRetryFailedPrompt}
+            />
+          </TranscriptRenderModeProvider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
   });
-  mounted.push({ root, container });
+  mounted.push({
+    root,
+    container,
+    transcriptRenderMode: opts.transcriptRenderMode ?? 'interactive',
+  });
   return container;
 }
 
@@ -321,19 +338,21 @@ function rerenderMessages(
     isResponding?: boolean;
   } = {},
 ): void {
-  const root = mounted.find((entry) => entry.container === container)?.root;
-  if (!root) throw new Error('Expected mounted MessageList root');
+  const entry = mounted.find((item) => item.container === container);
+  if (!entry) throw new Error('Expected mounted MessageList root');
   act(() => {
-    root.render(
+    entry.root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={{}}>
-          <MessageList
-            messages={messages}
-            pendingApproval={null}
-            loadingTranscript={opts.loadingTranscript}
-            catchingUp={opts.catchingUp}
-            isResponding={opts.isResponding}
-          />
+          <TranscriptRenderModeProvider value={entry.transcriptRenderMode}>
+            <MessageList
+              messages={messages}
+              pendingApproval={null}
+              loadingTranscript={opts.loadingTranscript}
+              catchingUp={opts.catchingUp}
+              isResponding={opts.isResponding}
+            />
+          </TranscriptRenderModeProvider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -709,6 +728,27 @@ describe('MessageList — turn collapse (DOM)', () => {
     );
   });
 
+  it('keeps agent groups static in a readonly transcript', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const messages = [userMsg('u1'), firstAgent, secondAgent];
+    const c = mount(messages, undefined, {
+      transcriptRenderMode: 'readonly',
+      isResponding: true,
+    });
+
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+  });
+
   it('keeps an earlier turn group collapsed when an unrelated response starts', () => {
     const firstAgent = agentMsg('agent-1');
     const secondAgent = agentMsg('agent-2');
@@ -985,7 +1025,13 @@ describe('MessageList — turn collapse (DOM)', () => {
       [...completedMessages, monitorNotificationMsg('monitor')],
       { isResponding: true },
     );
-    act(() => vi.advanceTimersByTime(500));
+    // Observe between the scheduled 400ms collapse and a restarted window's
+    // 600ms collapse: a restarted deferral would still be expanded here.
+    act(() => vi.advanceTimersByTime(300));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    act(() => vi.advanceTimersByTime(200));
 
     expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
       'false',
@@ -1113,6 +1159,101 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     // Past group B's 1500ms collapse plus its 180ms exit; group A stays
     // deferred while the turn awaits its summary.
+    act(() => vi.advanceTimersByTime(1_680));
+    expect(c.textContent).toContain('group A task');
+    expect(c.textContent).not.toContain('group B task');
+    expect(summaries().map((b) => b.getAttribute('aria-expanded'))).toEqual([
+      'false',
+      'true',
+    ]);
+  });
+
+  it('keeps deferring a latest-turn agent group when a monitor notification arrives mid-response', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    const completedMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('u1-answer'),
+      monitorNotificationMsg('monitor'),
+    ];
+
+    rerenderMessages(c, completedMessages, { isResponding: true });
+    // A non-agent notification must not strip the latest-turn deferral while
+    // the response is still streaming.
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(c, completedMessages, { isResponding: false });
+    act(() => vi.advanceTimersByTime(1_500));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    act(() => vi.advanceTimersByTime(180));
+    // The turn itself stays open for the monitor notification's reply.
+    expect(c.querySelector('[data-agent-collapse-exit="true"]')).toBeNull();
+    expect(parallelAgentsSummary(c)?.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('defers every latest-turn group while the response awaits the agent summary', () => {
+    vi.useFakeTimers();
+    const agentA1 = describedAgentMsg('agent-a1', 'group A task');
+    const agentA2 = describedAgentMsg('agent-a2', 'group A task');
+    const agentB1 = describedAgentMsg('agent-b1', 'group B task');
+    const agentB2 = describedAgentMsg('agent-b2', 'group B task');
+    agentA1.tools[0]!.status = 'pending';
+    agentA2.tools[0]!.status = 'pending';
+    agentB1.tools[0]!.status = 'pending';
+    agentB2.tools[0]!.status = 'pending';
+    const c = mount(
+      [userMsg('u1'), agentA1, agentA2, asstMsg('narration'), agentB1, agentB2],
+      undefined,
+      { isResponding: true },
+    );
+    const summaries = () =>
+      Array.from(c.querySelectorAll('button')).filter((button) =>
+        button.textContent?.includes('Parallel agents'),
+      );
+    expect(summaries()).toHaveLength(2);
+
+    const completedMessages = [
+      userMsg('u1'),
+      describedAgentMsg('agent-a1', 'group A task'),
+      describedAgentMsg('agent-a2', 'group A task'),
+      asstMsg('narration'),
+      describedAgentMsg('agent-b1', 'group B task'),
+      describedAgentMsg('agent-b2', 'group B task'),
+      backgroundNotificationMsg('bg-a1', 'call-agent-a1'),
+      backgroundNotificationMsg('bg-a2', 'call-agent-a2'),
+    ];
+    rerenderMessages(c, completedMessages, { isResponding: true });
+
+    // Past group B's 1500ms window: the non-owning group stays deferred too
+    // while the latest background item is the awaited agent notification.
+    act(() => vi.advanceTimersByTime(1_680));
+    expect(c.textContent).toContain('group A task');
+    expect(c.textContent).toContain('group B task');
+    expect(summaries().map((b) => b.getAttribute('aria-expanded'))).toEqual([
+      'true',
+      'true',
+    ]);
+
+    // Once the response ends, only the owner group stays deferred. The
+    // collapsed group keeps its launch position while the pinned owner group
+    // renders at the turn's tail.
+    rerenderMessages(c, completedMessages);
     act(() => vi.advanceTimersByTime(1_680));
     expect(c.textContent).toContain('group A task');
     expect(c.textContent).not.toContain('group B task');
@@ -1576,7 +1717,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     try {
       renderInto(root, simpleTurns(3));
@@ -1655,7 +1796,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     try {
       renderInto(root, simpleTurns(4));
@@ -1902,7 +2043,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     renderInto(root, [userMsg('u1'), asstMsg('a1')]);
     renderInto(root, [userMsg('u1'), asstMsg('a1'), userMsg('u2')]);
@@ -2074,7 +2215,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
     const render = (loadingOlderHistory: boolean) => {
       root.render(
         <I18nProvider language="en">
@@ -2338,7 +2479,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     renderInto(root, []);
     renderInto(root, [userMsg('u1'), asstMsg('a1')]);
@@ -2364,7 +2505,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     renderInto(root, []);
     renderInto(root, [userMsg('u1')]);
@@ -2401,7 +2542,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     renderInto(root, [], undefined, { loadingTranscript: true });
     renderInto(root, [userMsg('u1')], undefined, {
@@ -2433,7 +2574,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     renderInto(root, [userMsg('u1'), asstMsg('a1')]);
     renderInto(root, [
@@ -2476,7 +2617,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    mounted.push({ root, container });
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
 
     renderInto(root, messages, undefined, { catchingUp: true });
     expect(scrollTop).toBe(0);

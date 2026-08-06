@@ -18,8 +18,8 @@
   font: inherit;
 }
 
-.summary:hover,
-.summary:focus-visible {
+.summary:not(:disabled):hover,
+.summary:not(:disabled):focus-visible {
   color: var(--primary);
   outline: none;
 }
@@ -74,10 +74,6 @@
   white-space: nowrap;
   font-size: 13px;
   font-weight: 400;
-}
-
-.summaryTextActive {
-  color: var(--muted-foreground);
 }
 
 @media (prefers-reduced-motion: no-preference) {

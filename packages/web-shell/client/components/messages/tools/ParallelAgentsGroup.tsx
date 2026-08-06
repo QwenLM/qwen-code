@@ -226,17 +226,21 @@ export function ParallelAgentsGroup({
           collapseDelayChanged) &&
         expansionOwnerRef.current === 'automatic'
       ) {
-        autoCollapseTimerRef.current = setTimeout(() => {
+        autoCollapseTimerRef.current = setTimeout(function attemptCollapse() {
           if (
             !wasActiveRef.current &&
             expansionOwnerRef.current === 'automatic'
           ) {
-            setGroupExpanded(false);
             if (approvalAgentRef.current) {
-              expansionOwnerRef.current = 'none';
-              automaticExpansionChangeRef.current?.(false);
+              // The approval keeps the group visible; retry later so its
+              // resolution still gets the normal delayed exit animation.
+              autoCollapseTimerRef.current = setTimeout(
+                attemptCollapse,
+                automaticCollapseDelayMs,
+              );
               return;
             }
+            setGroupExpanded(false);
             const animationMs = automaticCollapseAnimationMs();
             if (animationMs === 0) {
               expansionOwnerRef.current = 'none';
@@ -327,7 +331,9 @@ export function ParallelAgentsGroup({
           if (expansionOwnerRef.current === 'automatic') {
             automaticExpansionChangeRef.current?.(false);
           }
-          expansionOwnerRef.current = 'manual';
+          if (autoManageExpansion) {
+            expansionOwnerRef.current = 'manual';
+          }
           setAutomaticCollapseAnimating(false);
           setGroupExpanded((value) => !value);
         }}
