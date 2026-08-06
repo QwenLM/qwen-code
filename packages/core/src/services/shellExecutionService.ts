@@ -296,8 +296,10 @@ export interface ShellPostPromoteHandlers {
   onData?: (event: ShellOutputEvent) => void;
   /**
    * Fired exactly once when the post-promote child settles — natural
-   * exit (`exitCode` set, `signal: null`), signal kill (`exitCode:
-   * null`, `signal` set), or spawn-side error (`error` set). NOT
+   * exit (including PTY `signal: 0`), signal kill (which may carry
+   * `exitCode: 0` with a non-zero signal on PTY, or `exitCode: null`
+   * with a string signal from `child_process`), or spawn-side error
+   * (`error` set). NOT
    * fired for the promote-time resolve itself (that's the
    * `result.promoted` Promise resolution). Callers wire this to the
    * registry's `complete` / `fail` transitions.

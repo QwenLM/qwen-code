@@ -6209,6 +6209,46 @@ describe('ShellTool', () => {
         expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
       });
 
+      it('keeps a task_stop cancellation from being reclassified as a signal failure', async () => {
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+        });
+        await promise;
+
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const onSettle = (
+          serviceCall[6] as {
+            postPromote: {
+              onSettle: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            };
+          }
+        ).postPromote.onSettle;
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        // `task_stop` aborts the fresh registry controller before the
+        // child reports its SIGTERM/SIGKILL settle event.
+        entry.abortController.abort();
+        onSettle({ exitCode: 0, signal: 15, endTime: 4 });
+
+        expect(registry.cancel).toHaveBeenCalledWith(entry.shellId, 4);
+        expect(registry.fail).not.toHaveBeenCalled();
+      });
+
       it('queued-settle race: onSettle fires BEFORE handlePromotedForeground completes — entry settles + llmContent reflects final status', async () => {
         // Pin the queued-settle path: a very fast command can exit
         // between the service-side promote-resolve and the

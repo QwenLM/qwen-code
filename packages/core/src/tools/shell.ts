@@ -3410,11 +3410,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           status: 'failed',
           failMsg: `Exited with code ${info.exitCode}`,
         };
-      if (info.signal !== null)
-        return {
-          status: 'failed',
-          failMsg: `Terminated by signal ${info.signal}`,
-        };
       // PR-2.5 wave-3: this branch is meant to
       // be unreachable — the service always populates one of
       // `error` / `exitCode` / `signal`. Hitting it means the
@@ -3436,6 +3431,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       };
     };
     const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
+      // `task_stop` aborts the entry before the child necessarily reports
+      // its signal. Preserve the user-intended `cancelled` state instead of
+      // allowing the later signal settle to overwrite it as `failed`.
+      if (entryAc.signal.aborted) {
+        registry.cancel(shellId, info.endTime);
+        return;
+      }
       const cls = classifySettle(info);
       if (cls.status === 'completed') {
         registry.complete(shellId, info.exitCode as number, info.endTime);
