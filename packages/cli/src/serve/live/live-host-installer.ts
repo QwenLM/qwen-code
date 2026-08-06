@@ -22,11 +22,13 @@ export const LIVE_HOST_TEAM_IDENTIFIER = 'NF4574S59H';
 export const LIVE_HOST_APP_PATH = '/Applications/Qwen Live Host.app';
 export const LIVE_HOST_RELEASE_BASE_URL =
   'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest';
+export const LIVE_HOST_OSS_BASE_URL =
+  'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/live-host';
 export const LIVE_HOST_MANIFEST_NAME = 'Qwen-Live-Host-manifest.json';
+export const LIVE_HOST_FETCH_TIMEOUT_MS = 60 * 60 * 1000;
 
 const LIVE_HOST_APP_NAME = 'Qwen Live Host.app';
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 5 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 2 * 60 * 1000;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -63,6 +65,23 @@ export interface LiveHostReleaseManifest {
   protocolVersion: number;
   bundleId: string;
   assets: Record<LiveHostArchitecture, LiveHostReleaseAsset>;
+}
+
+export function resolveLiveHostManifestUrls(): string[] {
+  return [
+    `${LIVE_HOST_OSS_BASE_URL}/latest/${LIVE_HOST_MANIFEST_NAME}`,
+    `${LIVE_HOST_RELEASE_BASE_URL}/${LIVE_HOST_MANIFEST_NAME}`,
+  ];
+}
+
+export function resolveLiveHostAssetUrls(
+  version: string,
+  assetName: string,
+): string[] {
+  return [
+    `${LIVE_HOST_OSS_BASE_URL}/v${version}/${assetName}`,
+    `${LIVE_HOST_RELEASE_BASE_URL}/${assetName}`,
+  ];
 }
 
 interface InstalledLiveHost {
@@ -213,25 +232,40 @@ async function inspectInstalledHost(): Promise<InstalledLiveHost | undefined> {
   }
 }
 
-async function fetchManifest(): Promise<LiveHostReleaseManifest> {
-  const response = await fetch(
-    `${LIVE_HOST_RELEASE_BASE_URL}/${LIVE_HOST_MANIFEST_NAME}`,
-    { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
-  );
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error(`Live Host manifest download failed (${response.status}).`);
+async function fetchManifest(
+  fetchImpl: typeof fetch = fetch,
+): Promise<LiveHostReleaseManifest> {
+  let lastError: unknown;
+  for (const url of resolveLiveHostManifestUrls()) {
+    try {
+      const response = await fetchImpl(url, {
+        signal: AbortSignal.timeout(LIVE_HOST_FETCH_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error(
+          `Live Host manifest download failed (${response.status}).`,
+        );
+      }
+      return parseLiveHostReleaseManifest(await response.json());
+    } catch (error) {
+      lastError = error;
+    }
   }
-  return parseLiveHostReleaseManifest(await response.json());
+  throw new Error('Live Host manifest download failed from all sources.', {
+    cause: lastError,
+  });
 }
 
-async function downloadAsset(
+async function downloadAssetFromUrl(
+  url: string,
   asset: LiveHostReleaseAsset,
   destination: string,
   onProgress: (progress: number) => void,
+  fetchImpl: typeof fetch,
 ): Promise<void> {
-  const response = await fetch(`${LIVE_HOST_RELEASE_BASE_URL}/${asset.name}`, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  const response = await fetchImpl(url, {
+    signal: AbortSignal.timeout(LIVE_HOST_FETCH_TIMEOUT_MS),
   });
   if (!response.ok || !response.body) {
     await response.body?.cancel().catch(() => {});
@@ -270,6 +304,39 @@ async function downloadAsset(
   }
 }
 
+async function downloadAsset(
+  version: string,
+  asset: LiveHostReleaseAsset,
+  destination: string,
+  onProgress: (progress: number) => void,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  let lastError: unknown;
+  for (const url of resolveLiveHostAssetUrls(version, asset.name)) {
+    await fsp.rm(destination, { force: true }).catch(() => {});
+    onProgress(0);
+    try {
+      await downloadAssetFromUrl(
+        url,
+        asset,
+        destination,
+        onProgress,
+        fetchImpl,
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  await fsp.rm(destination, { force: true }).catch(() => {});
+  throw new Error('Live Host download failed from all sources.', {
+    cause: lastError,
+  });
+}
+
+export const fetchLiveHostManifestForTesting = fetchManifest;
+export const downloadLiveHostAssetForTesting = downloadAsset;
+
 async function installLatestHost(
   currentArchitecture: LiveHostArchitecture,
   onStatus: (status: LiveHostInstallStatus) => void,
@@ -288,7 +355,7 @@ async function installLatestHost(
   let installedCandidate = false;
   try {
     onStatus({ state: 'downloading', progress: 0 });
-    await downloadAsset(asset, archivePath, (progress) => {
+    await downloadAsset(manifest.version, asset, archivePath, (progress) => {
       onStatus({ state: 'downloading', progress });
     });
     onStatus({ state: 'verifying' });

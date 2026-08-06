@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/live-host-release.yml'
+      - '.github/workflows/sync-live-host-to-oss.yml'
       - 'packages/desktop/apps/live-host/**'
       - 'packages/desktop/bun.lock'
       - 'packages/desktop/package.json'
@@ -345,3 +346,29 @@ jobs:
             echo "Version: $RELEASE_VERSION"
             echo "Release: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  oss-dry-run:
+    name: 'Dry-run Live Host OSS sync'
+    if: "${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.dry_run) }}"
+    needs:
+      - 'prepare'
+      - 'build'
+    uses: './.github/workflows/sync-live-host-to-oss.yml'
+    with:
+      version: '${{ needs.prepare.outputs.version }}'
+      dry_run: true
+      source: 'artifact'
+
+  sync-oss:
+    name: 'Sync stable Live Host release to OSS'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs:
+      - 'prepare'
+      - 'build'
+      - 'publish'
+    uses: './.github/workflows/sync-live-host-to-oss.yml'
+    with:
+      version: '${{ needs.prepare.outputs.version }}'
+      dry_run: false
+      source: 'artifact'
+    secrets: 'inherit'

@@ -4,13 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 import {
+  downloadLiveHostAssetForTesting,
+  fetchLiveHostManifestForTesting,
   isExpectedLiveHostSignature,
   LiveHostInstaller,
+  LIVE_HOST_FETCH_TIMEOUT_MS,
+  LIVE_HOST_OSS_BASE_URL,
   LIVE_HOST_RELEASE_BASE_URL,
   parseLiveHostReleaseManifest,
+  resolveLiveHostAssetUrls,
+  resolveLiveHostManifestUrls,
 } from './live-host-installer.js';
 
 const sha = 'a'.repeat(64);
@@ -37,10 +47,83 @@ function manifest() {
 }
 
 describe('LiveHostInstaller', () => {
-  it('downloads only from the independent stable Live Host feed', () => {
+  it('prefers OSS and retains the independent GitHub release fallback', () => {
+    expect(LIVE_HOST_OSS_BASE_URL).toBe(
+      'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/live-host',
+    );
     expect(LIVE_HOST_RELEASE_BASE_URL).toBe(
       'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest',
     );
+    expect(resolveLiveHostManifestUrls()).toEqual([
+      `${LIVE_HOST_OSS_BASE_URL}/latest/Qwen-Live-Host-manifest.json`,
+      `${LIVE_HOST_RELEASE_BASE_URL}/Qwen-Live-Host-manifest.json`,
+    ]);
+    expect(
+      resolveLiveHostAssetUrls('0.1.0', 'Qwen-Live-Host-arm64.zip'),
+    ).toEqual([
+      `${LIVE_HOST_OSS_BASE_URL}/v0.1.0/Qwen-Live-Host-arm64.zip`,
+      `${LIVE_HOST_RELEASE_BASE_URL}/Qwen-Live-Host-arm64.zip`,
+    ]);
+  });
+
+  it('allows slow Live Host downloads to finish', () => {
+    expect(LIVE_HOST_FETCH_TIMEOUT_MS).toBe(60 * 60 * 1000);
+  });
+
+  it('falls back to GitHub when the OSS manifest is unavailable', async () => {
+    const expected = manifest();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(Response.json(expected));
+
+    await expect(fetchLiveHostManifestForTesting(fetchImpl)).resolves.toEqual(
+      expected,
+    );
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual(
+      resolveLiveHostManifestUrls(),
+    );
+  });
+
+  it('removes a corrupt OSS download before falling back to GitHub', async () => {
+    const bytes = Buffer.from('signed-live-host-archive');
+    const asset = {
+      name: 'Qwen-Live-Host-arm64.zip',
+      size: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(Buffer.alloc(bytes.byteLength), {
+          headers: { 'content-length': String(bytes.byteLength) },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(bytes, {
+          headers: { 'content-length': String(bytes.byteLength) },
+        }),
+      );
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, asset.name);
+
+    try {
+      await downloadLiveHostAssetForTesting(
+        '0.1.0',
+        asset,
+        destination,
+        () => {},
+        fetchImpl,
+      );
+      await expect(fsp.readFile(destination)).resolves.toEqual(bytes);
+      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual(
+        resolveLiveHostAssetUrls('0.1.0', asset.name),
+      );
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('accepts only the Qwen Developer ID team', () => {
