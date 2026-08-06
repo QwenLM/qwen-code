@@ -71,11 +71,14 @@ interface SaveArtifactArgs {
 
 // Every path resolves against the main checkout, because the durable output
 // and `markdownReportPath` must stay relative to the main project for Web
-// Shell's `readWorkspaceFile` to find them. That root is this command's own
-// working directory: the skill runs every subcommand from the main checkout,
-// this one included — in PR worktree mode the worktree-resident inputs arrive
-// as absolute paths that still sit under the main project's `.qwen/tmp/`. An
-// explicit `--workspace-root` exists for an embedder whose cwd is elsewhere.
+// Shell's `readWorkspaceFile` to find them. That root arrives as
+// `--workspace-root`: the skill passes the main project directory explicitly
+// on every run (SKILL.md Step 8), because the root anchors the containment
+// checks — `isWithin` and the symlink walk below — and an ambient cwd is only
+// as trustworthy as wherever the command happened to run. Cwd is the fallback
+// when the flag is absent, right whenever the caller runs from the main
+// checkout — in PR worktree mode the worktree-resident inputs arrive as
+// absolute paths that still sit under the main project's `.qwen/tmp/`.
 //
 // This used to prefer `QWEN_CODE_PROJECT_DIR`, believing it named that
 // checkout. It never does: the harness exports it as the session-storage

@@ -18,8 +18,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import yargs from 'yargs';
+import type { Argv } from 'yargs';
 import { buildReport, type Finding } from './findings.js';
-import { saveReviewArtifact } from './save-artifact.js';
+import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test
 // can only run where the filesystem folds case. Probe once, at load time, so
@@ -81,8 +83,8 @@ function fixture() {
   mkdirSync(join(root, '.qwen/reviews'), { recursive: true });
   writeFileSync(report, '# Review\n');
   // The workspace root is explicit here because the test process's cwd is the
-  // package directory, not the temp root — the same situation `--workspace-root`
-  // exists for.
+  // package directory, not the temp root — the same explicit-root path the
+  // skill's own Step 8 invocation takes.
   return { findings, composed, report, out, workspaceRoot: root };
 }
 
@@ -384,9 +386,9 @@ describe('saveReviewArtifact', () => {
   });
 
   it('resolves relative paths against the explicit workspace root, not cwd', () => {
-    // The embedder form. --workspace-root points at the temp root while cwd
-    // stays the package directory, so the two roots differ and the resolution
-    // direction is observable.
+    // The form the skill's Step 8 block uses. --workspace-root points at the
+    // temp root while cwd stays the package directory, so the two roots
+    // differ and the resolution direction is observable.
     fixture();
 
     const saved = saveReviewArtifact({
@@ -447,5 +449,44 @@ describe('saveReviewArtifact', () => {
       }
       rmSync(decoy, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the CLI option contract', () => {
+  // Every test above builds its args by hand — the same shape that let a
+  // flag-name bug into `test-plan`: yargs camel-cases the flag, a field named
+  // for the flag read `undefined` on every real invocation, and the suite
+  // stayed green because nothing went through yargs. `--workspace-root` is
+  // this command's only multi-word flag AND its trust anchor (it roots the
+  // containment checks), so this test does not assert the parsed shape and
+  // stop — it feeds the yargs-parsed object straight into saveReviewArtifact
+  // and asserts on a write only reachable when the root actually arrived
+  // from the flag: cwd stays the package directory, where none of the
+  // fixture inputs exist.
+  it('parses --workspace-root into the field saveReviewArtifact actually reads', () => {
+    fixture();
+
+    const parsed = (saveArtifactCommand.builder as (y: Argv) => Argv)(
+      yargs([]),
+    ).parseSync([
+      '--findings',
+      '.qwen/tmp/findings.json',
+      '--composed',
+      '.qwen/tmp/composed.json',
+      '--report',
+      '.qwen/reviews/review.md',
+      '--target',
+      'pr-123',
+      '--effort',
+      'high',
+      '--out',
+      '.qwen/reviews/review.json',
+      '--workspace-root',
+      root,
+    ]) as unknown as Parameters<typeof saveReviewArtifact>[0];
+
+    const saved = saveReviewArtifact(parsed);
+    expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
+    expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
   });
 });
