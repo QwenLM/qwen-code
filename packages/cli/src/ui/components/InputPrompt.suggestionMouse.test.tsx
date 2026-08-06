@@ -223,16 +223,49 @@ describe('InputPrompt suggestion mouse routing', () => {
     unmount();
   });
 
-  it('routes an exact category selection to the default completion source', () => {
+  it('collapses an expanded suggestion when selecting a category', async () => {
     const selectCategory = vi.fn();
     (
       mockCommandCompletion as UseCommandCompletionReturn & {
         selectCategory: typeof selectCategory;
       }
     ).selectCategory = selectCategory;
+    const searchCompletion = {
+      suggestions: [
+        {
+          label: 'long command'.repeat(20),
+          value: 'long command'.repeat(20),
+        },
+      ],
+      activeSuggestionIndex: 0,
+      visibleStartIndex: 0,
+      showSuggestions: true,
+      isLoadingSuggestions: false,
+      navigateUp: vi.fn(),
+      navigateDown: vi.fn(),
+      handleAutocomplete: vi.fn(),
+      resetCompletionState: vi.fn(),
+      setActiveSuggestionIndex: vi.fn(),
+    };
+    vi.mocked(useReverseSearchCompletion).mockReturnValue(searchCompletion);
 
-    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     expect(captured.props).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\x12');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stdin.write('\u001B[C');
+      await Promise.resolve();
+    });
+    expect(captured.props!['expandedIndex']).toBe(0);
+
+    act(() => {
+      (captured.props!['onSelectIndex'] as (index: number) => void)(0);
+    });
+    expect(captured.props!['expandedIndex']).toBe(0);
 
     act(() => {
       (captured.props!['onSelectCategory'] as (category: 'session') => void)(
@@ -241,6 +274,7 @@ describe('InputPrompt suggestion mouse routing', () => {
     });
 
     expect(selectCategory).toHaveBeenCalledWith('session');
+    expect(captured.props!['expandedIndex']).toBe(-1);
     unmount();
   });
 

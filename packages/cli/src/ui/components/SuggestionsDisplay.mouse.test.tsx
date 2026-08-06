@@ -112,6 +112,7 @@ describe('SuggestionsDisplay mouse wiring', () => {
     expect(CompletionCategoryMouseController).toHaveBeenCalled();
     const props = vi.mocked(CompletionCategoryMouseController).mock.calls[0][0];
     expect(props.categories).toEqual(['all', 'file', 'session']);
+    expect(props.categoryRefs.current.filter(Boolean)).toHaveLength(3);
     expect(props.onSelectCategory).toBe(onSelectCategory);
   });
 
