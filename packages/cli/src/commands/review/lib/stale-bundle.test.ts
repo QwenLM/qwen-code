@@ -467,6 +467,9 @@ describe('the bundled skill stops on what this module prints', () => {
       mkdirSync(join(commands, 'review'), { recursive: true });
       writeFileSync(join(commands, 'review', 'drive.ts'), 'x');
       writeFileSync(join(commands, 'review.ts'), 'registers');
+      const services = join(root, 'packages', 'cli', 'src', 'services');
+      mkdirSync(services, { recursive: true });
+      writeFileSync(join(services, 'review-worktree-lease.ts'), 'leases');
       const skillDir = join(
         root,
         'packages',
@@ -508,6 +511,7 @@ describe('the bundled skill stops on what this module prints', () => {
       // compare.
       rmSync(join(commands, 'review.ts'));
       rmSync(join(commands, 'review', 'drive.ts'));
+      rmSync(join(services, 'review-worktree-lease.ts'));
       writeFileSync(join(commands, 'review', 'keep.test.ts'), 'a test');
       rmSync(skillDir, { recursive: true, force: true });
       lines.push(...bundleStalenessNotices(entry));
@@ -537,7 +541,7 @@ describe('the bundled skill stops on what this module prints', () => {
 });
 
 describe('reviewSourceRoots', () => {
-  it('covers the directory, the registration file beside it, and the skill', () => {
+  it('covers the directory, the registration file beside it, the lease outside it, and the skill', () => {
     // Built with the platform's `join`, so the expectation is too — a literal
     // with forward slashes passes on Linux and fails every element on the
     // Windows leg of the merge queue, which the PR event never runs.
@@ -550,6 +554,19 @@ describe('reviewSourceRoots', () => {
       // under `review/`.
       {
         path: join('/w', 'packages', 'cli', 'src', 'commands', 'review.ts'),
+        kind: 'code',
+      },
+      // Review-only code under `services/`, which the `review/` root cannot
+      // see.
+      {
+        path: join(
+          '/w',
+          'packages',
+          'cli',
+          'src',
+          'services',
+          'review-worktree-lease.ts',
+        ),
         kind: 'code',
       },
       {

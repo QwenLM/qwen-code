@@ -16,7 +16,7 @@
 // test:ci`), not `npm test` — a digest change verified only against the
 // package suite never reaches it.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   mkdtempSync,
@@ -54,6 +54,11 @@ const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
  */
 function stampNameWrittenByBuild(): string | undefined {
   const root = mkdtempSync(join(tmpdir(), 'stamp-name-'));
+  // The copier logs or warns about every asset class it meets; without a
+  // stub, this case adds that noise to the suite's output on every run —
+  // `package-assets.test.js` stubs for exactly this reason.
+  const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   try {
     const cli = join(root, 'packages', 'cli', 'src', 'commands');
     mkdirSync(join(cli, 'review'), { recursive: true });
@@ -65,6 +70,8 @@ function stampNameWrittenByBuild(): string | undefined {
     copyBundleAssets({ root });
     return readdirSync(join(root, 'dist')).find((f) => f.endsWith('.sha256'));
   } finally {
+    log.mockRestore();
+    warn.mockRestore();
     rmSync(root, { recursive: true, force: true });
   }
 }

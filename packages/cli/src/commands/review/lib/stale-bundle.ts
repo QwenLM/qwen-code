@@ -29,11 +29,12 @@
 // The whole round had to be discarded and re-run after a rebuild.
 //
 // SCOPE, so silence is not read as more than it is: the roots are the review
-// commands, the file that registers them, and the bundled skill — not the
-// modules those import. Editing `utils/stdioHelpers.ts` or a core helper on a
-// review path and skipping the rebuild produces no warning. The line drawn
-// here is the code whose behaviour a review is about; a quiet run means that
-// code matches the bundle, not that the whole tree does.
+// commands, the file that registers them, the review-only lease they import
+// from `services/`, and the bundled skill — not the modules those import.
+// Editing `utils/stdioHelpers.ts` or a core helper on a review path and
+// skipping the rebuild produces no warning. The line drawn here is the code
+// whose behaviour a review is about; a quiet run means that code matches the
+// bundle, not that the whole tree does.
 //
 // CONTENT, not timestamps. The first version compared the bundle's mtime
 // against the newest source file, and a warning that fires when nothing is
@@ -340,6 +341,22 @@ export function reviewSourceRoots(repoRoot: string): ReviewSourceRoot[] {
     // command, or a changed dispatch, lives here and nowhere under `review/`.
     // A root may be a single file for exactly this reason.
     { path: join(cli, 'review.ts'), kind: 'code' },
+    // The worktree lease is review-only code that lives outside `review/`:
+    // `fetch-pr` and `cleanup` import it from `services/`, so an edit to it
+    // with a skipped rebuild is the same silent failure this check exists
+    // for. The two shared files the closure also reaches (`stdioHelpers.ts`,
+    // `skill-args-file.ts`) stay out for the reason SCOPE gives.
+    {
+      path: join(
+        repoRoot,
+        'packages',
+        'cli',
+        'src',
+        'services',
+        'review-worktree-lease.ts',
+      ),
+      kind: 'code',
+    },
     {
       path: join(
         repoRoot,

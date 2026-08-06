@@ -19,17 +19,17 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
-
-const realReadFileSync = fs.readFileSync;
-const realReaddirSync = fs.readdirSync;
-const realStatSync = fs.statSync;
-const realRmSync = fs.rmSync;
 import {
   copyBundleAssets,
   reviewSourceDigestForBuild,
 } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
+
+const realReadFileSync = fs.readFileSync;
+const realReaddirSync = fs.readdirSync;
+const realStatSync = fs.statSync;
+const realRmSync = fs.rmSync;
 
 describe('package asset scripts', () => {
   const tempDirs = [];

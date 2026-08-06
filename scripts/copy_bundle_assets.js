@@ -90,6 +90,19 @@ export function reviewSourceDigestForBuild(root) {
   const roots = [
     { path: join(cliCommands, 'review'), kind: 'code' },
     { path: join(cliCommands, 'review.ts'), kind: 'code' },
+    // Mirrors the lease root `reviewSourceRoots` (stale-bundle.ts) adds; the
+    // repo-tree case in review-source-digest.test.ts holds the two equal.
+    {
+      path: join(
+        root,
+        'packages',
+        'cli',
+        'src',
+        'services',
+        'review-worktree-lease.ts',
+      ),
+      kind: 'code',
+    },
     {
       path: join(
         root,

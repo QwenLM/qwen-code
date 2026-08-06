@@ -32,7 +32,7 @@ export type FixtureFs = Pick<
 >;
 
 /**
- * A checkout-shaped tree holding all three review roots and a `dist/cli.js`
+ * A checkout-shaped tree holding all four review roots and a `dist/cli.js`
  * bundle — what the staleness check needs to reach a verdict. With only some
  * of the roots present the check answers 'could not check' instead.
  */
@@ -49,6 +49,12 @@ export function makeStaleBundleFixture(
   fs.mkdirSync(reviewDir, { recursive: true });
   fs.writeFileSync(join(reviewDir, 'drive.ts'), 'the built behaviour');
   fs.writeFileSync(join(commands, 'review.ts'), 'registers');
+  const services = join(repo, 'packages', 'cli', 'src', 'services');
+  fs.mkdirSync(services, { recursive: true });
+  fs.writeFileSync(
+    join(services, 'review-worktree-lease.ts'),
+    'leases the review worktree',
+  );
   const skillDir = join(
     repo,
     'packages',
