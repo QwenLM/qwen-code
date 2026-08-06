@@ -1118,6 +1118,38 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).toContain('declared directly instead');
   });
 
+  it('asks for smaller batches instead of declaring aggregate overflow directly', async () => {
+    const first = new MockTool({
+      name: 'medium_deferred_a',
+      description: 'a'.repeat(400),
+      shouldDefer: true,
+    });
+    const second = new MockTool({
+      name: 'medium_deferred_b',
+      description: 'b'.repeat(400),
+      shouldDefer: true,
+    });
+    registry.registerTool(first);
+    registry.registerTool(second);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(1_000);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:medium_deferred_a,medium_deferred_b' })
+      .execute(new AbortController().signal);
+
+    expect(setTools).not.toHaveBeenCalled();
+    expect(registry.isDeferredToolRevealed(first.name)).toBe(false);
+    expect(registry.isDeferredToolRevealed(second.name)).toBe(false);
+    expect(result.deferredToolPresentations).toBeUndefined();
+    expect(String(result.llmContent)).toContain(
+      'Request these tools individually or in a smaller follow-up batch',
+    );
+    expect(String(result.llmContent)).toContain(first.name);
+    expect(String(result.llmContent)).toContain(second.name);
+  });
+
   it('rolls back an oversized direct declaration when setTools fails', async () => {
     const oversized = new MockTool({
       name: 'oversized_deferred',

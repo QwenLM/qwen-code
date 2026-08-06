@@ -52,6 +52,8 @@ export interface ToolSearchParams {
 
 const DEFAULT_MAX_RESULTS = 5;
 const HARD_MAX_RESULTS = 20;
+const DEFERRED_CALL_USAGE_FOOTER =
+  'To call a fetched deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.';
 
 // Scoring weights mirror the Claude Code spec: MCP tools are weighted slightly
 // higher because they are always deferred and discovery is the only way the
@@ -347,8 +349,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       llmContent += formatFunctionSchemaBlocks(loadedSchemas);
     }
     if (deferredToolPresentations.length > 0) {
-      llmContent +=
-        '\n\nTo call a fetched deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.';
+      llmContent += `\n\n${DEFERRED_CALL_USAGE_FOOTER}`;
     }
     if (missing.length > 0) {
       const header = llmContent ? '\n\n' : '';
@@ -376,6 +377,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
 
     const oversizedFallback = await this.revealOversizedSchemasDirectly(
       llmContent,
+      loadedSchemas,
       deferredToolPresentations,
       directlyDeclared,
       missing,
@@ -410,6 +412,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
 
   private async revealOversizedSchemasDirectly(
     llmContent: string,
+    schemas: readonly FunctionDeclaration[],
     presentations: readonly DeferredToolPresentation[],
     directlyDeclared: readonly string[],
     missing: readonly string[],
@@ -427,7 +430,26 @@ class ToolSearchInvocation extends BaseToolInvocation<
 
     const registry = this.config.getToolRegistry();
     const names = [...new Set(presentations.map(({ name }) => name))];
-    const newlyRevealed = names.filter(
+    const schemaByName = new Map(
+      schemas
+        .filter((schema): schema is FunctionDeclaration & { name: string } =>
+          Boolean(schema.name),
+        )
+        .map((schema) => [schema.name, schema]),
+    );
+    // Direct declaration is the escape hatch only for a schema that cannot
+    // fit even when requested alone. Aggregate overflow should preserve the
+    // stable declaration cache and ask the model to retry smaller batches.
+    const atomicOversizedNames = names.filter((name) => {
+      const schema = schemaByName.get(name);
+      if (!schema) return false;
+      const atomicResponse = `${formatFunctionSchemaBlocks([schema])}\n\n${DEFERRED_CALL_USAGE_FOOTER}`;
+      return atomicResponse.length > budget;
+    });
+    const followUpNames = names.filter(
+      (name) => !atomicOversizedNames.includes(name),
+    );
+    const newlyRevealed = atomicOversizedNames.filter(
       (name) => !registry.isDeferredToolRevealed(name),
     );
     for (const name of newlyRevealed) {
@@ -454,7 +476,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
-    let directDeclarationMessage = `The requested deferred schemas exceeded the inline output budget, so these tools were declared directly instead: ${names.join(', ')}. Call them by exact name on a later turn; do not use deferred_tool_call for them.`;
+    let directDeclarationMessage =
+      atomicOversizedNames.length > 0
+        ? `The requested deferred schemas exceeded the inline output budget, so these individually oversized tools were declared directly instead: ${atomicOversizedNames.join(', ')}. Call them by exact name on a later turn; do not use deferred_tool_call for them.`
+        : 'The requested deferred schemas exceed the combined inline output budget. No tools were declared directly because each schema fits when requested alone.';
+    if (followUpNames.length > 0) {
+      directDeclarationMessage += `\n\nRequest these tools individually or in a smaller follow-up batch: ${followUpNames.join(', ')}`;
+    }
     if (directlyDeclared.length > 0) {
       directDeclarationMessage += `\n\nAlready declared and directly callable: ${directlyDeclared.join(', ')}`;
     }
@@ -466,7 +494,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
     return {
       llmContent: directDeclarationMessage,
-      returnDisplay: `Declared ${names.length} oversized tool(s) directly`,
+      returnDisplay:
+        atomicOversizedNames.length > 0
+          ? `Declared ${atomicOversizedNames.length} oversized tool(s) directly`
+          : 'Deferred schema batch exceeded budget',
     };
   }
 }
