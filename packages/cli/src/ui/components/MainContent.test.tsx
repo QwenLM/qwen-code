@@ -884,7 +884,7 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
     });
 
-    it('keeps the virtual viewport full-height only for pending plain-text confirmations', () => {
+    it('requests a full-height measurement only for pending plain-text confirmations', () => {
       scrollableListPropsSpy.mockClear();
 
       renderMainContent(
@@ -914,9 +914,9 @@ describe('<MainContent />', () => {
         }),
       );
 
-      expect(scrollableListPropsSpy.mock.calls.at(-1)?.[0].keepFullHeight).toBe(
-        true,
-      );
+      expect(
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].measureAtFullHeight,
+      ).toBe(true);
 
       renderMainContent(
         createUIState({
@@ -946,9 +946,9 @@ describe('<MainContent />', () => {
         }),
       );
 
-      expect(scrollableListPropsSpy.mock.calls.at(-1)?.[0].keepFullHeight).toBe(
-        false,
-      );
+      expect(
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].measureAtFullHeight,
+      ).toBe(false);
     });
 
     it('keeps ShowMoreLines reachable in VP mode (regression of OverflowProvider misplacement)', () => {
@@ -1069,6 +1069,54 @@ describe('<MainContent />', () => {
       // If activePtyId were still a useCallback dep, the identity would
       // change here and static items would re-render on every shell tick.
       // The ref-based read keeps identity stable.
+      expect(secondRenderItem).toBe(firstRenderItem);
+    });
+
+    it('keeps renderItem stable when the viewport height changes without pending content', () => {
+      scrollableListPropsSpy.mockClear();
+
+      const stableHistory: UIState['history'] = [
+        { id: 1, type: 'user', text: 'hello' },
+      ];
+      const stablePending: UIState['pendingHistoryItems'] = [];
+      const stableSlashCommands: UIState['slashCommands'] = [];
+      const { rerender } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          availableTerminalHeight: 12,
+          constrainHeight: true,
+          history: stableHistory,
+          pendingHistoryItems: stablePending,
+          slashCommands: stableSlashCommands,
+        }),
+      );
+
+      const firstRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+
+      rerender(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                availableTerminalHeight: 10,
+                constrainHeight: true,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      const secondRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
       expect(secondRenderItem).toBe(firstRenderItem);
     });
 

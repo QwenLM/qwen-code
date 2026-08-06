@@ -156,6 +156,11 @@ rendering, so Markdown, inline code, HTML-like underline tags, and link targets
 remain visible instead of being interpreted by the confirmation UI. The
 Provider still receives the original string.
 
+Literal rendering is implemented by the interactive TUI. ACP, headless, and
+`serve` surfaces do not consume this display marker; the managed launcher must
+continue to refuse those modes rather than relying on the confirmation text to
+be rendered safely there.
+
 When the complete reason does not fit in the constrained terminal view, the
 confirmation shows the beginning plus an explicit hidden-line count. The
 global `Ctrl-S` expansion then reveals the remaining reason before the user

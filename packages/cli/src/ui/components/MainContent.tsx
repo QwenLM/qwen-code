@@ -347,9 +347,10 @@ export const MainContent = () => {
     embeddedShellFocused: uiState.embeddedShellFocused,
     isEditorDialogOpen: uiState.isEditorDialogOpen,
   };
-  const pendingAvailableTerminalHeight = uiState.constrainHeight
-    ? availableTerminalHeight
-    : undefined;
+  const pendingAvailableTerminalHeight =
+    pendingHistoryItems.length > 0 && uiState.constrainHeight
+      ? availableTerminalHeight
+      : undefined;
   const hasPendingPlainTextConfirmation = pendingHistoryItems.some(
     (item) =>
       item.type === 'tool_group' &&
@@ -448,7 +449,7 @@ export const MainContent = () => {
           }
           isStaticItem={virtualIsStaticItem}
           containerHeight={scrollContainerHeight}
-          keepFullHeight={hasPendingPlainTextConfirmation}
+          measureAtFullHeight={hasPendingPlainTextConfirmation}
           showScrollbar={showScrollbar}
         />
         <TextSelectionController

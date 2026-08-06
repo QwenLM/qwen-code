@@ -81,6 +81,30 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  it('preserves urls when the prompt is rendered as plain text', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt: 'Review the literal target',
+      urls: ['https://example.com/target'],
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Review the literal target');
+    expect(lastFrame()).toContain('URLs to fetch:');
+    expect(lastFrame()).toContain('- https://example.com/target');
+  });
+
   it('renders plain-text info prompts without interpreting Markdown or links', () => {
     const prompt =
       'Save "[visible](https://hidden.example/target) **bold** `code` <u>under</u>"';

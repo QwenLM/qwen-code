@@ -168,10 +168,10 @@ describe('<VirtualizedList />', () => {
     ]);
   });
 
-  it('keeps the full viewport height when requested by the caller', () => {
+  it('collapses after measuring changed content at full viewport height', async () => {
     const liveItems = [{ id: -1, label: 'live' }];
 
-    const { lastFrame } = render(
+    const { lastFrame, rerender } = render(
       <VirtualizedList<Item>
         data={liveItems}
         renderItem={renderItem}
@@ -180,14 +180,49 @@ describe('<VirtualizedList />', () => {
         initialScrollIndex={SCROLL_TO_ITEM_END}
         isStaticItem={(item) => item.id >= 0}
         containerHeight={5}
-        keepFullHeight
         width={40}
         showScrollbar={false}
       />,
     );
 
-    expect(lastFrame()?.split('\n')).toHaveLength(5);
-    expect(lastFrame()).toContain('live');
+    const shortConfirmationItems = [{ id: -1, label: 'confirm' }];
+    rerender(
+      <VirtualizedList<Item>
+        data={shortConfirmationItems}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        isStaticItem={(item) => item.id >= 0}
+        containerHeight={5}
+        measureAtFullHeight
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+    await act(async () => {});
+    expect(lastFrame()?.split('\n')).toEqual(['confirm']);
+
+    const longConfirmationItems = [
+      { id: -1, label: ['confirm', 'line 2', 'line 3'].join('\n') },
+    ];
+    rerender(
+      <VirtualizedList<Item>
+        data={longConfirmationItems}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        isStaticItem={(item) => item.id >= 0}
+        containerHeight={5}
+        measureAtFullHeight
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+    await act(async () => {});
+
+    expect(lastFrame()?.split('\n')).toEqual(['confirm', 'line 2', 'line 3']);
   });
 
   it('targetScrollIndex anchors to that index on first usable render', () => {

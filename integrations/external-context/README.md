@@ -167,7 +167,11 @@ another copy of the same content.
    `dist/write-confirmation.js` exist.
 4. Start Qwen with an administrator-owned copy of
    `examples/managed-mem0-write-mcp.json`. The default extension manifest stays
-   search-only and does not enable `context_remember`.
+   search-only and does not enable `context_remember`. Register this managed
+   MCP server under exactly `external-context`; both the Hook matcher and its
+   fail-closed tool-name check use
+   `mcp__external-context__context_remember`, so another server name would
+   prevent the content confirmation from running.
 5. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
    of `examples/managed-mem0-write-system-settings.json`. Put the applicable
    POSIX or Windows managed write user-settings example in a dedicated
