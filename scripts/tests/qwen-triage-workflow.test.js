@@ -472,11 +472,11 @@ describe('qwen-triage tmux workflow', () => {
     expect(statusStep).toContain('continuing.');
 
     const finalizeStep = step('Finalize triage status comment');
-    // Runs on EVERY terminal outcome and edits the SAME marker comment (no
-    // second post). always(), not success() || failure(): cancellation —
-    // usually cancel-in-progress superseding the run, also job timeout or
-    // manual cancel — skipped the step and left the early comment claiming
-    // the run was still in progress.
+    // Runs on EVERY terminal outcome and edits the marker comment this run
+    // owns; a foreign marker gets a fresh terminal post instead. always(),
+    // not success() || failure(): cancellation — usually cancel-in-progress
+    // superseding the run, also job timeout or manual cancel — skipped the
+    // step and left the early comment claiming the run was still in progress.
     expect(finalizeStep).toContain("MARKER='<!-- qwen-triage lifecycle -->'");
     expect(finalizeStep).toContain(
       "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
@@ -502,15 +502,28 @@ describe('qwen-triage tmux workflow', () => {
     expect(finalizeStep).toContain('startswith($m)');
     expect(finalizeStep).not.toContain('contains($m)');
     // PATCH only a comment this run owns: its claim embeds this run's URL,
-    // while a previous run's terminal wording shares the same marker.
-    expect(finalizeStep).toContain('contains($runurl + ")")');
-    // Ownership couples the two steps' RUN_URL definitions; pin both so drift
-    // cannot silently classify this run's own claim as foreign.
+    // while a previous run's terminal wording shares the same marker. The
+    // claim step needs the same match — a re-run keeps its run_id, so its
+    // attempt-1 marker is still in the thread. Ownership couples the two
+    // steps' RUN_URL definitions; pin both so drift cannot silently classify
+    // this run's own claim as foreign.
     for (const s of [statusStep, finalizeStep]) {
       expect(s).toContain(
         "RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'",
       );
+      expect(s).toContain('contains($runurl + ")")');
     }
+    // The claim reclaims the OLDEST still-running marker, so a stranded
+    // running claim cannot hide behind a newer foreign comment forever.
+    expect(statusStep).toContain(
+      'map(select(.body | contains("Qwen Triage is running"))) | first',
+    );
+    // That detection literal must stay a substring of the claim body the
+    // same step composes: once in the jq, once in the composer — losing
+    // either silently breaks the stranded-claim reclaim.
+    expect(
+      statusStep.match(/Qwen Triage is running/g)?.length ?? 0,
+    ).toBeGreaterThanOrEqual(2);
     // The claim body must also embed that URL — finalize's
     // contains($runurl + ")") keys on exactly this embedding.
     expect(statusStep).toContain('[watch live progress]($RUN_URL)');
@@ -551,6 +564,7 @@ describe('qwen-triage tmux workflow', () => {
             'case "$*" in',
             "  'api user --jq .login') echo qwen-code-ci-bot ;;",
             '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
+            '  *) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1 ;;',
             'esac',
             'exit 0',
           ].join('\n'),
@@ -617,9 +631,13 @@ describe('qwen-triage tmux workflow', () => {
           [{ TRIAGE_OUTCOME: 'skipped', JOB_STATUS: 'failure' }, 'early'],
         ];
         for (const [env, expected] of combos) {
-          const { body, call } = run(env);
+          const { body, call, out } = run(env);
           expect(call, 'POSTed, not PATCHed').not.toContain('--method PATCH');
           expect(call).toContain('issues/7999/comments');
+          // The empty thread is its OWN state, not foreign: nothing may log
+          // the other-run diagnostic here, or reclassifying `empty` as
+          // `foreign` survives the suite while lying about a failed claim.
+          expect(out).not.toContain('Marker comment belongs to another run');
           expect(body.startsWith('<!-- qwen-triage lifecycle -->'), body).toBe(
             true,
           );
@@ -681,6 +699,28 @@ describe('qwen-triage tmux workflow', () => {
         expect(prefixed.call).not.toContain('issues/comments/778');
         expect(prefixed.out).toContain('Marker comment belongs to another run');
 
+        // A legacy marker body carries no run URL, so no run owns it — but
+        // it IS still a marker: dropping startswith($legacy) reclassifies
+        // the thread as empty and survives the suite, silently losing the
+        // diagnostic that tells the two paths apart.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 41,
+              user: { login: 'qwen-code-ci-bot' },
+              body: '<!-- qwen-triage stage=status -->\n\nlegacy status wording',
+            },
+          ]),
+        );
+        const legacy = run({
+          TRIAGE_OUTCOME: 'skipped',
+          JOB_STATUS: 'cancelled',
+        });
+        expect(legacy.call).toContain('issues/7999/comments');
+        expect(legacy.call).not.toContain('--method PATCH');
+        expect(legacy.out).toContain('Marker comment belongs to another run');
+
         // Both a prior run's terminal comment and this run's claim present:
         // the last OWN marker must win, not classify the older foreign one
         // and skip — a `first` mutant would otherwise survive the suite.
@@ -731,6 +771,33 @@ describe('qwen-triage tmux workflow', () => {
         expect(masked.call).toContain('--method PATCH');
         expect(masked.call).toContain('issues/comments/43');
 
+        // A job re-run keeps github.run_id, so the attempt-1 tombstone and
+        // the attempt-2 claim are BOTH owned: the LAST own marker must win,
+        // or a `first`-within-owned mutant PATCHes the dead tombstone and
+        // leaves the live claim at "running".
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 45,
+              user: { login: 'qwen-code-ci-bot' },
+              body: `<!-- qwen-triage lifecycle -->\n\n🚫 attempt 1 cancel [view run](${RUN_URL})`,
+            },
+            {
+              id: 46,
+              user: { login: 'qwen-code-ci-bot' },
+              body: `<!-- qwen-triage lifecycle -->\n\n🔄 running — [watch live progress](${RUN_URL})`,
+            },
+          ]),
+        );
+        const rerun = run({
+          TRIAGE_OUTCOME: 'failure',
+          JOB_STATUS: 'cancelled',
+        });
+        expect(rerun.call).toContain('--method PATCH');
+        expect(rerun.call).toContain('issues/comments/46');
+        expect(rerun.call).not.toContain('issues/comments/45');
+
         // An unreadable comment list is neither "no comment" nor "foreign":
         // POSTing would add a duplicate lifecycle comment while the real
         // claim stays at "running". Warn and skip instead.
@@ -763,6 +830,224 @@ describe('qwen-triage tmux workflow', () => {
         expect(own.call).toContain('issues/comments/43');
         expect(own.body).toContain('Qwen Triage was cancelled');
         expect(own.body).toContain('Qwen Triage 已取消');
+
+        // A failing write must not fail the step: under GitHub's `-eo
+        // pipefail` an unguarded POST/PATCH turns a transient API error
+        // while writing the terminal comment into a red job even under
+        // if: always(). These scenarios are all that notice a deleted
+        // `|| echo` guard — one per write arm. `run` asserts exit 0.
+        writeFileSync(commentsFile, '[]');
+        const postFailed = run({
+          TRIAGE_OUTCOME: 'success',
+          JOB_STATUS: 'success',
+          GH_STUB_FAIL_WRITE: '1',
+        });
+        expect(postFailed.out).toContain(
+          'Failed to post final triage status comment; continuing.',
+        );
+
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 42,
+              user: { login: 'qwen-code-ci-bot' },
+              body: '<!-- qwen-triage lifecycle -->\n\n✅ earlier verdict [finalize run](https://github.com/QwenLM/qwen-code/actions/runs/55)',
+            },
+          ]),
+        );
+        const foreignPostFailed = run({
+          TRIAGE_OUTCOME: 'skipped',
+          JOB_STATUS: 'cancelled',
+          GH_STUB_FAIL_WRITE: '1',
+        });
+        expect(foreignPostFailed.out).toContain(
+          'Marker comment belongs to another run',
+        );
+        expect(foreignPostFailed.out).toContain(
+          'Failed to post final triage status comment; continuing.',
+        );
+
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 43,
+              user: { login: 'qwen-code-ci-bot' },
+              body: `<!-- qwen-triage lifecycle -->\n\n🔄 running — [watch live progress](${RUN_URL})`,
+            },
+          ]),
+        );
+        const patchFailed = run({
+          TRIAGE_OUTCOME: 'failure',
+          JOB_STATUS: 'cancelled',
+          GH_STUB_FAIL_WRITE: '1',
+        });
+        expect(patchFailed.out).toContain(
+          'Failed to finalize triage status comment; continuing.',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The claim step's marker selection is what makes the multi-marker state
+  // finalize can create converge again: reuse a marker this run owns (a
+  // re-run rewrites its attempt-1 comment instead of clobbering the newest,
+  // possibly foreign, slot), else reclaim the OLDEST still-running claim —
+  // once ≥2 markers exist a newest-wins pick would never touch an older
+  // stranded one again, while the base tree's single slot healed them by
+  // overwrite — else the newest marker. Execute the real claim script
+  // against a stubbed `gh`.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'claims on its own marker before reclaiming a stranded running one',
+    () => {
+      const statusStep = step('Post triage status comment');
+      const script = statusStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+
+      const dir = mkdtempSync(join(tmpdir(), 'triage-claim-'));
+      const commentsFile = join(dir, 'comments.json');
+      const bodyOut = join(dir, 'body.md');
+      const callOut = join(dir, 'call.txt');
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/usr/bin/env bash',
+            'body=""',
+            'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
+            'if [ -n "$body" ]; then',
+            '  printf "%s" "$body" > "$GH_STUB_OUT"',
+            '  printf "%s\n" "$*" > "$GH_STUB_CALL"',
+            'fi',
+            'case "$*" in',
+            "  'api user --jq .login') echo qwen-code-ci-bot ;;",
+            '  *--paginate*) cat "$GH_STUB_COMMENTS" ;;',
+            'esac',
+            'exit 0',
+          ].join('\n'),
+          { mode: 0o755 },
+        );
+
+        const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
+        // Same shell flags as the real step — see the finalize harness.
+        const bashArgs = ['--noprofile', '--norc', '-eo', 'pipefail', '-c'];
+        const run = (env) => {
+          rmSync(bodyOut, { force: true });
+          rmSync(callOut, { force: true });
+          const proc = spawnSync('bash', [...bashArgs, script], {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GH_TOKEN: 'x',
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              NUMBER: '7999',
+              RUN_URL,
+              GH_STUB_OUT: bodyOut,
+              GH_STUB_CALL: callOut,
+              GH_STUB_COMMENTS: commentsFile,
+              ...env,
+            },
+            encoding: 'utf8',
+          });
+          expect(proc.status, proc.stderr).toBe(0);
+          return {
+            body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
+            call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
+          };
+        };
+        const marker = '<!-- qwen-triage lifecycle -->';
+        const comment = (id, body) => ({
+          id,
+          user: { login: 'qwen-code-ci-bot' },
+          body,
+        });
+        // The verbatim claim-composer body: reclaim detection keys on the
+        // "Qwen Triage is running" literal inside it, so a shortened fixture
+        // would test a comment shape that never exists in production.
+        const running = (url) =>
+          `${marker}\n\n🔄 **Qwen Triage is running** — [watch live progress](${url}). Stage results will post in this thread as they complete.\n\n🔄 **Qwen Triage 正在运行** —— [查看实时进度](${url})。各阶段结果完成后会更新在本线程。`;
+        const tombstone = (url) =>
+          `${marker}\n\n✅ earlier verdict [finalize run](${url})`;
+        const RUNS_55 = 'https://github.com/QwenLM/qwen-code/actions/runs/55';
+        const RUNS_123 = 'https://github.com/QwenLM/qwen-code/actions/runs/123';
+        const RUNS_456 = 'https://github.com/QwenLM/qwen-code/actions/runs/456';
+
+        // No marker yet: POST the running claim.
+        writeFileSync(commentsFile, '[]');
+        const fresh = run({});
+        expect(fresh.call).toContain('issues/7999/comments');
+        expect(fresh.call).not.toContain('--method PATCH');
+        expect(fresh.body).toContain('Qwen Triage is running');
+
+        // A re-run keeps github.run_id, so its attempt-1 marker is OWN:
+        // rewrite it instead of the newest (foreign) slot.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(42, tombstone(RUNS_55)),
+            comment(45, tombstone(RUN_URL)),
+          ]),
+        );
+        const own = run({});
+        expect(own.call).toContain('--method PATCH');
+        expect(own.call).toContain('issues/comments/45');
+        expect(own.call).not.toContain('issues/comments/42');
+
+        // An own marker beats a stranded running claim from another run.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(43, running(RUNS_123)),
+            comment(45, tombstone(RUN_URL)),
+          ]),
+        );
+        const ownBeatsStranded = run({});
+        expect(ownBeatsStranded.call).toContain('issues/comments/45');
+        expect(ownBeatsStranded.call).not.toContain('issues/comments/43');
+
+        // Stranded running claim older than a foreign tombstone: reclaim it,
+        // not the newest marker — nothing else ever touches the older one.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(43, running(RUNS_123)),
+            comment(44, tombstone(RUNS_55)),
+          ]),
+        );
+        const reclaim = run({});
+        expect(reclaim.call).toContain('issues/comments/43');
+        expect(reclaim.call).not.toContain('issues/comments/44');
+
+        // Two stranded running claims: the OLDEST first, so successive runs
+        // sweep them one per claim instead of ping-ponging on the newest.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(43, running(RUNS_123)),
+            comment(44, running(RUNS_456)),
+          ]),
+        );
+        const oldest = run({});
+        expect(oldest.call).toContain('issues/comments/43');
+        expect(oldest.call).not.toContain('issues/comments/44');
+
+        // No own and no running marker: reuse the newest slot (the base
+        // behavior — the marker comment is a shared slot, not a per-run log).
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(42, tombstone(RUNS_55)),
+            comment(44, tombstone(RUNS_456)),
+          ]),
+        );
+        const newest = run({});
+        expect(newest.call).toContain('issues/comments/44');
+        expect(newest.call).not.toContain('issues/comments/42');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

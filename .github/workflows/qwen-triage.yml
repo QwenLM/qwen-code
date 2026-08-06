@@ -541,8 +541,12 @@ jobs:
       # Actions log. Post a status comment up front carrying that run link so a
       # maintainer can watch progress instead of waiting silently until the
       # first stage comment lands; "Finalize triage status comment" flips it to
-      # a terminal state at the end. Upsert by marker so a re-run reuses the one
-      # comment (no clutter). Best-effort: never fail the job over a status post.
+      # a terminal state at the end. Selection reuses a marker this run owns
+      # (a re-run rewrites its attempt-1 comment), else reclaims the OLDEST
+      # still-"running" marker — finalize's foreign arm adds a fresh comment
+      # instead of upserting, and once two markers exist a newest-wins pick
+      # would never touch an older stranded claim again — else the newest
+      # marker. Best-effort: never fail the job over a status post.
       - name: 'Post triage status comment'
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
@@ -564,8 +568,13 @@ jobs:
             EXISTING_ID="$(
               gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
                 --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
-                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
+                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" --arg runurl "$RUN_URL" \
+                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))]
+                   | (map(select(.body | contains($runurl + ")"))) | last) as $own
+                   | (map(select(.body | contains("Qwen Triage is running"))) | first) as $running
+                   | if $own != null then $own.id
+                     elif $running != null then $running.id
+                     else (last | .id) // empty end'
             )" || EXISTING_ID=''
             if [ -n "$EXISTING_ID" ]; then
               gh api --method PATCH \
@@ -950,8 +959,9 @@ jobs:
       # Flip the early status comment to a terminal state so a lingering
       # "running" line doesn't outlive the run. Neutral wording — the verdict
       # lives in the stage comments above; this only records that the run ended
-      # and keeps the run link. Same marker → edits the one comment, no second
-      # post. Best-effort, on success, failure, AND cancellation: always() (not
+      # and keeps the run link. Same marker → edits the one comment this run
+      # owns; a marker owned by another run gets a fresh terminal post.
+      # Best-effort, on success, failure, AND cancellation: always() (not
       # success() || failure()) because cancellation — most often
       # cancel-in-progress superseding this run on a newer push or comment,
       # also job timeout or manual cancel — would skip this step and leave the
@@ -1007,8 +1017,11 @@ jobs:
             # marker. Anything not owned — a claim post that failed, a legacy
             # marker body, or another lane's racing write (e.g.
             # qwen-triage-finalize.yml's update_status) — gets a fresh terminal
-            # comment, so this run's ending is recorded and no comment is left
-            # claiming it is still running.
+            # comment, so this run's ending is recorded and no comment this run
+            # owns keeps claiming it is still running. A still-running claim
+            # owned by ANOTHER run stays untouched here: that run's finalize
+            # owns it, and if that never lands, the claim step reclaims the
+            # oldest still-running marker on the next run.
             case "$EXISTING_ID" in
               unreadable)
                 echo "::warning::Cannot read the comment list; skipping final status comment to avoid a duplicate post." >&2
