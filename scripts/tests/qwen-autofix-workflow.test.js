@@ -36,7 +36,7 @@ const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
-    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js \(hosted\)')/,
+    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js')/,
   )?.[0] ?? '';
 const routeStep =
   workflow.match(
@@ -47,11 +47,36 @@ const routeJob =
 const reviewScanJob =
   workflow.match(/\n {2}review-scan:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
-const reviewAddressJob =
-  workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
 const issueAutofixJob =
   workflow.match(/\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
+// Both slices bound on the GENERIC next-job shape, not the specific job
+// that happens to follow today: inserting a job after review-address must
+// shrink these slices instead of silently landing the newcomer's `runs-on`
+// inside them. review-address is currently last, so it also allows EOF.
+const buildCliJob =
+  workflow.match(/\n {2}build-cli:[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n)/)?.[0] ??
+  '';
+const reviewAddressJob =
+  workflow.match(
+    /\n {2}review-address:[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n|$)/,
+  )?.[0] ?? '';
+// The sanitize step is inlined into each heavy job as a `run:` step (a
+// local action would need a checkout it is meant to precede). issue-autofix's
+// copy is the canonical text for the ordering and hardening assertions below.
+const sanitizeStepOf = (job) =>
+  job.match(
+    /- name: 'Sanitize workspace git config'[\s\S]*?(?=\n[ ]{6}- name: ')/,
+  )?.[0] ?? '';
+// All three heavy jobs inline the SAME sanitize step (it must precede the
+// checkout it protects, so it cannot be a shared action). The byte-identical
+// pin below makes the hardening assertions cover every copy, not one of three.
+const sanitizeSteps = [
+  sanitizeStepOf(issueAutofixJob),
+  sanitizeStepOf(buildCliJob),
+  sanitizeStepOf(reviewAddressJob),
+];
+const sanitizeStep = sanitizeSteps[0];
 const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
@@ -150,9 +175,8 @@ const installAndBuildSteps =
     /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
 const nodeSetupSteps =
-  workflow.match(
-    /- name: 'Set up Node.js \(hosted\)'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
-  ) ?? [];
+  workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
+  [];
 
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
@@ -1289,12 +1313,8 @@ describe('qwen-autofix workflow', () => {
     // raising it to the target budget, both let one backlog open every agent
     // run at once — which is the thing the cap exists to prevent, and neither
     // would fail any other test.
-    // review-address is the last job in the file, so there is no trailing
-    // `# ====` separator to anchor on — match to EOF.
-    const addressJob =
-      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
-    expect(addressJob).toContain('matrix:');
-    const parallel = Number(addressJob.match(/max-parallel: (\d+)/)?.[1]);
+    expect(reviewAddressJob).toContain('matrix:');
+    const parallel = Number(reviewAddressJob.match(/max-parallel: (\d+)/)?.[1]);
     const targetBudget = Number(
       workflow.match(/MAX_TARGETS_PER_SCAN: '(\d+)'/)?.[1],
     );
@@ -1761,7 +1781,11 @@ describe('qwen-autofix workflow', () => {
 
   it('falls back to existing issue backlog only when review has no target', () => {
     expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
-    expect(issueAutofixJob).toContain('always()');
+    // Anchor the job `if` opening: a bare toContain('always()') is also
+    // satisfied by step-level always()s elsewhere in the job.
+    expect(issueAutofixJob).toContain(
+      "if: |-\n      ${{\n        always() &&\n        needs.route.outputs.do_issue == 'true' &&",
+    );
     expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
     expect(issueAutofixJob).toContain(
       "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
@@ -1897,9 +1921,68 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'if [[ "${ISSUE_STATE}" == \'open\' && "${_late_ready}" == \'true\' && "${_late_approved}" == \'true\' && "${sender_is_trusted}" == \'true\' ]]; then',
     );
+    // Issue-phase mutual exclusion: forced dispatches key per issue, label
+    // events key on the payload issue, and every scan-and-pick run (cron or
+    // unforced dispatch) shares ONE group. A run-unique fallback here let two
+    // overlapping scans double-claim the same issue — the claim recheck runs
+    // after assess and only narrows the race to the short gap between the
+    // recheck and the claim's label write; it does not close it. GitHub
+    // evaluates concurrency before the job `if`, but after `needs`, so the
+    // group is gated on the job `if`'s runnability predicate plus a dry-run
+    // exclusion: keyed-group occupants must CLAIM, and dry runs are
+    // if-runnable yet skip Claim/Publish, so they get a run-unique group
+    // just like never-runnable runs and cannot supersede a pending
+    // target-keyed run. The right edge is anchored to
+    // cancel-in-progress because the value is a folded block scalar — a
+    // run-unique suffix appended as a continuation line would also become
+    // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
+    expect(issueAutofixJob).not.toContain('|| github.run_id }}');
+    // The group identity and the scan step's FORCED_ISSUE env are
+    // load-bearingly coupled: both must resolve to the same issue on every
+    // trigger path, or runs aimed at one issue land in different groups and
+    // the double-claim race reopens while every literal pin above stays
+    // green. Assert the two expressions equal so neither side can drift
+    // alone.
+    const groupKeyedOn = issueAutofixJob.match(
+      /format\('qwen-autofix-issue-\{0\}', (.+?) \|\| 'scheduled'\)/,
+    )?.[1];
+    const forcedIssueSource = issueAutofixJob.match(
+      /id: 'scan'[\s\S]*?FORCED_ISSUE: '\$\{\{ (.+?) \}\}'/,
+    )?.[1];
+    expect(groupKeyedOn).toBeTruthy();
+    expect(groupKeyedOn).toBe(forcedIssueSource);
+    // The gate duplicated into the group expression must stay equal to the
+    // job `if` predicate minus `always() &&` (anchored where the job `if`
+    // opens), plus the dry-run exclusion the `if` does not need — dry runs
+    // execute but never claim, so they must not enter a keyed group: the
+    // gate clause now occurs on both sides, so the literal pins of it are
+    // satisfied by the group copy even if the `if:`-side occurrence drifts.
+    const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+    const ifPredicate = normalize(
+      issueAutofixJob.match(/if: \|-\n\s*\$\{\{\n([\s\S]*?)\n\s*\}\}/)?.[1] ??
+        '',
+    ).replace(/^always\(\) && /, '');
+    const gatePredicate = normalize(
+      issueAutofixJob.match(
+        /group: >-\n\s*\$\{\{\s*(.+?)\s*&& format\('qwen-autofix-issue-\{0\}'/,
+      )?.[1] ?? '',
+    );
+    expect(ifPredicate).toBeTruthy();
+    expect(gatePredicate).toBe(
+      ifPredicate.replace(
+        "needs.route.outputs.do_issue == 'true' && ",
+        "needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && ",
+      ),
+    );
+    // Dry runs get run-unique groups above because they never claim — that
+    // invariant rests on these step `if:` gates, which nothing else asserts:
+    // dropping the clause from either gate lets a dry run and a scheduled
+    // real run claim the same issue while every group pin stays green.
+    expect(claimIssueStep).toContain("needs.route.outputs.dry_run != 'true'");
+    expect(publishPrStep).toContain("needs.route.outputs.dry_run != 'true'");
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
@@ -2214,16 +2297,19 @@ describe('qwen-autofix workflow', () => {
       'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
-      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"',
+      'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
     expect(workflow).toContain(
-      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
     // gracefully instead of 403ing at the report step.
-    expect(workflow).toContain(
-      'git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+    // Require the git -c form, not a bare `git push` (which a plain
+    // `push --no-verify …` match would still satisfy): the host-scoped
+    // credential prefix must immediately precede the push.
+    expect(workflow).toMatch(
+      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
     );
     expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
@@ -5823,7 +5909,7 @@ exit 1
     expect(pushAndReportStep.length).toBeGreaterThan(0);
     expect(withdrawClaimStep.length).toBeGreaterThan(0);
     expect(workflow.indexOf("- name: 'Check bot credentials'")).toBeLessThan(
-      workflow.indexOf("- name: 'Set up Node.js (hosted)'"),
+      workflow.indexOf("- name: 'Set up Node.js'"),
     );
     expect(checkBotCredentialsStep).toContain(
       'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
@@ -5966,12 +6052,36 @@ exit 1
     );
   });
 
-  it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
+  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
-    expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
-    expect(workflow).toMatch(/build-cli:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    // Each heavy job routes to the persistent ECS pool (every target is
+    // live-gated to write+ internal authors and the ECS pool ships docker),
+    // with a hosted fallback for forks of this repo and when ECS routing is
+    // disabled. PR-family events additionally need a same-repo head or a
+    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
+    // Pin the exact expression so neither the repository guard nor the
+    // hosted fallback can be dropped silently.
+    const ecsRunsOn =
+      "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
+    const heavyJobRunsOn = {
+      'issue-autofix': issueAutofixJob,
+      'build-cli': buildCliJob,
+      'review-address': reviewAddressJob,
+    };
+    for (const runsOn of Object.values(heavyJobRunsOn)) {
+      expect(runsOn).toContain(ecsRunsOn);
+    }
+    // The widened runner-environment guard is what lets ECS-routed runs pass
+    // 'Check runner environment' at all — pin the accepted set in both jobs
+    // that carry it (build-cli has no such step): reverting either to the
+    // hosted-only pattern kills every ECS-routed run at that step while the
+    // rest of this suite stays green.
+    expect(
+      workflow.match(
+        /case "\$\{RUNNER_ENVIRONMENT\}" in\n\s+github-hosted\|self-hosted\) ;;/g,
+      ),
+    ).toHaveLength(2);
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
@@ -5981,6 +6091,40 @@ exit 1
     expect(workflow).toContain(
       "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
     );
+    // The widened environment gate doubles as the fail-fast capability
+    // preflight in both agent jobs: their agent runs inside the docker
+    // sandbox, and without the check a missing daemon surfaces only at
+    // 'Resolve sandbox image' — after npm ci/build. tmux likewise fails
+    // fast (and self-installs only via passwordless sudo) before npm ci.
+    const envCheckSteps =
+      workflow.match(
+        /- name: 'Check runner environment'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+      ) ?? [];
+    expect(envCheckSteps).toHaveLength(2);
+    for (const step of envCheckSteps) {
+      expect(step).toContain('docker info');
+      expect(step).toContain('exit 1');
+    }
+    const installTmuxSteps =
+      workflow.match(/- name: 'Install tmux'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
+      [];
+    expect(installTmuxSteps).toHaveLength(2);
+    for (const step of installTmuxSteps) {
+      expect(step).toContain('sudo -n apt-get install');
+      expect(step).not.toContain('sudo apt-get');
+    }
+    // "Short jobs stay hosted" is an explicit design decision — only the
+    // three heavy jobs may route onto the persistent pool.
+    expect(routeJob).toContain("runs-on: 'ubuntu-latest'");
+    expect(reviewScanJob).toContain("runs-on: 'ubuntu-latest'");
+    for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
+      const job =
+        workflow.match(
+          new RegExp(`\\n {2}${name}:[\\s\\S]*?(?=\\n {2}[a-z][a-z0-9-]*:\\n)`),
+        )?.[0] ?? '';
+      expect(job, `job slice missing: ${name}`).toBeTruthy();
+      expect(job).toContain("runs-on: 'ubuntu-latest'");
+    }
     // issue-autofix, build-cli, and review-address each stage the qwen shim
     // against the workspace bundle.
     expect(prepareQwenCliSteps).toHaveLength(3);
@@ -6070,6 +6214,10 @@ exit 1
     // Node bump applied to two of the three jobs) must not ship green.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
+      // Unconditional: re-adding the hosted-only `if` skips setup-node on
+      // every ECS-routed run and leaves the job on whatever Node the pool
+      // image happens to ship, while every recipe assertion stays green.
+      expect(step).not.toContain("runner.environment == 'github-hosted'");
       expect(step).toContain(
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
@@ -6085,21 +6233,15 @@ exit 1
     // per scan) before the agent could start. The legs download the shared
     // artifact instead; only their npm ci remains (the agent and the verify
     // gate still need node_modules against the PR branch).
-    const buildCliJob =
-      workflow.match(
-        /\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/,
-      )?.[0] ?? '';
-    const addressJob =
-      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
     const stepOf = (job, name) =>
       job.match(
         new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n[ ]{6}- name: |$)`),
       )?.[0] ?? '';
     expect(buildCliJob).toBeTruthy();
-    expect(addressJob).toBeTruthy();
+    expect(reviewAddressJob).toBeTruthy();
 
     expect(buildCliJob).toContain("needs: ['route', 'review-scan']");
-    expect(addressJob).toContain(
+    expect(reviewAddressJob).toContain(
       "needs: ['route', 'review-scan', 'build-cli']",
     );
     // An idle tick (no review targets) must not spend a build; the issue
@@ -6123,13 +6265,13 @@ exit 1
     // steps.meta.outputs.base_sha resolves to '' at runtime and every leg
     // silently checks out the event-default ref.
     expect(stepOf(buildCliJob, 'Upload CLI bundle')).toContain("id: 'meta'");
-    expect(stepOf(addressJob, 'Checkout trusted base')).toContain(
+    expect(stepOf(reviewAddressJob, 'Checkout trusted base')).toContain(
       "ref: '${{ needs.build-cli.outputs.base_sha }}'",
     );
     // The guard must fail the leg LOUD before the checkout: an empty ref
     // makes actions/checkout fall back to the event default — on
     // pull_request_review triggers the PR merge ref.
-    const validateShaStep = stepOf(addressJob, 'Validate bundle SHA');
+    const validateShaStep = stepOf(reviewAddressJob, 'Validate bundle SHA');
     expect(validateShaStep).toContain(
       "BASE_SHA: '${{ needs.build-cli.outputs.base_sha }}'",
     );
@@ -6137,9 +6279,9 @@ exit 1
       'if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then',
     );
     expect(validateShaStep).toContain('exit 1');
-    expect(addressJob.indexOf("- name: 'Validate bundle SHA'")).toBeLessThan(
-      addressJob.indexOf("- name: 'Checkout trusted base'"),
-    );
+    expect(
+      reviewAddressJob.indexOf("- name: 'Validate bundle SHA'"),
+    ).toBeLessThan(reviewAddressJob.indexOf("- name: 'Checkout trusted base'"));
 
     // The artifact is the repo-root dist/ plus packages/core/dist —
     // copy_bundle_assets.js already gathers every runtime asset under the
@@ -6160,7 +6302,7 @@ exit 1
     expect(buildCliJob).toContain('retention-days: 1');
     expect(buildCliJob).toContain("if-no-files-found: 'error'");
 
-    const restoreStep = stepOf(addressJob, 'Restore CLI bundle');
+    const restoreStep = stepOf(reviewAddressJob, 'Restore CLI bundle');
     expect(restoreStep).toContain(
       'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
     );
@@ -6169,7 +6311,7 @@ exit 1
     // settings-schema generator crash with ERR_MODULE_NOT_FOUND — pin the
     // restore-side assertion.
     expect(restoreStep).toContain('test -f packages/core/dist/index.js');
-    const downloadStep = stepOf(addressJob, 'Download CLI bundle');
+    const downloadStep = stepOf(reviewAddressJob, 'Download CLI bundle');
     expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
     // Download directory and restore extract path are one contract — pin
     // both sides so a rename of either fails this suite.
@@ -6177,7 +6319,7 @@ exit 1
 
     // The leg itself never rebuilds the base bundle — that is the entire
     // point of the fan-out.
-    const legInstall = stepOf(addressJob, 'Install dependencies');
+    const legInstall = stepOf(reviewAddressJob, 'Install dependencies');
     expect(legInstall).toContain('npm ci --prefer-offline');
     expect(legInstall).not.toContain('npm run build');
     expect(legInstall).not.toContain('npm run bundle');
@@ -6220,7 +6362,13 @@ exit 1
 
   it('clears persistent autofix workdirs before agent steps run', () => {
     expect(resetAutofixWorkspaceSteps).toHaveLength(2);
-    expect(workflow).toContain("WORKDIR: '/tmp/autofix'");
+    // Per-run private dir: pool registrations share one /tmp and issue-phase
+    // runs never serialize against each other. Both artifact uploads read
+    // ${{ env.WORKDIR }} — one source, nothing to drift.
+    expect(workflow).toContain("WORKDIR: '/tmp/autofix-${{ github.run_id }}'");
+    expect(workflow.match(/path: '\$\{\{ env\.WORKDIR \}\}\/'/g)).toHaveLength(
+      2,
+    );
     expect(workflow).toContain(
       "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
     );
@@ -6228,6 +6376,26 @@ exit 1
     for (const step of resetAutofixWorkspaceSteps) {
       expect(step).toContain('rm -rf "${WORKDIR}"');
       expect(step).toContain('mkdir -p "${WORKDIR}"');
+      // 0700 at creation via umask — mkdir-then-chmod leaves a
+      // world-readable window on the shared /tmp.
+      expect(step).toContain('(umask 077; mkdir -p "${WORKDIR}")');
+      expect(step).not.toContain('chmod 700');
+    }
+    // Per-run/per-target teardown after the artifact upload: nothing else
+    // removes these dirs on the persistent pool (PR numbers only increase).
+    const cleanupSteps =
+      workflow.match(
+        /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/g,
+      ) ?? [];
+    expect(cleanupSteps).toHaveLength(2);
+    for (const step of cleanupSteps) {
+      expect(step).toContain("if: 'always()'");
+      expect(step).toContain('rm -rf "${WORKDIR}"');
+    }
+    for (const job of [issueAutofixJob, reviewAddressJob]) {
+      expect(job.indexOf("- name: 'Upload run artifacts'")).toBeLessThan(
+        job.indexOf("- name: 'Clean up autofix workdir'"),
+      );
     }
     expect(workflow.indexOf("- name: 'Checkout'")).toBeLessThan(
       workflow.indexOf("- name: 'Reset autofix workspace'"),
@@ -6238,6 +6406,106 @@ exit 1
     expect(
       workflow.lastIndexOf("- name: 'Reset autofix workspace'"),
     ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
+  });
+
+  it('pins the persistent-pool hygiene steps into every heavy job', () => {
+    const stepOf = (job, name) =>
+      job.match(
+        new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n[ ]{6}- name: |$)`),
+      )?.[0] ?? '';
+    const heavyJobs = [
+      ['issue-autofix', issueAutofixJob],
+      ['build-cli', buildCliJob],
+      ['review-address', reviewAddressJob],
+    ];
+    for (const [name, job] of heavyJobs) {
+      expect(job, `job slice missing: ${name}`).toBeTruthy();
+      // Ownership restore and config sanitize must BOTH precede the
+      // checkout they protect: leftover root-owned files break
+      // actions/checkout, and a planted smudge filter or hook fires during
+      // the checkout itself. Deleting either step — or reordering it after
+      // the checkout — must not ship green while the routing assertions
+      // stay green.
+      for (const stepName of [
+        'Restore workspace ownership',
+        'Sanitize workspace git config',
+      ]) {
+        expect(job, `${name} missing '${stepName}'`).toContain(
+          `- name: '${stepName}'`,
+        );
+        expect(
+          job.indexOf(`- name: '${stepName}'`),
+          `${name}: '${stepName}' must precede checkout`,
+        ).toBeLessThan(job.indexOf("- name: 'Checkout"));
+      }
+      // Inlined as a run step, not a local action: a `uses: './...'`
+      // before checkout fails on a clean runner and executes leftover
+      // content on a reused one.
+      expect(job).toContain(
+        "- name: 'Sanitize workspace git config'\n        run: |-",
+      );
+      expect(job).not.toContain("uses: './");
+    }
+    // The issue phase treats "the branch exists" as proof the agent ran,
+    // so only it sweeps stale autofix/issue-* branches — detached, so
+    // `git branch -D` can never refuse the checked-out branch, and via
+    // BRANCH_PREFIX, so renaming the prefix renames the sweep.
+    const dropStep = stepOf(issueAutofixJob, 'Drop stale autofix branches');
+    expect(dropStep).toContain('git checkout --detach');
+    expect(dropStep).toContain('"refs/heads/${BRANCH_PREFIX}*"');
+    expect(buildCliJob).not.toContain("- name: 'Drop stale autofix branches'");
+  });
+
+  it('hardens the inlined git-config sanitize step against the verified bypasses', () => {
+    // The step is inlined into all three heavy jobs (a shared action cannot
+    // run before checkout); the copies must stay byte-identical so the
+    // assertions below hold for every job, not just issue-autofix.
+    expect(sanitizeSteps[0]).toBeTruthy();
+    expect(sanitizeSteps[1]).toBe(sanitizeSteps[0]);
+    expect(sanitizeSteps[2]).toBe(sanitizeSteps[0]);
+    // Worktree-scoped config first: extensions.worktreeConfig activates
+    // .git/config.worktree, which `git config --local` neither lists nor
+    // unsets and which CAN carry core.hooksPath — pointing the hook
+    // sweep's recursive delete at /. Then the allowlist sweep, and only
+    // then the hooks resolution: the ordering IS the containment.
+    const rmWorktreeCfg = sanitizeStep.indexOf('--git-path config.worktree');
+    const unsetExt = sanitizeStep.indexOf(
+      '--unset-all extensions.worktreeConfig',
+    );
+    const sweep = sanitizeStep.indexOf('--name-only --list');
+    const hooks = sanitizeStep.indexOf('--git-path hooks');
+    expect(rmWorktreeCfg).toBeGreaterThan(-1);
+    expect(unsetExt).toBeGreaterThan(rmWorktreeCfg);
+    expect(sweep).toBeGreaterThan(unsetExt);
+    expect(hooks).toBeGreaterThan(sweep);
+    // Hooks resolve with global/system config out of the way (a planted
+    // global core.hooksPath must not steer the sweep), deletion stays
+    // inside the repository's own git dir, and an outward-resolving entry
+    // is unlinked, never descended into.
+    expect(sanitizeStep).toContain('GIT_CONFIG_GLOBAL=/dev/null');
+    expect(sanitizeStep).toContain('GIT_CONFIG_SYSTEM=/dev/null');
+    expect(sanitizeStep).toContain('rev-parse --absolute-git-dir');
+    expect(sanitizeStep).toContain('unlinking it');
+    expect(sanitizeStep).toContain('-type f -o -type l');
+    expect(sanitizeStep).toContain(
+      'git config --local --unset-all core.hooksPath',
+    );
+    // Provenance link: the inlined step and qwen-triage's hardened step must
+    // be edited together.
+    expect(sanitizeStep).toContain('qwen-triage');
+  });
+
+  it('never invokes a local action before checkout', () => {
+    // A `uses: './...'` local action resolves from $GITHUB_WORKSPACE, so
+    // it only exists after a checkout — before one it fails on a clean
+    // runner and executes a leftover copy on a reused one.
+    for (const block of workflow.split(/\n {2}# ={6,}/)) {
+      const localUse = block.indexOf("uses: './");
+      if (localUse === -1) continue;
+      const checkout = block.indexOf("uses: 'actions/checkout");
+      expect(checkout).toBeGreaterThan(-1);
+      expect(localUse).toBeGreaterThan(checkout);
+    }
   });
 
   it('runs qwen headless once in each agent step', () => {
@@ -7039,7 +7307,7 @@ exit 1
     // git push twice more and the salvage legs execute against a branch
     // that was already pushed.
     expect(pushAndReportStep).toMatch(
-      /if git push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+      /if git_auth push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
     );
     // BOTH push-URL constructions stay pinned — the fork one is pinned by
     // the fork-plumbing test, and the same-repo one lost its old
@@ -7047,10 +7315,10 @@ exit 1
     // for ${HEAD_REPO} (empty in the same-repo case → a malformed
     // `github.com/.git` remote) must not survive.
     expect(pushAndReportStep).toContain(
-      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+      'PUSH_URL="https://github.com/${REPO}.git"',
     );
     expect(pushAndReportStep).toContain(
-      'git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
+      'git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
     );
     // Every failure path in the salvage loop is ::error::-annotated — a
     // deleted fork branch (or transient network error) must not kill the
@@ -7123,9 +7391,33 @@ exit 1
     // force flag; long options (--no-verify) start with -- and are exempt.
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* -[a-zA-Z]*f\b/);
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
-    expect(publishPrStep).toContain('git push --no-verify origin "${BRANCH}"');
+    // Same anchor as the dry-run: the publish push must carry the
+    // host-scoped `git -c credential…` prefix, not a bare `git push`.
+    expect(publishPrStep).toMatch(
+      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
+    );
+    // Neither PAT push may expose the token — not persisted to .git/config
+    // (a `git remote set-url`) and not in the process argv (a token-bearing
+    // URL on the command line, world-readable via /proc on this shared
+    // host). Both authenticate via a transient credential helper instead, so
+    // the push/fetch URLs are tokenless.
+    expect(publishPrStep).not.toContain('git remote set-url');
+    expect(pushAndReportStep).not.toContain('git remote set-url');
+    expect(publishPrStep).not.toContain('x-access-token:${GITHUB_TOKEN}@');
+    expect(pushAndReportStep).not.toContain('x-access-token:${GITHUB_TOKEN}@');
+    expect(publishPrStep).toContain('credential."https://github.com".helper');
     expect(pushAndReportStep).toContain(
-      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'credential."https://github.com".helper',
+    );
+    // `git -c` never writes the helper into the reused workspace's
+    // .git/config, so no error path can strand a credential there for the
+    // next job that lands on this host to read.
+    expect(publishPrStep).not.toContain('git config --local credential.helper');
+    expect(pushAndReportStep).not.toContain(
+      'git config --local credential.helper',
+    );
+    expect(pushAndReportStep).toContain(
+      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host

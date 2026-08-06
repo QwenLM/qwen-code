@@ -658,21 +658,141 @@ jobs:
         needs.route.outputs.do_issue == 'true' &&
         (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true'))
       }}
-    runs-on: 'ubuntu-latest'
+    # Secret-bearing and executes agent-driven code, but the agent runs inside
+    # the docker sandbox image and only ever writes a new branch as the
+    # dev-bot — it never executes a foreign author's code. Forks of this repo
+    # (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to hosted. On
+    # pull_request / pull_request_review events the ECS route additionally
+    # needs a same-repo head or a write+ author (ci.yml's pick_runner form);
+    # the other triggers skip that clause and rely on their own gates
+    # instead: issues / schedule require autofix/approved plus
+    # status/ready-for-agent on the issue, and workflow_dispatch rides the
+    # actor's own write access. Docker availability on this pool is proven
+    # in-repo by qwen-triage's container jobs, which run on the same
+    # runner labels.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 180
+    # route.issue_number is only set for forced dispatches; label events carry
+    # the issue in the payload, and scan-and-pick runs (cron, unforced
+    # dispatch) share one 'scheduled' group. The old github.run_id fallback
+    # made every scan-and-pick run its own group, so two overlapping scans
+    # (cron fires every 40-70min, this job runs up to 180) could double-claim
+    # the same issue — the claim recheck runs after assess and only narrows
+    # the race to the short gap between the recheck and the claim's label
+    # write; it does not close it. Queued (never cancelled) so the newest
+    # pending tick still runs after a long scan if targets remain;
+    # intermediate ticks are superseded, which is fine because each run
+    # rescans from scratch.
+    #
+    # GitHub evaluates concurrency before the job `if`, but after `needs`, so
+    # the group is gated on the same runnability predicate as the `if` above,
+    # plus a dry-run exclusion: runs whose issue phase will not execute
+    # (do_issue=false takeover, review, and command events; label events
+    # failing the decide gates; scheduled ticks whose review-scan still has
+    # targets) and dry runs (if-runnable, but their Claim/Publish steps are
+    # gated off) get a run-unique group instead — a run that never claims
+    # entering a target-keyed group would replace the single pending run
+    # there and silently cancel it. Same precedent as qwen-triage.yml's
+    # triage/tmux jobs.
     concurrency:
-      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
+      group: >-
+        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}
       cancel-in-progress: false
     permissions:
       contents: 'read'
     env:
       REPO: '${{ github.repository }}'
-      WORKDIR: '/tmp/autofix'
+      # Per-run private dir: this pool carries many registrations sharing one
+      # OS /tmp, and issue-phase runs never serialize against each other, so
+      # a fixed path let concurrent runs clobber each other's decision files.
+      WORKDIR: '/tmp/autofix-${{ github.run_id }}'
       EVENT_NAME: '${{ github.event_name }}'
       READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
       AUTOFIX_APPROVED_LABEL: 'autofix/approved'
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
     steps:
+      # Self-hosted runners reuse the workspace; a prior containerised job
+      # can leave root-owned, read-only files anywhere in it. Restore
+      # ownership and write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Self-hosted runners keep the workspace between runs, and other pool
+      # jobs execute human-authored code as the runner user, so a prior job
+      # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
+      # diff.external, includeIf, hooks) in the local config that would fire
+      # inside THIS job's PAT-bearing git steps. It keeps
+      # a known-safe allowlist and unsets everything else, hardened against
+      # the worktree-config and global-hooksPath bypasses verified in
+      # qwen-triage on this pool. No-op on a fresh hosted runner.
+      - name: 'Sanitize workspace git config'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in
+          # a worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to sanitize"
+            exit 0
+          fi
+          # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+          # on the allowlist below (it carries no command itself), but it
+          # activates `.git/config.worktree` — a second config file that
+          # `git config --local` neither lists nor unsets, and that CAN carry
+          # core.hooksPath. Verified in qwen-triage: a prior run can set
+          # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+          # make the hooks deletion below walk /. Delete the file outright,
+          # then drop the extension.
+          rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          # Rather than denylist each exec-vector family (which kept missing
+          # new ones), KEEP a known-safe allowlist and --unset-all everything
+          # else: this closes the whole class, including knobs not yet
+          # enumerated. The kept set is only plumbing that carries no command
+          # — repo format, remote, branch, fetch/gc/pack/index, safe.directory,
+          # extensions, and submodule url/active/branch (NOT
+          # submodule.*.update, which can be `!cmd`). actions/checkout
+          # re-establishes remote/auth afterward. `|| true` on the grep: no
+          # non-allowlisted keys (the steady state on an already-sanitized
+          # runner) means grep exits 1, which would kill the step exactly
+          # when there is nothing to clean.
+          git config --local --name-only --list 2>/dev/null \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # Belt and braces after the config scrub: only delete inside the
+          # repository's own git dir. A hooks path resolving anywhere else is
+          # unlinked, never swept — a recursive delete of a planted path is
+          # far worse than a stale hook on a runner the pool re-cleans.
+          # Resolve hooks with global/system config OUT of the way. Verified
+          # in qwen-triage: with a global core.hooksPath set, `git rev-parse
+          # --git-path hooks` returns that path, the guard below sees
+          # "outside the git dir", and a planted `.git/hooks` symlink
+          # survives untouched. Keep this resolution AFTER the sweep above.
+          GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+          HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+          if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+            # Match -type f OR -type l: a symlinked hook survives a bare
+            # `-type f` sweep and still fires on the next checkout.
+            find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          else
+            # Resolves outside the git dir (or not at all). Warning and
+            # walking away would leave a live hook directory that the next
+            # git command executes, so unlink the ENTRY without descending
+            # into it and put an empty hooks directory back.
+            RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
+            mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
+          fi
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -682,7 +802,34 @@ jobs:
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
-          mkdir -p "${WORKDIR}"
+          # 0700: the dir holds agent transcripts and decision files; the
+          # sandbox container runs as this same user, so the tighter mode
+          # costs the job nothing. umask at creation, not mkdir-then-chmod —
+          # the chmod form leaves a world-readable window on this shared /tmp.
+          (umask 077; mkdir -p "${WORKDIR}")
+          # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
+          # runner kill skips the always() teardown and run_id never repeats,
+          # so nothing else ever reclaims them.
+          find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          # The reused workspace's .git accumulates unreferenced objects
+          # across fetch runs on this persistent pool; prune them.
+          git -c gc.autoDetach=false gc --auto --prune=now --quiet 2>/dev/null || true
+
+      # Self-hosted runners keep the workspace's .git across runs, so a
+      # failed earlier attempt's local branch survives here: the agent's
+      # branch create then dies "branch already exists", or an adaptation
+      # checks out the stale line and pushes the failed attempt's commits
+      # into the new PR. Drop them deterministically (refs survive
+      # actions/checkout's untracked-file clean).
+      - name: 'Drop stale autofix branches'
+        run: |-
+          # Detach first: `git branch -D` refuses the currently checked-out
+          # branch, so a stale autofix branch holding HEAD would otherwise
+          # silently survive the sweep (actions/checkout normally leaves
+          # HEAD on the default branch; this makes the sweep unconditional).
+          git checkout --detach 2>/dev/null || true
+          git for-each-ref --format='%(refname:short)' "refs/heads/${BRANCH_PREFIX}*" \
+            | xargs -r -n 1 git branch -D 2>/dev/null || true
 
       # Same staging as the review-address job: the verify gate always runs the
       # trusted checkout's copy of the schema gate, never a working-tree copy.
@@ -717,18 +864,39 @@ jobs:
       - name: 'Check runner environment'
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted) ;;
+            github-hosted|self-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
               ;;
           esac
+          # The label routing pins ecs-qwen, but a mis-labelled registration
+          # must not silently claim a PAT-bearing 300-minute job — assert the
+          # pool by name on the self-hosted branch too.
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an ecs-qwen pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+          fi
+          # Capability preflight for the persistent pool: this job's agent
+          # runs inside the docker sandbox, and a missing daemon otherwise
+          # surfaces only at 'Resolve sandbox image' — after npm ci/build
+          # has already burned tens of minutes. Fail in seconds instead.
+          # Hosted runners ship docker; the ECS pool's docker is proven by
+          # qwen-triage's container jobs on the same labels.
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
+            exit 1
+          fi
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -740,8 +908,13 @@ jobs:
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq tmux
+            # sudo -n: a host without passwordless sudo must fail fast with a
+            # clear message, not die on a password prompt (the pr-review pool
+            # steps make the same assumption with `sudo -n ... || ::warning`).
+            sudo -n apt-get update -qq && sudo -n apt-get install -y -qq tmux || {
+              echo '::error::tmux is required on the autofix runner and passwordless install failed.'
+              exit 1
+            }
           else
             echo '::error::tmux is required on the autofix runner.'
             exit 1
@@ -786,6 +959,8 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          # Must resolve to the same issue as this job's concurrency group
+          # expression; a test pins the two equal.
           FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
@@ -1260,7 +1435,7 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'autofix-issue-artifacts'
-          path: '/tmp/autofix/'
+          path: '${{ env.WORKDIR }}/'
           if-no-files-found: 'ignore'
 
       - name: 'Publish PR'
@@ -1297,9 +1472,14 @@ jobs:
           fi
           BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           git config core.hooksPath /dev/null
-          git push --no-verify origin "${BRANCH}"
+          # Authenticate the push with a one-shot, host-scoped credential
+          # helper via `git -c`: nothing is written to the reused
+          # workspace's .git/config (no error path can strand it there),
+          # argv holds only the literal ${GITHUB_TOKEN} reference, and the
+          # host scope means it cannot answer a non-GitHub URL.
+          git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+            push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -1371,6 +1551,16 @@ jobs:
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
           fi
+
+      # Nothing else removes the per-run WORKDIR; on the persistent pool
+      # every run would leave its transcripts and decision files behind
+      # forever. Last step, after every reader including the artifact
+      # upload. always() covers cancellation too; only a hard runner kill
+      # abandons the dir, and run_id never repeats — the age sweep in
+      # Reset autofix workspace reclaims it.
+      - name: 'Clean up autofix workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
 
   # ===========================================================================
   # TAKEOVER COMMAND — the accepted comment command's side effects are the
@@ -2809,13 +2999,91 @@ jobs:
     needs: ['route', 'review-scan']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     permissions:
       contents: 'read'
     outputs:
       base_sha: '${{ steps.meta.outputs.base_sha }}'
     steps:
+      # Self-hosted runners reuse the workspace; a prior containerised job
+      # can leave root-owned, read-only files anywhere in it. Restore
+      # ownership and write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Same sweep as the agent jobs: this checkout runs in a workspace
+      # other pool jobs have written, and a surviving filter.*.smudge or
+      # hook fires during it — in the job that builds the CLI bundle every
+      # review-address leg then executes with a PAT in env.
+      - name: 'Sanitize workspace git config'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in
+          # a worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to sanitize"
+            exit 0
+          fi
+          # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+          # on the allowlist below (it carries no command itself), but it
+          # activates `.git/config.worktree` — a second config file that
+          # `git config --local` neither lists nor unsets, and that CAN carry
+          # core.hooksPath. Verified in qwen-triage: a prior run can set
+          # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+          # make the hooks deletion below walk /. Delete the file outright,
+          # then drop the extension.
+          rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          # Rather than denylist each exec-vector family (which kept missing
+          # new ones), KEEP a known-safe allowlist and --unset-all everything
+          # else: this closes the whole class, including knobs not yet
+          # enumerated. The kept set is only plumbing that carries no command
+          # — repo format, remote, branch, fetch/gc/pack/index, safe.directory,
+          # extensions, and submodule url/active/branch (NOT
+          # submodule.*.update, which can be `!cmd`). actions/checkout
+          # re-establishes remote/auth afterward. `|| true` on the grep: no
+          # non-allowlisted keys (the steady state on an already-sanitized
+          # runner) means grep exits 1, which would kill the step exactly
+          # when there is nothing to clean.
+          git config --local --name-only --list 2>/dev/null \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # Belt and braces after the config scrub: only delete inside the
+          # repository's own git dir. A hooks path resolving anywhere else is
+          # unlinked, never swept — a recursive delete of a planted path is
+          # far worse than a stale hook on a runner the pool re-cleans.
+          # Resolve hooks with global/system config OUT of the way. Verified
+          # in qwen-triage: with a global core.hooksPath set, `git rev-parse
+          # --git-path hooks` returns that path, the guard below sees
+          # "outside the git dir", and a planted `.git/hooks` symlink
+          # survives untouched. Keep this resolution AFTER the sweep above.
+          GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+          HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+          if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+            # Match -type f OR -type l: a symlinked hook survives a bare
+            # `-type f` sweep and still fires on the next checkout.
+            find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          else
+            # Resolves outside the git dir (or not at all). Warning and
+            # walking away would leave a live hook directory that the next
+            # git command executes, so unlink the ENTRY without descending
+            # into it and put an empty hooks directory back.
+            RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
+            mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
+          fi
+
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -2823,9 +3091,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -2907,7 +3173,22 @@ jobs:
     needs: ['route', 'review-scan', 'build-cli']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
-    runs-on: 'ubuntu-latest'
+    # Secret-bearing and executes PR code, but every target is live-gated to
+    # write+ (internal) authors at scan AND address time. That is an
+    # author-permission gate by design, not a head-repository gate: takeover
+    # engages maintainer fork PRs, and the pattern matches qwen-code-pr-review,
+    # whose ECS-routed review job also rides its upstream write+ check. The
+    # job therefore runs host-side (no `container:`): the branch code it
+    # executes is collaborator-authored — the same trust class ci.yml's
+    # pick_runner routes onto this pool — and persistent-workspace residue is
+    # scrubbed by the hygiene steps below. On pull_request /
+    # pull_request_review events the ECS route additionally needs a same-repo
+    # head or a write+ author (ci.yml's pick_runner form); issue_comment and
+    # the other triggers skip that clause and rely on the live write+ gates.
+    # Forks of this repo (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to
+    # hosted. Docker availability on this pool is proven in-repo by
+    # qwen-triage's container jobs, which run on the same runner labels.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 300
     permissions:
       contents: 'read'
@@ -2993,6 +3274,88 @@ jobs:
             exit 1
           fi
 
+      # Self-hosted runners reuse the workspace; a prior containerised job
+      # can leave root-owned, read-only files anywhere in it. Restore
+      # ownership and write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Self-hosted runners keep the workspace between runs, and other pool
+      # jobs execute human-authored code as the runner user, so a prior job
+      # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
+      # diff.external, includeIf, hooks) in the local config that would fire
+      # inside THIS job's PAT-bearing git steps. It keeps
+      # a known-safe allowlist and unsets everything else, hardened against
+      # the worktree-config and global-hooksPath bypasses verified in
+      # qwen-triage on this pool. No-op on a fresh hosted runner.
+      - name: 'Sanitize workspace git config'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in
+          # a worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to sanitize"
+            exit 0
+          fi
+          # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+          # on the allowlist below (it carries no command itself), but it
+          # activates `.git/config.worktree` — a second config file that
+          # `git config --local` neither lists nor unsets, and that CAN carry
+          # core.hooksPath. Verified in qwen-triage: a prior run can set
+          # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+          # make the hooks deletion below walk /. Delete the file outright,
+          # then drop the extension.
+          rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          # Rather than denylist each exec-vector family (which kept missing
+          # new ones), KEEP a known-safe allowlist and --unset-all everything
+          # else: this closes the whole class, including knobs not yet
+          # enumerated. The kept set is only plumbing that carries no command
+          # — repo format, remote, branch, fetch/gc/pack/index, safe.directory,
+          # extensions, and submodule url/active/branch (NOT
+          # submodule.*.update, which can be `!cmd`). actions/checkout
+          # re-establishes remote/auth afterward. `|| true` on the grep: no
+          # non-allowlisted keys (the steady state on an already-sanitized
+          # runner) means grep exits 1, which would kill the step exactly
+          # when there is nothing to clean.
+          git config --local --name-only --list 2>/dev/null \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # Belt and braces after the config scrub: only delete inside the
+          # repository's own git dir. A hooks path resolving anywhere else is
+          # unlinked, never swept — a recursive delete of a planted path is
+          # far worse than a stale hook on a runner the pool re-cleans.
+          # Resolve hooks with global/system config OUT of the way. Verified
+          # in qwen-triage: with a global core.hooksPath set, `git rev-parse
+          # --git-path hooks` returns that path, the guard below sees
+          # "outside the git dir", and a planted `.git/hooks` symlink
+          # survives untouched. Keep this resolution AFTER the sweep above.
+          GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+          HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+          if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+            # Match -type f OR -type l: a symlinked hook survives a bare
+            # `-type f` sweep and still fires on the next checkout.
+            find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          else
+            # Resolves outside the git dir (or not at all). Warning and
+            # walking away would leave a live hook directory that the next
+            # git command executes, so unlink the ENTRY without descending
+            # into it and put an empty hooks directory back.
+            RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
+            mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
+          fi
+
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -3003,7 +3366,18 @@ jobs:
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
-          mkdir -p "${WORKDIR}"
+          # 0700: the dir holds agent transcripts and decision files; the
+          # sandbox container runs as this same user, so the tighter mode
+          # costs the job nothing. umask at creation, not mkdir-then-chmod —
+          # the chmod form leaves a world-readable window on this shared /tmp.
+          (umask 077; mkdir -p "${WORKDIR}")
+          # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
+          # runner kill skips the always() teardown and run_id never repeats,
+          # so nothing else ever reclaims them.
+          find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          # The reused workspace's .git accumulates unreferenced objects
+          # across fetch runs on this persistent pool; prune them.
+          git -c gc.autoDetach=false gc --auto --prune=now --quiet 2>/dev/null || true
 
       # Stage the schema gate script from the TRUSTED BASE checkout before
       # "Prepare branch and feedback" switches the working tree to the PR
@@ -3035,18 +3409,39 @@ jobs:
       - name: 'Check runner environment'
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted) ;;
+            github-hosted|self-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
               ;;
           esac
+          # The label routing pins ecs-qwen, but a mis-labelled registration
+          # must not silently claim a PAT-bearing 300-minute job — assert the
+          # pool by name on the self-hosted branch too.
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an ecs-qwen pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+          fi
+          # Capability preflight for the persistent pool: this job's agent
+          # runs inside the docker sandbox, and a missing daemon otherwise
+          # surfaces only at 'Resolve sandbox image' — after npm ci/build
+          # has already burned tens of minutes. Fail in seconds instead.
+          # Hosted runners ship docker; the ECS pool's docker is proven by
+          # qwen-triage's container jobs on the same labels.
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
+            exit 1
+          fi
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -3058,8 +3453,13 @@ jobs:
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq tmux
+            # sudo -n: a host without passwordless sudo must fail fast with a
+            # clear message, not die on a password prompt (the pr-review pool
+            # steps make the same assumption with `sudo -n ... || ::warning`).
+            sudo -n apt-get update -qq && sudo -n apt-get install -y -qq tmux || {
+              echo '::error::tmux is required on the autofix runner and passwordless install failed.'
+              exit 1
+            }
           else
             echo '::error::tmux is required on the autofix runner.'
             exit 1
@@ -3228,7 +3628,8 @@ jobs:
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
             # of 403ing at the report step after the work is done.
-            if ! git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
+            if ! git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+              push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
               echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
               {
                 echo "stale=true"
@@ -4122,19 +4523,22 @@ jobs:
           if [[ "${OUTCOME}" == "fixed" ]]; then
             NEXT_ROUND="$(( ROUND + 1 ))"
             git config --local --unset-all http.https://github.com/.extraheader || true
-            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
             # This step carries the PAT; the branch carries PR-controlled
             # .husky hooks (hooksPath was pointed there so the AGENT's
             # commits get checked). A pre-push hook would execute that code
             # with the PAT in env — sever hooks entirely before pushing.
             git config core.hooksPath /dev/null
+            # Authenticate push/fetch with a one-shot, host-scoped credential
+            # helper via a git_auth wrapper (see Publish PR) — nothing lands
+            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference.
+            git_auth() { git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
             if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's
               # PR branch when the author ticked the box).
-              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"
+              PUSH_URL="https://github.com/${HEAD_REPO}.git"
             else
-              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+              PUSH_URL="https://github.com/${REPO}.git"
             fi
             # Salvage a race-lost push instead of discarding the run. The
             # per-PR head-write concurrency group serialises THIS repo's
@@ -4153,7 +4557,7 @@ jobs:
             # through to the existing failure path — same as today.
             PUSH_RACE_MERGED='false'
             for push_attempt in 1 2 3; do
-              if git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+              if git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
                 break
               fi
               if [[ "${push_attempt}" == 3 ]]; then
@@ -4161,7 +4565,7 @@ jobs:
                 exit 1
               fi
               echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
-              if ! git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
+              if ! git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
                 echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
                 exit 1
               fi
@@ -5010,3 +5414,14 @@ jobs:
           gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
             -f body="${BODY}" > /dev/null ||
             echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
+
+      # Nothing else removes the per-target WORKDIR; PR numbers only
+      # increase, so on the persistent pool every addressed PR would leave
+      # its transcripts and decision files behind forever. Last step, after
+      # every reader including the artifact upload. always() covers
+      # cancellation too; a dir abandoned by a hard runner kill is reclaimed
+      # by the next same-PR run's reset, or by the age sweep in Reset
+      # autofix workspace if that PR is never addressed again.
+      - name: 'Clean up autofix workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
