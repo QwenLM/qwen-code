@@ -504,6 +504,59 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
+  it('falls back to the fileName basename when filePath is absent (pre-fix persisted sessions)', () => {
+    const machine = createTranscriptReplayMachine();
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'edit_file', args: {}, id: 'call-1' } },
+          ],
+        },
+      }),
+    );
+    const result = updates(
+      machine,
+      record('result-1', 'tool_result', {
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'edit_file',
+                response: { output: 'edited' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: {
+            fileDiff: '--- a\n+++ b\n',
+            fileName: 'Foo.kt',
+            originalContent: 'old',
+            newContent: 'new',
+          },
+        },
+      }),
+    );
+
+    expect(result[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-1',
+      content: [
+        {
+          type: 'diff',
+          path: 'Foo.kt',
+          oldText: 'old',
+          newText: 'new',
+        },
+      ],
+    });
+  });
+
   it('reports ambiguous same-name result correlation', () => {
     const onDiagnostic = vi.fn();
     const machine = createTranscriptReplayMachine({ onDiagnostic });
