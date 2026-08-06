@@ -312,6 +312,9 @@ describe('readMediaViaOmniDelivery result shape', () => {
         getOmniRootDir() {
           return tmpDir;
         }
+        getObjectsDir() {
+          return path.join(tmpDir, 'objects');
+        }
       },
     }));
     vi.doMock('./upload.js', () => ({
@@ -370,7 +373,10 @@ describe('readMediaViaOmniDelivery result shape', () => {
       OmniObjectStore: class {
         putFile = putFileMock;
         getOmniRootDir() {
-          return '/tmp/omni-test-qwen/omni';
+          return tmpDir;
+        }
+        getObjectsDir() {
+          return path.join(tmpDir, 'objects');
         }
       },
     }));
@@ -417,7 +423,10 @@ describe('readMediaViaOmniDelivery result shape', () => {
           return { objectPath: '/tmp/obj.mp3', deduped: false };
         }
         getOmniRootDir() {
-          return '/tmp/omni-test-qwen/omni';
+          return tmpDir;
+        }
+        getObjectsDir() {
+          return path.join(tmpDir, 'objects');
         }
       },
     }));
@@ -496,5 +505,186 @@ describe('readMediaViaOmniDelivery result shape', () => {
         expect(String(field)).not.toContain(parentFragment);
       }
     }
+  });
+});
+
+describe('processMediaForOmniDelivery upload cache integration', () => {
+  // The REAL upload-cache.js and recovery.js modules run against a temp omni
+  // root; only the leaf deps (ffmpeg/recognition/storage/upload) are mocked.
+  // This pins the wiring itself: hit skips store+upload, miss persists,
+  // ttl 0 disables, scope isolates credentials, recovery runs.
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-cache-int-'));
+  });
+
+  afterEach(async () => {
+    vi.resetAllMocks();
+    vi.doUnmock('./ffmpeg.js');
+    vi.doUnmock('./recognition.js');
+    vi.doUnmock('./storage.js');
+    vi.doUnmock('./upload.js');
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function cacheConfig(overrides?: {
+    cgc?: Record<string, unknown>;
+    ttlHours?: number;
+  }): Config {
+    return {
+      isOmniEnabled: vi.fn().mockReturnValue(true),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue(overrides?.cgc ?? DASHSCOPE_CGC),
+      getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
+      getOmniUploadMaxFileBytes: vi.fn().mockReturnValue(0),
+      getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
+      getOmniUploadCacheTtlHours: vi.fn().mockReturnValue(overrides?.ttlHours),
+      storage: { getQwenDir: () => tmpDir },
+    } as unknown as Config;
+  }
+
+  /** Installs leaf mocks around a shared pair of spies and imports the
+   * pipeline. The mocked store roots at tmpDir, so the real cache file
+   * lands at tmpDir/upload-cache.json. */
+  async function armPipeline() {
+    const putFileMock = vi
+      .fn()
+      .mockResolvedValue({ objectPath: '/tmp/obj.mp3', deduped: false });
+    const uploadFileMock = vi.fn().mockResolvedValue('oss://bucket/cached');
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi
+        .fn()
+        .mockResolvedValue(mockRecognizedFor('audio', { durationMs: 60_000 })),
+      hashFileSha256: vi.fn().mockResolvedValue('b'.repeat(64)),
+      extensionForMime: vi.fn().mockReturnValue('.mp3'),
+    }));
+    const objectsDir = path.join(tmpDir, 'objects');
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        putFile = putFileMock;
+        getOmniRootDir() {
+          return tmpDir;
+        }
+        getObjectsDir() {
+          return objectsDir;
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        uploadFile = uploadFileMock;
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    const mod = await import('./index.js');
+    return { putFileMock, uploadFileMock, mod };
+  }
+
+  function mockRecognizedFor(
+    modality: 'audio',
+    metadata: Record<string, unknown>,
+  ) {
+    return {
+      modality,
+      detectedMimeType: 'audio/mpeg',
+      sizeBytes: 1234,
+      metadata,
+    };
+  }
+
+  async function realFile(name: string): Promise<string> {
+    const filePath = path.join(tmpDir, name);
+    await fs.writeFile(filePath, 'not really media');
+    return filePath;
+  }
+
+  it('serves a repeat delivery from the cache: no second store copy or upload', async () => {
+    const { putFileMock, uploadFileMock, mod } = await armPipeline();
+    const filePath = await realFile('song.mp3');
+    const config = cacheConfig();
+
+    const first = await mod.processMediaForOmniDelivery(filePath, config);
+    expect(first.uploadCacheHit).toBe(false);
+    expect(putFileMock).toHaveBeenCalledTimes(1);
+    expect(uploadFileMock).toHaveBeenCalledTimes(1);
+
+    const second = await mod.processMediaForOmniDelivery(filePath, config);
+    expect(second.uploadCacheHit).toBe(true);
+    expect(second.fileUri).toBe(first.fileUri);
+    expect(second.deduped).toBe(true);
+    // Hit path must run BEFORE store promotion and upload.
+    expect(putFileMock).toHaveBeenCalledTimes(1);
+    expect(uploadFileMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists the miss: the oss URL lands in upload-cache.json on disk', async () => {
+    const { mod } = await armPipeline();
+    await mod.processMediaForOmniDelivery(
+      await realFile('song.mp3'),
+      cacheConfig(),
+    );
+    const raw = await fs.readFile(
+      path.join(tmpDir, 'upload-cache.json'),
+      'utf8',
+    );
+    expect(raw).toContain('oss://bucket/cached');
+    expect(raw).toContain('b'.repeat(64));
+  });
+
+  it('re-uploads every time when the cache TTL is configured to 0', async () => {
+    const { uploadFileMock, mod } = await armPipeline();
+    const filePath = await realFile('song.mp3');
+    const config = cacheConfig({ ttlHours: 0 });
+
+    const first = await mod.processMediaForOmniDelivery(filePath, config);
+    const second = await mod.processMediaForOmniDelivery(filePath, config);
+    expect(first.uploadCacheHit).toBe(false);
+    expect(second.uploadCacheHit).toBe(false);
+    expect(uploadFileMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('never serves a URL cached under a different credential or endpoint', async () => {
+    // An oss:// URL is minted for one (origin, apiKey) pair; switching
+    // accounts must re-upload rather than reuse a URL the new credential
+    // may not own.
+    const { uploadFileMock, mod } = await armPipeline();
+    const filePath = await realFile('song.mp3');
+
+    await mod.processMediaForOmniDelivery(filePath, cacheConfig());
+    const otherKey = await mod.processMediaForOmniDelivery(
+      filePath,
+      cacheConfig({ cgc: { ...DASHSCOPE_CGC, apiKey: 'sk-other-key' } }),
+    );
+    expect(otherKey.uploadCacheHit).toBe(false);
+    expect(uploadFileMock).toHaveBeenCalledTimes(2);
+
+    // Same credential again: both prior entries coexist; still a hit.
+    const back = await mod.processMediaForOmniDelivery(filePath, cacheConfig());
+    expect(back.uploadCacheHit).toBe(true);
+    expect(uploadFileMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs startup recovery: an expired download .part is swept on first delivery', async () => {
+    const downloadsDir = path.join(tmpDir, 'downloads');
+    await fs.mkdir(downloadsDir, { recursive: true });
+    const expired = path.join(downloadsDir, 'stale.part');
+    await fs.writeFile(expired, 'partial');
+    const old = new Date(Date.now() - 49 * 3600_000);
+    await fs.utimes(expired, old, old);
+
+    const { mod } = await armPipeline();
+    await mod.processMediaForOmniDelivery(
+      await realFile('song.mp3'),
+      cacheConfig(),
+    );
+    await expect(fs.stat(expired)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

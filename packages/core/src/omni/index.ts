@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
@@ -133,7 +134,8 @@ export interface OmniMediaDelivery {
   recognized: RecognizedMedia;
   /** Raw-resource token estimate (attached even when the guard is off). */
   tokenEstimate: OmniTokenEstimate;
-  /** Whether the object store already held this content. */
+  /** Whether the content was already known to the system — object-store
+   * dedup on the miss path, always true on an upload-cache hit. */
   deduped: boolean;
   /** True when the oss URL came from the persistent upload cache (no
    * network transfer happened for this delivery). */
@@ -204,9 +206,12 @@ export function isOmniDeliveryActive(config: Config): boolean {
  *
  * All modalities are uploaded AS-IS — no resizing, no transcoding.
  * Degradation is the job of S4 policies (which must disclose); the default
- * path never silently alters content. No caching yet (S3 adds the
- * (sha256, model) upload cache). Throws OmniDeliveryError /
- * OmniTransportGuardError on failure; user aborts propagate untouched.
+ * path never silently alters content. Successful uploads are remembered in
+ * the persistent upload cache (`.qwen/omni/upload-cache.json`, keyed by
+ * sha256 + model + endpoint scope) for the oss URL validity window, so a
+ * re-read of unchanged content skips both the store copy and the network
+ * transfer. Throws OmniDeliveryError / OmniTransportGuardError on failure;
+ * user aborts propagate untouched.
  */
 export async function processMediaForOmniDelivery(
   filePath: string,
@@ -280,16 +285,50 @@ export async function processMediaForOmniDelivery(
   }
 
   const store = new OmniObjectStore(config.storage.getQwenDir());
+  const cgc = config.getContentGeneratorConfig();
+  // Scope the cache to the endpoint credential: an oss:// URL minted for one
+  // (origin, apiKey) pair must never be served for another — switching
+  // accounts or endpoints yields URLs the new credential may not own. The
+  // fingerprint keeps raw key material out of the cache file.
+  const cacheScope = createHash('sha256')
+    .update(`${cgc.baseUrl ?? ''}|${cgc.apiKey ?? ''}`)
+    .digest('hex')
+    .slice(0, 16);
   const configuredTtl = config.getOmniUploadCacheTtlHours?.();
   const uploadCache = new OmniUploadCache(
     store.getOmniRootDir(),
     configuredTtl === undefined
       ? DEFAULT_UPLOAD_CACHE_TTL_HOURS
       : configuredTtl,
+    cacheScope,
   );
   // Lazy one-time hygiene scan (expired .part files, promotion orphans,
   // sampled object verification). Never throws.
   await runStartupRecoveryOnce(store, uploadCache);
+
+  // Cache lookup BEFORE store promotion: a hit means the server already
+  // holds these bytes for this model+endpoint, so neither the local copy
+  // nor the upload is needed (zoom_image reads the original path, not the
+  // store). Checking after putFile would pay a full-file copy per hit.
+  const model = config.getModel();
+  const cachedUrl = await uploadCache.get(sha256, model);
+  if (cachedUrl) {
+    debugLogger.debug(
+      `omni upload cache hit: sha256=${sha256.slice(0, 12)}… model=${model}`,
+    );
+    return {
+      fileUri: cachedUrl,
+      mimeType: recognized.detectedMimeType,
+      sha256,
+      recognized,
+      tokenEstimate,
+      // No new copy was made: the content is already known to the system
+      // (a prior delivery both stored and uploaded it).
+      deduped: true,
+      uploadCacheHit: true,
+    };
+  }
+
   const extension = extensionForMime(recognized.detectedMimeType);
   let objectPath: string;
   let deduped: boolean;
@@ -306,24 +345,6 @@ export async function processMediaForOmniDelivery(
     );
   }
 
-  const model = config.getModel();
-  const cachedUrl = await uploadCache.get(sha256, model);
-  if (cachedUrl) {
-    debugLogger.debug(
-      `omni upload cache hit: sha256=${sha256.slice(0, 12)}… model=${model}`,
-    );
-    return {
-      fileUri: cachedUrl,
-      mimeType: recognized.detectedMimeType,
-      sha256,
-      recognized,
-      tokenEstimate,
-      deduped,
-      uploadCacheHit: true,
-    };
-  }
-
-  const cgc = config.getContentGeneratorConfig();
   const uploader = new DashScopeUploader({
     apiKey: cgc.apiKey ?? '',
     baseUrl: cgc.baseUrl,

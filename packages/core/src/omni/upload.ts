@@ -115,6 +115,43 @@ function rethrowIfAborted(err: unknown, signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw err;
 }
 
+/** Abort-shaped rejection reason for a caller whose signal fired. */
+function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException('This operation was aborted', 'AbortError')
+  );
+}
+
+/**
+ * Settle with `shared` unless `signal` aborts first. The shared promise is
+ * never cancelled — it keeps running for the other cache consumers — while
+ * this caller rejects with its own abort reason. The abort listener is
+ * removed as soon as the shared promise settles, so racing against a
+ * long-lived caller signal does not accumulate listeners.
+ */
+function raceWithSignal<T>(
+  shared: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return shared;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortReason(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    shared.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 /**
  * Client for DashScope's official temporary upload channel:
  * getPolicy → OSS multipart form POST → `oss://` URL usable as a media
@@ -152,27 +189,33 @@ export class DashScopeUploader {
     const cacheKey = `${this.origin}|${model}|${keyDigest}`;
     const cached = credentialCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < CREDENTIAL_TTL_MS) {
-      return cached.policy;
+      return raceWithSignal(cached.policy, signal);
     }
+    // The shared fetch runs under the internal timeout only — never a
+    // caller's signal. A caller-owned signal aborting a shared promise
+    // would poison it for every other caller awaiting the same entry;
+    // instead each caller races the shared promise against its own
+    // signal below, so an abort rejects that caller alone.
     const entry: CachedPolicy = {
       fetchedAt: Date.now(),
-      policy: this.fetchPolicy(model, signal),
+      policy: this.fetchPolicy(model),
     };
     credentialCache.set(cacheKey, entry);
     entry.policy.catch(() => {
-      // Never cache a failed credential fetch.
+      // Never cache a failed credential fetch. This handler also keeps an
+      // abandoned shared rejection (all racers already aborted) from
+      // surfacing as an unhandled rejection.
       if (credentialCache.get(cacheKey) === entry) {
         credentialCache.delete(cacheKey);
       }
     });
-    return entry.policy;
+    return raceWithSignal(entry.policy, signal);
   }
 
-  /** Uncached policy fetch. */
-  private async fetchPolicy(
-    model: string,
-    signal?: AbortSignal,
-  ): Promise<DashScopeUploadPolicy> {
+  /** Uncached policy fetch. Runs solely under the internal timeout; caller
+   * signals are handled per-caller in getPolicy so one caller's abort never
+   * contaminates the shared cached promise. */
+  private async fetchPolicy(model: string): Promise<DashScopeUploadPolicy> {
     const url = new URL('/api/v1/uploads', this.origin);
     url.searchParams.set('action', 'getPolicy');
     url.searchParams.set('model', model);
@@ -181,7 +224,7 @@ export class DashScopeUploader {
     // consumed, not just until headers arrive — undici cancels in-flight
     // body reads through the request signal, so cleaning up earlier would
     // leave a stalled body read unabortable (no timeout, no ESC).
-    const combined = combineAbortSignals([signal], {
+    const combined = combineAbortSignals([], {
       timeoutMs: GET_POLICY_TIMEOUT_MS,
     });
     let failureSummary: string | undefined;
@@ -203,7 +246,6 @@ export class DashScopeUploader {
         failureSummary = await summarizeHttpFailure(res);
       }
     } catch (err) {
-      rethrowIfAborted(err, signal);
       throw new Error(
         `DashScope upload getPolicy request failed: ${
           err instanceof Error ? err.message : String(err)

@@ -15,7 +15,11 @@ import type { OmniUploadCache } from './upload-cache.js';
 
 const debugLogger = createDebugLogger('omni:recovery');
 
-/** Resume window for interrupted downloads (storage design §6.1). */
+/** How long crash-orphaned `downloads/*.part` files are retained before
+ * the sweep removes them. Nothing ever resumes a .part — staging names
+ * are random per attempt and there is no Range/resume logic — so this is
+ * purely a debugging window for inspecting what an interrupted download
+ * left behind (storage design §6.1). */
 const PART_RETENTION_MS = 48 * 3600_000;
 /** Sampled integrity verification budget per recovery run. */
 const SAMPLE_VERIFY_LIMIT = 3;
@@ -28,11 +32,21 @@ const SAMPLE_VERIFY_MAX_BYTES = 64 * 1024 * 1024;
  * fail that process's rename. Older survivors are crash leftovers. */
 const TMP_GRACE_MS = 3600_000;
 
-let recoveryOnce: Promise<void> | undefined;
+/** Tunables for {@link runStartupRecoveryOnce}; production callers use
+ * the defaults, tests inject small values. */
+export interface StartupRecoveryOptions {
+  sampleVerifyLimit?: number;
+  sampleVerifyMaxBytes?: number;
+}
+
+/** One latch per omni root: distinct stores in one process (multi-project
+ * setups, tests) each get their own scan instead of the first root's scan
+ * suppressing all others. */
+const recoveryOnce = new Map<string, Promise<void>>();
 
 /** Test-only: allow re-running recovery within one process. */
 export function resetRecoveryLatchForTests(): void {
-  recoveryOnce = undefined;
+  recoveryOnce.clear();
 }
 
 async function sweepDownloads(downloadsDir: string): Promise<void> {
@@ -97,6 +111,7 @@ async function sampleVerifyObjects(
   objectsDir: string,
   uploadCache: OmniUploadCache | undefined,
   limit: number,
+  maxBytes: number,
 ): Promise<void> {
   const candidates: string[] = [];
   let shards: string[];
@@ -116,20 +131,27 @@ async function sampleVerifyObjects(
       if (!name.startsWith('.')) candidates.push(path.join(shard, name));
     }
   }
-  // Day-seeded stride sampling: coverage rotates across runs (a fixed
-  // offset would verify the same objects forever). Cheap corruption
-  // detection, not an audit.
-  const stride = Math.max(1, Math.floor(candidates.length / limit));
-  const seed = Math.floor(Date.now() / 86_400_000) % stride;
-  const sample = candidates
-    .filter((_, i) => i % stride === seed)
-    .slice(0, limit);
-  for (const rel of sample) {
+  if (candidates.length === 0 || limit <= 0) return;
+  // Day-seeded stride sampling over a SORTED candidate list (readdir order
+  // is filesystem-dependent): pick (seed + k*stride) % N so coverage
+  // rotates across days and wraps — a filter+slice would leave a
+  // permanent blind spot at the tail. Cheap corruption detection, not an
+  // audit.
+  candidates.sort();
+  const n = candidates.length;
+  const stride = Math.max(1, Math.floor(n / limit));
+  const seed = Math.floor(Date.now() / 86_400_000) % n;
+  const picked = new Set<number>();
+  for (let k = 0; k < limit && picked.size < n; k++) {
+    picked.add((seed + k * stride) % n);
+  }
+  for (const i of picked) {
+    const rel = candidates[i]!;
     const full = path.join(objectsDir, rel);
     const expected = path.basename(rel).split('.')[0]!;
     try {
       const st = await fs.lstat(full);
-      if (st.size > SAMPLE_VERIFY_MAX_BYTES) continue;
+      if (st.size > maxBytes) continue;
       const hash = createHash('sha256');
       await pipeline(createReadStream(full), hash);
       if (hash.digest('hex') !== expected) {
@@ -146,33 +168,51 @@ async function sampleVerifyObjects(
 }
 
 /**
- * One-time-per-process recovery scan (storage design §6.1), run lazily the
- * first time the omni pipeline is touched — zero cost when omni is unused.
+ * One-time-per-process-per-root recovery scan (storage design §6.1), run
+ * lazily the first time the omni pipeline is touched — zero cost when
+ * omni is unused.
  *
- * 1. expired `downloads/*.part` (resume window 48h) are removed;
+ * 1. crash-orphaned `downloads/*.part` older than the 48h debugging
+ *    retention window are removed;
  * 2. `objects/…/.tmp-*` promotion orphans are removed (crash leftovers);
  * 3. a small sample of objects is hash-verified; corrupt objects are
  *    deleted with their upload-cache entries cascaded.
  *
- * Never throws: recovery is hygiene, not a gate.
+ * Never throws: recovery is hygiene, not a gate. That covers the latch
+ * key lookup too — a store whose getOmniRootDir() throws yields a
+ * resolved promise and does not poison the latch for later calls.
  */
 export function runStartupRecoveryOnce(
   store: OmniObjectStore,
   uploadCache?: OmniUploadCache,
+  options?: StartupRecoveryOptions,
 ): Promise<void> {
-  recoveryOnce ??= (async () => {
-    const root = store.getOmniRootDir();
-    await sweepDownloads(path.join(root, 'downloads'));
-    await sweepTmpFiles(store.getObjectsDir());
-    await sampleVerifyObjects(
-      store.getObjectsDir(),
-      uploadCache,
-      SAMPLE_VERIFY_LIMIT,
-    );
-  })().catch((err) => {
+  let root: string;
+  try {
+    root = store.getOmniRootDir();
+  } catch (err) {
     debugLogger.debug(
       `recovery scan failed (ignored): ${err instanceof Error ? err.message : err}`,
     );
-  });
-  return recoveryOnce;
+    return Promise.resolve();
+  }
+  let scan = recoveryOnce.get(root);
+  if (!scan) {
+    scan = (async () => {
+      await sweepDownloads(path.join(root, 'downloads'));
+      await sweepTmpFiles(store.getObjectsDir());
+      await sampleVerifyObjects(
+        store.getObjectsDir(),
+        uploadCache,
+        options?.sampleVerifyLimit ?? SAMPLE_VERIFY_LIMIT,
+        options?.sampleVerifyMaxBytes ?? SAMPLE_VERIFY_MAX_BYTES,
+      );
+    })().catch((err) => {
+      debugLogger.debug(
+        `recovery scan failed (ignored): ${err instanceof Error ? err.message : err}`,
+      );
+    });
+    recoveryOnce.set(root, scan);
+  }
+  return scan;
 }
