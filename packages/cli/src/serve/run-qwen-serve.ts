@@ -117,6 +117,8 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
+import { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
@@ -130,6 +132,7 @@ import type {
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
+import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
@@ -205,6 +208,7 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
 
 function channelDeliveryPublicError(
   code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
@@ -790,6 +794,7 @@ export interface RunHandle {
 const retryableChannelWorkerShutdownErrors = new WeakSet<Error>();
 
 type CoreRuntime = typeof import('./core-runtime.js');
+type LiveDiscoveryRuntime = typeof import('./live/discovery.js');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
 type EnvironmentRuntime = typeof import('../config/environment.js');
@@ -1016,6 +1021,14 @@ export interface RunQwenServeDeps {
   ) => ChannelWorkerSupervisor;
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
+  /** Test/embed override; production uses the private user Conversations root. */
+  liveConversationWorkspace?: LiveConversationWorkspace;
+  /** Test/embed override; production uses ~/.qwen for the Live Host locator. */
+  liveDiscoveryStableBaseDir?: string;
+  /** Test/embed override for stable Live locator ownership handoff. */
+  liveDiscoveryRetryDelayMs?: number;
+  /** Test/embed override; production uses process.platform. */
+  runtimePlatform?: NodeJS.Platform;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -1027,6 +1040,12 @@ let coreRuntimePromise: Promise<CoreRuntime> | undefined;
 function loadCoreRuntime(): Promise<CoreRuntime> {
   coreRuntimePromise ??= import('./core-runtime.js');
   return coreRuntimePromise;
+}
+
+let liveDiscoveryRuntimePromise: Promise<LiveDiscoveryRuntime> | undefined;
+function loadLiveDiscoveryRuntime(): Promise<LiveDiscoveryRuntime> {
+  liveDiscoveryRuntimePromise ??= import('./live/discovery.js');
+  return liveDiscoveryRuntimePromise;
 }
 
 async function resolveDaemonLogBaseDirForRun(input: {
@@ -1411,6 +1430,21 @@ const BOOTSTRAP_SERVE_PATHS = new Set([
   BOOTSTRAP_DAEMON_STATUS_PATH,
 ]);
 
+const RUNTIME_STARTUP_FAILED_ENVELOPE = {
+  error: 'Daemon runtime failed to start',
+  code: 'daemon_runtime_failed',
+} as const;
+const RUNTIME_STARTUP_STARTING_ENVELOPE = {
+  error: 'Daemon runtime is still starting',
+  code: 'daemon_runtime_starting',
+} as const;
+
+function runtimeStartupEnvelope(runtimeError: string | undefined) {
+  return runtimeError
+    ? RUNTIME_STARTUP_FAILED_ENVELOPE
+    : RUNTIME_STARTUP_STARTING_ENVELOPE;
+}
+
 function createBootstrapServeApp(input: {
   opts: ServeOptions;
   getPort: () => number;
@@ -1493,14 +1527,7 @@ function createBootstrapServeApp(input: {
       if (runtimeError === undefined) {
         res.setHeader('Retry-After', '1');
       }
-      res.status(503).json({
-        error: runtimeError
-          ? 'Daemon runtime failed to start'
-          : 'Daemon runtime is still starting',
-        code: runtimeError
-          ? 'daemon_runtime_failed'
-          : 'daemon_runtime_starting',
-      });
+      res.status(503).json(runtimeStartupEnvelope(runtimeError));
       return;
     }
     res.status(200).json(
@@ -1679,13 +1706,7 @@ function createBootstrapServeApp(input: {
   });
 
   app.use((_req: Request, res: Response): void => {
-    const runtimeError = getRuntimeError();
-    res.status(503).json({
-      error: runtimeError
-        ? 'Daemon runtime failed to start'
-        : 'Daemon runtime is still starting',
-      code: runtimeError ? 'daemon_runtime_failed' : 'daemon_runtime_starting',
-    });
+    res.status(503).json(runtimeStartupEnvelope(getRuntimeError()));
   });
 
   return app;
@@ -1700,6 +1721,7 @@ function createDelegatingServeApp(
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
+    isPreAuthRequest?: (req: Request) => boolean | Promise<boolean>;
   } = {},
 ): Application {
   const app = express();
@@ -1724,7 +1746,14 @@ function createDelegatingServeApp(
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
           : options.authenticateDeferredRuntimeRequest;
-        if (authGate) {
+        // A rejecting predicate must not 500 every deferred request —
+        // fail closed to the bearer gate instead.
+        const preAuthExempted =
+          authGate !== undefined &&
+          (await Promise.resolve(options.isPreAuthRequest?.(req)).catch(
+            () => false,
+          )) === true;
+        if (authGate && !preAuthExempted) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
             return;
           }
@@ -1736,6 +1765,13 @@ function createDelegatingServeApp(
         try {
           await options.runtimeReady;
         } catch {
+          if (preAuthExempted) {
+            // The bootstrap app serves the failure envelope only behind its
+            // bearer gate, which a pre-auth navigation cannot pass — answer
+            // here so the browser sees the startup failure, not a 401.
+            res.status(503).json(RUNTIME_STARTUP_FAILED_ENVELOPE);
+            return;
+          }
           // Fall through to the bootstrap app so it can report the startup error.
         } finally {
           timing.waitMs =
@@ -3076,6 +3112,7 @@ async function runQwenServeImpl(
     const locals = app.locals as {
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
+      stopLiveCoordinator?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -3091,6 +3128,7 @@ async function runQwenServeImpl(
     };
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
+    stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -3201,6 +3239,8 @@ async function runQwenServeImpl(
         }`,
       );
     }
+    const liveConversationWorkspace =
+      deps.liveConversationWorkspace ?? new LiveConversationWorkspace();
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -4615,6 +4655,9 @@ async function runQwenServeImpl(
           'Managed scratch runtime must use an accepted direct child directory',
         );
       }
+      if (provenance === 'live-conversation') {
+        await liveConversationWorkspace.assertExactRoot(cwd);
+      }
       const snapshot =
         buildOptions?.snapshot ??
         (await trustPolicy.readDaemonTrustPolicySnapshot());
@@ -4622,7 +4665,7 @@ async function runQwenServeImpl(
         buildOptions?.decision ??
         trustPolicy.evaluateDaemonWorkspaceTrust(snapshot, cwd);
       const trusted =
-        provenance === 'managed-scratch'
+        provenance === 'managed-scratch' || provenance === 'live-conversation'
           ? true
           : (buildOptions?.trusted ?? decision.targetTrusted);
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
@@ -4702,6 +4745,21 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
+        ...(provenance === 'live-conversation'
+          ? {
+              notifySentCompletion: true,
+              isolatedWorkspace: {
+                materializeDirectory: (sessionId: string) =>
+                  liveConversationWorkspace.materializeConversationDirectory(
+                    sessionId,
+                  ),
+                discardEmptyDirectory: (sessionId: string) =>
+                  liveConversationWorkspace.discardEmptyConversationDirectory(
+                    sessionId,
+                  ),
+              },
+            }
+          : {}),
         ...subSessionConcurrencyCapsFromSettings(
           wsSettings?.merged.serve ?? {},
         ),
@@ -4928,11 +4986,14 @@ async function runQwenServeImpl(
         sessionRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(buildOptions?.displayName !== undefined
           ? { displayName: buildOptions.displayName }
-          : {}),
+          : provenance === 'live-conversation'
+            ? { displayName: 'Conversations' }
+            : {}),
         primary: buildOptions?.primary ?? false,
         trusted,
         provenance,
-        removable: buildOptions?.removable ?? true,
+        removable:
+          buildOptions?.removable ?? provenance !== 'live-conversation',
         registrationIds: [...(buildOptions?.registrationIds ?? [])],
         env: wsEnv.metadata,
         bridge: wsBridge,
@@ -4948,7 +5009,7 @@ async function runQwenServeImpl(
           }),
       };
       subSessionStoppersByRuntime.set(wsRuntime, wsSubSessionLauncher.stop);
-      if (provenance !== 'managed-scratch' && !buildOptions?.snapshot) {
+      if (provenance === 'existing' && !buildOptions?.snapshot) {
         const latest = await trustPolicy.readDaemonTrustPolicySnapshot();
         if (latest.revision !== snapshot.revision) {
           generationGuard.close();
@@ -4987,6 +5048,7 @@ async function runQwenServeImpl(
     } = { current: undefined };
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
+        if (runtimeAdded.provenance === 'live-conversation') return;
         channelWebhookEnvByWorkspace.set(
           runtimeAdded.workspaceCwd,
           workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
@@ -5024,7 +5086,11 @@ async function runQwenServeImpl(
           invalidatePrimaryServeFeaturesCache();
         }
         totalSessionAdmission.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
-        channelWorkerManager?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        if (runtimeToDrain.provenance !== 'live-conversation') {
+          channelWorkerManager?.beginWorkspaceDrain(
+            runtimeToDrain.workspaceCwd,
+          );
+        }
         workspaceVoiceCoordinator.beginWorkspaceDrain(runtimeToDrain);
         channelWebhookEnvByWorkspace.delete(runtimeToDrain.workspaceCwd);
         channelWebhookConfigVersion += 1;
@@ -5050,15 +5116,21 @@ async function runQwenServeImpl(
           bridgeRef = runtimeToDrain.bridge;
           invalidatePrimaryServeFeaturesCache();
         }
-        channelWorkerManager?.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        if (runtimeToDrain.provenance !== 'live-conversation') {
+          channelWorkerManager?.cancelWorkspaceDrain(
+            runtimeToDrain.workspaceCwd,
+          );
+        }
         totalSessionAdmission.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
         workspaceVoiceCoordinator.cancelWorkspaceDrain(runtimeToDrain);
-        channelWebhookEnvByWorkspace.set(
-          runtimeToDrain.workspaceCwd,
-          workspaceRuntimeEffectiveEnv(runtimeToDrain, daemonRuntimeBaseEnv),
-        );
-        channelWebhookConfigVersion += 1;
-        refreshChannelWebhookConfigs?.();
+        if (runtimeToDrain.provenance !== 'live-conversation') {
+          channelWebhookEnvByWorkspace.set(
+            runtimeToDrain.workspaceCwd,
+            workspaceRuntimeEffectiveEnv(runtimeToDrain, daemonRuntimeBaseEnv),
+          );
+          channelWebhookConfigVersion += 1;
+          refreshChannelWebhookConfigs?.();
+        }
         const app =
           serveAppForRuntimeLifecycle.current ??
           runtimeApp ??
@@ -5087,9 +5159,11 @@ async function runQwenServeImpl(
             runtimeToDrain.workspaceCwd,
           ).inFlight,
           channelWorkers:
-            channelWorkerManager?.workspaceActivity(
-              runtimeToDrain.workspaceCwd,
-            ) ?? 0,
+            runtimeToDrain.provenance === 'live-conversation'
+              ? 0
+              : (channelWorkerManager?.workspaceActivity(
+                  runtimeToDrain.workspaceCwd,
+                ) ?? 0),
           voiceSessions:
             workspaceVoiceCoordinator.getWorkspaceActivity(runtimeToDrain),
         };
@@ -5131,7 +5205,11 @@ async function runQwenServeImpl(
           } catch {
             // Continue to bridge teardown.
           }
-          if (reason !== 'daemon_shutdown' && channelWorkerManager) {
+          if (
+            reason !== 'daemon_shutdown' &&
+            channelWorkerManager &&
+            runtimeToDrain.provenance !== 'live-conversation'
+          ) {
             await channelWorkerManager
               .removeWorkspace(runtimeToDrain.workspaceCwd)
               .catch((err) => {
@@ -5344,6 +5422,7 @@ async function runQwenServeImpl(
           }
         : {}),
       managedScratchRoot,
+      liveConversationWorkspace,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       workspaceTrustHotReloadAvailable,
@@ -5361,6 +5440,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
@@ -5746,6 +5826,17 @@ async function runQwenServeImpl(
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
+      // The runtime app serves these before bearerAuth; a browser navigation
+      // cannot attach the bearer header, so the cold gate must let them
+      // through (and start the runtime) exactly like the warm app would.
+      // Dynamic import keeps web-shell-static out of the serve fast-path
+      // static closure (see the import-boundary guards in fast-path.test.ts).
+      isPreAuthRequest: webShellMounted
+        ? (req) =>
+            import('./web-shell-static.js').then((webShellStatic) =>
+              webShellStatic.isPreAuthWebShellRequest(req),
+            )
+        : undefined,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -5976,6 +6067,209 @@ async function runQwenServeImpl(
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const scheme = tlsOptions ? 'https' : 'http';
       const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      const liveRuntimeBaseDir = path.dirname(daemonLogBaseDir);
+      const liveDiscoveryOwners: Array<{
+        runtimeBaseDir: string;
+        instanceNonce: string;
+        pid: number;
+      }> = [];
+      let liveDiscoveryPublish: Promise<void> | undefined;
+      let liveDiscoveryRetryTimer: NodeJS.Timeout | undefined;
+      let liveDiscoveryRetryTask: Promise<void> | undefined;
+      let liveDiscoveryEnabled = false;
+      let liveDiscoveryShuttingDown = false;
+      let liveDiscoveryToggle: Promise<void> = Promise.resolve();
+      let attemptPendingLiveDiscovery: (() => Promise<void>) | undefined;
+      const pendingLiveDiscoveryBaseDirs = new Set<string>();
+      const warnedLiveDiscoveryOwners = new Set<string>();
+      const liveDiscoveryRetryDelayMs =
+        deps.liveDiscoveryRetryDelayMs !== undefined &&
+        Number.isFinite(deps.liveDiscoveryRetryDelayMs) &&
+        deps.liveDiscoveryRetryDelayMs >= 10
+          ? Math.min(deps.liveDiscoveryRetryDelayMs, 60_000)
+          : DEFAULT_LIVE_DISCOVERY_RETRY_MS;
+      const scheduleLiveDiscoveryRetry = (): void => {
+        if (
+          liveDiscoveryShuttingDown ||
+          !liveDiscoveryEnabled ||
+          liveDiscoveryRetryTimer ||
+          liveDiscoveryRetryTask ||
+          pendingLiveDiscoveryBaseDirs.size === 0 ||
+          !attemptPendingLiveDiscovery
+        ) {
+          return;
+        }
+        liveDiscoveryRetryTimer = setTimeout(() => {
+          liveDiscoveryRetryTimer = undefined;
+          if (
+            liveDiscoveryShuttingDown ||
+            !liveDiscoveryEnabled ||
+            !attemptPendingLiveDiscovery
+          ) {
+            return;
+          }
+          const retry = attemptPendingLiveDiscovery().finally(() => {
+            if (liveDiscoveryRetryTask === retry) {
+              liveDiscoveryRetryTask = undefined;
+            }
+            scheduleLiveDiscoveryRetry();
+          });
+          liveDiscoveryRetryTask = retry;
+        }, liveDiscoveryRetryDelayMs);
+        liveDiscoveryRetryTimer.unref();
+      };
+      const cancelLiveDiscoveryRetry = (): void => {
+        if (!liveDiscoveryRetryTimer) return;
+        clearTimeout(liveDiscoveryRetryTimer);
+        liveDiscoveryRetryTimer = undefined;
+      };
+      const publishLiveDiscovery = (
+        candidateApp: Application,
+      ): Promise<void> => {
+        if (liveDiscoveryShuttingDown) return Promise.resolve();
+        if (!resolveAcpHttpEnabled()) return Promise.resolve();
+        if (candidateApp.locals?.['liveVoiceEnabled'] !== true)
+          return Promise.resolve();
+        liveDiscoveryEnabled = true;
+        if (liveDiscoveryPublish) return liveDiscoveryPublish;
+        const coordinator = candidateApp.locals?.['liveCoordinator'] as
+          | { daemonInstanceNonce?: unknown }
+          | undefined;
+        const instanceNonce = coordinator?.daemonInstanceNonce;
+        if (typeof instanceNonce !== 'string') return Promise.resolve();
+        liveDiscoveryPublish = loadLiveDiscoveryRuntime()
+          .then(
+            async ({
+              getStableLiveDiscoveryBaseDir,
+              LiveDiscoveryOwnerActiveError,
+              writeLiveDiscoveryFile,
+            }) => {
+              if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) return;
+              const stableBaseDir = path.resolve(
+                deps.liveDiscoveryStableBaseDir ??
+                  getStableLiveDiscoveryBaseDir(),
+              );
+              const runtimeBaseDir = path.resolve(liveRuntimeBaseDir);
+              const targetBaseDirs = new Set<string>();
+              if (runtimeBaseDir !== stableBaseDir) {
+                targetBaseDirs.add(runtimeBaseDir);
+              }
+              targetBaseDirs.add(stableBaseDir);
+              for (const baseDir of targetBaseDirs) {
+                pendingLiveDiscoveryBaseDirs.add(baseDir);
+              }
+              const record = {
+                url,
+                ...(token ? { token } : {}),
+                protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+                pid: process.pid,
+                instanceNonce,
+              };
+              attemptPendingLiveDiscovery = async () => {
+                for (const runtimeBaseDir of [
+                  ...pendingLiveDiscoveryBaseDirs,
+                ]) {
+                  if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled)
+                    return;
+                  try {
+                    await writeLiveDiscoveryFile(runtimeBaseDir, record);
+                    pendingLiveDiscoveryBaseDirs.delete(runtimeBaseDir);
+                    warnedLiveDiscoveryOwners.delete(runtimeBaseDir);
+                    liveDiscoveryOwners.push({
+                      runtimeBaseDir,
+                      instanceNonce,
+                      pid: process.pid,
+                    });
+                  } catch (err) {
+                    if (err instanceof LiveDiscoveryOwnerActiveError) {
+                      if (!warnedLiveDiscoveryOwners.has(runtimeBaseDir)) {
+                        warnedLiveDiscoveryOwners.add(runtimeBaseDir);
+                        daemonLog.warn(
+                          `failed to publish Live Host discovery at ${runtimeBaseDir}: ${err.message}`,
+                        );
+                      }
+                      continue;
+                    }
+                    pendingLiveDiscoveryBaseDirs.delete(runtimeBaseDir);
+                    daemonLog.warn(
+                      `failed to publish Live Host discovery at ${runtimeBaseDir}: ${
+                        err instanceof Error ? err.message : String(err)
+                      }`,
+                    );
+                  }
+                }
+              };
+              await attemptPendingLiveDiscovery();
+              scheduleLiveDiscoveryRetry();
+            },
+          )
+          .catch((err) => {
+            daemonLog.warn(
+              `failed to publish Live Host discovery: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          });
+        return liveDiscoveryPublish;
+      };
+      const removeLiveDiscoveryOwners = async (): Promise<void> => {
+        const owners = liveDiscoveryOwners.splice(0);
+        if (owners.length === 0) return;
+        let removeLiveDiscoveryFile: LiveDiscoveryRuntime['removeLiveDiscoveryFile'];
+        try {
+          ({ removeLiveDiscoveryFile } = await loadLiveDiscoveryRuntime());
+        } catch (err) {
+          daemonLog.warn(
+            `failed to load Live discovery runtime for cleanup: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          return;
+        }
+        for (const owner of owners) {
+          try {
+            await removeLiveDiscoveryFile(owner.runtimeBaseDir, owner);
+          } catch (err) {
+            daemonLog.warn(
+              `failed to remove Live Host discovery at ${owner.runtimeBaseDir}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+      };
+      const unpublishLiveDiscovery = async (): Promise<void> => {
+        liveDiscoveryEnabled = false;
+        cancelLiveDiscoveryRetry();
+        pendingLiveDiscoveryBaseDirs.clear();
+        attemptPendingLiveDiscovery = undefined;
+        await liveDiscoveryPublish;
+        await liveDiscoveryRetryTask;
+        liveDiscoveryPublish = undefined;
+        liveDiscoveryRetryTask = undefined;
+        await removeLiveDiscoveryOwners();
+      };
+      const attachLiveDiscoveryControl = (candidateApp: Application): void => {
+        (
+          candidateApp.locals as {
+            setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
+          }
+        ).setLiveDiscoveryEnabled = (enabled) => {
+          const operation = liveDiscoveryToggle.then(() =>
+            enabled
+              ? publishLiveDiscovery(candidateApp)
+              : unpublishLiveDiscovery(),
+          );
+          liveDiscoveryToggle = operation.catch(() => undefined);
+          return operation;
+        };
+      };
+      const cleanupLiveDiscovery = async (): Promise<void> => {
+        liveDiscoveryShuttingDown = true;
+        cancelLiveDiscoveryRetry();
+        await liveDiscoveryToggle;
+        await unpublishLiveDiscovery();
+      };
       try {
         channelWorkspaceGroups = resolveChannelWorkspaceGroupsAtListen();
       } catch (err) {
@@ -6197,7 +6491,9 @@ async function runQwenServeImpl(
             'Workspace registry is not available for channel workers.',
           );
         }
-        const runtimes = registry.list();
+        const runtimes = registry
+          .list()
+          .filter((runtime) => runtime.provenance !== 'live-conversation');
         if (runtimes.length <= 1 && operation === 'initial') {
           const primary = registry.primary;
           if (!primary.trusted) {
@@ -6236,6 +6532,7 @@ async function runQwenServeImpl(
               workspaceCwd: runtime.workspaceCwd,
               primary: runtime.primary,
               trusted: runtime.trusted,
+              provenance: runtime.provenance,
             };
           }),
           selection: channelSelection,
@@ -6370,6 +6667,7 @@ async function runQwenServeImpl(
       ): Promise<void> => {
         if (runtimeStartupSettled) return;
         runtimeApp = candidateApp;
+        attachLiveDiscoveryControl(candidateApp);
         const acpHandle = candidateApp.locals?.['acpHandle'] as
           | AcpHttpHandle
           | undefined;
@@ -6381,6 +6679,7 @@ async function runQwenServeImpl(
           if (runtimeStartupSettled) return;
         }
         if (runtimeStartupSettled) return;
+        await publishLiveDiscovery(candidateApp);
         runtimeStartupSettled = true;
         clearRuntimeStartupTimer();
         markRuntimeReady();
@@ -6555,6 +6854,8 @@ async function runQwenServeImpl(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            liveDiscoveryShuttingDown = true;
+            cancelLiveDiscoveryRetry();
             channelControlDraining = true;
             const initiallyMountedApp = runtimeApp ?? runtimeAppForCleanup;
             const initiallyMountedManagement = initiallyMountedApp?.locals?.[
@@ -6569,6 +6870,11 @@ async function runQwenServeImpl(
             // yields so no management request can enter the shutdown window.
             const initialManagementWait =
               initiallyMountedManagement?.sealAndWait?.();
+            const initiallyMountedLive = initiallyMountedApp?.locals as
+              | { sealAndWaitLiveCoordinator?: () => Promise<void> }
+              | undefined;
+            const initialLiveWait =
+              initiallyMountedLive?.sealAndWaitLiveCoordinator?.();
             const initialSessionMaintenanceWait =
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
@@ -6674,6 +6980,7 @@ async function runQwenServeImpl(
                     rej(retryableError);
                     return;
                   }
+                  await cleanupLiveDiscovery();
                   if (loggerPublished || loggerSignalOwned) {
                     writeDaemonLifecycleBestEffort(() => {
                       if (finalErr) {
@@ -6721,6 +7028,13 @@ async function runQwenServeImpl(
                 await initialManagementWait;
                 if (workspaceManagementHandle !== initiallyMountedManagement) {
                   await workspaceManagementHandle?.sealAndWait?.();
+                }
+                const liveLifecycleHandle = appForCleanup?.locals as
+                  | { sealAndWaitLiveCoordinator?: () => Promise<void> }
+                  | undefined;
+                await initialLiveWait;
+                if (liveLifecycleHandle !== initiallyMountedLive) {
+                  await liveLifecycleHandle?.sealAndWaitLiveCoordinator?.();
                 }
                 await initialSessionMaintenanceWait;
                 if (sessionMaintenance !== initiallyMountedSessionMaintenance) {
@@ -6879,6 +7193,7 @@ async function runQwenServeImpl(
       });
       const preparedRuntimeApp = runtimeApp ?? runtimeAppForCleanup;
       if (preparedRuntimeApp && bridgeRef && deps.bridge) {
+        attachLiveDiscoveryControl(preparedRuntimeApp);
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
         }
@@ -6892,6 +7207,7 @@ async function runQwenServeImpl(
             | AcpHttpHandle
             | undefined;
           acpHandle?.attachServer?.(server);
+          void publishLiveDiscovery(preparedRuntimeApp);
         }
       } else if (deferRuntimeUntilFirstHealth) {
         scheduleRuntimeStartFallback();
@@ -6902,10 +7218,13 @@ async function runQwenServeImpl(
       if (deps.resolveOnListen) {
         loggerPublished = true;
         loggerLifecycle.published();
-        resolve(handle);
+        void (liveDiscoveryPublish ?? Promise.resolve()).then(() =>
+          resolve(handle),
+        );
       } else {
         void runtimeReady.then(
-          () => {
+          async () => {
+            await liveDiscoveryPublish;
             loggerPublished = true;
             loggerLifecycle.published();
             resolve(handle);

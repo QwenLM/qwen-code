@@ -347,11 +347,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...result,
       ...(extraBody ? extraBody : {}),
     };
+    const reasoningEffort = merged['reasoning_effort'];
     const dropped: string[] = [];
-    if (
+    if (reasoningEffort === 'none' && merged['thinking_budget'] !== undefined) {
+      // 'none' is the canonical tiered-model disable. Keep that sentinel but
+      // never ship it with a budget: DashScope rejects the pair.
+      dropped.push('thinking_budget');
+    } else if (
       preferredThinkingKnob === 'thinking_budget' &&
-      merged['reasoning_effort'] !== undefined &&
-      merged['reasoning_effort'] !== 'none'
+      reasoningEffort !== undefined
     ) {
       dropped.push('reasoning_effort');
     }
@@ -364,8 +368,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     for (const key of dropped) {
       delete merged[key];
     }
-    this.warnConflictingKnobDrop(model, merged, dropped);
-    this.dropConflictingThinkingKnobs(model, merged);
+    dropped.push(...this.dropConflictingThinkingKnobs(model, merged));
+    this.warnConflictingKnobDrop(model, reasoningEffort, dropped);
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
@@ -423,17 +427,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private dropConflictingThinkingKnobs(
     model: string | undefined,
     merged: Record<string, unknown>,
-  ): void {
+  ): string[] {
     const effort = merged['reasoning_effort'];
     // Value check, not presence: 'none' is an explicit disable that stays on
     // the wire (same semantics as the pipeline's reasoning_effort guards),
     // not a tier that overrides the thinking knobs.
     if (typeof effort !== 'string' || effort === 'none') {
-      return;
+      return [];
     }
     const wireModel = this.resolveWireModel(model);
     if (!isQwenFamilyWireModel(wireModel)) {
-      return;
+      return [];
     }
     const dropped: string[] = [];
     if (isTieredEffortWireModel(wireModel)) {
@@ -450,17 +454,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       dropped.push('reasoning_effort');
     }
     if (dropped.length === 0) {
-      return;
+      return [];
     }
     for (const key of dropped) {
       delete merged[key];
     }
-    this.warnConflictingKnobDrop(model, merged, dropped);
+    return dropped;
   }
 
   private warnConflictingKnobDrop(
     model: string | undefined,
-    merged: Record<string, unknown>,
+    reasoningEffort: unknown,
     dropped: string[],
   ): void {
     if (dropped.length === 0) {
@@ -470,7 +474,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       this.conflictingKnobDropWarned = true;
       debugLogger.warn('DashScope: dropped conflicting thinking knobs', {
         model: this.resolveWireModel(model),
-        reasoningEffort: merged['reasoning_effort'],
+        reasoningEffort,
         dropped,
       });
     }

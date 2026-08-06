@@ -745,6 +745,85 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('no package defines this script');
     });
 
+    it('reproduces a script defined only by a nameless-but-parseable member', () => {
+      // A nameless member lands in `skipped`, but its manifest PARSES — the
+      // scripts table is fully readable (scripts need no `name` to enumerate),
+      // so the ruling uses the evidence it holds rather than declaring the
+      // whole table unreadable.
+      mkdirSync(join(dir, 'packages/nameless'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/nameless/package.json'),
+        JSON.stringify({ scripts: { 'test:ghost': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:ghost`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
+      expect(claim?.verdict).toBe('reproduces');
+    });
+
+    it('contradicts a fabricated script even when a nameless member exists', () => {
+      // Every manifest parses — the script table is complete — so a positive
+      // absence is sound; `unchecked` is reserved for genuinely unreadable
+      // manifests.
+      mkdirSync(join(dir, 'packages/nameless'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/nameless/package.json'),
+        JSON.stringify({ scripts: { 'test:ghost': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:nonexistent`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:nonexistent');
+      expect(claim?.verdict).toBe('contradicted');
+    });
+
+    it('rules unchecked — not contradicted — when only an unreadable manifest could define the script', () => {
+      // A manifest that does not PARSE proves nothing about its scripts, so
+      // the ruling must not assert a positive absence from a table it was
+      // told may be incomplete.
+      mkdirSync(join(dir, 'packages/broken'), { recursive: true });
+      writeFileSync(join(dir, 'packages/broken/package.json'), '{ not json');
+      const r = run('## Test Plan\n\nRan `npm run test:ghost`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('packages/broken');
+    });
+
+    it('rules unchecked when the workspace globs use a shape the walker does not model', () => {
+      // `packages/**` lands in NEITHER `packages` nor `skipped` — the table
+      // may be silently incomplete, so a positive absence would be unsound.
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          workspaces: ['packages/**'],
+          scripts: { build: 'exit 0' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { 'test:unit': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:unit`');
+      expect(verdictOf(r.claims, 'npm run test:unit')).toBe('unchecked');
+    });
+
+    it('models ./-prefixed workspace globs like their bare form', () => {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          workspaces: ['./packages/*'],
+          scripts: { build: 'exit 0' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { 'test:unit': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:unit`');
+      expect(verdictOf(r.claims, 'npm run test:unit')).toBe('reproduces');
+    });
+
     it("prefers this review's own exit code over the manifest lookup", () => {
       const bt = {
         build: [
