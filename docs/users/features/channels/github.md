@@ -4,17 +4,31 @@ This guide covers setting up a Qwen Code channel that monitors GitHub notificati
 
 ## Prerequisites
 
-- A GitHub account for the channel. Use a dedicated bot account when the PAT
-  owner also needs to operate the channel.
-- A GitHub Personal Access Token (PAT) with `notifications` and `public_repo` (or `repo`) scopes
+- A GitHub account authenticated with the permissions needed to read notifications and post comments
+- The [GitHub CLI](https://cli.github.com/) installed on the host running Qwen Code when using local `gh` authentication
 
-## Creating a Token
+Use a dedicated bot account when the authenticated account also needs to operate the channel. GitHub does not generate a usable notification for the account's own activity, and the adapter ignores its own comments to prevent reply loops.
 
-1. Go to **Settings → Developer settings → Personal access tokens → Tokens (classic)**
-2. Generate a token with these scopes:
-   - **notifications** — read notification threads
-   - **public_repo** (or **repo** for private repos) — post comments
-3. Save the token securely as an environment variable
+## Authentication
+
+To reuse the GitHub CLI login on the Qwen Code host, authenticate `gh` and explicitly set `useLocalGh: true` in the channel configuration:
+
+```bash
+gh auth login
+```
+
+Local `gh` authentication is account-wide and may expose notifications from every repository visible to that GitHub account. Enable it only when the workspace operator is trusted to use that account. Otherwise, configure a dedicated PAT.
+
+For GitHub Enterprise Server, authenticate the same host used by `baseUrl`:
+
+```bash
+gh auth login --hostname github.example.com
+```
+
+You can instead configure a classic personal access token (PAT). An explicit `token` overrides local `gh` authentication. The PAT needs these scopes:
+
+- **notifications** — read notification threads
+- **public_repo** (or **repo** for private repos) — post comments
 
 ## Configuration
 
@@ -25,7 +39,7 @@ Add the channel to `~/.qwen/settings.json`:
   "channels": {
     "my-github": {
       "type": "github",
-      "token": "$GITHUB_TOKEN",
+      "useLocalGh": true,
       "pollInterval": 60000,
       "reasonFilter": ["mention", "review_requested", "assign"],
       "senderPolicy": "allowlist",
@@ -42,18 +56,13 @@ Add the channel to `~/.qwen/settings.json`:
 }
 ```
 
-Set the token as an environment variable:
+To override local `gh` authentication with a PAT, add `"token": "$GITHUB_TOKEN"` to the channel and set the environment variable before starting Qwen Code:
 
 ```bash
 export GITHUB_TOKEN="ghp_your_token_here"
 ```
 
-The PAT owner cannot trigger its own channel: GitHub self-activity does not
-provide a usable notification, and the adapter intentionally ignores its own
-comments to prevent reply loops. If the PAT owner needs to operate the channel,
-use a separate bot-owned PAT and put only operator accounts in `allowedUsers`.
-Startup rejects an allowlist containing only the PAT owner and warns when the
-PAT owner appears alongside other operators.
+The authenticated account cannot trigger its own channel. If that account needs to operate the channel, authenticate a separate bot account and put only operator accounts in `allowedUsers`. Startup rejects an allowlist containing only the authenticated account and warns when it appears alongside other operators.
 
 ### GitHub Enterprise
 
@@ -65,11 +74,14 @@ For GitHub Enterprise Server, set `baseUrl`:
 }
 ```
 
+Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credential cannot be sent over plaintext HTTP.
+
 ## Configuration Options
 
 | Option                    | Default                  | Description                                                                                   |
 | ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `token`                   | (required)               | Classic PAT with `notifications` scope                                                        |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication          |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                     |
 | `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
 | `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
 | `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
@@ -141,7 +153,7 @@ not retried automatically because GitHub may have created the comment.
 - If a user marks a notification as read on github.com before the bot's poll cycle, the bot will not process it.
 - The bot does not read comments before the current polling window; `author` and `comment` notifications may aggregate up to 20 comments from that window.
 - Inline PR review comments and review summary bodies are not enumerated; only issue/PR comments are processed.
-- Requires a classic PAT with `notifications` scope. Fine-grained PATs do not support the notifications API.
+- The selected credential must support the Notifications API. Fine-grained PATs do not support it; use local `gh` authentication or a classic PAT with `notifications` scope.
 
 ## Starting the Channel
 
