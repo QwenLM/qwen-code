@@ -39,10 +39,11 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 import {
@@ -61,16 +62,6 @@ const CLI_BIN =
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
 const REPO_ROOT = path.resolve(__dirname, '../..');
-
-function isPathAtOrWithin(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === '' ||
-    (relative !== '..' &&
-      !relative.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(relative))
-  );
-}
 
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
@@ -93,15 +84,20 @@ const SKIP =
   );
 const describePOSIX = SKIP ? describe.skip : describe;
 
+// Deliberately excludes the real `$HOME`: fixtures are created with
+// `mkdtempSync` and only removed in `afterAll`, so a Ctrl-C, `--bail`, or CI
+// timeout would leave a hidden directory behind in the developer's home on
+// every interrupted run. `/var/tmp` is outside both the workspace and the
+// `/tmp` local-read root, which is all this fixture base needs to be.
 function findExternalReadBase(): string | undefined {
   if (SKIP) return undefined;
-  for (const candidate of [homedir(), '/var/tmp']) {
+  for (const candidate of ['/var/tmp']) {
     try {
       const resolved = realpathSync(candidate);
       accessSync(resolved, constants.W_OK);
       if (
-        !isPathAtOrWithin(realpathSync('/tmp'), resolved) &&
-        !isPathAtOrWithin(realpathSync(REPO_ROOT), resolved)
+        !isPathWithinRoot(resolved, realpathSync('/tmp')) &&
+        !isPathWithinRoot(resolved, realpathSync(REPO_ROOT))
       ) {
         return resolved;
       }
@@ -653,7 +649,10 @@ describePOSIX('qwen serve — same-host external text reads', () => {
             );
           }),
         ).toBe(true);
-        expect(serializedEvents).toContain('was canceled by the user.');
+        // The failed `tool_call_update` above and the sentinel absence below
+        // carry the whole meaning. Asserting the user-facing rejection copy
+        // would fail on a wording change or a non-English locale for reasons
+        // unrelated to the capability under test.
         expect(serializedEvents).not.toContain(sentinel);
       }
     } finally {

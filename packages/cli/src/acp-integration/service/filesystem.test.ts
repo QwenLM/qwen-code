@@ -966,7 +966,10 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('keeps writes delegated when readTextFile capability is disabled', async () => {
+    // Split from the write case below on purpose: this half is the one that
+    // protects the capability's core behavior, so deleting "the write test"
+    // later must not silently drop read coverage with it.
+    it('routes reads to the local fallback when readTextFile capability is disabled', async () => {
       const client = {
         readTextFile: vi.fn(),
         writeTextFile: vi.fn().mockResolvedValue(undefined),
@@ -1011,17 +1014,39 @@ describe('AcpFileSystemService', () => {
         _meta: { request: 'same-host' },
       });
       expect(client.readTextFile).not.toHaveBeenCalled();
+    });
 
+    it('keeps writes delegated when readTextFile capability is disabled', async () => {
+      const client = {
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+
+      const fallback = createFallback();
+      const svc = new AcpFileSystemService(
+        client,
+        'session-3',
+        { readTextFile: false, writeTextFile: true },
+        fallback,
+      );
+
+      // A defined `_meta` round trip: `toEqual` ignores undefined-valued
+      // properties, so asserting `{ _meta: undefined }` also passes for `{}`
+      // and would not catch the field being dropped. `bom: true` additionally
+      // pins the BOM prepend on the delegated content.
+      const meta = { bom: true };
       const writeResult = await svc.writeTextFile({
         path: '/some/file.txt',
         content: 'updated content',
+        _meta: meta,
       });
 
-      expect(writeResult).toEqual({ _meta: undefined });
+      expect(writeResult).toEqual({ _meta: meta });
       expect(client.writeTextFile).toHaveBeenCalledWith({
         path: '/some/file.txt',
-        content: 'updated content',
+        content: '\uFEFFupdated content',
         sessionId: 'session-3',
+        _meta: meta,
       });
       expect(fallback.writeTextFile).not.toHaveBeenCalled();
     });

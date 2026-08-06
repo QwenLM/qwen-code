@@ -25,6 +25,33 @@ and full-snapshot cap, 8 MiB large-text scan cap, read audit, symlink rejection,
 and read-side TOCTOU protections. Direct `read_file` still applies the core line
 and output limits, subject to their existing configuration.
 
+This document is the single owner of that tradeoff list. Other documents
+reference it rather than restating the limits, so tuning one of them does not
+leave stale copies behind.
+
+### What this does not fix
+
+Reads become child-local; final ACP text writes stay delegated. The reported
+failure in #8618 therefore still reproduces for the `write_file`, `replace`,
+and `notebook_edit` family, only later in the sequence: the pre-read now
+succeeds locally, the diff renders, the user approves, and the delegated write
+is then refused by the workspace filesystem because the target is outside the
+workspace. The model can still fall back to shell at that point. Moving writes
+child-local as well would give up the trust gate, symlink rejection, TOCTOU
+protection, atomic temp-and-rename with mode preservation, and the write audit,
+which is a materially larger concession than the read change; it is deliberately
+out of scope here and tracked separately.
+
+### Pre-approval exposure in the daemon
+
+A confirmation payload is built by reading the file, so an edit or write
+confirmation for an out-of-workspace path now carries that file's content in
+its diff. The daemon fans that payload out to every attached SSE subscriber
+before the approval decision exists. In the interactive CLI the same diff is
+seen only by the person at the terminal. This follows from treating
+authenticated daemon clients as one security principal, and is called out here
+because that framing is easy to read past.
+
 HTTP filesystem routes such as `/glob` and `/list` remain workspace-scoped.
 Agent `glob`, `ls`, `grep`, and other discovery-tool behavior is unchanged by
 this capability. Final ACP `writeTextFile` content writes stay delegated through
