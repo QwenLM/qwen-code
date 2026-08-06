@@ -3541,7 +3541,18 @@ if [[ "$1 $2" == 'api user' ]]; then
   exit 0
 fi
 if [[ "$1 $2" == 'api repos/QwenLM/qwen-code/issues/8320/comments' ]]; then
+  # CONNECTION-level failure: nothing on stdout at all. This is the shape that
+  # needs pipefail — a downstream \`jq -rs\` reads empty input, prints nothing
+  # and exits 0, so without it the caller cannot tell this from success.
   if [[ "\${FAIL_STATUS_LOOKUP:-false}" == 'true' ]]; then
+    printf 'gh: Server Error (HTTP 502)\\n' >&2
+    exit 1
+  fi
+  # HTTP-level failure: gh puts the error BODY on stdout, so jq chokes on it
+  # and fails on its own. This path never depended on pipefail; pinned so the
+  # two halves stay distinguishable.
+  if [[ "\${FAIL_STATUS_LOOKUP_HTTP:-false}" == 'true' ]]; then
+    printf '%s' '{"message":"Server Error"}'
     printf 'gh: Server Error (HTTP 502)\\n' >&2
     exit 1
   fi
@@ -3583,19 +3594,21 @@ exit 1
       const runReporter = (
         extraEnv = {},
         reason = 'permission_lookup_failed',
+        shellOpts = 'set -eo pipefail',
       ) =>
         spawnSync(
           'bash',
           [
             '-c',
             // Production runs this block under `bash --noprofile --norc -eo
-            // pipefail` (defaults.run.shell: bash), and every call site is an
-            // `if !` / `||` context, which suspends errexit inside the call.
-            // Reproduce BOTH halves: the harness sets -eo pipefail (so the new
-            // gh|jq pipeline reports gh's failure, not jq's success) and calls
-            // the function through `|| exit $?`, exactly as the gate does.
+            // pipefail` (defaults.run.shell: bash, pinned below), and every
+            // call site is an `if !` / `||` context, which suspends errexit
+            // inside the call. Reproduce BOTH halves: the harness sets -eo
+            // pipefail and calls the function through `|| exit $?`, exactly as
+            // the gate does. `shellOpts` is overridable so one case can drop
+            // the ambient pipefail and prove the helper carries its own.
             [
-              'set -eo pipefail',
+              shellOpts,
               'sleep() { :; }',
               reportBlocked.replace(/\n {10}/g, '\n'),
               `report_forced_takeover_blocked ${reason} || exit $?`,
@@ -3722,6 +3735,49 @@ exit 1
       // gh's own diagnosis rides along instead of going to /dev/null — the
       // rule this same block states for read_live_permission.
       expect(failedReporter.stderr).toContain('HTTP 502');
+      // Nothing was read, so nothing may be written: a "post a new one" here
+      // would be the duplicate ⛔ comment beside the stale ✅ one.
+      expect(readFileSync(callsFile, 'utf8')).not.toContain('AutoFix blocked');
+
+      // Same connection-level failure with the ambient pipefail REMOVED. The
+      // status read is the one `if` in this helper that tests a PIPELINE, and
+      // `jq -rs` turns gh's empty stdout into a silent exit 0 — so without a
+      // local `set -o pipefail` the loop breaks on attempt 1, status_lookup_ok
+      // goes true on nothing read, and the empty id routes the writer to the
+      // "no status comment yet" branch: a DUPLICATE blocked comment, run green
+      // at exit 0. defaults.run.shell (pinned below) makes production pipefail
+      // today; this case is what keeps the helper correct without it.
+      writeFileSync(callsFile, '');
+      const failedNoPipefail = runReporter(
+        { FAIL_STATUS_LOOKUP: 'true' },
+        'permission_lookup_failed',
+        'set -e',
+      );
+      expect(failedNoPipefail.status).toBe(1);
+      expect(failedNoPipefail.stderr).toContain('(attempt 3/3)');
+      expect(failedNoPipefail.stderr).toContain(
+        'Failed to read takeover status comments',
+      );
+      const noPipefailCalls = readFileSync(callsFile, 'utf8');
+      expect(noPipefailCalls.match(/issues\/8320\/comments/g)).toHaveLength(3);
+      expect(noPipefailCalls).not.toContain('AutoFix blocked');
+
+      // The HTTP-status half of the same failure, also without ambient
+      // pipefail: gh writes the error body to stdout, jq chokes on it and
+      // fails by itself. This path was already correct — pinned so a future
+      // "simplification" cannot conclude the pipefail above is what carries it
+      // and drop it.
+      writeFileSync(callsFile, '');
+      const failedHttpNoPipefail = runReporter(
+        { FAIL_STATUS_LOOKUP_HTTP: 'true' },
+        'permission_lookup_failed',
+        'set -e',
+      );
+      expect(failedHttpNoPipefail.status).toBe(1);
+      expect(failedHttpNoPipefail.stderr).toContain('(attempt 3/3)');
+      expect(
+        readFileSync(callsFile, 'utf8').match(/issues\/8320\/comments/g),
+      ).toHaveLength(3);
 
       // 'The PAT is not the bot' is the riskiest new branch and had no
       // coverage in either direction. It is still a hard stop (return 1), so
@@ -3751,6 +3807,21 @@ exit 1
     expect(reviewScanJob).toContain('<!-- autofix-status -->');
     expect(reviewScanJob).toContain('AutoFix blocked');
     expect(reviewScanJob).toContain('exit 1');
+
+    // The status read is the only `if` in this helper testing a PIPELINE, so
+    // it carries pipefail itself instead of inheriting it. Pinned textually
+    // because the behavioural case above can only observe its ABSENCE by
+    // dropping the ambient option — a reader of the YAML alone would not see
+    // why one command substitution differs from its neighbours.
+    expect(reviewScanJob).toContain(
+      'if status_ids="$(set -o pipefail; gh api "repos/${REPO}/issues/${FORCED_PR}/comments" --paginate',
+    );
+    // And the ambient half: `shell: bash` is what expands to `bash --noprofile
+    // --norc -eo pipefail`, which every other gh|jq pipeline in this file (the
+    // scan's `| jq -s 'add // []'` writers) relies on WITHOUT saying so. Drop
+    // this default and those go silently green on empty input; the harnesses
+    // above would keep passing, since they set the option themselves.
+    expect(workflow).toMatch(/\ndefaults:\n {2}run:\n {4}shell: 'bash'\n/);
 
     const runBlock = reviewScanJob.match(/run: \|-\n([\s\S]*)$/)?.[1];
     expect(runBlock).toBeTruthy();

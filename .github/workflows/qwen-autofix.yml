@@ -1854,8 +1854,22 @@ jobs:
             # lands in a WORKDIR json file, so the WORKDIR page normalizer
             # (add-with-empty-default) must NOT be applied here: it would wrap
             # the id stream in an array and break the tail-1 consumer.
+            # pipefail is set LOCALLY here rather than relied on: this `if`
+            # must test gh's status, not jq's. A gh failure carrying an HTTP
+            # status prints the error body to stdout, so jq errors out and the
+            # retry fires — but a CONNECTION-level failure (TCP reset, TLS
+            # abort, DNS blip) leaves stdout EMPTY, and `jq -rs` then prints
+            # nothing and exits 0. Without pipefail that reads as success on
+            # nothing read: status_lookup_ok=true, the empty id takes the
+            # writer down the "no status comment yet" branch, and it posts a
+            # DUPLICATE ⛔ blocked comment beside the stale ✅ one — the exact
+            # two-status state this function exists to prevent — on a green
+            # run. `defaults.run.shell: bash` already gives every step in this
+            # file `-eo pipefail`, so this is redundant today; it is also the
+            # only guard that survives that default changing or this helper
+            # being lifted into a step that sets its own options.
             for attempt in 1 2 3; do
-              if status_ids="$(gh api "repos/${REPO}/issues/${FORCED_PR}/comments" --paginate 2> "${err}" |
+              if status_ids="$(set -o pipefail; gh api "repos/${REPO}/issues/${FORCED_PR}/comments" --paginate 2> "${err}" |
                 jq -rs --arg ab "${AUTOFIX_BOT}" --arg m '<!-- autofix-status -->' \
                   '.[][] | select((.user.login // "") == $ab) | select((.body // "") | contains($m)) | .id')"; then
                 status_lookup_ok=true
