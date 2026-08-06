@@ -1453,6 +1453,55 @@ describe('useVim hook', () => {
       });
       expect(handled).toBe(true);
     });
+
+    it('should clear a pending operator when passing through Ctrl+Tab', () => {
+      // Before this pass-through existed the key hit the default catch-all,
+      // which zeroes pending state; keep an abandoned `d` from firing on the
+      // next motion.
+      mockVimContext.vimMode = 'NORMAL';
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderVimHook(buffer);
+
+      act(() => {
+        result.current.handleInput(makeKey('d'));
+      });
+      let passedThrough = true;
+      act(() => {
+        passedThrough = result.current.handleInput({
+          ...makeKey('\t', 'tab'),
+          ctrl: true,
+        });
+      });
+      expect(passedThrough).toBe(false);
+      act(() => {
+        result.current.handleInput(makeKey('w'));
+      });
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear a partial count when passing through Ctrl+Shift+Tab', () => {
+      mockVimContext.vimMode = 'NORMAL';
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderVimHook(buffer);
+
+      act(() => {
+        result.current.handleInput(makeKey('3'));
+      });
+      let passedThrough = true;
+      act(() => {
+        passedThrough = result.current.handleInput({
+          ...makeKey('\t', 'tab'),
+          ctrl: true,
+          shift: true,
+        });
+      });
+      expect(passedThrough).toBe(false);
+      act(() => {
+        result.current.handleInput(makeKey('l'));
+      });
+      expect(buffer.vimMoveRight).toHaveBeenCalledWith(1);
+    });
   });
 
   // Line operations (dd, cc) are tested in text-buffer.test.ts

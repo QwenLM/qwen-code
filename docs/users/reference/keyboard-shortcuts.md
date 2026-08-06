@@ -80,7 +80,8 @@ These shortcuts apply while an interactive foreground shell command is running.
 > dismiss the menu first if you need to move the cursor. `Alt/Option+Arrow` word
 > movement is unaffected. `Ctrl+Tab` / `Ctrl+Shift+Tab` remain available as
 > alternatives when an editor mode (for example Vim keybindings) consumes the
-> bare arrows.
+> bare arrows. (On terminals without the Kitty keyboard protocol, these arrive
+> as plain `Tab` / `Shift+Tab` and accept the highlighted suggestion instead.)
 
 ## History Search
 

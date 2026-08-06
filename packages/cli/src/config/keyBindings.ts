@@ -203,7 +203,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Ctrl+Tab / Ctrl+Shift+Tab are kept as alternatives: with Vim keybindings
   // enabled, vimHandleInput consumes the bare arrows before completion
   // handling runs, but tab keys pass through Vim insert mode, so these keep
-  // a keyboard path to switch categories for Vim users.
+  // a keyboard path to switch categories for Vim users. They need a terminal
+  // that reports modifiers on Tab (Kitty keyboard protocol); without it
+  // Ctrl+Tab arrives as plain Tab and accepts the suggestion instead.
   [Command.COMPLETION_TAB_LEFT]: [
     { key: 'left', shift: false, ctrl: false, meta: false },
     { key: 'tab', shift: true, ctrl: true, command: false },

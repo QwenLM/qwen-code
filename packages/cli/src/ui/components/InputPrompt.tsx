@@ -7,7 +7,11 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  MAX_WIDTH,
+  hasCategoryTabs,
+} from './SuggestionsDisplay.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
@@ -395,7 +399,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     !suggestionsFromExport &&
     !commandSearchActive &&
     !reverseSearchActive &&
-    (completion.availableCategories?.length ?? 0) > 2;
+    hasCategoryTabs(completion.availableCategories);
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{

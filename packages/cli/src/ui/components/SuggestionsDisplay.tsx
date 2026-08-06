@@ -47,6 +47,17 @@ interface SuggestionsDisplayProps {
   availableCategories?: Array<SuggestionCategory | 'all'>;
 }
 
+/**
+ * Whether the category tab bar renders for a given tab list. InputPrompt
+ * composes the same predicate to gate its ←/→ handling, so the key path and
+ * the rendered UI can only agree or disagree together (#8069).
+ */
+export function hasCategoryTabs(
+  categories?: Array<SuggestionCategory | 'all'>,
+): boolean {
+  return (categories?.length ?? 0) > 2;
+}
+
 function categoryLabel(cat: SuggestionCategory | 'all'): string {
   switch (cat) {
     case 'all':
@@ -118,7 +129,7 @@ export function SuggestionsDisplay({
       ? suggestions
       : suggestions.filter((s) => (s.category ?? 'file') === activeCategory);
 
-  const showTabBar = (availableCategories?.length ?? 0) > 2;
+  const showTabBar = hasCategoryTabs(availableCategories);
 
   if (filteredSuggestions.length === 0) {
     return null; // Don't render anything if there are no suggestions

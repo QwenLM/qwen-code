@@ -1161,8 +1161,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
         // Ctrl+Tab / Ctrl+Shift+Tab are the documented alternatives for
         // switching completion categories while this mode consumes the bare
-        // arrows as movement; let them through like insert mode does.
+        // arrows as movement; let them through like insert mode does. Clear
+        // the pending operator/count first — the gesture abandons them, and
+        // the default catch-all below cleared them before this pass-through.
         if (normalizedKey.name === 'tab' && normalizedKey.ctrl) {
+          dispatch({ type: 'CLEAR_PENDING_STATES' });
           return false;
         }
 

@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import {
   SuggestionsDisplay,
   normalizeDescription,
+  hasCategoryTabs,
 } from './SuggestionsDisplay.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
@@ -233,6 +234,18 @@ describe('SuggestionsDisplay tabs', () => {
     );
     expect(lastFrame()).not.toContain('Files');
     expect(lastFrame()).not.toContain('(←/→ to switch)');
+  });
+});
+
+describe('hasCategoryTabs', () => {
+  // InputPrompt gates its ←/→ category switching on this same predicate
+  // (#8069), so the threshold boundary is pinned here.
+  it('requires more than two tabs', () => {
+    expect(hasCategoryTabs(undefined)).toBe(false);
+    expect(hasCategoryTabs([])).toBe(false);
+    expect(hasCategoryTabs(['all'])).toBe(false);
+    expect(hasCategoryTabs(['all', 'file'])).toBe(false);
+    expect(hasCategoryTabs(['all', 'file', 'session'])).toBe(true);
   });
 });
 
