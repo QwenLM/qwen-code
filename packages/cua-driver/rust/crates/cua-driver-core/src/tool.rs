@@ -3921,6 +3921,23 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
     let mut redacted = args.clone();
     if let Some(arguments) = redacted.as_object_mut() {
         match tool_name {
+            "browser_navigate" => {
+                if arguments.contains_key("url") {
+                    arguments.insert("url".to_owned(), Value::String("[redacted]".to_owned()));
+                }
+            }
+            "browser_type" => {
+                if arguments.contains_key("text") {
+                    arguments.insert("text".to_owned(), Value::String("[redacted]".to_owned()));
+                }
+            }
+            "page" => {
+                for field in ["text", "javascript"] {
+                    if arguments.contains_key(field) {
+                        arguments.insert(field.to_owned(), Value::String("[redacted]".to_owned()));
+                    }
+                }
+            }
             "browser_prepare" => {
                 if arguments.contains_key("approval_token") {
                     arguments.insert(
@@ -4082,12 +4099,40 @@ mod capability_tests {
             .get("_cua_browser_download_mcp_host_approved")
             .is_none());
 
-        let serialized = serde_json::json!([dialog, upload, download]).to_string();
+        let navigate = recording_args_for(
+            "browser_navigate",
+            &serde_json::json!({"url": "https://private.example/account?token=secret"}),
+        );
+        assert_eq!(navigate["url"], "[redacted]");
+
+        let typed = recording_args_for(
+            "browser_type",
+            &serde_json::json!({"text": "private browser input"}),
+        );
+        assert_eq!(typed["text"], "[redacted]");
+
+        let page = recording_args_for(
+            "page",
+            &serde_json::json!({
+                "action": "execute_javascript",
+                "text": "private page input",
+                "javascript": "document.body.dataset.secret = 'value'"
+            }),
+        );
+        assert_eq!(page["text"], "[redacted]");
+        assert_eq!(page["javascript"], "[redacted]");
+
+        let serialized =
+            serde_json::json!([dialog, upload, download, navigate, typed, page]).to_string();
         for forbidden in [
             "private reply",
             "/private/one",
             "/private/two",
             "/private/destination",
+            "private.example",
+            "private browser input",
+            "private page input",
+            "dataset.secret",
         ] {
             assert!(
                 !serialized.contains(forbidden),

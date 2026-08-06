@@ -79,6 +79,7 @@ describe('resolveAssetTarget', () => {
 
   it('throws on unsupported platforms / arches', () => {
     expect(() => resolveAssetTarget('linux', 'ia32')).toThrow(/unsupported/i);
+    expect(() => resolveAssetTarget('win32', 'ia32')).toThrow(/unsupported/i);
     expect(() => resolveAssetTarget('aix' as never, 'x64')).toThrow(
       /unsupported/i,
     );

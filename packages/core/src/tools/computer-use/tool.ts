@@ -34,61 +34,23 @@ const INSTALL_REASON =
   'Computer Use can click, type, and read your desktop apps in the background. ' +
   "On macOS you'll be guided through Accessibility / Screen Recording permissions next.";
 
-/**
- * Tools / params that perform irreversible or sensitive actions and must NOT be
- * silently auto-approved in AUTO_EDIT mode. The generated MCP
- * `destructiveHint` covers the expanded Qwen CUA surface; this curated set
- * additionally protects sensitive operations whose upstream annotation is
- * intentionally non-destructive. AUTO still routes them through its classifier
- * (getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
- *   - kill_app          force-kills a PID
- *   - launch_app        launches arbitrary apps (incl. with CDP debug ports)
- *   - start_recording   captures the screen to disk
- *   - set_config        mutates driver configuration
- *   - replay_trajectory re-invokes every recorded tool call in a dir via the
- *     same dispatch path — it replays arbitrary actions (kill_app, launch_app,
- *     page execute_javascript, …). Gating the wrapper is the only chokepoint we
- *     have; the replayed sub-actions run inside cua-driver. (review round 2)
- *   - page action 'execute_javascript'           — arbitrary JS in the user's
- *     logged-in browser (cookie / credential exfiltration)
- *   - page action 'enable_javascript_apple_events' — permanently patches the
- *     browser's prefs + quits/relaunches it (more persistent than the one-shot
- *     execute_javascript). (review round 2)
- */
-const HIGH_RISK_TOOLS = new Set<ComputerUseToolName>([
-  'kill_app',
-  'launch_app',
-  'start_recording',
-  'set_config',
-  'replay_trajectory',
-]);
-
-const HIGH_RISK_PAGE_ACTIONS = new Set([
-  'execute_javascript',
-  'enable_javascript_apple_events',
-]);
-
-// Fail fast at module load if a high-risk entry isn't a real tool name. The
-// Set<ComputerUseToolName> typing already rejects typos at compile time; this
-// also catches the name union drifting from the schema set at runtime. A typo
-// would otherwise silently disable the gate for that tool. (review round 3)
-for (const t of HIGH_RISK_TOOLS) {
-  if (!(t in COMPUTER_USE_SCHEMAS)) {
-    throw new Error(`HIGH_RISK_TOOLS contains unknown tool: ${t}`);
-  }
-}
+const READ_ONLY_PAGE_ACTIONS = new Set(['get_text', 'query_dom']);
 
 export function isHighRiskCall(
   upstreamName: string,
   params: Record<string, unknown>,
 ): boolean {
-  if (HIGH_RISK_TOOLS.has(upstreamName as ComputerUseToolName)) return true;
+  if (upstreamName === 'clipboard_read') {
+    return params['include_text'] === true;
+  }
+  if (upstreamName === 'check_permissions') {
+    return params['prompt'] === true;
+  }
+  if (upstreamName === 'page') {
+    return !READ_ONLY_PAGE_ACTIONS.has(params['action'] as string);
+  }
   const schema = COMPUTER_USE_SCHEMAS[upstreamName as ComputerUseToolName];
-  if (schema?.annotations.destructiveHint === true) return true;
-  return (
-    upstreamName === 'page' &&
-    HIGH_RISK_PAGE_ACTIONS.has(params['action'] as string)
-  );
+  return schema?.annotations.readOnlyHint !== true;
 }
 
 class ComputerUseInvocation extends BaseToolInvocation<
@@ -172,10 +134,8 @@ class ComputerUseInvocation extends BaseToolInvocation<
       }
     };
 
-    // High-risk calls (review round 1) surface as 'mcp' type so AUTO_EDIT does
-    // NOT silently auto-approve them — isAutoEditApproved() only auto-approves
-    // 'edit'/'info'. AUTO still routes them through its classifier (this tool's
-    // getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
+    // Mutating or sensitive calls surface as 'mcp' so AUTO_EDIT does not
+    // silently approve them and PLAN mode's read-only boundary blocks them.
     if (isHighRiskCall(this.upstreamName, this.params)) {
       // NOTE: args are deliberately NOT folded into `title` — no mcp
       // confirmation surface (TUI / non-interactive / ACP) renders the mcp
@@ -227,25 +187,10 @@ class ComputerUseInvocation extends BaseToolInvocation<
     );
     client.setIdleTimeoutMs(this.config?.getComputerUseIdleTimeoutMs());
 
-    // If the user confirmed through the pre-execution dialog, the install state
-    // was already written by onConfirm — runBootstrap will skip promptInstallApproval.
-    // But several approval modes auto-approve the tool call and bypass that
-    // dialog entirely (so onConfirm never runs and install state is never
-    // written): YOLO (needsConfirmation() returns false), AUTO_EDIT
-    // (isAutoEditApproved() auto-approves info-type tools — all computer_use__*
-    // tools are info), and AUTO (classifier-approved calls). In those modes
-    // pass autoApproveInstall so the bootstrap honors the already-granted call
-    // approval instead of refusing with "install declined by user". DEFAULT
-    // still shows the dialog; PLAN blocks. Headless / SDK contexts (no config)
-    // fall back to the env-var path in bootstrap's default promptInstallApproval.
-    // Reaching execute() means the scheduler already approved THIS call — via
-    // the confirmation dialog, a persisted always-allow rule, or an auto-approve
-    // mode (YOLO / AUTO_EDIT / AUTO). Treat any of those as install consent. The
-    // subtle case is a saved always-allow rule: it SUPPRESSES the dialog, so
-    // onConfirm never writes install-state, and in DEFAULT mode bootstrap would
-    // then fall into the headless refuse path and dead-end ("install declined")
-    // on every retry. Headless / SDK contexts (no config) keep the env-var
-    // fallback in bootstrap's default promptInstallApproval. (review round 1)
+    // Reaching execute() means the scheduler approved this call. A saved rule or
+    // auto-approval mode can bypass onConfirm, so pass install consent whenever a
+    // Config-backed scheduler is present. Headless contexts keep bootstrap's
+    // explicit environment-controlled fallback.
     const autoApproveInstall = !!this.config;
     await runBootstrap(client, { signal, updateOutput, autoApproveInstall });
 

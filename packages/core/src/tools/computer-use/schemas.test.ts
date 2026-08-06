@@ -73,10 +73,25 @@ describe('computer-use schemas (cua-driver full tool surface)', () => {
       ).toBeTruthy();
       expect((schema.parameterSchema as { type: string }).type).toBe('object');
       expect(schema.annotations, `${name} missing annotations`).toBeTruthy();
+      for (const hint of [
+        'readOnlyHint',
+        'destructiveHint',
+        'idempotentHint',
+        'openWorldHint',
+      ] as const) {
+        expect(
+          typeof schema.annotations[hint],
+          `${name}.${hint} must be a boolean`,
+        ).toBe('boolean');
+      }
+      expect(
+        schema.description,
+        `${name} leaked a payload-filter marker`,
+      ).not.toContain('__cuaf_');
     }
   });
 
-  it('preserves destructive annotations used by the Qwen approval gate', () => {
+  it('preserves upstream destructive annotations', () => {
     expect(COMPUTER_USE_SCHEMAS.click.annotations.destructiveHint).toBe(true);
     expect(COMPUTER_USE_SCHEMAS.list_apps.annotations.destructiveHint).toBe(
       false,
@@ -102,5 +117,23 @@ describe('computer-use schemas (cua-driver full tool surface)', () => {
     expect(schema.properties).toHaveProperty('x');
     expect(schema.properties).toHaveProperty('y');
     expect(schema.properties).not.toHaveProperty('app');
+  });
+
+  it('keeps deprecated capture_mode permissive because every value is ignored', () => {
+    const schema = COMPUTER_USE_SCHEMAS.get_window_state.parameterSchema as {
+      properties: Record<string, { enum?: string[] }>;
+    };
+    expect(schema.properties['capture_mode'].enum).toBeUndefined();
+  });
+
+  it('advertises every macOS action that accepts coordinates from zoom', () => {
+    for (const name of ['type_text', 'press_key', 'hotkey'] as const) {
+      const schema = COMPUTER_USE_SCHEMAS[name].parameterSchema as {
+        properties: Record<string, unknown>;
+      };
+      expect(schema.properties, `${name} missing from_zoom`).toHaveProperty(
+        'from_zoom',
+      );
+    }
   });
 });

@@ -141,7 +141,6 @@ export const COMPUTER_USE_SCHEMAS: Record<
         capture_mode: {
           description:
             'DEPRECATED and ignored. get_window_state always returns BOTH the element tree and a screenshot — ground on both. The modality is chosen at action time by how you address the target: an element ax action (element_index/element_token) or an element px action (x,y). Any value (including the old "som"/"screenshot" aliases) is accepted but has no effect.',
-          enum: ['ax', 'vision'],
           type: 'string',
         },
         include_screenshot: {
@@ -862,6 +861,11 @@ export const COMPUTER_USE_SCHEMAS: Record<
             'Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. If element_index, snapshot_id, or window_id are also supplied they must agree. Returns an explicit stale error once a newer snapshot supersedes it.',
           type: 'string',
         },
+        from_zoom: {
+          description:
+            'Set true after zoom to translate x,y from the latest zoom image back to full-window coordinates.',
+          type: 'boolean',
+        },
         pid: {
           description: 'Target process ID.',
           type: 'integer',
@@ -935,6 +939,11 @@ export const COMPUTER_USE_SCHEMAS: Record<
             'Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. If element_index, snapshot_id, or window_id are also supplied they must agree. Returns an explicit stale error once a newer snapshot supersedes it.',
           type: 'string',
         },
+        from_zoom: {
+          description:
+            'Set true after zoom to translate x,y from the latest zoom image back to full-window coordinates.',
+          type: 'boolean',
+        },
         key: {
           description: 'Key name: return, tab, escape, up, down, etc.',
           type: 'string',
@@ -1004,6 +1013,11 @@ export const COMPUTER_USE_SCHEMAS: Record<
           enum: ['background', 'foreground'],
           type: 'string',
         },
+        from_zoom: {
+          description:
+            'Set true after zoom to translate x,y from the latest zoom image back to full-window coordinates.',
+          type: 'boolean',
+        },
         keys: {
           description:
             'Modifier(s) and one non-modifier key, e.g. ["cmd", "c"].',
@@ -1056,7 +1070,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   set_value: {
     description:
-      'Set a value on a UI element. Two modes depending on element role:\n\n- **AXPopUpButton / select dropdown**: finds the child option whose title or value matches `value` (case-insensitive) and AXPresses it directly — the native macOS popup menu is never opened, so focus is never stolen. Use this for HTML <select> elements in Safari or any native NSPopUpButton.\n\n- **All other elements**: writes AXValue directly (sliders, steppers, date pickers, native text fields that expose settable AXValue).\n\nFor free-form text entry into web inputs, prefer `type_text_chars` which synthesises key events — AXValue writes are ignored by WebKit.',
+      'Set a value on a UI element. Two modes depending on element role:\n\n- **AXPopUpButton / select dropdown**: finds the child option whose title or value matches `value` (case-insensitive) and AXPresses it directly — the native macOS popup menu is never opened, so focus is never stolen. Use this for HTML <select> elements in Safari or any native NSPopUpButton.\n\n- **All other elements**: writes AXValue directly (sliders, steppers, date pickers, native text fields that expose settable AXValue).\n\nFor free-form text entry into web inputs, prefer `type_text`, which falls back to synthesized key events when AXValue writes are ignored.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -1482,7 +1496,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   check_permissions: {
     description:
-      "Report TCC permission status for Accessibility and Screen Recording. By default also raises the system permission dialogs for any missing grants — Apple's request APIs are no-ops when the grant is already active, so this is safe to call repeatedly. Pass {\"prompt\": false} for a purely read-only status check.\n\nReturns: `accessibility` + `screen_recording` (booleans from the TCC preflight APIs), `screen_recording_capturable` (a live ScreenCaptureKit probe when `prompt` is true; null on read-only calls), `direct_capture_status` (`ready`, `unavailable`, `timed_out`, `probe_failed`, `blocked_by_screen_recording`, or `not_checked`), `direct_capture_error` (a structured timeout/probe failure when applicable), and `source` (which TCC identity the booleans reflect: the CuaDriver daemon vs the launching terminal/IDE). macOS attributes grants to the responsible process, so a standalone call from a terminal reports the terminal's grants, not the driver's. The prompt-capable ScreenCaptureKit probe never runs when `prompt` is false. Pass `probe_direct_capture:false` with `prompt:true` to register/request only the two required TCC grants before separately explaining Tahoe's direct-capture consent.",
+      "Report TCC permission status for Accessibility and Screen Recording. The default is a purely read-only status check. A trusted host setup route may pass {\"prompt\": true} to raise system permission dialogs for missing grants.\n\nReturns: `accessibility` + `screen_recording` (booleans from the TCC preflight APIs), `screen_recording_capturable` (a live ScreenCaptureKit probe when `prompt` is true; null on read-only calls), `direct_capture_status` (`ready`, `unavailable`, `timed_out`, `probe_failed`, `blocked_by_screen_recording`, or `not_checked`), `direct_capture_error` (a structured timeout/probe failure when applicable), and `source` (which TCC identity the booleans reflect: the Qwen Cua Driver daemon vs the launching terminal/IDE). macOS attributes grants to the responsible process, so a standalone call from a terminal reports the terminal's grants, not the driver's. The prompt-capable ScreenCaptureKit probe never runs when `prompt` is false. Pass `probe_direct_capture:false` with `prompt:true` to register/request only the two required TCC grants before separately explaining Tahoe's direct-capture consent.",
     parameterSchema: {
       type: 'object',
       properties: {
@@ -1509,7 +1523,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   health_report: {
     description:
-      'Single-call end-to-end driver diagnostics. Designed to let downstream consumers ship one stable call instead of stitching together check_permissions, doctor, version, bundle attribution, and platform capability status. On macOS, prompt-capable direct capture is deliberately skipped; use `__cuaf_7177656E__-cua-driver permissions grant` to verify it explicitly. __cuaf_7177656E__-cua-driver owns the health model; consumers stay thin.\n\nInput — all optional:\n  {\n    "include": ["<check_name>", ...],   // run only these\n    "skip":    ["<check_name>", ...]    // skip these\n  }\nIf both are given, `include` wins.\n\nCanonical check names:\n  macOS  : binary_version, platform_supported, session_active,\n           bundle_identity, tcc_accessibility, tcc_screen_recording,\n           ax_capability, screen_capture_capability\n  Windows: binary_version, platform_supported, session_active,\n           ax_capability (via UIA), screen_capture_capability (via DXGI)\n  Linux  : binary_version, platform_supported, session_active,\n           ax_capability (via AT-SPI), screen_capture_capability (via X11)\n\nOutput — stable contract, schema_version="1":\n  {\n    "schema_version": "1",\n    "platform": "darwin" | "win32" | "linux",\n    "driver_version": "<semver>",\n    "overall": "ok" | "degraded" | "failed",\n    "checks": [\n      {\n        "name": "<one of the canonical names above>",\n        "status": "pass" | "fail" | "skip",\n        "message": "<one-line summary, always present>",\n        "hint": "<remediation step, present when status=fail>",\n        "data": { /* check-specific structured fields */ }\n      },\n      ...\n    ]\n  }\n\n`overall` rules:\n  - `ok`       — every non-skipped check passes\n  - `degraded` — at least one non-core check fails (binary is still usable)\n  - `failed`   — any core check fails (binary_version, platform_supported, session_active)\n\nStability: schema_version="1" is the contract. Future breaking changes will be `"2"`. Adding new check names under the same schema_version is non-breaking; consumers must tolerate unknown check names.',
+      'Single-call end-to-end driver diagnostics. Designed to let downstream consumers ship one stable call instead of stitching together check_permissions, doctor, version, bundle attribution, and platform capability status. On macOS, prompt-capable direct capture is deliberately skipped; use `qwen-cua-driver permissions grant` to verify it explicitly. qwen-cua-driver owns the health model; consumers stay thin.\n\nInput — all optional:\n  {\n    "include": ["<check_name>", ...],   // run only these\n    "skip":    ["<check_name>", ...]    // skip these\n  }\nIf both are given, `include` wins.\n\nCanonical check names:\n  macOS  : binary_version, platform_supported, session_active,\n           bundle_identity, tcc_accessibility, tcc_screen_recording,\n           ax_capability, screen_capture_capability\n  Windows: binary_version, platform_supported, session_active,\n           ax_capability (via UIA), screen_capture_capability (via DXGI)\n  Linux  : binary_version, platform_supported, session_active,\n           ax_capability (via AT-SPI), screen_capture_capability (via X11)\n\nOutput — stable contract, schema_version="1":\n  {\n    "schema_version": "1",\n    "platform": "darwin" | "win32" | "linux",\n    "driver_version": "<semver>",\n    "overall": "ok" | "degraded" | "failed",\n    "checks": [\n      {\n        "name": "<one of the canonical names above>",\n        "status": "pass" | "fail" | "skip",\n        "message": "<one-line summary, always present>",\n        "hint": "<remediation step, present when status=fail>",\n        "data": { /* check-specific structured fields */ }\n      },\n      ...\n    ]\n  }\n\n`overall` rules:\n  - `ok`       — every non-skipped check passes\n  - `degraded` — at least one non-core check fails (binary is still usable)\n  - `failed`   — any core check fails (binary_version, platform_supported, session_active)\n\nStability: schema_version="1" is the contract. Future breaking changes will be `"2"`. Adding new check names under the same schema_version is non-breaking; consumers must tolerate unknown check names.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -1608,13 +1622,13 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   zoom: {
     description:
-      'Capture a cropped JPEG of a window region (x1,y1)–(x2,y2) in screenshot pixel coordinates, with 20% padding added on each side. The output image is at most 500 px wide.\n\nAfter a zoom, pass `from_zoom=true` to click/type_text to auto-translate coordinates back to full-window space.',
+      'Capture a cropped JPEG of a window region (x1,y1)–(x2,y2) in screenshot pixel coordinates, with 20% padding added on each side. The output image is at most 500 px wide.\n\nAfter a zoom, pass `from_zoom=true` to click, type_text, press_key, or hotkey to auto-translate coordinates back to full-window space.',
     parameterSchema: {
       type: 'object',
       properties: {
         pid: {
           description:
-            'Target pid — required for from_zoom click/type translation.',
+            'Target pid — required for from_zoom action translation.',
           type: 'integer',
         },
         window_id: {
@@ -2213,7 +2227,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   start_recording: {
     description:
-      "Start trajectory recording. Every subsequent action-tool invocation (click, right_click, scroll, type_text, press_key, hotkey, set_value) writes a turn folder under `output_dir`:\n\n- `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI state immediately before and after the action.\n- `before.png` / `after.png` — target-window screenshots immediately before and after the action.\n- `evidence.json` — capture status and a stable classification when an expected artifact could not be captured.\n- `app_state.json` — post-action AX/UIA snapshot for the target pid.\n- `screenshot.png` — compatibility alias of `after.png`.\n- `action.json` — tool name, full input arguments, result summary, result-error flag, pid, click point (when applicable), ISO-8601 timestamp.\n- `click.png` — for dispatched click-family actions only, `before.png` with a red marker at the click point. A call refused before target resolution is explicitly not applicable instead.\n\nTurn folders are named `turn-00001/`, `turn-00002/`, etc.  Turn numbering restarts at 1 each time recording is (re-)started.\n\n**Video is off by default.** Pass `record_video: true` to also capture the main display to `<output_dir>/recording.mp4` (H.264 / 30 fps) for the lifetime of the session. The recording is torn down automatically when the MCP client disconnects.\n\n**macOS uses native ScreenCaptureKit** (daemon-owned SCStream + SCRecordingOutput) so video inherits the daemon's Screen Recording grant — no extra TCC prompt, no ffmpeg subprocess. Requires macOS 15.0+.\n\n**Windows + Linux use an ffmpeg subprocess** (`gdigrab` / `x11grab` + libx264). Requires ffmpeg on PATH (winget install Gyan.FFmpeg / apt install ffmpeg); when ffmpeg is missing or fails on startup the per-turn capture (screenshots + action.json) still runs and the session's `last_error` field carries the diagnostic.\n\nState persists for the life of the daemon; a restart resets to disabled with no on-disk state. Call `stop_recording` to disable + finalize the mp4.",
+      "Start trajectory recording. Every subsequent non-read-only tool invocation, except recording controls and replay_trajectory, writes a turn folder under `output_dir`. Sensitive browser URLs, typed text, page scripts, clipboard content, file paths, and approval tokens are redacted from action.json:\n\n- `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI state immediately before and after the action.\n- `before.png` / `after.png` — target-window screenshots immediately before and after the action.\n- `evidence.json` — capture status and a stable classification when an expected artifact could not be captured.\n- `app_state.json` — post-action AX/UIA snapshot for the target pid.\n- `screenshot.png` — compatibility alias of `after.png`.\n- `action.json` — tool name, redacted input arguments, result summary, result-error flag, pid, click point (when applicable), ISO-8601 timestamp.\n- `click.png` — for dispatched click-family actions only, `before.png` with a red marker at the click point. A call refused before target resolution is explicitly not applicable instead.\n\nTurn folders are named `turn-00001/`, `turn-00002/`, etc.  Turn numbering restarts at 1 each time recording is (re-)started.\n\n**Video is off by default.** Pass `record_video: true` to also capture the main display to `<output_dir>/recording.mp4` (H.264 / 30 fps) for the lifetime of the session.\n\n**macOS uses native ScreenCaptureKit** (daemon-owned SCStream + SCRecordingOutput) so video inherits the daemon's Screen Recording grant — no extra TCC prompt, no ffmpeg subprocess. Requires macOS 15.0+.\n\n**Windows + Linux use an ffmpeg subprocess** (`gdigrab` / `x11grab` + libx264). Requires ffmpeg on PATH (winget install Gyan.FFmpeg / apt install ffmpeg); when ffmpeg is missing or fails on startup the per-turn capture (screenshots + action.json) still runs and the session's `last_error` field carries the diagnostic.\n\nRecording remains active until its owning MCP client disconnects, `stop_recording` or `end_session` for its owning session ends it, or the daemon restarts. A daemon restart resets recording to disabled without deleting files already written.",
     parameterSchema: {
       type: 'object',
       properties: {
@@ -2332,7 +2346,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         capture_scope: {
           default: 'auto',
           description:
-            'Per-session perception/action modality. auto starts window-only and requires explicit escalation before desktop tools; window and desktop are strict. Immutable for the live session.',
+            'Per-session perception/action modality for calls carrying this same public session id. auto starts window-only and requires explicit escalation before desktop tools; window and desktop are strict. Sessionless calls use the legacy unrestricted path. Immutable for the live session.',
           enum: ['auto', 'window', 'desktop'],
           type: 'string',
         },
@@ -2446,7 +2460,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   check_for_update: {
     description:
-      'Check whether a newer cua-driver-rs release is available on GitHub. Returns the current and latest versions, an `update_available` boolean, the install one-liner, and the release notes URL. Read-only — never installs. Mirror of `__cuaf_7177656E__-cua-driver check-update --json`.',
+      'Check whether a newer cua-driver-rs release is available on GitHub. Returns the current and latest versions, an `update_available` boolean, the install one-liner, and the release notes URL. Read-only — never installs. Mirror of `qwen-cua-driver check-update --json`.',
     parameterSchema: {
       type: 'object',
       properties: {},

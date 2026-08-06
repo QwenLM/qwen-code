@@ -109,31 +109,43 @@ export function parsePermissionsStatus(json: string): PermissionProbeResult {
   }
 }
 
-const SOCKET = () =>
-  join(
-    homedir(),
-    'Library',
-    'Caches',
-    'qwen-cua-driver',
-    'qwen-cua-driver.sock',
-  );
+export function daemonCleanupTargets(home = homedir()): {
+  processPatterns: string[];
+  socketPaths: string[];
+} {
+  return {
+    processPatterns: [
+      'QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver serve',
+      'CuaDriver.app/Contents/MacOS/cua-driver serve',
+    ],
+    socketPaths: [
+      join(
+        home,
+        'Library',
+        'Caches',
+        'qwen-cua-driver',
+        'qwen-cua-driver.sock',
+      ),
+      join(home, 'Library', 'Caches', 'cua-driver', 'cua-driver.sock'),
+    ],
+  };
+}
 
 function killServeDaemons(): void {
-  try {
-    spawnSync(
-      'pkill',
-      ['-f', 'QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver serve'],
-      {
-        stdio: 'ignore',
-      },
-    );
-  } catch {
-    // ignore
+  const targets = daemonCleanupTargets();
+  for (const pattern of targets.processPatterns) {
+    try {
+      spawnSync('pkill', ['-f', pattern], { stdio: 'ignore' });
+    } catch {
+      // ignore
+    }
   }
-  try {
-    rmSync(SOCKET(), { force: true });
-  } catch {
-    // ignore
+  for (const socketPath of targets.socketPaths) {
+    try {
+      rmSync(socketPath, { force: true });
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -322,13 +334,13 @@ async function ensurePermissions(
           deps.openPermissionPane('accessibility');
           ctx.updateOutput?.(
             'Step 1/2 — In the System Settings window that opened ' +
-              '(Privacy & Security → Accessibility), turn ON QwenCuaDriver. ' +
+              '(Privacy & Security → Accessibility), turn ON Qwen Cua Driver. ' +
               'This continues automatically.',
           );
         } else {
           const elapsed = Math.round((Date.now() - startedAt) / 1000);
           ctx.updateOutput?.(
-            `Waiting for Accessibility… (${elapsed}s) — enable QwenCuaDriver in System Settings.`,
+            `Waiting for Accessibility… (${elapsed}s) — enable Qwen Cua Driver in System Settings.`,
           );
         }
         continue;
@@ -341,13 +353,13 @@ async function ensurePermissions(
         ctx.updateOutput?.(
           'Step 2/2 — Accessibility granted. Now in System Settings ' +
             '(Privacy & Security → Screen & System Audio Recording), turn ON ' +
-            'QwenCuaDriver. macOS will ask to restart QwenCuaDriver — allow it; that is ' +
+            'Qwen Cua Driver. macOS will ask to restart Qwen Cua Driver — allow it; that is ' +
             'expected. This continues automatically.',
         );
       } else {
         const elapsed = Math.round((Date.now() - startedAt) / 1000);
         ctx.updateOutput?.(
-          `Waiting for Screen Recording… (${elapsed}s) — enable QwenCuaDriver in System Settings.`,
+          `Waiting for Screen Recording… (${elapsed}s) — enable Qwen Cua Driver in System Settings.`,
         );
       }
     }

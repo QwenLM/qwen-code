@@ -37,11 +37,11 @@ On macOS, desktop automation requires two system permissions:
 - **Accessibility** — to read window/UI state and synthesize input
 - **Screen Recording** — to capture screenshots
 
-On first use the driver walks you through granting these via the standard macOS system dialogs. The agent can also check permission status on demand (the `check_permissions` tool). Qwen Code registers and launches the downloaded `QwenCuaDriver.app`, so the grants belong to `com.qwencode.cua-driver` rather than the terminal or IDE that launched Qwen Code.
+On first use the driver walks you through granting these via the standard macOS system dialogs. The agent can also check permission status on demand (the `check_permissions` tool). Qwen Code registers and launches the downloaded `QwenCuaDriver.app`, so the grants normally belong to `com.qwencode.cua-driver` rather than the terminal or IDE that launched Qwen Code. If LaunchServices registration fails, attribution can fall back to the launching terminal; the tool's `source` field reports which identity is in use.
 
 ## What the agent can do
 
-The full `cua-driver` tool surface is exposed. Highlights:
+The full Qwen CUA driver tool surface is exposed. Highlights:
 
 | Category     | Tools (a selection)                                                                                              |
 | ------------ | ---------------------------------------------------------------------------------------------------------------- |
@@ -55,11 +55,11 @@ The full `cua-driver` tool surface is exposed. Highlights:
 | Sessions     | `start_session`, `escalate_session`, `get_session_state`, `end_session`, agent-cursor controls                   |
 | Diagnostics  | `health_report`, `check_permissions`, `get_config`, `check_for_update`                                           |
 
-Element-addressed actions are preferred over raw pixel coordinates: `get_window_state` returns structured elements with an `element_token` tied to the current snapshot. Re-snapshot before each action turn because older element handles fail closed after the window state changes. When pixel addressing is necessary, coordinates are absolute screenshot pixels by default; relative coordinates are opt-in via `CUA_DRIVER_RS_COORDINATE_SPACE=1`.
+Element-addressed actions are preferred over raw pixel coordinates: `get_window_state` returns structured elements with an `element_token` tied to the current snapshot. Re-snapshot before each action turn because older element handles fail closed after the window state changes. When pixel addressing is necessary, Qwen Code always uses absolute screenshot pixels so the runtime matches its checked-in tool schemas.
 
 Qwen Code keeps the driver's standard authorization mode and never enables unrestricted mode on your behalf. Operations that require a protected resource grant or embedding authorization host fail closed when that stronger authorization path is unavailable.
 
-Support is most complete on macOS; some tools are platform-specific (for example, `bring_to_front` is Windows-only, and `launch_app` targets macOS apps).
+Support is most complete on macOS, and individual tool implementations vary by platform. For example, `bring_to_front` is available on macOS and Windows, while `launch_app` targets macOS apps.
 
 ## Configuration
 
@@ -69,7 +69,7 @@ All Computer Use settings live under `tools.computerUse` in `settings.json`. See
 | ------------------------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tools.computerUse.enabled`           | boolean | `true`   | Register the `computer_use__*` tools. When `false`, the driver is never downloaded or spawned.                                                                                                                                                                                                                                              |
 | `tools.computerUse.maxImageDimension` | number  | `-1`     | Best-effort longest-edge pixel cap for screenshots. `-1` keeps the driver's default (1568); `0` disables resizing (full resolution); a positive value caps the longest edge. If standard authorization refuses the runtime config change, startup continues with the driver default. Env override: `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION`. |
-| `tools.computerUse.idleTimeoutMs`     | number  | `300000` | Milliseconds to keep the driver process alive after the last `computer_use__*` call (default 5 minutes). `0` keeps it running until Qwen Code exits.                                                                                                                                                                                        |
+| `tools.computerUse.idleTimeoutMs`     | number  | `300000` | Milliseconds to keep the Qwen CUA driver process alive after the last `computer_use__*` call (default 5 minutes). Active trajectory recording suspends idle shutdown. `0` keeps it running until Qwen Code exits.                                                                                                                           |
 
 All three settings require a restart to take effect.
 

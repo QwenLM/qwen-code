@@ -39,10 +39,6 @@ async function main(): Promise<void> {
     // registered/TCC-authorized macOS app bundle in the developer checkout;
     // the production client intentionally keeps the normal app/daemon path.
     args: ['mcp', '--direct'],
-    env: {
-      ...process.env,
-      MCP_MODEL_PAYLOAD_FILTER: '1',
-    } as Record<string, string>,
   });
   const client = new Client(
     { name: 'qwen-code-schema-sync', version: '1.0.0' },

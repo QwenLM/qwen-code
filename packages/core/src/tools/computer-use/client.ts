@@ -19,10 +19,15 @@ export const MAX_COMPUTER_USE_IDLE_TIMEOUT_MS = 2_147_483_647;
 export function computerUseMcpEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  return {
-    ...env,
-    MCP_MODEL_PAYLOAD_FILTER: '1',
-  } as Record<string, string>;
+  const childEnv = Object.fromEntries(
+    Object.entries(env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  delete childEnv['CUA_DRIVER_RS_COORDINATE_SPACE'];
+  delete childEnv['CUA_DRIVER_RS_COORDINATE_SCALE'];
+  childEnv['MCP_MODEL_PAYLOAD_FILTER'] = '1';
+  return childEnv;
 }
 
 /**
@@ -67,6 +72,8 @@ export class ComputerUseClient {
   private client: Client | undefined;
   private startPromise: Promise<void> | undefined;
   private activeCalls = 0;
+  private recordingActive = false;
+  private recordingOwnerSession: string | undefined;
   private idleStopTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: ComputerUseClientOptions) {
@@ -154,9 +161,8 @@ export class ComputerUseClient {
     const transport = new StdioClientTransport({
       command: this.binary,
       args: ['mcp'],
-      // Inherit user configuration (including an explicit relative-coordinate
-      // opt-in), but keep absolute coordinates as the driver default by not
-      // setting CUA_DRIVER_RS_COORDINATE_SPACE here.
+      // The checked-in Qwen schemas use absolute pixels. Strip coordinate-mode
+      // overrides so the runtime contract cannot drift from those schemas.
       env: computerUseMcpEnv(),
     });
     const client = new Client(
@@ -234,10 +240,12 @@ export class ComputerUseClient {
     this.clearIdleStopTimer();
     try {
       try {
-        return (await this.client.callTool({
+        const result = (await this.client.callTool({
           name,
           arguments: args,
         })) as CallToolResult;
+        this.trackRecordingLifecycle(name, args, result);
+        return result;
       } catch (err) {
         if (!isTransportClosedError(err)) throw err;
         // The connection died. Two recoverable causes, both fixed by respawning
@@ -261,10 +269,12 @@ export class ComputerUseClient {
             throw new Error('ComputerUseClient reconnect failed');
           }
           try {
-            return (await this.client.callTool({
+            const result = (await this.client.callTool({
               name,
               arguments: args,
             })) as CallToolResult;
+            this.trackRecordingLifecycle(name, args, result);
+            return result;
           } catch (retryErr) {
             if (!isTransportClosedError(retryErr)) throw retryErr;
             lastErr = retryErr;
@@ -283,6 +293,8 @@ export class ComputerUseClient {
   /** Tear down the child process. Safe to call multiple times. */
   async stop(): Promise<void> {
     this.clearIdleStopTimer();
+    this.recordingActive = false;
+    this.recordingOwnerSession = undefined;
     const client = this.client;
     this.client = undefined;
     if (client) {
@@ -296,7 +308,12 @@ export class ComputerUseClient {
 
   private scheduleIdleStop(): void {
     this.clearIdleStopTimer();
-    if (!this.client || this.activeCalls > 0 || this.idleTimeoutMs <= 0) {
+    if (
+      !this.client ||
+      this.activeCalls > 0 ||
+      this.recordingActive ||
+      this.idleTimeoutMs <= 0
+    ) {
       return;
     }
 
@@ -312,6 +329,29 @@ export class ComputerUseClient {
     if (!this.idleStopTimer) return;
     clearTimeout(this.idleStopTimer);
     this.idleStopTimer = undefined;
+  }
+
+  private trackRecordingLifecycle(
+    name: string,
+    args: Record<string, unknown>,
+    result: CallToolResult,
+  ): void {
+    if (result.isError) return;
+    if (name === 'start_recording') {
+      this.recordingActive = true;
+      this.recordingOwnerSession =
+        typeof args['session'] === 'string' && args['session'].length > 0
+          ? args['session']
+          : undefined;
+    } else if (
+      name === 'stop_recording' ||
+      (name === 'end_session' &&
+        this.recordingOwnerSession !== undefined &&
+        args['session'] === this.recordingOwnerSession)
+    ) {
+      this.recordingActive = false;
+      this.recordingOwnerSession = undefined;
+    }
   }
 }
 

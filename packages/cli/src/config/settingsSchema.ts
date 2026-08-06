@@ -2738,7 +2738,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          "Cross-platform desktop automation via the vendored Qwen CUA driver. On first invocation a pinned platform bundle is downloaded into ~/.qwen/computer-use/ (signed + notarized on macOS), and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Absolute pixel coordinates are the driver default; relative coordinates remain an explicit environment opt-in. Exposes the driver's full tool surface (click, type_text, scroll, browser automation, clipboard, recording, sessions, and more).",
+          "Cross-platform desktop automation via the vendored Qwen CUA driver. On first invocation a pinned platform bundle is downloaded into ~/.qwen/computer-use/ (signed + notarized on macOS), and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Qwen Code uses absolute screenshot-pixel coordinates. Exposes the driver's full tool surface (click, type_text, scroll, browser automation, clipboard, recording, sessions, and more).",
         showInDialog: false,
         properties: {
           enabled: {
@@ -2760,7 +2760,7 @@ const SETTINGS_SCHEMA = {
             minimum: 0,
             maximum: 2147483647,
             description:
-              'Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.',
+              'Milliseconds to keep the Qwen CUA driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Active trajectory recording suspends idle shutdown. Set to 0 to keep it running until qwen-code exits.',
             showInDialog: false,
           },
           maxImageDimension: {
