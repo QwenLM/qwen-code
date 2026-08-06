@@ -11,9 +11,12 @@
  * voice network policy — silently, and in the unsafe direction. A comment is
  * not a mechanism, so the mirrored units are compared mechanically instead.
  *
- * Units are compared after normalization: comments, whitespace, braces, and
- * the `export` modifier are dropped, because the two sides intentionally
- * differ only in formatting (brace style, comments, exports).
+ * Units are compared as parse trees: each unit is parsed with TypeScript and
+ * re-printed canonically with comments removed, single-statement blocks
+ * unwrapped, and the `export` modifier dropped, because the two sides
+ * intentionally differ only in formatting (brace style, comments, exports).
+ * Literal contents and statement structure are compared exactly, so drift
+ * hidden inside a string, template, regex, or block is still caught.
  *
  * Not covered: mirrors with intentionally different shapes (trusted-settings
  * merge, env-var interpolation, storage paths). Those stay comment-guarded
@@ -23,6 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -60,179 +64,86 @@ export const MIRROR_SETS = [
   },
 ];
 
-// A `/` starts a regex literal (not division) when the previous significant
-// token is one of these keywords or a non-closing punctuator.
-const REGEX_PRECEDING_KEYWORDS = new Set([
-  'return',
-  'case',
-  'typeof',
-  'instanceof',
-  'in',
-  'of',
-  'new',
-  'delete',
-  'void',
-  'throw',
-  'do',
-  'else',
-  'yield',
-  'await',
-]);
+const PRINTER = ts.createPrinter({ removeComments: true });
 
 /**
- * Strip `//` and block comments while preserving strings, template literals
- * (including `${...}` interpolations), and regex literals — all of which can
- * legally contain comment-looking sequences such as `http://`.
+ * Absorb brace-style differences by replacing a block that wraps a single
+ * statement with that statement, in the positions where the bare statement
+ * form is also valid (`if (x) { return; }` vs `if (x) return;`). Blocks with
+ * more than one statement keep their shape, so moving a statement into or
+ * out of a block still reads as drift.
  */
-export function stripComments(source) {
-  const n = source.length;
-  let out = '';
-  let i = 0;
-  let lastIdent = '';
-  let lastChar = '';
-
-  const note = (text) => {
-    for (const ch of text) {
-      if (/[A-Za-z0-9_$]/.test(ch)) {
-        lastIdent = /[A-Za-z0-9_$]/.test(lastChar) ? lastIdent + ch : ch;
-        lastChar = ch;
-      } else if (!/\s/.test(ch)) {
-        lastIdent = '';
-        lastChar = ch;
-      }
-    }
-  };
-
-  const regexAllowed = () => {
-    if (lastChar === '') return true;
-    if (lastChar === ')' || lastChar === ']' || lastChar === '}') {
-      return false;
-    }
-    if (/[A-Za-z0-9_$]/.test(lastChar)) {
-      return REGEX_PRECEDING_KEYWORDS.has(lastIdent);
-    }
-    return true;
-  };
-
-  const scanString = (start, quote) => {
-    let j = start;
-    while (j < n) {
-      const c = source[j];
-      if (c === '\\') {
-        j += 2;
-        continue;
-      }
-      if (c === quote || c === '\n') {
-        return j + 1;
-      }
-      j += 1;
-    }
-    return j;
-  };
-
-  const scanTemplateExpression = (start) => {
-    let depth = 1;
-    let j = start;
-    while (j < n && depth > 0) {
-      const c = source[j];
-      if (c === "'" || c === '"') {
-        j = scanString(j + 1, c);
-        continue;
-      }
-      if (c === '`') {
-        j = scanTemplate(j + 1);
-        continue;
-      }
-      if (c === '{') depth += 1;
-      else if (c === '}') depth -= 1;
-      j += 1;
-    }
-    return j;
-  };
-
-  const scanTemplate = (start) => {
-    let j = start;
-    while (j < n) {
-      const c = source[j];
-      if (c === '\\') {
-        j += 2;
-        continue;
-      }
-      if (c === '`') {
-        return j + 1;
-      }
-      if (c === '$' && source[j + 1] === '{') {
-        j = scanTemplateExpression(j + 2);
-        continue;
-      }
-      j += 1;
-    }
-    return j;
-  };
-
-  while (i < n) {
-    const ch = source[i];
-    if (ch === '/' && source[i + 1] === '/') {
-      const newline = source.indexOf('\n', i);
-      i = newline === -1 ? n : newline;
-      continue;
-    }
-    if (ch === '/' && source[i + 1] === '*') {
-      const end = source.indexOf('*/', i + 2);
-      i = end === -1 ? n : end + 2;
-      continue;
-    }
-    if (ch === '/' && regexAllowed()) {
-      let j = i + 1;
-      let inClass = false;
-      while (j < n) {
-        const c = source[j];
-        if (c === '\\') {
-          j += 2;
-          continue;
-        }
-        if (c === '\n') break;
-        if (c === '[') inClass = true;
-        else if (c === ']') inClass = false;
-        else if (c === '/' && !inClass) break;
-        j += 1;
-      }
-      if (j >= n || source[j] !== '/') {
-        // Unterminated: not a regex literal after all.
-        out += ch;
-        note(ch);
-        i += 1;
-        continue;
-      }
-      j += 1;
-      while (j < n && /[a-z]/i.test(source[j])) j += 1;
-      const literal = source.slice(i, j);
-      out += literal;
-      note(literal);
-      i = j;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      const j = scanString(i + 1, ch);
-      const literal = source.slice(i, j);
-      out += literal;
-      note(literal);
-      i = j;
-      continue;
-    }
-    if (ch === '`') {
-      const j = scanTemplate(i + 1);
-      const literal = source.slice(i, j);
-      out += literal;
-      note(literal);
-      i = j;
-      continue;
-    }
-    out += ch;
-    note(ch);
-    i += 1;
+function unwrapSingleStatementBlock(statement) {
+  let body = statement;
+  while (
+    body &&
+    body.kind === ts.SyntaxKind.Block &&
+    body.statements.length === 1
+  ) {
+    body = body.statements[0];
   }
-  return out;
+  return body;
+}
+
+function unwrapSingleStatementBlocks(node) {
+  if (node.kind === ts.SyntaxKind.IfStatement) {
+    node.thenStatement = unwrapSingleStatementBlock(node.thenStatement);
+    if (node.elseStatement) {
+      node.elseStatement = unwrapSingleStatementBlock(node.elseStatement);
+    }
+  } else if (
+    node.kind === ts.SyntaxKind.ForStatement ||
+    node.kind === ts.SyntaxKind.ForInStatement ||
+    node.kind === ts.SyntaxKind.ForOfStatement ||
+    node.kind === ts.SyntaxKind.WhileStatement ||
+    node.kind === ts.SyntaxKind.DoStatement ||
+    node.kind === ts.SyntaxKind.WithStatement ||
+    node.kind === ts.SyntaxKind.LabeledStatement
+  ) {
+    node.statement = unwrapSingleStatementBlock(node.statement);
+  }
+  ts.forEachChild(node, unwrapSingleStatementBlocks);
+}
+
+/**
+ * Detach nodes from their source positions so the printer emits its own
+ * canonical layout instead of preserving the original line breaks.
+ */
+function stripSourceLayout(node) {
+  node.pos = -1;
+  node.end = -1;
+  if (node.multiLine) {
+    node.multiLine = false;
+  }
+  ts.forEachChild(node, stripSourceLayout);
+}
+
+/**
+ * Normalize mirrored code for comparison: parse it and re-print it
+ * canonically. The two sides intentionally differ only in comments,
+ * formatting, brace style for single statements, and the `export` modifier;
+ * everything else — including literal contents and statement structure — is
+ * significant.
+ */
+export function normalizeMirroredCode(text) {
+  const sourceFile = ts.createSourceFile(
+    'voice-guard-unit.ts',
+    text,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+  );
+  return sourceFile.statements
+    .map((statement) => {
+      if (statement.modifiers) {
+        statement.modifiers = statement.modifiers.filter(
+          (modifier) => modifier.kind !== ts.SyntaxKind.ExportKeyword,
+        );
+      }
+      unwrapSingleStatementBlocks(statement);
+      stripSourceLayout(statement);
+      return PRINTER.printNode(ts.EmitHint.Unspecified, statement, sourceFile);
+    })
+    .join('\n');
 }
 
 /**
@@ -261,18 +172,6 @@ export function extractTopLevelUnit(source, unit) {
     }
   }
   return undefined;
-}
-
-/**
- * Normalize mirrored code for comparison: the two sides intentionally differ
- * only in comments, formatting, brace style for single statements, and the
- * `export` modifier.
- */
-export function normalizeMirroredCode(text) {
-  return stripComments(text)
-    .replace(/\s+/g, '')
-    .replace(/^export/, '')
-    .replace(/[{}]/g, '');
 }
 
 /** Returns one entry per unit that is missing or has drifted. */

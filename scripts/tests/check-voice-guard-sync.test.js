@@ -11,7 +11,6 @@ import {
   checkMirrorSet,
   extractTopLevelUnit,
   normalizeMirroredCode,
-  stripComments,
 } from '../check-voice-guard-sync.js';
 
 const checkScriptPath = fileURLToPath(
@@ -85,14 +84,75 @@ describe('check-voice-guard-sync', () => {
     );
   });
 
-  it('does not treat comment-looking sequences in strings as comments', () => {
+  it('compares literal contents exactly and drops comments', () => {
     const source = [
       'function url(host: string): string {',
+      '  // Prefix with the ASR scheme.',
       '  return `http://[${host}]/`;',
       '}',
     ].join('\n');
-    expect(stripComments(source)).toContain('http://[${host}]/');
-    expect(normalizeMirroredCode(source)).toContain('http://');
+    const normalized = normalizeMirroredCode(source);
+    expect(normalized).toContain('`http://[${host}]/`');
+    expect(normalized).not.toContain('Prefix with the ASR scheme');
+  });
+
+  it('reports drift when braces are removed inside a template literal', () => {
+    const cli = [
+      'function f(a: string, prefix: string): string {',
+      '  return `${a}${prefix}`;',
+      '}',
+    ].join('\n');
+    const desktop = cli.replace('${prefix}', '$prefix');
+    expect(
+      checkMirrorSet(cli, desktop, [{ kind: 'function', name: 'f' }]),
+    ).toEqual([{ name: 'f', reason: 'bodies differ' }]);
+  });
+
+  it('reports drift when whitespace changes inside a string literal', () => {
+    const cli = [
+      'function f(prefix: string): string {',
+      "  return prefix.replace('/compatible-mode/v1', '');",
+      '}',
+    ].join('\n');
+    const desktop = cli.replace(
+      "'/compatible-mode/v1'",
+      "'/compatible-mode/ v1'",
+    );
+    expect(
+      checkMirrorSet(cli, desktop, [{ kind: 'function', name: 'f' }]),
+    ).toEqual([{ name: 'f', reason: 'bodies differ' }]);
+  });
+
+  it('reports drift when a newline changes return semantics', () => {
+    const cli = ['function f(): number {', '  return 1;', '}'].join('\n');
+    const desktop = ['function f(): number {', '  return', '    1;', '}'].join(
+      '\n',
+    );
+    expect(
+      checkMirrorSet(cli, desktop, [{ kind: 'function', name: 'f' }]),
+    ).toEqual([{ name: 'f', reason: 'bodies differ' }]);
+  });
+
+  it('reports drift when a statement moves into or out of a block', () => {
+    const cli = [
+      'function f(x: boolean): void {',
+      '  if (x) {',
+      '    a();',
+      '  }',
+      '  b();',
+      '}',
+    ].join('\n');
+    const desktop = [
+      'function f(x: boolean): void {',
+      '  if (x) {',
+      '    a();',
+      '    b();',
+      '  }',
+      '}',
+    ].join('\n');
+    expect(
+      checkMirrorSet(cli, desktop, [{ kind: 'function', name: 'f' }]),
+    ).toEqual([{ name: 'f', reason: 'bodies differ' }]);
   });
 
   it('passes on the real mirrored sources', () => {
