@@ -1693,8 +1693,13 @@ jobs:
     timeout-minutes: 15
     # A forced scan can write the same status comment as review-address.
     # Share its per-PR lock so neither writer can erase the other's state.
+    # Keep the predicate as narrow as the job's own `if:` — concurrency is
+    # evaluated BEFORE it, so without the do_review conjunct a dispatch with
+    # `phase: issue` + `pr_number: N` (route emits pr_number unconditionally)
+    # would park this skipped job in that PR's shared slot behind a 300-minute
+    # address round, stalling the issue phase that `needs` it.
     concurrency:
-      group: 'qwen-pr-head-write-${{ needs.route.outputs.pr_number || github.run_id }}'
+      group: "qwen-pr-head-write-${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"
       cancel-in-progress: false
     outputs:
       targets: '${{ steps.scan.outputs.targets }}'

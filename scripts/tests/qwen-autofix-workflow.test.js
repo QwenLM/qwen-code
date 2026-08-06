@@ -4029,14 +4029,49 @@ exit 1
   });
 
   it('serializes forced status writes with the matching address job', () => {
+    // The prefix is a LITERAL on both sides: job-level `concurrency` cannot
+    // read the `env` context, so the two jobs cannot share a constant. Compare
+    // the extracted prefixes instead of pinning two independent literals —
+    // renaming one side alone silently re-opens the lost-update race on the
+    // status comment, and nothing else in the suite would notice.
+    // Either quote style: the scan side is double-quoted because its
+    // expression embeds `'true'`, which Prettier will not leave escaped.
+    const groupOf = (text) =>
+      text.match(/\n {4}concurrency:\n {6}group: ['"]([a-z-]+?)-\$\{\{/)?.[1];
+    const scanLock = groupOf(reviewScanJob);
+    const addressLock = groupOf(reviewAddressJob);
+    expect(scanLock).toBeTruthy();
+    expect(scanLock).toBe(addressLock);
+
+    // Each side must still key the group on the PR number — a shared prefix
+    // with a per-run suffix would serialise nothing.
     expect(reviewScanJob).toContain(
-      "group: 'qwen-pr-head-write-${{ needs.route.outputs.pr_number || github.run_id }}'",
+      `group: "${scanLock}-\${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"`,
+    );
+    expect(reviewAddressJob).toContain(
+      `group: '${addressLock}-\${{ matrix.target.pr }}'`,
     );
     expect(reviewScanJob).toContain('cancel-in-progress: false');
-    expect(reviewAddressJob).toContain(
-      "group: 'qwen-pr-head-write-${{ matrix.target.pr }}'",
-    );
     expect(reviewAddressJob).toContain('cancel-in-progress: false');
+  });
+
+  // GitHub evaluates concurrency BEFORE the job `if`, so a predicate broader
+  // than the job's own condition lets a run that will only skip take the
+  // shared per-PR slot. `route` emits pr_number unconditionally, so without
+  // the do_review conjunct a `phase: issue` dispatch carrying pr_number: N
+  // queues this skipped job behind PR N's in-flight address round — and
+  // `issue-autofix` needs review-scan, so the dispatched issue phase idles
+  // with only a "queued" badge to explain it.
+  it('keeps the forced-scan lock as narrow as the job condition', () => {
+    const groupLine = reviewScanJob.match(/\n {6}group: ['"].*['"]/)?.[0] ?? '';
+    expect(groupLine).toContain("needs.route.outputs.do_review == 'true'");
+    // A skipped run must fall to a per-run group, never the shared per-PR one.
+    expect(groupLine).toContain('github.run_id');
+    // The gate the group must mirror, matched on the job's own `if:` block so
+    // this stays a comparison and not a restatement of the group line.
+    expect(reviewScanJob).toContain(
+      "if: |-\n      ${{ needs.route.outputs.do_review == 'true' }}",
+    );
   });
 
   it('exposes exactly one comment command: label-toggle takeover sugar', () => {
