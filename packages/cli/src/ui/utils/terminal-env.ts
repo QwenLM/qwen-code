@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Shared terminal/platform environment detection.
  *
  * WSL detection previously lived as a private helper in `voice-availability`
