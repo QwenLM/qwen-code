@@ -1129,6 +1129,11 @@ export function buildRoleLaunchPrompt(
  * authoritative ("this list does not replace the brief; read it first") — the
  * exact sentence the orchestrator truncated when it used to build this by hand.
  *
+ * When the findings write failed (`findingsFile` null, non-empty list), the
+ * section falls back to inlining the list — pointing at a file that was never
+ * written would run the whole round against a dead path, while the inline
+ * list keeps the recorded prompt self-contained exactly as it was pre-#8597.
+ *
  * Each `acceptsFindings` role has its own framing, and the branches are explicit: a
  * future role that opts into `--findings` but has no framing here throws, rather than
  * silently inheriting the reverse auditor's "do not re-report" prose — which is wrong
@@ -1141,31 +1146,35 @@ export function findingsSection(
   findingsFile: string | null,
 ): string {
   const body = content.trim();
-  if (body.length > 0 && findingsFile === null) {
-    throw new Error(
-      'agent-prompt: findingsSection got a non-empty findings list with no ' +
-        'findings file. The caller writes the list to disk (writeFindingsFile) ' +
-        'whenever the body is non-empty — a violation means the two drifted.',
-    );
+  let listRef: string | null = null;
+  if (body.length > 0) {
+    if (findingsFile === null) {
+      // The findings write failed (writeFindingsFile said so on stderr):
+      // inline the list — the pre-#8597 shape — rather than point the block
+      // at a file that does not exist. The recorded prompt carries the list
+      // itself then, the delivery check compares it verbatim as before, and
+      // the floor owes no separate findings read (findingsPointerOf finds
+      // none). The pointer shape below is the happy path; this is the
+      // degraded one that still reviews with what it was launched.
+      listRef = body;
+    } else {
+      listRef = [
+        // The line count makes under-reading visible: `read_file` truncates,
+        // so an agent told only "read ALL of it" can stop after the first
+        // page and never know it saw a fraction of the list. Count from the
+        // UNtrimmed content — that is what writeFindingsFile writes — but
+        // drop one trailing newline's empty segment, so the number matches
+        // the real lines a newline-terminated file holds.
+        `The list is a file (${content.replace(/\n$/, '').split('\n').length} lines). Read ALL ` +
+          'of it, right after your brief — page with a larger `offset` if a ' +
+          'read comes back `isTruncated`:',
+        '',
+        '```',
+        `read_file(file_path="${findingsFile}")`,
+        '```',
+      ].join('\n');
+    }
   }
-  const listRef =
-    body.length > 0
-      ? [
-          // The line count makes under-reading visible: `read_file` truncates,
-          // so an agent told only "read ALL of it" can stop after the first
-          // page and never know it saw a fraction of the list. Count from the
-          // UNtrimmed content — that is what writeFindingsFile writes — but
-          // drop one trailing newline's empty segment, so the number matches
-          // the real lines a newline-terminated file holds.
-          `The list is a file (${content.replace(/\n$/, '').split('\n').length} lines). Read ALL ` +
-            'of it, right after your brief — page with a larger `offset` if a ' +
-            'read comes back `isTruncated`:',
-          '',
-          '```',
-          `read_file(file_path="${findingsFile}")`,
-          '```',
-        ].join('\n')
-      : null;
   if (role === 'verify') {
     return [
       '## The findings you are ruling on',
@@ -1316,7 +1325,8 @@ function foldFindings(
  * Write the findings list a findings-role launch is built from and return the
  * path the printed block points at — one file per (role, round, digest), so
  * every block of an --all-chunks round points at the SAME list. An empty list
- * gets no file: the inline "nothing is confirmed yet" note carries it.
+ * gets no file: the inline "nothing is confirmed yet" note carries it. Null
+ * on a failed write: findingsSection then inlines the list instead.
  */
 function findingsFileFor(
   planPath: string,

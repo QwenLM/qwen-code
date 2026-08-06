@@ -1263,11 +1263,13 @@ export function verificationGaps(
     // at since #8597 — is matched the same way: the pointer comes from the
     // recorded prompt itself (a per-chunk key and its round's findings file
     // are keyed differently, so the key cannot derive the path), and a prompt
-    // with no pointer (an empty early round, a pre-#8597 inlined list) owes
+    // with no pointer (an empty early round, a pre-#8597 inlined list, or a
+    // round whose findings-file write failed and fell back to inlining) owes
     // no findings read. Deliberate weakening versus the inlined shape this
     // replaced: the floor proves the findings file was OPENED (one successful
-    // read of the path), not that it was paged to completion — `read_file`
-    // truncates, so a first-page-only read still leaves a matching `fNeedle`.
+    // read_file of the path — no other tool's args count), not that it was
+    // paged to completion — `read_file` truncates, so a first-page-only read
+    // still leaves a matching `fNeedle`.
     // The old `wasDeliveredVerbatim` required the whole list in the delivered
     // prompt; the pointer proves delivery of the pointer line, not receipt of
     // the whole list. Accepted: the brief now orders the full read, and a
@@ -1279,7 +1281,11 @@ export function verificationGaps(
     const readTheFindings = (r: AgentRecord) => {
       if (findingsPointer === null) return true;
       const fNeedle = JSON.stringify(findingsPointer);
-      return r.successfulCallArgs.some((a) => a.includes(fNeedle));
+      // Successful read_file calls ONLY: every tool serializes its args, and
+      // a `search_file_content` or a `list_directory` over the record dir
+      // names the path without reading a line of it. The floor certifies
+      // that the list was OPENED, and a mention is not an open.
+      return r.successfulReadFileArgs.some((a) => a.includes(fNeedle));
     };
     const gotTheBuiltPrompt = records.filter((r) =>
       wasDeliveredVerbatim(r.launchPrompt, b),

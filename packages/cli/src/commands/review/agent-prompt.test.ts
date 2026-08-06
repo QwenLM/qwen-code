@@ -34,8 +34,13 @@ import { dirname, join, resolve } from 'node:path';
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   DEADLINE_ENV,
   RESERVE_ENV,
@@ -1518,6 +1523,56 @@ describe('--findings — point the block at the list file, record EXACTLY that b
     expect(() =>
       findingsSection('2', 'some findings', '/tmp/x.findings.md'),
     ).toThrow(/--findings has no framing for role "2"/);
+  });
+
+  it('inlines the list when the findings file could not be written', () => {
+    // A read-only tmp dir makes writeFindingsFile return null; the section
+    // must then fall back to the pre-#8597 inline shape rather than point
+    // the block at a file that does not exist — a whole round would run
+    // against the dead path before the delivery floor could fail it.
+    const list = '- **[Critical]** foo.ts:10 — the collision drops arguments';
+    const verify = findingsSection('verify', list, null);
+    expect(verify).toContain('## The findings you are ruling on');
+    expect(verify).toContain(list);
+    expect(verify).not.toContain('The list is a file');
+    expect(verify).not.toContain('.findings.md');
+    const audit = findingsSection('reverse-audit', list, null);
+    expect(audit).toContain('Already confirmed — do not re-report these');
+    expect(audit).toContain(list);
+    expect(audit).not.toContain('The list is a file');
+  });
+
+  it('a failed findings write builds with the list inlined, not a dead pointer', () => {
+    // End-to-end shape of the fallback: a FILE where the record directory
+    // must sit makes the findings write fail, and the printed block carries
+    // the list itself with no `.findings.md` pointer. The agents then read
+    // what they were launched with; the floor owes no findings read for a
+    // pointer-less prompt.
+    const dir = tmp('ap-ff-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    writeFileSync(
+      join(dir, 'plan-prompts'),
+      'a file where the record dir would go',
+    );
+    const findings = join(dir, 'findings.md');
+    writeFileSync(
+      findings,
+      '- **[Critical]** foo.ts:10 — the collision drops arguments',
+    );
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('.findings.md');
+    expect((writeStderrLineSafe as unknown as Mock).mock.calls[0][0]).toContain(
+      'inlining the list instead',
+    );
   });
 
   it('an empty findings file tells the reverse auditor nothing is confirmed yet', () => {

@@ -5730,6 +5730,46 @@ describe('ContentGenerationPipeline', () => {
       expect(done).toBe(true);
     });
 
+    it('does not charge the cap for a wall-clock jump — the accounting is monotonic', async () => {
+      // The guard accounts on `performance.now()`, not `Date.now()`: an NTP
+      // step forward (or a laptop waking from a long sleep) must not kill a
+      // healthy stream, and a backward step must not disable the cap. The
+      // jump lands while `it.next()` is pending, so a wall-clock deadline
+      // charged it as upstream wait and threw at the next iteration; the
+      // monotonic clock sees only the 500ms the model actually took.
+      const gated = gatedStream(); // silent until pushed
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000); // idle 1s, lifetime 3s
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      let done = false;
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      await vi.advanceTimersByTimeAsync(500); // next() pending, t=500
+      // The wall clock leaps 20 minutes while monotonic time does not.
+      const dateNow = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.now() + 1_200_000);
+      gated.push(chunk('a')); // ends the wait 500ms in by the monotonic clock
+      await vi.advanceTimersByTimeAsync(0);
+      gated.push(chunk('b'));
+      await vi.advanceTimersByTimeAsync(500);
+      gated.end(); // completes at monotonic t=1000, well under the 3s cap
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      dateNow.mockRestore();
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+    });
+
     it('honours QWEN_STREAM_MAX_LIFETIME_MS when no explicit config is set', async () => {
       vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '4000');
       const gated = gatedStream(); // drip-fed, never ends

@@ -288,9 +288,11 @@ function resolveStreamMaxLifetimeMs(config: ContentGeneratorConfig): number {
  * ETIMEDOUT. The idle timer resets on every chunk (including
  * thinking/reasoning deltas), so an actively streaming model is never
  * interrupted by it. The lifetime cap does NOT reset: once the stream has
- * been open for `maxLifetimeMs` without completing, the iterator throws the
- * same way — the bound a drip-fed stream cannot reset (issue #8597).
- * `<= 0` disables each guard independently.
+ * accumulated `maxLifetimeMs` of upstream-wait time (the time spent blocked
+ * on the source, never the consumer's time after a yield) without
+ * completing, the iterator throws the same way — the bound a drip-fed
+ * stream cannot reset (issue #8597). `<= 0` disables each guard
+ * independently.
  */
 async function* withStreamGuards(
   source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
@@ -309,7 +311,12 @@ async function* withStreamGuards(
     return;
   }
   const it = source[Symbol.asyncIterator]();
-  const streamStartedAt = Date.now();
+  // Monotonic, never `Date.now()`: an NTP step must not kill a healthy
+  // generation on the next iteration (a forward jump) nor silently disable
+  // the cap until the clock catches up (a backward jump) — the hang this
+  // guard exists to bound. The setTimeout this races is a monotonic clock
+  // too, so the two agree.
+  const streamStartedAt = performance.now();
   // The lifetime cap is on ACCUMULATED UPSTREAM-WAIT — the wall-clock time
   // this loop spends blocked in `await it.next()`. It is deliberately NOT
   // end-to-end delivery time: an upstream that finished and buffered its
@@ -318,9 +325,6 @@ async function* withStreamGuards(
   // at the boundary completes rather than becoming a retry. The cap only
   // bites while the consumer is actually waiting on the model — which is
   // exactly where #8597's drip-fed, never-completing stream spends its time.
-  // (`Date.now()` is used for consistency with the idle watchdog's
-  // setTimeout-based accounting; a monotonic `performance.now()` is not
-  // fake-able by the test suite's timers, so it is deferred, not dropped.)
   let upstreamMs = 0;
   let chunksReceived = 0;
   try {
@@ -343,11 +347,11 @@ async function* withStreamGuards(
         throw new StreamLifetimeExceededError(
           maxLifetimeMs,
           chunksReceived,
-          Date.now() - streamStartedAt,
+          performance.now() - streamStartedAt,
         );
       }
       const nextPromise = it.next();
-      const awaitedAt = Date.now();
+      const awaitedAt = performance.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {
         // The caller wraps only when at least one guard is positive, so at
@@ -368,7 +372,7 @@ async function* withStreamGuards(
                 new StreamLifetimeExceededError(
                   maxLifetimeMs,
                   chunksReceived,
-                  Date.now() - streamStartedAt,
+                  performance.now() - streamStartedAt,
                 ),
               );
             } else {
@@ -377,7 +381,7 @@ async function* withStreamGuards(
                 new StreamInactivityTimeoutError(
                   idleMs,
                   chunksReceived,
-                  Date.now() - streamStartedAt,
+                  performance.now() - streamStartedAt,
                 ),
               );
             }
@@ -400,7 +404,7 @@ async function* withStreamGuards(
       if (result.done) return;
       // Charge only the time this chunk took to arrive — the upstream
       // latency — never the time the consumer spent after the previous yield.
-      upstreamMs += Date.now() - awaitedAt;
+      upstreamMs += performance.now() - awaitedAt;
       chunksReceived += 1;
       yield result.value;
     }

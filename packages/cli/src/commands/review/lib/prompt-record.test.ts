@@ -26,7 +26,6 @@ import { join } from 'node:path';
 import {
   wasDeliveredVerbatim,
   findingsPointerOf,
-  findingsFilePath,
   writeFindingsFile,
 } from './prompt-record.js';
 import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
@@ -161,10 +160,12 @@ describe('findingsPointerOf — the list file a recorded launch points at', () =
 });
 
 describe('writeFindingsFile — a failed write must not be silent', () => {
-  it('reports the failure on stderr and still returns the path', () => {
-    // The build must not die on an unwritable record dir — but the miss must
-    // be visible: the whole round's blocks point at the file this one write
-    // owes. A FILE where the record directory must sit makes mkdir fail. The
+  it('reports the failure on stderr and returns null so the caller inlines', () => {
+    // The build must not die on an unwritable record dir — and it must not
+    // point the round at a file that does not exist either: null is what
+    // makes findingsSection fall back to inlining the list (the pre-#8597
+    // shape), instead of 12-14 agents burning a round against a dead path.
+    // A FILE where the record directory must sit makes mkdir fail. The
     // diagnostic goes through writeStderrLineSafe: this catch exists to keep
     // the build alive, so it must not throw out of it on EPIPE.
     const dir = mkdtempSync(join(tmpdir(), 'pr-ff-'));
@@ -173,10 +174,13 @@ describe('writeFindingsFile — a failed write must not be silent', () => {
       writeFileSync(blocker, 'a file where a directory would go');
       const planPath = join(blocker, 'plan.json');
       const p = writeFindingsFile(planPath, 'verify--abc', 'the list');
-      expect(p).toBe(findingsFilePath(planPath, 'verify--abc'));
+      expect(p).toBeNull();
       expect(
         (writeStderrLineSafe as unknown as Mock).mock.calls[0][0],
       ).toContain('failed to write findings file');
+      expect(
+        (writeStderrLineSafe as unknown as Mock).mock.calls[0][0],
+      ).toContain('inlining the list instead');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

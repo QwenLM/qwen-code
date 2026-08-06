@@ -100,28 +100,35 @@ export function findingsPointerOf(prompt: string): string | null {
  * prompt exactly as dropping the list did, and the delivery floor counts the
  * read it instructs exactly as it counts the brief's — an agent that opens
  * its brief but skips this file does not clear it.
+ *
+ * Returns null when the write fails (a read-only tmp dir): the caller then
+ * inlines the list into the block — the pre-#8597 shape — instead of
+ * pointing a whole round at a file that does not exist.
  */
 export function writeFindingsFile(
   planPath: string,
   key: string,
   content: string,
-): string {
+): string | null {
   const p = findingsFilePath(planPath, key);
   try {
     mkdirSync(promptRecordDir(planPath), { recursive: true });
     writeFileSync(p, content);
   } catch (err) {
-    // A read-only tmp dir must not stop a review being BUILT — the delivery
-    // floor fails the launch whose findings read never happens, where a
-    // reader can act on it. But say so now: a silent miss used to leave a
-    // whole round's agents pointing at a file that does not exist, and
-    // nothing downstream noticed until the floor was taught to count reads.
-    // Safe writer: this catch exists to keep the build alive, so the
-    // diagnostic must not throw out of it on EPIPE (`qwen … | head`).
+    // A read-only tmp dir must not stop a review being BUILT — and it must
+    // not send a whole round pointing at a file that does not exist either:
+    // null makes findingsSection inline the list (the pre-#8597 shape), so
+    // the agents read what they were launched with, instead of 12-14 of
+    // them burning a full round against a dead path before the delivery
+    // floor fails it. Say so now: a silent miss used to leave the round
+    // pointing at nothing with no notice anywhere. Safe writer: this catch
+    // exists to keep the build alive, so the diagnostic must not throw out
+    // of it on EPIPE (`qwen … | head`).
     writeStderrLineSafe(
       `agent-prompt: failed to write findings file ${p}: ` +
-        `${(err as Error).message}`,
+        `${(err as Error).message} — inlining the list instead`,
     );
+    return null;
   }
   return p;
 }

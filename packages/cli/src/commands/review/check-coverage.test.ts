@@ -155,6 +155,12 @@ function transcript(
      * that wants an agent which ignored its brief passes `opens: []`.
      */
     opens?: string[];
+    /**
+     * Paths the agent's only contact with is NAMING them in a successful
+     * non-read tool's args — a search, not an open. Models the agent that
+     * clears a path-shaped floor without reading the file.
+     */
+    mentions?: string[];
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
@@ -226,6 +232,40 @@ function transcript(
               functionResponse: {
                 name: 'read_file',
                 response: { output: 'brief' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
+  for (const path of opts.mentions ?? []) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'search_file_content',
+                args: { path, pattern: 'Critical' },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'search_file_content',
+                response: { output: '1 match' },
               },
             },
           ],
@@ -1514,6 +1554,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
       rewritten?: boolean;
       findings?: boolean;
       opensFindings?: boolean;
+      mentionsFindings?: boolean;
     } = {},
   ): void {
     const d = promptRecordDir(planPath);
@@ -1546,7 +1587,9 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     }
     const opens = opts.opensBrief === false ? [] : [brief];
     if (opts.findings && opts.opensFindings !== false) opens.push(findings);
-    transcript(id, prompt, { calls: 2, opens });
+    const mentions =
+      opts.findings && opts.mentionsFindings ? [findings] : undefined;
+    transcript(id, prompt, { calls: 2, opens, mentions });
   }
 
   it('passes when the reverse audit ran on a review with nothing to verify', () => {
@@ -1799,6 +1842,26 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit');
     step45(p, 'verify--abc123def456', { findings: true });
     expect(verificationGaps(p, { postsFindings: true }, ENV).ok).toBe(true);
+  });
+
+  it('does not credit a non-read tool that merely names the findings path', () => {
+    // Every tool serializes its args, so a `search_file_content` over the
+    // findings file carries the same stringified path as a read of it —
+    // without reading a line. The floor certifies the list was OPENED; a
+    // mention is not an open, and only read_file counts.
+    const p = plan();
+    step45(p, 'reverse-audit'); // Step 5 compliant; verification is the subject
+    step45(p, 'verify--abc123def456', {
+      findings: true,
+      opensFindings: false,
+      mentionsFindings: true,
+    });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.unverifiedFindings).toBe(true);
+    expect(gapText(r)).toMatch(
+      /verification — it was launched with the built prompt and opened its brief, but never read the findings file/,
+    );
   });
 
   it('flags a reverse auditor that opened its brief but skipped the findings file', () => {
