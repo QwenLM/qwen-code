@@ -129,6 +129,21 @@ const BASE_URL = 'https://open.feishu.cn/open-apis';
 /** Validate Feishu ID format to prevent SSRF path traversal in URL interpolation. */
 const FEISHU_ID_RE = /^[a-zA-Z0-9_.:-]+$/;
 
+/**
+ * Typed failure for interactive-card delivery. `status` is set for HTTP
+ * failures so callers (createStreamingCard) can classify by type instead of
+ * string-matching message literals that could drift under rewording.
+ */
+class FeishuCardDeliveryError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = 'FeishuCardDeliveryError';
+  }
+}
+
 export class FeishuChannel extends ChannelBase {
   private eventDispatcher!: lark.EventDispatcher;
   private wsClient?: lark.WSClient;
@@ -838,7 +853,10 @@ export class FeishuChannel extends ChannelBase {
     card: Record<string, unknown>,
   ): Promise<string> {
     const token = await this.getTenantAccessToken();
-    if (!token) throw new Error('Feishu card delivery failed: no access token');
+    if (!token)
+      throw new FeishuCardDeliveryError(
+        'Feishu card delivery failed: no access token',
+      );
 
     const resp = await fetch(
       `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
@@ -860,15 +878,18 @@ export class FeishuChannel extends ChannelBase {
     if (!resp.ok) {
       if (resp.status === 401) this.tokenCache = undefined;
       const detail = await resp.text().catch(() => '');
-      throw new Error(
+      throw new FeishuCardDeliveryError(
         `Feishu card delivery failed: HTTP ${resp.status} ${detail}`,
+        resp.status,
       );
     }
 
     const data = (await resp.json()) as { data?: { message_id?: string } };
     const messageId = data.data?.message_id;
     if (!messageId) {
-      throw new Error('Feishu card delivery returned no message id');
+      throw new FeishuCardDeliveryError(
+        'Feishu card delivery returned no message id',
+      );
     }
     return messageId;
   }
@@ -930,18 +951,13 @@ export class FeishuChannel extends ChannelBase {
       const messageId = await this.sendInteractiveCard(chatId, card);
       return { messageId, success: true };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const httpPrefix = 'Feishu card delivery failed: HTTP ';
-      if (message.startsWith(httpPrefix)) {
-        process.stderr.write(
-          `[Feishu:${this.name}] createStreamingCard failed: HTTP ${message.slice(httpPrefix.length)}\n`,
-        );
-        return { messageId: '', success: false };
-      }
-      if (
-        message === 'Feishu card delivery failed: no access token' ||
-        message === 'Feishu card delivery returned no message id'
-      ) {
+      if (err instanceof FeishuCardDeliveryError) {
+        if (err.status !== undefined) {
+          const deliveryPrefix = 'Feishu card delivery failed: ';
+          process.stderr.write(
+            `[Feishu:${this.name}] createStreamingCard failed: ${err.message.slice(deliveryPrefix.length)}\n`,
+          );
+        }
         return { messageId: '', success: false };
       }
       process.stderr.write(

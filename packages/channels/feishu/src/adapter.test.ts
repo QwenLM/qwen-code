@@ -27,6 +27,7 @@ import type {
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   SessionTarget,
+  UserInputSettlementReason,
 } from '@qwen-code/channel-base';
 
 function createMockBridge(): ChannelAgentBridge {
@@ -2057,6 +2058,90 @@ describe('FeishuChannel', () => {
           'createStreamingCard failed: HTTP 500 server down',
         ),
       );
+    });
+
+    it('wires the real question-card controller through the card transport', async () => {
+      // Every routing test replaces questionCardController with a mock, so the
+      // constructor wiring seam (sendCard -> sendInteractiveCard) is exercised
+      // by no other test. Keep the real controller and mock only fetch.
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify({ code: 0, data: { message_id: 'om_question' } }),
+            { status: 200 },
+          ),
+        );
+
+      const listeners = new Set<(reason: UserInputSettlementReason) => void>();
+      const respond = vi.fn().mockResolvedValue(true);
+      const context: ChannelUserInputRequestContext = {
+        requestId: 'request-wiring',
+        sessionId: 'session-wiring',
+        runId: 'run-wiring',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'feishu',
+          chatId: 'oc_chat',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+        questions: [
+          {
+            answerKey: '0',
+            header: 'Region',
+            question: 'Which region?',
+            options: [{ label: 'Beijing', description: 'Use Beijing.' }],
+            multiSelect: false,
+          },
+        ],
+        submitOptionId: 'allow-once',
+        onSettled(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        respond,
+      };
+
+      const controller = (
+        channel as unknown as {
+          questionCardController: {
+            present(
+              ctx: ChannelUserInputRequestContext,
+            ): Promise<{ kind: string }>;
+            dispose(): void;
+          };
+        }
+      ).questionCardController;
+
+      await expect(controller.present(context)).resolves.toMatchObject({
+        kind: 'presented',
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/im/v1/messages?receive_id_type=chat_id'),
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            Authorization: 'Bearer tenant-token',
+          }),
+        }),
+      );
+      const body = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+      expect(body.receive_id).toBe('oc_chat');
+      expect(body.msg_type).toBe('interactive');
+      const serializedCard = JSON.stringify(JSON.parse(body.content));
+      expect(serializedCard).toContain('qwen_ask_form');
+      expect(serializedCard).toContain('Which region?');
+      expect(serializedCard).toContain('request-wiring');
+
+      controller.dispose();
+      fetchSpy.mockRestore();
     });
   });
 
