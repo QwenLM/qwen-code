@@ -5745,13 +5745,13 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('returns false (no queue pop, no buffer clear) on ESC when responding with an empty buffer', async () => {
+    it('does not pop the queue or clear the buffer on ESC when responding with an empty buffer', async () => {
       // Pins the no-side-effect contract for ESC while the agent is Responding
       // and both the buffer and the queue are empty: no queue pop and no
-      // buffer mutation. Note: the `return false` branch itself is defensive -
-      // KeypressContext.broadcast ignores handler return values and
-      // BaseTextInput's ESC clear is a no-op on an empty buffer - so deleting
-      // that branch would still leave this test green. #8201.
+      // buffer mutation. The cancel itself is AppContainer's job (its broadcast
+      // ESC handler runs after this one and sees the empty buffer), so this
+      // only asserts InputPrompt's side leaves the shared buffer untouched.
+      // #8201.
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],

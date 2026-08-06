@@ -1202,9 +1202,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
         // Pop queued messages into input on ESC (before double-ESC clear).
         // Skip when the agent is actively responding: popQueueIntoInput()
-        // fills the shared buffer, which makes AppContainer's broadcast ESC
-        // handler take its "input has content -> double-press to clear"
-        // branch instead of the cancel-work branch. #8201.
+        // fills the shared buffer (a live getter over stateRef.current, not
+        // React state), which makes AppContainer's broadcast ESC handler -
+        // which runs AFTER this one because child useEffects subscribe to
+        // KeypressContext first and useKeypress memoizes on [] - take its
+        // "input has content -> double-press to clear" branch instead of the
+        // cancel-work branch. This guard breaks that chain. #8201.
+        //
+        // Relies on two invariants: (1) InputPrompt/BaseTextInput subscribe
+        // before AppContainer, and (2) buffer.text reads through to
+        // stateRef.current synchronously. Break either and the single-ESC
+        // cancel regresses with a fully green suite - see the integration test.
+        // Only Responding is gated (matching AppContainer's cancel branch);
+        // WaitingForConfirmation is deliberately not covered - do NOT broaden
+        // this to !== Idle or ESC becomes a no-op during a tool confirmation.
         if (
           !isAttachmentMode &&
           uiState.messageQueue.length > 0 &&
@@ -1217,23 +1228,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // returned false (queue already cleared) — fall through
         }
 
-        // Handle double ESC for clearing input.
-        // When the agent is actively responding AND the input buffer is
-        // empty, defer to AppContainer's broadcast ESC handler so it takes
-        // its cancel-work branch. KeypressContext broadcasts to all handlers
-        // regardless of this return value; returning false lets BaseTextInput
-        // fall through to its own ESC handler (which clears the buffer), but
-        // the buffer.text === '' gate makes that clear a no-op. Do NOT relax
-        // this gate: returning false with non-empty text would let
-        // BaseTextInput wipe it without the double-press confirmation. #8201.
-        if (
-          uiState.streamingState === StreamingState.Responding &&
-          buffer.text === ''
-        ) {
-          resetEscapeState();
-          return false;
-        }
-
+        // Handle double ESC for clearing input. (When the agent is
+        // Responding and the buffer is empty, AppContainer's broadcast ESC
+        // handler - running after this one - takes its cancel-work branch
+        // directly, so no separate guard is needed here.) #8201.
         if (escPressCount === 0) {
           if (buffer.text === '') {
             return true;
