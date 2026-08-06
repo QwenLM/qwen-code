@@ -3,7 +3,7 @@ use rand::RngCore;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -176,15 +176,28 @@ fn require_file(path: &Path, description: &str) -> Result<(), String> {
     Err(format!("{description} is missing at {}", path.display()))
 }
 
-fn resolve_workspace(configured: &Path) -> Result<PathBuf, String> {
-    // dunce::canonicalize keeps the Windows `\\?\` verbatim prefix out of the
-    // child cwd and `--workspace` argument (#8615).
+fn ensure_supported_workspace_path(path: &Path) -> Result<(), String> {
+    if matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+    ) {
+        return Err(format!(
+            "Desktop workspace path requires an unsupported Windows verbatim form: {}. Choose a shorter local path.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_workspace(configured: &Path) -> Result<PathBuf, String> {
+    // dunce::canonicalize strips the Windows `\\?\` prefix when safe (#8615).
     let workspace = dunce::canonicalize(configured).map_err(|error| {
         format!(
             "Failed to resolve desktop workspace {}: {error}",
             configured.display()
         )
     })?;
+    ensure_supported_workspace_path(&workspace)?;
     if workspace.is_dir() {
         Ok(workspace)
     } else {
@@ -479,6 +492,20 @@ mod tests {
             !resolved.starts_with("\\\\?\\"),
             "workspace keeps the verbatim prefix: {resolved}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_residual_windows_verbatim_workspace_paths() {
+        for path in [
+            r"\\?\C:\workspace",
+            r"\\?\UNC\server\share",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+        ] {
+            let error = super::ensure_supported_workspace_path(Path::new(path))
+                .expect_err("reject residual verbatim path");
+            assert!(error.contains("unsupported Windows verbatim form"));
+        }
     }
 
     #[test]
