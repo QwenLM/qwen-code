@@ -225,6 +225,28 @@ describe('buildInstallPlan', () => {
     expect(plan.authType).toBe(AuthType.USE_ANTHROPIC);
     expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_ANTHROPIC);
   });
+
+  it('persists the template version when the caller adds custom model IDs', () => {
+    const config = makeConfig({ modelsEditable: true });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'user-added-model'],
+    });
+
+    // The custom ID reaches the model list, but the persisted version must
+    // stay the built-in template hash so update detection does not re-offer
+    // an update after a re-auth that carries user-added models through.
+    expect(plan.modelProviders?.[0]?.models).toHaveLength(2);
+    expect(plan.providerState).toEqual({
+      'providerMetadata.test': {
+        baseUrl: 'https://api.test.com/v1',
+        version: computeModelListVersion(
+          buildProviderTemplate(config, 'https://api.test.com/v1'),
+        ),
+      },
+    });
+  });
 });
 
 describe('specToModelConfig (via buildProviderTemplate)', () => {

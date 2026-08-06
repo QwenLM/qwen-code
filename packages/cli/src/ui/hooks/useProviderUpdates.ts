@@ -234,12 +234,7 @@ export function useProviderUpdates(
   const migrated = useRef(false);
 
   const executeUpdate = useCallback(
-    async (
-      providerCfg: ProviderConfig,
-      metadataKey: string,
-      currentVersion: string,
-      baseUrl?: string,
-    ) => {
+    async (providerCfg: ProviderConfig, baseUrl?: string) => {
       try {
         const resolved = resolveBaseUrl(providerCfg, baseUrl);
         // An update only refreshes built-in models — user-added custom IDs
@@ -254,11 +249,6 @@ export function useProviderUpdates(
           apiKey: '',
           modelIds: [...defaultIds, ...customIds],
         });
-        const providerState =
-          installPlan.providerState?.[`${PROVIDER_METADATA_NS}.${metadataKey}`];
-        if (providerState) {
-          providerState['version'] = currentVersion;
-        }
         delete installPlan.env;
         const previousModel = config.getModel();
         const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
@@ -367,12 +357,7 @@ export function useProviderUpdates(
         setUpdateRequest(undefined);
         if (choice === 'update') {
           for (const p of pendingList) {
-            await executeUpdate(
-              p.provider,
-              p.metadataKey,
-              p.currentVersion,
-              p.baseUrl,
-            );
+            await executeUpdate(p.provider, p.baseUrl);
           }
         } else if (choice === 'skip') {
           const persistScope = getPersistScopeForModelSelection(settings);

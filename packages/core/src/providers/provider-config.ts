@@ -229,13 +229,17 @@ export const PROVIDER_METADATA_NS = 'providerMetadata';
 function resolveProviderState(
   config: ProviderConfig,
   baseUrl: string,
-  models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config);
   if (key) {
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        version: computeModelListVersion(models),
+        // Version tracks the built-in template, not the caller's model list:
+        // installs can carry user-added custom IDs, and update detection
+        // compares this value against the template hash.
+        version: computeModelListVersion(
+          buildProviderTemplate(config, baseUrl),
+        ),
         baseUrl,
       },
     };
@@ -287,7 +291,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState: resolveProviderState(config, inputs.baseUrl),
   };
 }
 
