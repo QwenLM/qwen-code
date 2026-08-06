@@ -642,11 +642,16 @@ export interface DaemonStatusReport {
          * a computed answer meaning the pool hosts no child.
          */
         maxConcurrentChildren: number | null;
-        /** `null` when no child is admissible and under `off` — never 0. */
+        /**
+         * Never 0 and never below `modeled.minChildHeapMb`; `null` instead,
+         * under `off` and wherever no partition fits within that floor.
+         */
         perChildCeilingMb: number | null;
         /**
          * Admission pressure only. 0 does not mean the partition is safe to
-         * apply: children still run on the host-derived ceiling.
+         * apply: children still run on the host-derived ceiling. A channel
+         * swap at full occupancy also books one, and on a host too small to
+         * model a partition this equals the total ACP spawn count.
          */
         refusals: number;
       } | null;

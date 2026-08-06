@@ -97,6 +97,12 @@ describe('computeDaemonMemoryPressure', () => {
     (bad) => {
       // daemon-metrics-ring sanitizes non-finite gauges to 0 before storing
       // them, so these do reach callers in this codebase.
+      //
+      // `source: 'unknown'` is the assertion that matters. Without it this
+      // case passes just as well when an unusable *numerator* is coerced to 0
+      // and divided anyway — which publishes `level: 'normal', source: 'rss'`
+      // for a daemon that measured nothing, the one reading this module exists
+      // to make impossible.
       expect(
         computeDaemonMemoryPressure({
           rssBytes: bad,
@@ -104,7 +110,17 @@ describe('computeDaemonMemoryPressure', () => {
           availableBytes: 8 * GB,
           heapLimitBytes: 4 * GB,
         }),
-      ).toMatchObject({ ratio: 0, level: 'normal' });
+      ).toMatchObject({ ratio: 0, level: 'normal', source: 'unknown' });
+
+      // One bad numerator retires only its own side; the other still reports.
+      expect(
+        computeDaemonMemoryPressure({
+          rssBytes: bad,
+          heapUsedBytes: 3 * GB,
+          availableBytes: 8 * GB,
+          heapLimitBytes: 4 * GB,
+        }),
+      ).toMatchObject({ source: 'heap', ratio: 0.75, rssRatio: 0 });
 
       expect(
         computeDaemonMemoryPressure({
@@ -116,6 +132,21 @@ describe('computeDaemonMemoryPressure', () => {
       ).toMatchObject({ source: 'heap' });
     },
   );
+
+  it('treats a zero numerator as a reading, not as an unusable gauge', () => {
+    // The asymmetry the two helpers encode: 0 bytes used is merely implausible,
+    // while dividing by 0 bytes available is undefined. Retiring a zero
+    // numerator would make an idle daemon indistinguishable from an
+    // unmeasurable one — the same collapse from the opposite direction.
+    expect(
+      computeDaemonMemoryPressure({
+        rssBytes: 0,
+        heapUsedBytes: 0,
+        availableBytes: 8 * GB,
+        heapLimitBytes: 4 * GB,
+      }),
+    ).toMatchObject({ ratio: 0, level: 'normal', source: 'rss' });
+  });
 
   it("falls back to this process's real V8 ceiling when none is given", () => {
     // The only production caller omits `heapLimitBytes`, so the documented

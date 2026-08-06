@@ -2054,26 +2054,39 @@ describe('runQwenServe memory budget', () => {
       // `enforced` has to stay false or the field means "the feature exists"
       // rather than "children are being sized by this".
       expect(memory?.enforced).toBe(false);
-      // Still `toEqual`, so an unannounced field added to the wire fails here
-      // rather than passing unnoticed. The two derived figures are host-
-      // dependent — this suite boots a real daemon, so the pool follows the
-      // machine — hence matchers for those and an exact value for the rest.
-      expect(memory?.childHeap).toEqual({
-        mode: 'observe',
-        maxConcurrentChildren: expect.any(Number),
-        perChildCeilingMb: expect.any(Number),
-        refusals: 0,
-      });
-      // What those two figures have to satisfy, on any host: a fixed ceiling
-      // handed to every admitted child must total no more than the pool it
-      // partitions. That product is the whole reason the partition is a bound
-      // and not just a per-spawn share.
-      expect(
-        (memory?.childHeap?.maxConcurrentChildren ?? 0) *
-          (memory?.childHeap?.perChildCeilingMb ?? 0),
-      ).toBeLessThanOrEqual(memory?.modeled.childPoolMb ?? 0);
-      // Nothing in this section is applied, and the wire says so.
-      expect(memory?.enforced).toBe(false);
+      // Pin the key set rather than the values, so an unannounced field added
+      // to the wire still fails here. `toEqual` on the whole object was the
+      // other option and it does not survive this suite booting a real daemon:
+      // both derived figures follow the host's pool, and on a runner with
+      // under ~1 GB available the model correctly publishes no partition at
+      // all — so a matcher asserting `any(Number)` would fail on exactly the
+      // host where the code is doing the right thing.
+      expect(Object.keys(memory?.childHeap ?? {}).sort()).toEqual([
+        'maxConcurrentChildren',
+        'mode',
+        'perChildCeilingMb',
+        'refusals',
+      ]);
+      expect(memory?.childHeap?.mode).toBe('observe');
+      expect(memory?.childHeap?.refusals).toBe(0);
+      // Whichever branch this host took, the two figures agree with each
+      // other. The arithmetic itself is pinned exhaustively in
+      // `child-heap-policy.test.ts`; what this asserts is that a real daemon
+      // put a self-consistent pair on the wire.
+      if (memory?.childHeap?.perChildCeilingMb === null) {
+        expect(memory?.childHeap?.maxConcurrentChildren).toBe(0);
+      } else {
+        // A fixed grant handed to every admitted child must total no more than
+        // the pool it partitions. That product is the whole reason the
+        // partition is a bound rather than a per-spawn share.
+        expect(memory?.childHeap?.maxConcurrentChildren ?? 0).toBeGreaterThan(
+          0,
+        );
+        expect(
+          (memory?.childHeap?.maxConcurrentChildren ?? 0) *
+            (memory?.childHeap?.perChildCeilingMb ?? 0),
+        ).toBeLessThanOrEqual(memory?.modeled.childPoolMb ?? 0);
+      }
       expect(memory?.configuredBudgetMb).toBe(4096);
       expect(memory?.budgetSource).toBe('flag');
       // The invariant that motivates separating configured from effective:

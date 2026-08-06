@@ -20,6 +20,7 @@ import {
   DEFAULT_MAX_JOURNAL_EVENTS,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
+import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,
@@ -130,7 +131,7 @@ interface ServeArgs {
   'mcp-client-budget'?: number;
   'memory-budget-mb'?: number;
   'memory-pressure-mode'?: 'off' | 'observe';
-  'child-heap-mode'?: 'off' | 'observe';
+  'child-heap-mode'?: ChildHeapMode;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;

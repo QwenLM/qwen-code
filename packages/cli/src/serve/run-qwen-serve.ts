@@ -4565,12 +4565,24 @@ async function runQwenServeImpl(
           // is single-flight per bridge and the number of bridges is capped by
           // MAX_DAEMON_WORKSPACES.
           for (const managed of workspaceRegistry.listManaged()) {
+            // The shipped bridge's `refreshChildResource` never rejects: it
+            // catches the RPC failure itself, keeps the last good cache, and
+            // tees the reason to the serve debug log — which is why this
+            // handler has never fired and why the fan-out cannot turn it into
+            // 25 warnings a tick. It stays as a backstop rather than being
+            // deleted, because the method is an optional interface member and
+            // an `async` one, so any other implementation throwing before its
+            // own try block would surface here as an unhandled rejection and
+            // take the daemon down.
+            //
+            // Carrying the workspace matters for exactly that case: an
+            // unattributable warning repeated across a 25-workspace fan-out is
+            // the shape that is impossible to act on.
             void managed.bridge.refreshChildResource?.().catch((err) => {
-              daemonLog.warn(
-                `ACP child resource refresh failed: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
+              daemonLog.warn('ACP child resource refresh failed', {
+                workspaceId: managed.workspaceId,
+                error: err instanceof Error ? err.message : String(err),
+              });
             });
           }
         }

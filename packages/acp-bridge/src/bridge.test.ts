@@ -19946,15 +19946,17 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
       // Walk the clock past the cliff. `STALE_CHILD_RESOURCE_MS` is a const
       // inside the bridge factory closure, not an export, so drive the
       // boundary with the clock rather than exporting it for a test.
-      const realNow = Date.now;
+      // `vi.spyOn` rather than assigning `Date.now` directly: the restore is
+      // registered with the test runner, so it survives an assertion throwing
+      // between here and a `finally`, and it is what the rest of the repo uses.
+      const staleAt = Date.now() + 30_001;
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(staleAt);
       try {
-        const staleAt = realNow() + 30_001;
-        Date.now = () => staleAt;
         // Dropped, not returned-and-stale: a zombie child must not read as
         // healthy just because its last good value is still in the cache.
         expect(bridge.getChildResourceSnapshot!()).toBeUndefined();
       } finally {
-        Date.now = realNow;
+        nowSpy.mockRestore();
       }
     } finally {
       await bridge.shutdown();

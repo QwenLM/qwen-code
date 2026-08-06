@@ -23,7 +23,10 @@ import {
   recommendedChildShareMb,
   type DaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
-import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import type {
+  ChildHeapMode,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   computeDaemonMemoryPressure,
   type DaemonMemoryPressure,
@@ -204,22 +207,31 @@ export interface DaemonStatusMemoryLimits {
    * `null` when no policy was built.
    */
   childHeap: {
-    mode: 'off' | 'observe';
+    mode: ChildHeapMode;
     /**
-     * Children the pool could host at once. 0 when it cannot host one,
-     * `null` under `off` — which models nothing, and so is not the same
-     * claim as a pool that hosts zero children.
+     * Children the pool could host at once. 0 when no partition can be
+     * modeled — either the pool cannot cover one child at the minimum heap,
+     * or the ceiling would land under that minimum once capped at today's
+     * host-derived one. `null` under `off`, which models nothing and so is
+     * not the same claim as a pool that hosts zero children.
      */
     maxConcurrentChildren: number | null;
     /**
-     * What each would receive. `null` when none is admissible and under
-     * `off` — never 0.
+     * What each would receive. Never 0 and never below
+     * `modeled.minChildHeapMb`; `null` instead, both under `off` and wherever
+     * the partition cannot be modeled within that floor.
      */
     perChildCeilingMb: number | null;
     /**
      * Spawns that would have exceeded `maxConcurrentChildren`. Admission
      * pressure only: 0 does **not** mean the partition is safe to apply,
      * because children still run on the much larger host-derived ceiling.
+     *
+     * Two known sources of counts that are not capacity pressure: a channel
+     * swap on a daemon already at `maxConcurrentChildren` books one, because
+     * the terminating child is counted until it exits; and on a host too
+     * small to model a partition this equals the total ACP spawn count, with
+     * `insufficientMemory` as the field that says why.
      */
     refusals: number;
   } | null;

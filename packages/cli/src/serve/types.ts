@@ -14,6 +14,11 @@ import {
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+// Type-only, so it is erased before the serve fast-path bundle closure check
+// ever sees it. Reused only for the child-heap knob: `memoryPressureMode`
+// happens to share the same two values today but is an independent switch, and
+// aliasing them would couple whichever one gains `enforce` first to the other.
+import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import type {
   AuthType,
   InputModalities,
@@ -260,7 +265,7 @@ export interface ServeOptions {
    * pressure, while children still run on the far larger host-derived
    * ceiling. `off` models nothing.
    */
-  childHeapMode?: 'off' | 'observe';
+  childHeapMode?: ChildHeapMode;
   /**
    * Resolved at boot by `runQwenServe`. Not an operator input, and not
    * consumed by any spawn path — it is reported under `limits.memory` on

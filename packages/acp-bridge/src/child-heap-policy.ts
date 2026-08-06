@@ -36,8 +36,10 @@ export interface ChildHeapPolicySnapshot {
   minChildHeapMb: number;
   /**
    * Children the pool could host concurrently under the modeled partition.
-   * **0** when the pool cannot cover even one child at `minChildHeapMb` — a
-   * real state on a small host, and not the same as 1.
+   * **0** when no partition can be modeled at all — either the pool cannot
+   * cover one child at `minChildHeapMb`, or the ceiling would land under that
+   * floor once capped at today's host-derived one. Both are real states on a
+   * small host, and neither is the same as 1.
    *
    * `null` under `off`, which models nothing. That is a different statement
    * from `0`: zero is a computed answer meaning "this pool hosts no child",
@@ -47,10 +49,11 @@ export interface ChildHeapPolicySnapshot {
    */
   maxConcurrentChildren: number | null;
   /**
-   * The ceiling every child would receive. `null` when no child is
-   * admissible and under `off`, never 0: `--max-old-space-size=0` means
-   * *V8's default heap*, so emitting a zero here would authorise gigabytes
-   * against an empty pool.
+   * The ceiling every child would receive. Never 0 and never below
+   * `minChildHeapMb` — `null` instead, under `off` and on any host where the
+   * partition cannot be modeled within that floor. A zero would be worse than
+   * useless: `--max-old-space-size=0` means *V8's default heap*, so emitting
+   * one would authorise gigabytes against an empty pool.
    */
   perChildCeilingMb: number | null;
   /**
@@ -62,6 +65,24 @@ export interface ChildHeapPolicySnapshot {
    * run on the far larger host-derived ceiling, so a workload needing more
    * old space than `perChildCeilingMb` is perfectly healthy here and would
    * only fail once the partition were applied.
+   *
+   * Two ways it counts something other than capacity pressure, both by
+   * construction:
+   *
+   * - **Channel swaps at full occupancy.** The decision reads
+   *   `committedProcessCount`, which counts a terminating child until it
+   *   actually exits — deliberately, since its memory is still resident. So a
+   *   replacement spawned before the old child exits transiently makes the
+   *   count one higher than steady state. Where `MAX_DAEMON_WORKSPACES` is the
+   *   binding term (`childPoolMb >= 12800`, i.e. a ~32 GB host and up), a
+   *   daemon at 25 live children books a refusal on every channel replacement,
+   *   with no memory pressure involved. Do not net this out by giving the
+   *   comparison swap headroom: that would admit a 26th ceiling against a
+   *   25-child pool, trading a metric artifact for real overcommit.
+   * - **Hosts too small to model a partition.** `maxConcurrentChildren` is 0
+   *   there, so this equals the total ACP spawn count. Correct by the
+   *   definition and alarming to read; `insufficientMemory` on the budget is
+   *   the field that says why.
    */
   refusals: number;
 }
@@ -93,17 +114,37 @@ export function createChildHeapPolicy(options: {
   // Not clamped to a minimum of one. A pool below `MIN_CHILD_HEAP_MB` hosts
   // no child at all, and saying "1" there produced a ceiling of 0 — which V8
   // reads as its *default* heap, roughly 4 GB, against a pool of nothing.
-  const maxConcurrentChildren = Math.min(
+  const admissible = Math.min(
     Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB),
     MAX_DAEMON_WORKSPACES,
   );
-  const perChildCeilingMb =
-    maxConcurrentChildren > 0
+  // `floor(pool / admissible) >= MIN_CHILD_HEAP_MB` by construction, but the
+  // legacy cap is `floor(available / 2)` and is under the floor whenever
+  // available memory is below 1024 MB. The `Math.min` lets it win, so the
+  // partition could publish a ceiling *below* the `minChildHeapMb` sitting
+  // next to it in the same snapshot — a host with 768 MB available and an
+  // explicit `--memory-budget-mb 1024` modeled one child at 384 MB. Not
+  // reachable from a derived budget (the pool hits 0 first), but the docs tell
+  // operators on exactly those hosts to pass that flag, so the documented
+  // remedy is what reaches the band.
+  //
+  // Refuse the model rather than shrink under the floor: a ceiling the module
+  // says no child may run at is not a partition, and this is the figure a
+  // future `enforce` would hand to `--max-old-space-size`. Such a host already
+  // reports `insufficientMemory`, which is where an operator should be reading
+  // it from.
+  const rawCeilingMb =
+    admissible > 0
       ? Math.min(
-          Math.floor(budget.childPoolMb / maxConcurrentChildren),
+          Math.floor(budget.childPoolMb / admissible),
           budget.legacyChildCeilingMb,
         )
       : null;
+  const modelable = rawCeilingMb !== null && rawCeilingMb >= MIN_CHILD_HEAP_MB;
+  // Kept in lockstep: publishing "one child fits" beside a null ceiling would
+  // be the same contradiction from the other side.
+  const maxConcurrentChildren = modelable ? admissible : 0;
+  const perChildCeilingMb = modelable ? rawCeilingMb : null;
 
   return {
     decide(concurrentChildren) {
