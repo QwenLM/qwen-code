@@ -19,6 +19,8 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
+import { planEffortField } from './lib/effort.js';
+import type { ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -39,6 +41,7 @@ interface PlanDiffArgs {
   /** The PR this diff came from — passed ONLY after `pr-context` succeeded. */
   pr?: number;
   repo?: string;
+  effort?: ReviewEffort;
 }
 
 /** A plan for a diff nobody fetched: no worktree — and PR identity only when
@@ -50,6 +53,8 @@ type PlanDiffResult = PlanReport & {
   diffPathAbsolute: string;
   prNumber?: string;
   ownerRepo?: string;
+  /** The review's effort, recorded so the roster reads one value everywhere. */
+  effort?: ReviewEffort;
 };
 
 function runPlanDiff(args: PlanDiffArgs): void {
@@ -90,6 +95,7 @@ function runPlanDiff(args: PlanDiffArgs): void {
     // against — so per-file line counts and heaviness are unavailable. Chunk
     // coverage, which is what Step 3B needs, is not.
     ...buildPlanReport(plan, null),
+    ...planEffortField(args.effort),
   };
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
@@ -145,6 +151,15 @@ export const planDiffCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('effort', {
+        type: 'string',
+        choices: ['low', 'medium', 'high'],
+        describe:
+          'The review effort. `medium` (balanced) drops the adversarial ' +
+          'personas from the required roster; recorded in the plan so ' +
+          'check-coverage, agent-prompt --roster and compose-review all read ' +
+          'one value. Omit for the full (high) roster.',
       }),
   handler: (argv) => {
     runPlanDiff(argv as unknown as PlanDiffArgs);

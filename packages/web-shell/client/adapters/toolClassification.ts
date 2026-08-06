@@ -7,6 +7,18 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+export function isActiveToolStatus(
+  status: ACPToolCall['status'] | string,
+): boolean {
+  return (
+    status === 'pending' || status === 'running' || status === 'in_progress'
+  );
+}
+
+export function hasActiveAgents(agents: readonly ACPToolCall[]): boolean {
+  return agents.some((agent) => isActiveToolStatus(agent.status));
+}
+
 export function isTaskExecutionRaw(raw: unknown): boolean {
   return getRecord(raw)?.['type'] === 'task_execution';
 }

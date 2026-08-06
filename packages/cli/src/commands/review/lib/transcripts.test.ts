@@ -67,6 +67,39 @@ describe('readTranscripts — defensive parsing', () => {
     expect(readTranscripts(undefined, ENV)).toEqual([]);
   });
 
+  it('skips the harness sidecar files beside a transcript', () => {
+    // The harness writes sibling files per agent into this dir —
+    // agent-transcript.ts writes `agent-<id>.meta.json` via writeAgentMeta,
+    // and a meta carries an `agentId` key. Admitted by the filter, it would
+    // parse to a phantom zero-tool-call AgentRecord: it is the
+    // `.endsWith('.jsonl')` filter, not parseTranscript, that keeps it out.
+    file(
+      'agent-a1.jsonl',
+      JSON.stringify({
+        agentId: 'a1',
+        agentName: 'general-purpose',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'chunk 1 of 1' }] },
+      }) + '\n',
+    );
+    file(
+      'agent-a1.meta.json',
+      JSON.stringify({
+        agentId: 'a1',
+        agentType: 'general-purpose',
+        description: 'dimension 1',
+        parentSessionId: 'S1',
+        parentAgentId: null,
+        createdAt: '2026-08-03T10:06:00.000Z',
+        status: 'completed',
+      }),
+    );
+    file('agent-a1.jsonl.stream', 'streaming text, not jsonl records');
+    const recs = readTranscripts(undefined, ENV);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].agentId).toBe('a1');
+  });
+
   it('skips an empty transcript file', () => {
     file('agent-empty.jsonl', '');
     expect(readTranscripts(undefined, ENV)).toEqual([]);

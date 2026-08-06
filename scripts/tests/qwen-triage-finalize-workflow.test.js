@@ -84,10 +84,17 @@ describe('qwen-triage-finalize workflow', () => {
     // Marker text is public: anyone can paste it into a PR comment. Every
     // lookup that acts on a marker must filter on the bot identity first.
     expect(script).toContain("gh api user --jq '.login'");
+    // Status-comment lookup: body starts with the marker (a comment that
+    // merely quotes it must not be PATCHed), so startswith is the strict match.
+    expect(script).toContain(
+      'select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))',
+    );
+    // CI-region, approve-marker, and new-head-marker lookups embed the marker
+    // inside the body (not at the start), so contains is the correct match —
+    // still author-filtered.
     const authorFiltered = script.match(
       /select\(\.user\.login == \$bot\) \| select\(\.body \| contains\(\$m\)\)/g,
     );
-    // CI-region lookup, approve-marker lookup, and status-comment lookup.
     expect(authorFiltered?.length).toBeGreaterThanOrEqual(3);
   });
 
@@ -138,6 +145,10 @@ describe('qwen-triage-finalize workflow', () => {
     );
     expect(workflowText).toContain(
       "HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'",
+    );
+    expect(script).toContain("STATUS_MARKER='<!-- qwen-triage lifecycle -->'");
+    expect(script).toContain(
+      "LEGACY_STATUS_MARKER='<!-- qwen-triage stage=status -->'",
     );
   });
 

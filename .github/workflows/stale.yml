@@ -10,7 +10,13 @@ on:
 
 jobs:
   stale:
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (schedule/dispatch use
+    # base-repo YAML), so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # A hung sweep must not pin a persistent pool machine for the 360-minute
+    # default; the sweep itself finishes in well under this.
+    timeout-minutes: 10
     permissions:
       issues: 'write'
       pull-requests: 'write'

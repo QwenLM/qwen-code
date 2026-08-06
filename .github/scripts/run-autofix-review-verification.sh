@@ -40,6 +40,65 @@ fi
 git config core.hooksPath /dev/null
 git checkout "${BRANCH}"
 
+GATE_LOG="${WORKDIR}/gate-output.log"
+: > "${GATE_LOG}"
+reject_fix() {
+  echo "❌ ${1}"
+  # Declare the verdict before writing its detail. An empty outcome on a failed
+  # step means the gate itself crashed, so losing the detail file must not turn
+  # a deterministic rejection into an infrastructure retry.
+  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+  echo "retryable=true" >> "${GITHUB_OUTPUT}"
+  {
+    echo "**${1}**"
+    echo
+    # Captured output can contain triple-backtick fences.
+    echo '````'
+    tail -c 3000 "${GATE_LOG}" 2> /dev/null
+    echo '````'
+  } > "${WORKDIR}/gate-rejection.md" ||
+    echo "::warning::could not write the gate rejection detail; the verdict stands."
+  exit 1
+}
+run_check() {
+  # pipefail makes the pipeline carry the command's status, not tee's.
+  local label="${1}"
+  shift
+  if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+    reject_fix "${label}"
+  fi
+}
+assert_verification_tree() {
+  if [[ "$(git rev-parse HEAD)" != "${VERIFICATION_HEAD}" ]]; then
+    reject_fix 'HEAD changed during deterministic verification'
+  fi
+  if [[ -n "$(git status --porcelain)" ]]; then
+    git status --short >> "${GATE_LOG}"
+    reject_fix 'workspace became dirty during deterministic verification'
+  fi
+}
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  git status --short >> "${GATE_LOG}"
+  reject_fix 'workspace is dirty before deterministic verification'
+fi
+VERIFICATION_HEAD="$(git rev-parse HEAD)"
+
+# The schema generator resolves '@qwen-code/qwen-code-core' to core's DIST
+# entry point, which the CLI bundle restored from the TRUSTED BASE. When the
+# branch itself changed core's sources, that base-built dist can disagree
+# with the branch's committed schema (changed runtime constants) or crash
+# the generator (changed exports) — the same false "settings schema is
+# stale" rejection class this gate exists to prevent. Rebuild core from
+# branch sources in that case: the gate already runs a full `npm run build`
+# on branch sources for every commit path, so this widens no trust surface,
+# and the build's git-ignored output cannot trip the dirty-tree asserts.
+if git diff --name-only "origin/main...${BRANCH}" \
+  | grep -Eq '^packages/core/(src/|index\.ts$)'; then
+  run_check 'core rebuild failed on the agent-committed fix' \
+    npm run build --workspace packages/core
+fi
+
 # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
 # write no-action.md, and without this the no-op path would report the
@@ -53,9 +112,12 @@ git checkout "${BRANCH}"
 # that predates the script does not contain it (bash would exit 127
 # and kill the gate with no outcome), and the gate logic must come
 # from the trusted base, not the branch under verification.
-bash "${RUNNER_TEMP}/check-settings-schema.sh"
-git diff --name-only "origin/main...${BRANCH}" \
-  | bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
+run_check 'settings schema is stale on the agent-committed fix' \
+  bash "${RUNNER_TEMP}/check-settings-schema.sh"
+CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
+run_check 'cross-package contract verification failed' \
+  bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
+assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   # No new commit. That is only legitimate as a deliberate no-action.
@@ -75,51 +137,6 @@ if [[ ! -s "${WORKDIR}/address-summary.md" ]]; then
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
   exit 1
 fi
-
-# Every check below can legitimately REJECT the agent's attempt, so
-# each declares that verdict explicitly. That is what lets the handoff
-# tell a rejection apart from the gate's OWN death: an empty outcome
-# on a failed job means the gate never reached a verdict (its own bug,
-# an infra blip), and the agent's work must then be retried rather
-# than buried by a watermark advance.
-# Capture each check's output. A rejection has to tell the agent WHY
-# its change was refused: without that, the next round re-reads only
-# the original review feedback and re-makes the same mistake - #7208
-# was handed to a human over a two-character TS4111 fix its own
-# compiler output already spelled out.
-GATE_LOG="${WORKDIR}/gate-output.log"
-: > "${GATE_LOG}"
-reject_fix() {
-  echo "❌ ${1}"
-  # Declare the verdict FIRST. The handoff routes on outcome=, and an
-  # empty outcome on a failed job means "the gate never reached a
-  # verdict" — i.e. a crash, which is RETRIED. So a rejection that
-  # dies while writing its detail file would be re-attempted forever
-  # instead of reported once. A detail we cannot write is a degraded
-  # message; it must never cost the verdict, hence this order and the
-  # non-fatal write below.
-  echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  {
-    echo "**${1}**"
-    echo
-    # A four-backtick fence cannot be closed by a ``` line, so
-    # captured output containing its own fences stays inside the
-    # block when this is posted verbatim as a PR comment.
-    echo '````'
-    tail -c 3000 "${GATE_LOG}" 2> /dev/null
-    echo '````'
-  } > "${WORKDIR}/gate-rejection.md" ||
-    echo "::warning::could not write the gate rejection detail; the verdict stands."
-  exit 1
-}
-run_check() {
-  # pipefail makes the pipeline carry the command's status, not tee's.
-  local label="${1}"
-  shift
-  if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
-    reject_fix "${label}"
-  fi
-}
 
 echo '🔬 Re-running deterministic checks (independent of the agent)...'
 run_check 'build failed on the agent-committed fix' npm run build
@@ -159,4 +176,6 @@ else
       npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
   done
 fi
+assert_verification_tree
+echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"

@@ -14,6 +14,7 @@ import {
   CompressionStatus,
   Turn,
   GeminiEventType,
+  createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
 import type {
@@ -101,6 +102,21 @@ describe('findRepeatedDuplicateProviderToolCall', () => {
   });
 });
 
+describe('createDuplicateProviderToolCallResponse', () => {
+  it('marks the synthetic response as not started', () => {
+    const response = createDuplicateProviderToolCallResponse({
+      callId: 'duplicate-response',
+      providerCallId: 'provider-call',
+      name: 'read_file',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-duplicate',
+    });
+
+    expect(response.executionStatus).toBe('not_started');
+  });
+});
+
 describe('Turn', () => {
   let turn: Turn;
   // Define a type for the mocked Chat instance for clarity
@@ -174,6 +190,7 @@ describe('Turn', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         'prompt-id-1',
+        undefined,
       );
 
       expect(events).toEqual([

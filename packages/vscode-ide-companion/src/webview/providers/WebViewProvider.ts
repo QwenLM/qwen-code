@@ -484,6 +484,18 @@ export class WebViewProvider {
         }
       }
 
+      const pendingToolCallId =
+        this.pendingPermissionRequest?.toolCall?.toolCallId;
+      const updateToolCallId = updateData.toolCallId;
+      const updateStatus = updateData.status;
+      if (
+        typeof updateToolCallId === 'string' &&
+        updateToolCallId === pendingToolCallId &&
+        (updateStatus === 'completed' || updateStatus === 'failed')
+      ) {
+        this.pendingPermissionResolve?.('cancel');
+      }
+
       this.sendMessageToWebView({
         type: 'toolCall',
         data: {
@@ -544,6 +556,7 @@ export class WebViewProvider {
             if (message.type !== 'permissionResponse') {
               return;
             }
+            if (!this.pendingPermissionResolve) return;
 
             const optionId = message.data.optionId || '';
 
@@ -559,6 +572,12 @@ export class WebViewProvider {
             const isSwitchMode =
               (request.toolCall as { kind?: string } | undefined)?.kind ===
               'switch_mode';
+            const isWorkflowApproval =
+              (
+                request.toolCall as
+                  | { _meta?: { workflowApproval?: unknown } }
+                  | undefined
+              )?._meta?.workflowApproval === true;
 
             // Always close open qwen-diff editors after any permission decision
             void vscode.commands.executeCommand('qwen.diff.closeAll');
@@ -568,7 +587,7 @@ export class WebViewProvider {
               // end the stream; for switch_mode, keep the session alive but
               // still mark the permission tool call as failed in the UI.
               void (async () => {
-                if (!isSwitchMode) {
+                if (!isSwitchMode && !isWorkflowApproval) {
                   try {
                     await this.agentManager.cancelCurrentPrompt();
                   } catch (err) {

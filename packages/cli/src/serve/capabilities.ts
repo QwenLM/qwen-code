@@ -49,7 +49,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // must not be polled in a tight loop.
   session_info: { since: 'v1' },
   session_source_metadata: { since: 'v1' },
+  session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_mid_turn_message_mutation: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -98,6 +100,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
@@ -119,6 +122,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `mcp_budget_warning` and `mcp_child_refused_batch`. Always-on;
   // orthogonal to `mcp_guardrails` (the snapshot surface).
   mcp_guardrail_events: { since: 'v1' },
+  // Managed ACP invokes an authenticated external policy provider exactly once
+  // at the final tool-execution boundary. Advertised only after the required
+  // provider completed its startup handshake.
+  external_tool_guard: { since: 'v1', modes: ['required'] },
   // Always-on. Daemon supports runtime MCP server mutation via
   // `POST /workspace/mcp/servers` (add) and
   // `DELETE /workspace/mcp/servers/:name` (remove). SDK clients
@@ -134,6 +141,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // advertise the text/list/stat/glob surface without byte-window
   // support.
   workspace_file_bytes: { since: 'v1' },
+  // Daemon supports byte-cursor paging on `GET /file`: responses carry
+  // `nextCursor`/`hasMore` and requests accept `cursor`. A separate tag from
+  // `workspace_file_read` because the convention here is that new behavior
+  // gets a new tag — a client that preflighted the old one must not silently
+  // receive a surface it cannot recognise. Same split as
+  // `workspace_file_bytes` from `workspace_file_read`, and
+  // `session_transcript_pagination` from `session_transcript`.
+  workspace_file_read_cursor: { since: 'v1' },
   // Daemon supports hash-aware text mutation routes
   // (`POST /file/write`, `POST /file/edit`) behind the strict mutation
   // gate. Clients should still pre-flight `require_auth` separately for
@@ -334,6 +349,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // to discover plural modalities because legacy Voice tags describe only
   // the primary runtime and may be absent for a secondary-only setup.
   workspace_qualified_voice: { since: 'v1' },
+  // Workspace-qualified managed-memory routes
+  // (`/workspaces/:workspace/memory/{remember,forget,dream}`). Each
+  // registered workspace gets its own task lane; the primary lane is the
+  // same instance as the singular `/workspace/memory` surface.
+  workspace_qualified_memory: { since: 'v1' },
   // Global extension catalog/mutations plus workspace-qualified activation
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
@@ -388,6 +408,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // would make the envelope depend on the user's home config). `modes`
   // enumerates the two transcription paths (realtime vs. on-stop batch).
   voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
+  // Process-global Live Voice control plane. Advertisement requires a macOS
+  // WebShell daemon with native Host integration and the hot-applied enabled
+  // gate. `/live/status` remains the dynamic readiness surface for the Host,
+  // permissions, self-checks, and provider reachability.
+  realtime_voice: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -400,6 +425,7 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
+  externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
@@ -444,6 +470,7 @@ export interface AdvertiseFeatureToggles {
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
    */
   acpHttpEnabled?: boolean;
+  realtimeVoiceEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
 }
 
@@ -486,6 +513,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['require_auth', (toggles) => toggles.requireAuth === true],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
+  [
+    'external_tool_guard',
+    (toggles) => toggles.externalToolGuardActive === true,
+  ],
   ['allow_origin', (toggles) => toggles.allowOriginActive === true],
   [
     'prompt_absolute_deadline',
@@ -581,6 +612,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.acpHttpEnabled === true &&
       toggles.multiWorkspaceSessionsEnabled === true,
   ],
+  [
+    'workspace_qualified_memory',
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.multiWorkspaceSessionsEnabled === true,
+  ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
   [
@@ -595,6 +632,11 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     // upgrade listener verifies (see acp-http/index.ts).
     'voice_transcribe',
     (toggles) => toggles.voiceWsAvailable !== false,
+  ],
+  [
+    'realtime_voice',
+    (toggles) =>
+      toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
   ],
 ]);
 

@@ -317,6 +317,7 @@ You have access to the ${ToolNames.TODO_WRITE} tool to keep user-visible progres
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -710,6 +711,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: ${ToolNames.WRITE_FILE} for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: ${ToolNames.SHELL} for 'npm run test']
@@ -850,6 +854,15 @@ Now I'll look for existing or related test files to understand current testing c
 </function>
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+<function=${ToolNames.READ_FILE}>
+<parameter=file_path>
+/path/to/someFile.test.ts
+</parameter>
+</function>
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 <function=${ToolNames.WRITE_FILE}>
 <parameter=file_path>
@@ -963,6 +976,11 @@ Now I'll look for existing or related test files to understand current testing c
 {"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/existingTest.test.ts"}}
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+{"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/someFile.test.ts"}}
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 {"name": "${ToolNames.WRITE_FILE}", "arguments": {"file_path": "/path/to/someFile.test.ts", "content": "(test code content)"}}
 </tool_call>
@@ -1045,6 +1063,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/existingTest.test.ts<|"|>}<tool_call|>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/someFile.test.ts<|"|>}<tool_call|>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <|tool_call>call:${ToolNames.WRITE_FILE}{file_path:<|"|>/path/to/someFile.test.ts<|"|>,content:<|"|>(test code content)<|"|>}<tool_call|>
 I've written the tests. Now I'll run the project's test command to verify them.
 <|tool_call>call:${ToolNames.SHELL}{command:<|"|>npm run test<|"|>}<tool_call|>
@@ -1181,18 +1202,19 @@ Your plan is ready when you have addressed all ambiguities and it covers: what t
 }
 
 /**
- * One-shot reminder injected on the first model-bound turn after the user
- * manually exits plan mode (Shift+Tab, `/approval-mode`, `/plan`, ACP mode
- * switch). While plan mode is active {@link getPlanModeSystemReminder} is
- * re-injected every turn, so on a manual exit the model's most recent
- * context still says "plan mode is active" — the reminder silently
- * disappearing is not a signal models reliably notice (#7671).
+ * One-shot reminder injected on the first model-bound turn after Plan mode
+ * changes outside the approved `exit_plan_mode` flow. While Plan mode is
+ * active {@link getPlanModeSystemReminder} is re-injected every turn, so the
+ * reminder silently disappearing is not a signal models reliably notice
+ * (#7671).
  *
- * @param currentMode - The approval mode the user switched to
+ * @param currentMode - The approval mode active when delivery is claimed
  */
 export function getManualPlanExitSystemReminder(currentMode: string): string {
   return `<system-reminder>
-The user has manually switched out of plan mode (current approval mode: ${currentMode}). You are no longer in plan mode. Do NOT call ${ToolNames.EXIT_PLAN_MODE} — there is no plan approval pending. Continue working in the current mode; previous plan-mode restrictions on edits and state-modifying tools no longer apply.
+The approval mode changed outside the approved exit_plan_mode flow.
+The current approval mode is: ${currentMode}.
+Plan mode is no longer active. This notice supersedes any earlier reminder that Plan mode is active. Do not call exit_plan_mode; no plan approval is pending. Continue under the current mode's permissions and confirmation requirements.
 </system-reminder>`;
 }
 
