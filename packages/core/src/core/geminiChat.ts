@@ -2700,6 +2700,12 @@ export class GeminiChat {
               prompt_id,
               requestOverrides,
               turnGoalContext,
+              // Captured by value, so the attempt records exactly the prefix
+              // `buildAttemptContents()` just asked the model to resume from,
+              // even if a later branch resets the continuation.
+              transportContinuationPrefix.length > 0
+                ? transportContinuationPrefix
+                : undefined,
             );
 
             lastFinishReason = undefined;
@@ -3795,6 +3801,7 @@ export class GeminiChat {
       retryErrorCodes?: readonly number[];
     },
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3871,7 +3878,12 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse, goalContext);
+    return this.processStreamResponse(
+      model,
+      streamResponse,
+      goalContext,
+      transportContinuationPrefix,
+    );
   }
 
   private async *makeFallbackStream(
@@ -4333,10 +4345,18 @@ export class GeminiChat {
     }
   }
 
+  /**
+   * @param transportContinuationPrefix - Text a previous attempt already
+   *   delivered before a socket cut, which this attempt was asked to resume
+   *   from (issue #8094). Merged into the recorded turn on success only, so
+   *   the JSONL transcript matches the turn `prependTextToLastModelTurn`
+   *   leaves in memory. Undefined on every non-continuation send.
+   */
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4786,9 +4806,38 @@ export class GeminiChat {
       streamError === null ||
       (hasToolCall &&
         (thoughtContentPart || consolidatedHistoryParts.length > 0));
+    // Transport-continuation merge (issue #8094). `allModelParts` is
+    // per-attempt, so a continuation's `contentText` is the resumed remainder
+    // only. The outer send loop merges the delivered prefix back into history
+    // with `prependTextToLastModelTurn`, but that writes history alone — so
+    // without this, `--resume` rehydrates a turn that starts mid-sentence
+    // while the live session shows a coherent answer.
+    //
+    // It has to happen here rather than next to the history merge: this
+    // record is appended before the outer loop regains control, and
+    // `appendRecord` is append-only, so a second record written afterwards
+    // would sit *behind* the remainder and resume would read the halves out
+    // of order.
+    //
+    // Success only. On `streamError !== null` the record must keep matching
+    // the remainder-only partial that survives in history (the
+    // `pendingPartialAssistantRecord` path below) — the prefix belongs to an
+    // attempt that did not survive, and a fresh-restart retry discards it
+    // from history via `resetTransportContinuation`.
+    const recordedContentText =
+      streamError === null && transportContinuationPrefix
+        ? transportContinuationPrefix +
+          getRecoveryContinuationSuffix(
+            transportContinuationPrefix,
+            contentText,
+          )
+        : contentText;
     if (
       willPersistToHistory &&
-      (thoughtContentPart || contentText || hasToolCall || usageMetadata)
+      (thoughtContentPart ||
+        recordedContentText ||
+        hasToolCall ||
+        usageMetadata)
     ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
@@ -4796,7 +4845,7 @@ export class GeminiChat {
         model,
         message: [
           ...(thoughtContentPart ? [thoughtContentPart] : []),
-          ...(contentText ? [{ text: contentText }] : []),
+          ...(recordedContentText ? [{ text: recordedContentText }] : []),
           ...(hasToolCall
             ? contentParts
                 .map(redactStructuredOutputArgsForRecording)
