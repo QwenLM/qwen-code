@@ -20,7 +20,7 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
-import { AcpDispatcher } from './dispatch.js';
+import { AcpDispatcher, type LiveSessionIsolation } from './dispatch.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import type {
   WorkspaceRegistry,
@@ -455,6 +455,7 @@ export interface MountAcpHttpOptions {
     ws: WebSocket,
     req: IncomingMessage,
   ) => void;
+  liveSessionIsolation?: LiveSessionIsolation;
 }
 
 /**
@@ -807,6 +808,7 @@ export function mountAcpHttp(
       const guard = opts.workspaceRegistry?.primaryEntry.current?.guard;
       return guard ? () => guard.assertOpen() : undefined;
     },
+    undefined,
     opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
       Storage.getRuntimeBaseDir(),
   );
@@ -1288,6 +1290,9 @@ export function mountAcpHttp(
         const guard = rt.generationGuard;
         return guard ? () => guard.assertOpen() : undefined;
       },
+      rt.provenance === 'live-conversation'
+        ? opts.liveSessionIsolation
+        : undefined,
       rt.sessionRuntimeBaseDir,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;

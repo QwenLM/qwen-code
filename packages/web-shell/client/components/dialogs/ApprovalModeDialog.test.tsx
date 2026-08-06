@@ -71,6 +71,12 @@ describe('ApprovalModeDialog', () => {
     expect(
       container!.querySelector('[data-mode-id="plan"]')?.textContent,
     ).toContain('Plan & Review (plan)');
+    expect(
+      container!.querySelector('[data-mode-id="default"]')?.textContent,
+    ).toContain('Ask Approval (default)');
+    expect(
+      container!.querySelector('[data-mode-id="yolo"]')?.textContent,
+    ).toContain('Full Access (yolo)');
   });
 
   it('opens with the highlight on the current mode and confirms on Enter', () => {
