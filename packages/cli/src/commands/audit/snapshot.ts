@@ -60,7 +60,7 @@ export const snapshotCommand: CommandModule = {
           headSha: sidecar.meta.headSha ?? null,
           subtreeHash: sidecar.meta.subtreeHash ?? null,
           hashedFiles: Object.keys(sidecar.hashes).length,
-          callers: Object.keys(sidecar.callerHashes).length,
+          callers: sidecar.callerNames.length,
         },
         null,
         2,

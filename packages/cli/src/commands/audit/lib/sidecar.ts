@@ -68,8 +68,13 @@ export interface Sidecar {
   meta: SidecarMeta;
   /** sha256 of every walked subject and test file at capture time. */
   hashes: Record<string, string>;
-  /** sha256 of every registered deep-read caller, keyed by absolute path. */
+  /** sha256 of every registered deep-read caller readable at capture,
+   *  keyed by absolute path. */
   callerHashes: Record<string, string>;
+  /** Every registered caller by absolute path, readable or not — a name
+   *  without a hash was unreadable at capture, but drift-check still
+   *  watches it, so a registration is never silently dropped. */
+  callerNames: string[];
   /** Uncoverable files are name-recorded, never content-copied or hashed. */
   uncoverableNames: string[];
 }
@@ -93,7 +98,8 @@ export function captureSidecar(
   if (existsSync(existingPath)) {
     const existing = loadSidecar(sidecarDir);
     for (const caller of callerPaths) {
-      if (caller in existing.callerHashes) continue;
+      if (existing.callerNames.includes(caller)) continue;
+      existing.callerNames.push(caller);
       try {
         existing.callerHashes[caller] = sha256(readFileSync(caller, 'utf8'));
         const dest = join(
@@ -194,6 +200,7 @@ export function captureSidecar(
     meta,
     hashes,
     callerHashes,
+    callerNames: [...new Set(callerPaths)],
     uncoverableNames: plan.uncoverable.map((u) => u.path),
   };
   writeFileSync(
@@ -249,12 +256,18 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
   }
 
   const driftedCallers: string[] = [];
-  for (const [caller, baseline] of Object.entries(sidecar.callerHashes)) {
+  for (const caller of sidecar.callerNames) {
+    const baseline = sidecar.callerHashes[caller];
     if (!existsSync(caller)) {
       driftedCallers.push(caller);
       continue;
     }
-    if (sha256(readFileSync(caller, 'utf8')) !== baseline) {
+    // A name without a baseline was unreadable at capture — content that
+    // (re)appears there cannot be aligned against anything, so it drifts.
+    if (
+      baseline === undefined ||
+      sha256(readFileSync(caller, 'utf8')) !== baseline
+    ) {
       driftedCallers.push(caller);
     }
   }

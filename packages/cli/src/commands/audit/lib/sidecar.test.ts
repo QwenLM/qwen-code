@@ -89,6 +89,7 @@ describe('caller registration', () => {
     const extended = captureSidecar(p, sidecarDir, [caller]);
     expect(extended.hashes['src/a.ts']).toBe(baselineHash);
     expect(Object.keys(extended.callerHashes)).toEqual([caller]);
+    expect(extended.callerNames).toEqual([caller]);
     // Caller copies are keyed by their full path under callers/.
     expect(
       existsSync(join(sidecarDir, 'callers', caller.replace(/^\//, ''))),
@@ -99,6 +100,30 @@ describe('caller registration', () => {
     expect(drift.driftedCallers).toEqual([]);
 
     writeFileSync(caller, 'call(2);\n');
+    expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([caller]);
+  });
+
+  it('records an unreadable caller by name and drift-check reports it', () => {
+    const caller = join(dir, 'caller.ts');
+    writeFileSync(caller, 'call();\n');
+    const p = plan();
+    captureSidecar(p, sidecarDir);
+    // The file vanishes between 1c's registration and the snapshot: it is
+    // name-recorded, never silently dropped.
+    rmSync(caller);
+
+    const extended = captureSidecar(p, sidecarDir, [caller]);
+    expect(extended.callerNames).toEqual([caller]);
+    expect(extended.callerHashes[caller]).toBeUndefined();
+    expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([caller]);
+  });
+
+  it('name-records a caller already unreadable at first capture', () => {
+    const caller = join(dir, 'missing.ts'); // never created
+    const p = plan();
+    const sidecar = captureSidecar(p, sidecarDir, [caller]);
+    expect(sidecar.callerNames).toEqual([caller]);
+    expect(sidecar.callerHashes[caller]).toBeUndefined();
     expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([caller]);
   });
 });
