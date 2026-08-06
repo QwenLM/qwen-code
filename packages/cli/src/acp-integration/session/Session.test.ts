@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fsSync from 'node:fs';
@@ -53,6 +54,10 @@ import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../../serve/live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../../serve/live/live-speak-to-user.js';
+import {
+  collectHistoryReplayUpdates,
+  createReplayCumulativeUsage,
+} from './history-replay-page.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
@@ -758,6 +763,82 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('bounds textual tool results at the live ACP delivery boundary', async () => {
+    const source = `head-${'x'.repeat(499_999)}-tail`;
+    await session.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'large-call',
+      status: 'completed',
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: source },
+        },
+      ],
+      rawOutput: source,
+      _meta: { toolName: 'read_file' },
+    });
+
+    const params = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.at(-1)?.[0] as SessionNotification | undefined;
+    expect(params).toBeDefined();
+    const delivered = params?.update as unknown as Record<string, unknown>;
+    expect(
+      Buffer.byteLength(JSON.stringify(delivered['content']), 'utf8'),
+    ).toBeLessThanOrEqual(65_536);
+    expect(
+      Buffer.byteLength(JSON.stringify(delivered['rawOutput']), 'utf8'),
+    ).toBeLessThanOrEqual(65_536);
+    expect(delivered).toHaveProperty('content');
+    expect(delivered).toHaveProperty('rawOutput');
+
+    await session.sendUpdate(params!.update);
+    const redelivered = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.at(-1)?.[0]?.update;
+    expect(redelivered).toBe(params?.update);
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session-id',
+      records: [
+        chatRecord({
+          uuid: 'large-tool-result',
+          parentUuid: 'large-assistant',
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'large-replay-call',
+                  name: 'read_file',
+                  response: { output: source },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'large-replay-call',
+            responseParts: [],
+            resultDisplay: source,
+          },
+        }),
+      ],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+    const replayUpdate = replay.updates.find(
+      (update) => update.sessionUpdate === 'tool_call_update',
+    );
+    expect(replayUpdate).toBeDefined();
+
+    await session.sendUpdate(replayUpdate!);
+    const replayDelivered = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.at(-1)?.[0]?.update;
+    expect(replayDelivered).toBe(replayUpdate);
   });
 
   it('bridges workflow approvals through ACP permission requests', async () => {
