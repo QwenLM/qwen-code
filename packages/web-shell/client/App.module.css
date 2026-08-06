@@ -161,6 +161,14 @@
   }
 }
 
+/* Applied on the fullscreen -> docked transition: the same node swaps back to
+   .artifactPanelDock, whose open animation would otherwise restart (the
+   computed animation-name flips none -> artifactPanelDockOpen) and re-play the
+   slide-in on the already-open panel. */
+.artifactPanelDockNoOpenAnimation {
+  animation: none;
+}
+
 .artifactPanelFullscreen {
   position: fixed;
   inset: env(safe-area-inset-top) env(safe-area-inset-right)
@@ -168,13 +176,6 @@
   z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) - 10);
   background: var(--background);
   display: flex;
-}
-
-/* The fullscreen artifact panel covers the sidebar and the chat column; drop
-   the covered shells from layout, tab order, and AT while it is up (same
-   treatment chatViewHidden gives the chat behind covering panels/pages). */
-.shellHidden {
-  display: none;
 }
 
 /* Positioning context so the scheduled-tasks page (position:absolute) covers

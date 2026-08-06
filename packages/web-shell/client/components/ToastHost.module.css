@@ -2,7 +2,9 @@
   position: absolute;
   top: 12px;
   right: 12px;
-  z-index: 30;
+  /* Above the fullscreen artifact surface (dialog-backdrop - 10) so error
+     toasts from panel actions aren't painted under the opaque overlay. */
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
   display: flex;
   width: min(420px, calc(100% - 24px));
   flex-direction: column;

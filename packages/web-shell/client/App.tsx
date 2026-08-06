@@ -2400,6 +2400,13 @@ export function App({
     DEFAULT_REVIEW_PANEL_WIDTH,
   );
   const [artifactPanelFullscreen, setArtifactPanelFullscreen] = useState(false);
+  // Exiting fullscreen swaps the same DOM node back to .artifactPanelDock,
+  // whose open animation would re-play on the already-open panel; suppress it
+  // until the panel closes and the dock remounts for a genuine open.
+  const [
+    suppressArtifactDockOpenAnimation,
+    setSuppressArtifactDockOpenAnimation,
+  ] = useState(false);
   const artifactPanelResizeCleanupRef = useRef<(() => void) | null>(null);
   const artifactPanelSessionStateRef = useRef<ArtifactPanelSessionState | null>(
     null,
@@ -3101,12 +3108,18 @@ export function App({
   }, []);
   const toggleArtifactPanelFullscreen = useCallback(() => {
     setArtifactPanelFullscreen((value) => !value);
+    setSuppressArtifactDockOpenAnimation(true);
   }, []);
   useEffect(() => {
-    if (!artifactPanelOpen) setArtifactPanelFullscreen(false);
+    if (!artifactPanelOpen) {
+      setArtifactPanelFullscreen(false);
+      setSuppressArtifactDockOpenAnimation(false);
+    }
   }, [artifactPanelOpen]);
   useLayoutEffect(() => {
-    if (!artifactPanelOpen) return;
+    // Fullscreen hides the chat pane (display:none); measuring it there
+    // reports 0 and would clamp the panel down to its minimum width.
+    if (!artifactPanelOpen || artifactPanelFullscreen) return;
     const clampWidth = () => {
       setArtifactPanelWidth((width) => {
         const chatPaneWidth =
@@ -3128,7 +3141,7 @@ export function App({
       window.removeEventListener('resize', clampWidth);
       observer.disconnect();
     };
-  }, [artifactPanelOpen]);
+  }, [artifactPanelOpen, artifactPanelFullscreen]);
   const closeArtifactPanelTab = useCallback((tabId: string) => {
     setArtifactPanelTabs((tabs) => {
       const nextTabs = tabs.filter((tab) => tab.id !== tabId);
@@ -3986,6 +3999,10 @@ export function App({
     if (activePanel) setActivePanel(null);
     if (modelDialogMode) setModelDialogMode(null);
     if (showApprovalModeDialog) setShowApprovalModeDialog(false);
+    // The fullscreen artifact panel hides the chat (display:none +
+    // aria-hidden), and the approval overlay renders inside the chat footer —
+    // shrink the panel back to its dock/drawer so the approval surfaces.
+    if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
     // The Scheduled Tasks and Goals pages are full-pane overlays
     // (position:absolute) that cover the chat footer too, so dismiss them for
     // the same reason. The split view is deliberately NOT dismissed: each pane
@@ -4000,6 +4017,7 @@ export function App({
     modelDialogMode,
     showApprovalModeDialog,
     mainView,
+    artifactPanelFullscreen,
   ]);
   // Whether each approval overlay is the topmost (visible, uncovered) one. The
   // overlay components consume this as `keyboardActive`: when it flips true — on
@@ -4012,13 +4030,15 @@ export function App({
     !activePanel &&
     modelDialogMode === null &&
     !showApprovalModeDialog &&
-    mainView === 'chat';
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
   const askUserOverlayVisible =
     pendingAskUserApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
     !showApprovalModeDialog &&
-    mainView === 'chat';
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
@@ -8099,8 +8119,14 @@ export function App({
       // top are DialogShells, whose own handler stops Escape before this
       // listener, so this only fires when the panel itself is topmost.
       if (e.key === 'Escape' && live.artifactPanelFullscreen) {
-        e.preventDefault();
-        setArtifactPanelFullscreen(false);
+        // Mirror the activePanel branch below: the sidebar search input
+        // clears on Escape without stopping the event, so don't also shrink
+        // the panel when Escape is being handled inside the sidebar.
+        const target = e.target as HTMLElement | null;
+        if (!target?.closest('[data-sidebar-shell]')) {
+          e.preventDefault();
+          setArtifactPanelFullscreen(false);
+        }
         return;
       }
 
@@ -9144,7 +9170,7 @@ export function App({
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
                   forceMobileDrawer ? styles.mobileDrawerForced : undefined,
-                  artifactPanelFullscreen ? styles.shellHidden : undefined,
+                  artifactPanelFullscreen ? styles.chatViewHidden : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -9262,7 +9288,7 @@ export function App({
             <div
               className={[
                 styles.contextShell,
-                artifactPanelFullscreen ? styles.shellHidden : undefined,
+                artifactPanelFullscreen ? styles.chatViewHidden : undefined,
               ]
                 .filter(Boolean)
                 .join(' ')}
@@ -10455,7 +10481,7 @@ export function App({
             {environmentPanelMounted && (
               <EnvironmentPanel
                 floating={!environmentPanelFits}
-                hidden={!environmentPanelVisible}
+                hidden={!environmentPanelVisible || artifactPanelFullscreen}
                 workspaceCwd={sessionWorktree?.path ?? activeWorkspaceCwd}
                 gitWorkspaceCwd={
                   connection.sessionId ? gitDiffWorkspaceCwd : undefined
@@ -10516,7 +10542,14 @@ export function App({
                 className={
                   artifactPanelFullscreen
                     ? styles.artifactPanelFullscreen
-                    : styles.artifactPanelDock
+                    : [
+                        styles.artifactPanelDock,
+                        suppressArtifactDockOpenAnimation
+                          ? styles.artifactPanelDockNoOpenAnimation
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')
                 }
                 style={
                   {

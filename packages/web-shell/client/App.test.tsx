@@ -1560,6 +1560,20 @@ describe('task activity key', () => {
     // remount would silently discard panel-local state (drafts, scroll).
     expect(fullscreenAside).toBe(dockedAside);
     expect(fullscreenAside?.className).toContain('panelFullscreen');
+    // The covered shells must drop out of layout, tab order, and AT while the
+    // opaque surface is up — keyboard/AT reaching them behind the overlay is
+    // exactly what the hiding prevents.
+    const messages = container.querySelector('[data-testid="messages"]');
+    expect(messages).not.toBeNull();
+    expect(messages?.closest('[aria-hidden="true"]')).not.toBeNull();
+    const sidebarShell = container.querySelector('[data-sidebar-shell]');
+    expect(sidebarShell).not.toBeNull();
+    expect(sidebarShell?.getAttribute('aria-hidden')).toBe('true');
+    expect(sidebarShell?.className).toContain('chatViewHidden');
+    const contextShell = container.querySelector('[class*="contextShell"]');
+    expect(contextShell).not.toBeNull();
+    expect(contextShell?.getAttribute('aria-hidden')).toBe('true');
+    expect(contextShell?.className).toContain('chatViewHidden');
     const exitFullscreenButton =
       fullscreenAside?.querySelector<HTMLButtonElement>(
         'button[aria-label="Exit fullscreen"]',
@@ -1590,13 +1604,15 @@ describe('task activity key', () => {
     ).not.toBeNull();
 
     await act(async () => {
-      window.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Escape',
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
+      container
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
       await Promise.resolve();
     });
 
@@ -1607,6 +1623,12 @@ describe('task activity key', () => {
     expect(
       container.querySelector('button[title="watch server log"]'),
     ).not.toBeNull();
+    // Exiting fullscreen restores the covered shells to layout and AT.
+    expect(messages?.closest('[aria-hidden="true"]')).toBeNull();
+    expect(sidebarShell?.getAttribute('aria-hidden')).toBeNull();
+    expect(sidebarShell?.className).not.toContain('chatViewHidden');
+    expect(contextShell?.getAttribute('aria-hidden')).toBeNull();
+    expect(contextShell?.className).not.toContain('chatViewHidden');
   });
 
   it('merges a reopened monitor into its existing tab', async () => {
@@ -1973,9 +1995,12 @@ describe('artifact panel fullscreen', () => {
     ).not.toBeNull();
 
     // Escape shrinks the panel back to its drawer width; it must not close
-    // the panel entirely.
+    // the panel entirely. Dispatch on the drawer content (not window) so the
+    // event passes through document, where vaul's capture-phase Escape
+    // listener runs — DrawerContent's onEscapeKeyDown preventDefault is what
+    // keeps the drawer from closing the panel here.
     await act(async () => {
-      window.dispatchEvent(
+      drawerAside?.dispatchEvent(
         new KeyboardEvent('keydown', {
           key: 'Escape',
           bubbles: true,
@@ -1995,6 +2020,200 @@ describe('artifact panel fullscreen', () => {
       `${portal} [data-slot="drawer-content"]`,
     );
     expect(restoredContent?.className).toContain('min(520px');
+  });
+
+  it('preserves the docked width across a fullscreen round-trip', () => {
+    // While fullscreen, the chat pane is display:none; a real browser fires
+    // its ResizeObserver the moment it collapses to 0x0. The width clamp
+    // must not shrink the persisted panel width from that 0 measurement.
+    const resizeCallbacks = new Set<ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        resizeCallbacks.add(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        resizeCallbacks.delete(this.callback);
+      }
+    } as typeof ResizeObserver;
+    let chatPaneWidth = 400;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function () {
+        if (this.dataset['testid'] !== 'chat-pane-container')
+          return new DOMRect();
+        return new DOMRect(0, 0, chatPaneWidth, 600);
+      },
+    );
+    const { container } = renderApp();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    // The opening clamp shrinks the default 500px panel to fit the 400px
+    // chat pane — the width a user would then carry into fullscreen.
+    expect(
+      container
+        .querySelector('[role="separator"]')
+        ?.getAttribute('aria-valuenow'),
+    ).toBe('400');
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    const fullscreenAside = container.querySelector<HTMLElement>(
+      '[class*="artifactPanelFullscreen"] aside',
+    );
+    expect(fullscreenAside).not.toBeNull();
+    // Full-bleed comes from the class; the docked inline width must not be
+    // applied alongside it (inline styles beat classes).
+    expect(fullscreenAside?.style.width).toBe('');
+    expect(fullscreenAside?.style.flexBasis).toBe('');
+
+    // The hidden pane collapses to 0x0 and its ResizeObserver fires.
+    chatPaneWidth = 0;
+    act(() => {
+      resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver));
+    });
+
+    // The pane lays back out at viewport(900) - panel(400) = 500 on exit.
+    chatPaneWidth = 500;
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Exit fullscreen"]',
+        )
+        ?.click();
+    });
+    expect(
+      container
+        .querySelector('[role="separator"]')
+        ?.getAttribute('aria-valuenow'),
+    ).toBe('400');
+    globalThis.ResizeObserver = originalResizeObserver;
+  });
+
+  it('shrinks fullscreen when a tool approval becomes pending', async () => {
+    const { container, rerender } = renderApp();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // A gated tool call arrives while the opaque surface covers the chat;
+    // the approval overlay renders in the chat footer, so fullscreen must
+    // step aside or the turn hangs behind it with no visible prompt.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    const approvalOverlay = document.querySelector(
+      '[data-testid="approval-overlay"]',
+    );
+    expect(approvalOverlay).not.toBeNull();
+    expect(approvalOverlay?.closest('[aria-hidden="true"]')).toBeNull();
+    expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+  });
+
+  it('does not dismiss the floating environment panel on pointerdown while fullscreen', async () => {
+    const resizeCallbacks = new Set<ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        resizeCallbacks.add(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        resizeCallbacks.delete(this.callback);
+      }
+    } as typeof ResizeObserver;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function () {
+        if (this.dataset['testid'] !== 'context-body') return new DOMRect();
+        return new DOMRect(0, 0, 1_000, 600);
+      },
+    );
+    const { container } = renderApp();
+
+    await act(async () => {
+      resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver));
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    expect(
+      container
+        .querySelector('[data-testid="environment-panel"]:not([hidden])')
+        ?.getAttribute('data-floating'),
+    ).toBe('true');
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // A pointerdown lands on the fullscreen surface; the covered environment
+    // panel is hidden but must not be dismissed by its outside-click listener.
+    act(() => {
+      container
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Exit fullscreen"]',
+        )
+        ?.click();
+    });
+    expect(
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).not.toBeNull();
+    globalThis.ResizeObserver = originalResizeObserver;
   });
 });
 
