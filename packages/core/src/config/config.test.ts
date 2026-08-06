@@ -33,6 +33,7 @@ import {
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
+  logStartSession,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -326,6 +327,7 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   return {
     ...actual,
     logRipgrepFallback: vi.fn(),
+    logStartSession: vi.fn(actual.logStartSession),
   };
 });
 
@@ -2232,6 +2234,29 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('does not self-link a resumed session when the id is unchanged', async () => {
+      const sessionId = 'same-session-id';
+      const config = new Config({ ...baseParams, sessionId });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession(sessionId, {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+    });
+
     it('rejects a session switch while the current recorder owns the writer lease', () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const originalSessionId = config.getSessionId();

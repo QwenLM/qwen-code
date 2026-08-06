@@ -56,6 +56,10 @@ vi.mock('@opentelemetry/instrumentation-http');
 vi.mock('@opentelemetry/instrumentation-undici');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
+vi.mock('./session-events.js', () => ({
+  emitSessionEnd: vi.fn(),
+  emitSessionStart: vi.fn(),
+}));
 vi.mock('./session-context.js');
 vi.mock('./trace-context.js');
 vi.mock('./tracer.js', () => ({
@@ -66,6 +70,7 @@ import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
 import { createSessionRootContext } from './tracer.js';
+import { emitSessionStart } from './session-events.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 
@@ -188,6 +193,17 @@ describe('Telemetry SDK', () => {
 
       expect(NodeSDK).toHaveBeenCalledTimes(1);
       expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits the initial session start after deferred telemetry initialization', async () => {
+      const deferredConfig = {
+        ...mockConfig,
+        isTelemetryInitializationDeferred: () => true,
+      } as unknown as Config;
+
+      await initializeTelemetry(deferredConfig);
+
+      expect(emitSessionStart).toHaveBeenCalledWith('test-session');
     });
 
     it('clears the in-flight promise so a failed init can be retried', async () => {

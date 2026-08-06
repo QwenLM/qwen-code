@@ -27,7 +27,7 @@ import { createSessionRootContext } from './tracer.js';
 import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
 import { endInteractionSpan } from './session-tracing.js';
-import { emitSessionEnd } from './session-events.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
   const debugLogger = createDebugLogger('OTEL');
@@ -89,6 +89,9 @@ export function initializeTelemetry(
       activeMetricReader = started.metricReader;
       const sessionId = config.getSessionId();
       setSessionContext(createSessionRootContext(sessionId), sessionId);
+      if (config.isTelemetryInitializationDeferred?.()) {
+        emitSessionStart(sessionId);
+      }
       setShellTracePropagation(
         config.getOutboundCorrelationPropagateTraceContext(),
       );

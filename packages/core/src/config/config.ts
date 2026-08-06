@@ -3845,7 +3845,9 @@ export class Config {
       logStartSession(
         this,
         new StartSessionEvent(this),
-        sessionData ? previousSessionId : undefined,
+        sessionData && previousSessionId !== this.sessionId
+          ? previousSessionId
+          : undefined,
       );
     }
 
