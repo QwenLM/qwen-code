@@ -549,7 +549,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         sessionId: string;
         controller: AbortController;
         restartRequested: boolean;
-        restartReason?: DaemonSseConnectReason;
       }
     | undefined
   >(undefined);
@@ -819,7 +818,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionId: string;
               controller: AbortController;
               restartRequested: boolean;
-              restartReason?: DaemonSseConnectReason;
             }
           | undefined;
         let removeProviderAbortListener: (() => void) | undefined;
@@ -2230,8 +2228,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const restartRequested = eventStream.restartRequested;
           clearEventStream();
           if (restartRequested) {
-            nextSseConnectReason =
-              eventStream.restartReason ?? 'prompt_restart';
+            nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -2300,8 +2297,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           clearEventStream();
           if (restartRequested && !disposed && !abort.signal.aborted) {
             flushTranscriptSync();
-            nextSseConnectReason =
-              eventStream?.restartReason ?? 'prompt_restart';
+            nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -2709,7 +2705,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const eventStream = eventStreamRef.current;
           if (eventStream?.sessionId !== sessionId) return;
           eventStream.restartRequested = true;
-          eventStream.restartReason = 'prompt_restart';
           eventStream.controller.abort();
         },
         getCreateSessionRequest: () => ({

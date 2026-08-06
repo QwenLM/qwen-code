@@ -14,6 +14,7 @@ import { DaemonTransportClosedError } from './DaemonTransport.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import { parseSseStream } from './sse.js';
 
+// Keep in sync with the daemon route's predecessor-query validator.
 const SSE_STREAM_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 

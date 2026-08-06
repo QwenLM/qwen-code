@@ -72,12 +72,13 @@ The close record and request span also receive stream duration, settled event
 frame count, last written event id, backpressure count, maximum drain wait,
 maximum live publish-to-write-settled time, slow-warning count, EventBus
 eviction reason, terminal event type, and close reason. The duration attribute
-is fully namespaced. It must not use the special bare `duration_ms` attribute
-interpreted by the Log-to-Span bridge as a span start duration.
+and all other close attributes are fully namespaced. In particular, duration
+must not use the special bare `duration_ms` attribute interpreted by the
+Log-to-Span bridge as a span start duration.
 
-The exact close attributes are
-`qwen-code.daemon.sse.duration_ms`, `event_frames_write_settled`,
-`last_event_id_written`, `backpressure_count`, `max_drain_wait_ms`,
+The exact close attributes use the `qwen-code.daemon.sse.*` namespace:
+`duration_ms`, `event_frames_write_settled`, `last_event_id_written`,
+`backpressure_count`, `max_drain_wait_ms`,
 `max_live_publish_to_write_settled_ms`, `slow_warning_count`,
 `event_bus_eviction_reason`, `terminal_event_type`, and `close_reason`. Close
 reason is one of `writer_idle_timeout`, `socket_error`, `iterator_error`,

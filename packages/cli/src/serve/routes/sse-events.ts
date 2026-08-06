@@ -43,6 +43,7 @@ import {
 let activeSseCount = 0;
 
 const SSE_STREAM_ID_HEADER = 'X-Qwen-SSE-Stream-Id';
+// Keep in sync with the REST transport's response-header validator.
 const SSE_STREAM_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SSE_CONNECT_REASONS = [
@@ -82,6 +83,7 @@ function parsePreviousSseStreamId(raw: unknown): string | undefined {
 }
 
 function parseSseClientId(raw: unknown): string | undefined {
+  // Observability hints are best-effort and must not reject an SSE handshake.
   return typeof raw === 'string' &&
     raw.length > 0 &&
     raw.length <= MAX_CLIENT_ID_LENGTH &&
@@ -90,8 +92,8 @@ function parseSseClientId(raw: unknown): string | undefined {
     : undefined;
 }
 
-function boundedDiagnosticType(value: string): string {
-  return Array.from(value)
+function boundedDiagnosticString(value: string): string {
+  return Array.from(value.slice(0, 256))
     .slice(0, 128)
     .map((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
@@ -166,6 +168,7 @@ export function registerSseEventsRoutes(
 
   app.get('/session/:id/events', async (req, res) => {
     const sessionId = req.params['id'];
+    const diagnosticSessionId = boundedDiagnosticString(sessionId);
     const streamId = randomUUID();
     const clientId = parseSseClientId(req.headers['x-qwen-client-id']);
     const connectReason = parseSseConnectReason(req.query['connectReason']);
@@ -203,7 +206,7 @@ export function registerSseEventsRoutes(
     const onSubscriberDiagnostic = (
       diagnostic: EventBusSubscriberDiagnostic,
     ): boolean => {
-      const triggerEventType = boundedDiagnosticType(
+      const triggerEventType = boundedDiagnosticString(
         diagnostic.data.triggerEventType,
       );
       const common = {
@@ -226,7 +229,7 @@ export function registerSseEventsRoutes(
       if (diagnostic.type === 'slow_client_warning') {
         slowWarningCount += 1;
         const context = {
-          sessionId,
+          sessionId: diagnosticSessionId,
           clientId,
           streamId,
           connectReason,
@@ -257,20 +260,22 @@ export function registerSseEventsRoutes(
           },
         );
       } else {
-        eventBusEvictionReason = diagnostic.data.reason;
+        eventBusEvictionReason = boundedDiagnosticString(
+          diagnostic.data.reason,
+        );
         const threshold =
           diagnostic.data.reason === 'queue_bytes_overflow'
             ? 'bytes'
             : 'frames';
         const context = {
-          sessionId,
+          sessionId: diagnosticSessionId,
           clientId,
           streamId,
           connectReason,
           previousStreamId,
           ...common,
           threshold,
-          reason: diagnostic.data.reason,
+          reason: eventBusEvictionReason,
           droppedAfter: diagnostic.data.droppedAfter,
           ...(diagnostic.data.eventBytes !== undefined
             ? { eventBytes: diagnostic.data.eventBytes }
@@ -295,7 +300,7 @@ export function registerSseEventsRoutes(
             ...telemetryCommon,
             'qwen-code.daemon.sse.threshold': threshold,
             'qwen-code.daemon.sse.event_bus_eviction_reason':
-              diagnostic.data.reason,
+              eventBusEvictionReason,
             'qwen-code.daemon.sse.dropped_after_event_id':
               diagnostic.data.droppedAfter,
             ...(diagnostic.data.eventBytes !== undefined
@@ -394,7 +399,7 @@ export function registerSseEventsRoutes(
       // a raw-fetch client gets the same structured error.
       if (err instanceof SubscriberLimitExceededError) {
         writeStderrLine(
-          `qwen serve: subscriber limit reached for session ${sessionId} (limit=${err.limit}); rejecting new SSE client with 429`,
+          `qwen serve: subscriber limit reached for session ${diagnosticSessionId} (limit=${err.limit}); rejecting new SSE client with 429`,
         );
         res.setHeader('Retry-After', '5');
         res.status(429).json({
@@ -438,25 +443,28 @@ export function registerSseEventsRoutes(
         closeReason ?? terminalCandidate ?? 'client_disconnect';
       const closeAttributes: Record<string, string | number | boolean> = {
         'qwen-code.daemon.sse.duration_ms': durationMs,
-        event_frames_write_settled: eventFramesWriteSettled,
-        backpressure_count: backpressureCount,
-        max_drain_wait_ms: maxDrainWaitMs,
-        max_live_publish_to_write_settled_ms: maxLivePublishToWriteSettledMs,
-        slow_warning_count: slowWarningCount,
-        close_reason: resolvedCloseReason,
+        'qwen-code.daemon.sse.event_frames_write_settled':
+          eventFramesWriteSettled,
+        'qwen-code.daemon.sse.backpressure_count': backpressureCount,
+        'qwen-code.daemon.sse.max_drain_wait_ms': maxDrainWaitMs,
+        'qwen-code.daemon.sse.max_live_publish_to_write_settled_ms':
+          maxLivePublishToWriteSettledMs,
+        'qwen-code.daemon.sse.slow_warning_count': slowWarningCount,
+        'qwen-code.daemon.sse.close_reason': resolvedCloseReason,
         ...(lastEventIdWritten !== undefined
           ? {
-              last_event_id_written: lastEventIdWritten,
+              'qwen-code.daemon.sse.last_event_id_written': lastEventIdWritten,
             }
           : {}),
         ...(eventBusEvictionReason
           ? {
-              event_bus_eviction_reason: eventBusEvictionReason,
+              'qwen-code.daemon.sse.event_bus_eviction_reason':
+                eventBusEvictionReason,
             }
           : {}),
         ...(terminalEventType
           ? {
-              terminal_event_type: terminalEventType,
+              'qwen-code.daemon.sse.terminal_event_type': terminalEventType,
             }
           : {}),
       };
@@ -472,7 +480,7 @@ export function registerSseEventsRoutes(
       }).catch(() => {});
       try {
         daemonLog?.info('SSE stream closed', {
-          sessionId,
+          sessionId: diagnosticSessionId,
           clientId,
           streamId,
           connectReason,
@@ -520,7 +528,7 @@ export function registerSseEventsRoutes(
     }
     try {
       daemonLog?.info('SSE stream opened', {
-        sessionId,
+        sessionId: diagnosticSessionId,
         clientId,
         streamId,
         connectReason,
@@ -764,7 +772,7 @@ export function registerSseEventsRoutes(
         // subsequent tick would re-throw — turning one transient
         // failure into a permanent uncaughtException loop.
         const idleContext = {
-          sessionId,
+          sessionId: diagnosticSessionId,
           clientId,
           streamId,
           connectReason,
@@ -777,7 +785,7 @@ export function registerSseEventsRoutes(
             daemonLog.warn('SSE writer idle timeout', idleContext);
           } else {
             writeStderrLine(
-              `qwen serve: evicting SSE client (session ${sessionId}) — ` +
+              `qwen serve: evicting SSE client (session ${diagnosticSessionId}) — ` +
                 `writer idle for ${idleForMs}ms > ${writerIdleTimeoutMsValue}ms timeout ` +
                 `(streamId=${streamId}${clientId ? `, clientId=${clientId}` : ''})`,
             );
@@ -821,7 +829,7 @@ export function registerSseEventsRoutes(
       try {
         if (daemonLog) {
           daemonLog.error('SSE socket error', err, {
-            sessionId,
+            sessionId: diagnosticSessionId,
             clientId,
             streamId,
             connectReason,
@@ -829,7 +837,7 @@ export function registerSseEventsRoutes(
           });
         } else {
           writeStderrLine(
-            `qwen serve: SSE socket error (session ${sessionId}): ${err.message} ` +
+            `qwen serve: SSE socket error (session ${diagnosticSessionId}): ${err.message} ` +
               `(streamId=${streamId}${clientId ? `, clientId=${clientId}` : ''})`,
           );
         }
@@ -856,7 +864,7 @@ export function registerSseEventsRoutes(
             const reason = (next.value.data as { reason?: unknown } | null)
               ?.reason;
             if (typeof reason === 'string') {
-              eventBusEvictionReason = boundedDiagnosticType(reason);
+              eventBusEvictionReason = boundedDiagnosticString(reason);
             }
           } else if (
             next.value.type === 'session_died' ||
@@ -880,14 +888,14 @@ export function registerSseEventsRoutes(
                 : undefined;
             const reason =
               typeof data.reason === 'string'
-                ? boundedDiagnosticType(data.reason)
+                ? boundedDiagnosticString(data.reason)
                 : 'unknown';
             const detail =
               typeof data.detail === 'string'
-                ? boundedDiagnosticType(data.detail)
+                ? boundedDiagnosticString(data.detail)
                 : undefined;
             const context = {
-              sessionId,
+              sessionId: diagnosticSessionId,
               clientId,
               streamId,
               connectReason,
@@ -906,7 +914,7 @@ export function registerSseEventsRoutes(
                 );
               } else {
                 writeStderrLine(
-                  `qwen serve: SSE ring eviction detected (session ${sessionId}): ` +
+                  `qwen serve: SSE ring eviction detected (session ${diagnosticSessionId}): ` +
                     `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
                     `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
                     `gap=${gap ?? '?'} events, ` +
@@ -992,7 +1000,7 @@ export function registerSseEventsRoutes(
           // Log bridge iterator errors to daemon stderr for
           // operator observability.
           writeStderrLine(
-            `qwen serve: bridge iterator error (session ${sessionId}): ` +
+            `qwen serve: bridge iterator error (session ${diagnosticSessionId}): ` +
               `${errorMessage(err)}` +
               (errorKind ? ` [${errorKind}]` : ''),
           );

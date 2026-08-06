@@ -22822,11 +22822,11 @@ describe('GET /session/:id/events (SSE)', () => {
         streamId,
       );
       expect(setAttribute).toHaveBeenCalledWith(
-        'close_reason',
+        'qwen-code.daemon.sse.close_reason',
         'source_complete',
       );
       expect(setAttribute).toHaveBeenCalledWith(
-        'event_frames_write_settled',
+        'qwen-code.daemon.sse.event_frames_write_settled',
         1,
       );
       expect(setAttribute).toHaveBeenCalledWith(
@@ -22836,6 +22836,20 @@ describe('GET /session/:id/events (SSE)', () => {
       expect(
         setAttribute.mock.calls.some(([key]) => key === 'duration_ms'),
       ).toBe(false);
+      const attributeKeys = setAttribute.mock.calls.map(([key]) => key);
+      for (const bareKey of [
+        'event_frames_write_settled',
+        'last_event_id_written',
+        'backpressure_count',
+        'max_drain_wait_ms',
+        'max_live_publish_to_write_settled_ms',
+        'slow_warning_count',
+        'event_bus_eviction_reason',
+        'terminal_event_type',
+        'close_reason',
+      ]) {
+        expect(attributeKeys).not.toContain(bareKey);
+      }
       expect(getActiveSseCount()).toBe(beforeActive);
     } finally {
       getSpanSpy.mockRestore();
@@ -22922,7 +22936,7 @@ describe('GET /session/:id/events (SSE)', () => {
     const beforeActive = getActiveSseCount();
     const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
     const responsePromise = request(app)
-      .get('/session/sess-A/events?connectReason=resume')
+      .get('/session/sess-%E2%80%A8A/events?connectReason=resume')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .set('X-Qwen-Client-Id', 'client-1')
       .then((response) => response);
@@ -22947,7 +22961,7 @@ describe('GET /session/:id/events (SSE)', () => {
         queuedBytes: 2048,
         maxQueuedBytes: 4096,
         threshold: 'frames',
-        triggerEventType: 'tool\n\u2028result',
+        triggerEventType: `tool\n\u2028result${'x'.repeat(10_000)}`,
         triggerEventBytes: 512,
       },
     });
@@ -22970,11 +22984,11 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(daemonLog.warn).toHaveBeenCalledWith(
       'SSE slow client warning',
       expect.objectContaining({
-        sessionId: 'sess-A',
+        sessionId: 'sess- A',
         clientId: 'client-1',
         streamId,
         threshold: 'frames',
-        triggerEventType: 'tool  result',
+        triggerEventType: `tool  result${'x'.repeat(116)}`,
         triggerEventBytes: 512,
       }),
     );
