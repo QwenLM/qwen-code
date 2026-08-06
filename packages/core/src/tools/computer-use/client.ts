@@ -73,7 +73,6 @@ export class ComputerUseClient {
   private startPromise: Promise<void> | undefined;
   private activeCalls = 0;
   private recordingActive = false;
-  private recordingOwnerSession: string | undefined;
   private idleStopTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: ComputerUseClientOptions) {
@@ -244,7 +243,7 @@ export class ComputerUseClient {
           name,
           arguments: args,
         })) as CallToolResult;
-        this.trackRecordingLifecycle(name, args, result);
+        this.trackRecordingLifecycle(name, result);
         return result;
       } catch (err) {
         if (!isTransportClosedError(err)) throw err;
@@ -273,7 +272,7 @@ export class ComputerUseClient {
               name,
               arguments: args,
             })) as CallToolResult;
-            this.trackRecordingLifecycle(name, args, result);
+            this.trackRecordingLifecycle(name, result);
             return result;
           } catch (retryErr) {
             if (!isTransportClosedError(retryErr)) throw retryErr;
@@ -294,7 +293,6 @@ export class ComputerUseClient {
   async stop(): Promise<void> {
     this.clearIdleStopTimer();
     this.recordingActive = false;
-    this.recordingOwnerSession = undefined;
     const client = this.client;
     this.client = undefined;
     if (client) {
@@ -331,26 +329,17 @@ export class ComputerUseClient {
     this.idleStopTimer = undefined;
   }
 
-  private trackRecordingLifecycle(
-    name: string,
-    args: Record<string, unknown>,
-    result: CallToolResult,
-  ): void {
+  private trackRecordingLifecycle(name: string, result: CallToolResult): void {
+    if (name === 'stop_recording') {
+      // The driver disables recording before surfacing video-finalization
+      // errors, so clear the flag even on isError — otherwise the idle
+      // timer never re-arms.
+      this.recordingActive = false;
+      return;
+    }
     if (result.isError) return;
     if (name === 'start_recording') {
       this.recordingActive = true;
-      this.recordingOwnerSession =
-        typeof args['session'] === 'string' && args['session'].length > 0
-          ? args['session']
-          : undefined;
-    } else if (
-      name === 'stop_recording' ||
-      (name === 'end_session' &&
-        this.recordingOwnerSession !== undefined &&
-        args['session'] === this.recordingOwnerSession)
-    ) {
-      this.recordingActive = false;
-      this.recordingOwnerSession = undefined;
     }
   }
 }

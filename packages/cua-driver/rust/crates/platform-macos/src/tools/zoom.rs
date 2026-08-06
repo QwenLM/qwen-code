@@ -21,8 +21,8 @@ fn def() -> &'static ToolDef {
         description: "Capture a cropped JPEG of a window region (x1,y1)–(x2,y2) in screenshot \
             pixel coordinates, with 20% padding added on each side. The output image is at most \
             500 px wide.\n\n\
-            After a zoom, pass `from_zoom=true` to click, type_text, press_key, or hotkey to \
-            auto-translate coordinates back to full-window space.".into(),
+            After a zoom, pass `from_zoom=true` to click, drag, type_text, press_key, or \
+            hotkey to auto-translate coordinates back to full-window space.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "required": ["window_id", "x1", "y1", "x2", "y2"],

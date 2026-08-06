@@ -49,6 +49,17 @@ export function isHighRiskCall(
   if (upstreamName === 'page') {
     return !READ_ONLY_PAGE_ACTIONS.has(params['action'] as string);
   }
+  // screenshot_out_file turns these read-only snapshots into a file write at
+  // a model-chosen ~-expanded path — same family the driver classifies as
+  // file_transfer_and_output, so gate it like other mutating calls.
+  if (
+    (upstreamName === 'get_window_state' ||
+      upstreamName === 'get_desktop_state') &&
+    typeof params['screenshot_out_file'] === 'string' &&
+    params['screenshot_out_file'].length > 0
+  ) {
+    return true;
+  }
   const schema = COMPUTER_USE_SCHEMAS[upstreamName as ComputerUseToolName];
   return schema?.annotations.readOnlyHint !== true;
 }
@@ -312,12 +323,17 @@ export function coerceTypes(
   schema: Record<string, unknown>,
 ): Record<string, unknown> {
   const properties = (
-    schema as { properties?: Record<string, { type?: string }> }
+    schema as { properties?: Record<string, { type?: string | string[] }> }
   ).properties;
   if (!properties) return params;
   const result: Record<string, unknown> = { ...params };
   for (const [key, value] of Object.entries(result)) {
-    const fieldType = properties[key]?.type;
+    let fieldType = properties[key]?.type;
+    // Nullable fields regenerate as ['number', 'null'] — unwrap to the
+    // concrete type so the comparisons below still match.
+    if (Array.isArray(fieldType)) {
+      fieldType = fieldType.find((t) => t !== 'null');
+    }
     // Direction 1: string value, schema wants integer/number → parse
     if (
       (fieldType === 'integer' || fieldType === 'number') &&

@@ -49,7 +49,8 @@ impl Tool for StartRecordingTool {
                 invocation, except recording controls and replay_trajectory, writes a turn \
                 folder under `output_dir`. Sensitive browser URLs, typed text, page scripts, \
                 clipboard content, file paths, and approval tokens are redacted from \
-                action.json:\n\n\
+                action.json (turns carrying redacted values are lossy: replay re-dispatches \
+                the literal `[redacted]` placeholder, not the original value):\n\n\
                 - `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI \
                   state immediately before and after the action.\n\
                 - `before.png` / `after.png` — target-window screenshots immediately \
@@ -312,6 +313,14 @@ impl Tool for ReplayTrajectoryTool {
                   `stop_on_error` is true.\n\
                 - `get_window_state` and other read-only tools are NOT currently recorded, \
                   so replays do not re-populate the per-(pid, window_id) element cache.\n\
+                - Turns whose recorded arguments carry `[redacted]` values (browser URLs, \
+                  typed text, file paths, approval tokens) replay the placeholder literally \
+                  — e.g. `browser_type` types the string `[redacted]` — and cannot reproduce \
+                  the original action.\n\
+                - Browser actions bound via `get_browser_state` target/tab ids do not replay \
+                  in a new session: the binding call is read-only and not recorded, and stale \
+                  ids refuse with `browser_binding_stale`. Re-run `get_browser_state` and \
+                  remap ids first.\n\
                 - If recording is ENABLED while replay runs, the replay itself is recorded \
                   into the currently configured output directory.  That's deliberate: \
                   recording a replay against a new build and diffing the two trajectories \

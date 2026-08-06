@@ -127,13 +127,31 @@ describe('computer-use schemas (cua-driver full tool surface)', () => {
   });
 
   it('advertises every macOS action that accepts coordinates from zoom', () => {
-    for (const name of ['type_text', 'press_key', 'hotkey'] as const) {
+    for (const name of [
+      'click',
+      'drag',
+      'type_text',
+      'press_key',
+      'hotkey',
+    ] as const) {
       const schema = COMPUTER_USE_SCHEMAS[name].parameterSchema as {
         properties: Record<string, unknown>;
       };
       expect(schema.properties, `${name} missing from_zoom`).toHaveProperty(
         'from_zoom',
       );
+    }
+  });
+
+  it('rejects unknown parameters for every tool (additionalProperties: false)', () => {
+    // The client-side validator relies on this to fail fast on hallucinated
+    // params instead of forwarding them to a driver that silently ignores
+    // them. The sync script normalizes any upstream `true` to `false`.
+    for (const [name, schema] of Object.entries(COMPUTER_USE_SCHEMAS)) {
+      expect(
+        schema.parameterSchema['additionalProperties'],
+        `${name} must set additionalProperties: false`,
+      ).toBe(false);
     }
   });
 });

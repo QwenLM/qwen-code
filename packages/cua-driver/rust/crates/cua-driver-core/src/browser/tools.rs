@@ -858,7 +858,9 @@ impl Tool for BrowserNavigateTool {
                 self.engine
                     .store
                     .invalidate_tab_snapshots(&session, &target_id, &tab_id);
-                ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(json!({
+                // The text result is persisted as action.json's result_summary; the URL
+                // stays out of it (structured content below is not recorded).
+                ToolResult::text(format!("navigated {tab_id}")).with_structured(json!({
                     "status": "ok",
                     "target_id": target_id,
                     "tab_id": tab_id,

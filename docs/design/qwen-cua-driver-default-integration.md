@@ -66,8 +66,10 @@ working first-install path.
   annotation-based risk classification.
 - Schema regeneration must report exactly 54 tools from the local 0.17.0
   binary without leaking coordinate-mode overrides into generated schemas.
-- Workflow validation checks that the mirror job depends on the release and
-  uploads only downloader-consumed assets plus `checksums.txt`.
+- The mirror job itself enforces the asset contract in-workflow: it depends on
+  the release job, downloads exactly the seven downloader-consumed assets plus
+  `checksums.txt`, verifies them with `sha256sum -c`, and re-downloads the
+  mirrored files to compare before finishing.
 - A release-candidate E2E run must verify first install, macOS TCC attribution,
   an absolute-coordinate action, and model-facing payload filtering against
   the published artifact.
