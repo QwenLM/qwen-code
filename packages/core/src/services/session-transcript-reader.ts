@@ -28,6 +28,13 @@ export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
+// Hard source-byte ceiling for one backward page, counting everything the
+// turn-alignment and pair extensions add above the soft `maxBytes`
+// selection budget. The workspace route derives its serialized-response cap
+// as twice this value, leaving headroom for the response envelope: a page
+// past that cap fails serialization and dead-ends backward pagination at
+// its anchor on every retry.
+export const SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES = 16 * 1024 * 1024;
 
 export class InvalidSessionTranscriptCursorError extends Error {
   constructor(message = 'Invalid transcript cursor') {
@@ -493,12 +500,19 @@ function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
 }
 
 // A backward page can safely start at a replay turn start or at the
-// assistant record owning any following tool results.
+// assistant record owning any following tool results. The turn loop
+// persists one assistant record per model response and records each tool
+// run's results as one contiguous batch before the next assistant record,
+// so the nearest matching assistant below a tool_result run owns it.
+// Realtime conversation records are the exception: they interleave at
+// wall-clock time and own no tool results, so the walk must pass through
+// them instead of splitting the pair.
 function isReplayPageStart(index: TranscriptIndex, uuid: string): boolean {
   const entry = index.byUuid.get(uuid);
   return (
-    entry?.type === 'assistant' ||
-    isReplayTurnStartType(entry?.type, entry?.subtype)
+    entry?.subtype !== 'realtime_message' &&
+    (entry?.type === 'assistant' ||
+      isReplayTurnStartType(entry?.type, entry?.subtype))
   );
 }
 
@@ -522,33 +536,32 @@ function findReplayBoundaryAtOrBefore(
   return candidate;
 }
 
-function replayExtensionFitsByteBudget(
+function backwardPageBytesFit(
   index: TranscriptIndex,
-  extensionStart: number,
-  selectedStart: number,
-  selectedBytes: number,
-  maxBytes: number | undefined,
+  start: number,
+  end: number,
+  budget: number,
 ): boolean {
-  if (maxBytes === undefined) return true;
-  // Mirrors the one-extra-window record bound: the extension may overshoot
-  // the soft byte budget by at most one extra budget, so a large persisted
-  // result batch cannot balloon the page toward the route's hard response
-  // cap, where serialization fails and pagination dead-ends.
-  const ceiling = 2 * maxBytes;
-  let total = selectedBytes;
-  for (let i = selectedStart - 1; i >= extensionStart; i--) {
+  let total = 0;
+  for (let i = start; i < end; i++) {
     total += recordSegmentBytes(index, index.activeUuids[i]!);
-    if (total > ceiling) return false;
+    if (total > budget) return false;
   }
   return true;
 }
 
+// Selects one backward page. Worst case the page holds 3 * limit records:
+// the requested window, one turn-alignment window, and one pair-extension
+// window. Both expansions are additionally bounded by
+// SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES source bytes, so they cannot
+// push a page past the workspace route's serialized-response cap.
 function selectBackwardPageUuids(
   index: TranscriptIndex,
   position: number,
   limit: number,
   maxBytes: number | undefined,
 ): { uuids: string[]; nextPosition: number } {
+  const sessionId = path.basename(index.filePath, '.jsonl');
   let start = Math.max(0, position - limit);
   for (let i = start; i < position; i++) {
     if (isReplayTurnStart(index, index.activeUuids[i]!)) {
@@ -561,14 +574,19 @@ function selectBackwardPageUuids(
   // (e.g. one in-flight prompt with thousands of records) would otherwise
   // turn EVERY backward page into the whole transcript — ignoring `limit`
   // and making anchor-based pagination dead-end at the file head. Allow at
-  // most one extra window (`limit` records) of expansion.
+  // most one extra window (`limit` records) of expansion, and only when it
+  // reaches a real boundary: otherwise keep the requested window so pages
+  // inside a long turn stay `limit` records, not `2 * limit`.
   const expansionFloor = Math.max(0, position - 2 * limit);
-  start = findReplayBoundaryAtOrBefore(
+  const expandedStart = findReplayBoundaryAtOrBefore(
     index,
     start,
     expansionFloor,
     isReplayTurnStart,
   );
+  if (isReplayTurnStart(index, index.activeUuids[expandedStart]!)) {
+    start = expandedStart;
+  }
 
   let selectedStart = position;
   let selectedBytes = 0;
@@ -588,6 +606,10 @@ function selectBackwardPageUuids(
     selectedBytes += bytes;
   }
 
+  // Turn-alignment expansion admits a whole turn even when it overshoots
+  // the soft `maxBytes` budget, but never past the hard ceiling: a page the
+  // workspace route cannot serialize would fail at its response cap and
+  // dead-end backward pagination at this anchor on every retry.
   let alignedToReplayBoundary = false;
   for (let i = selectedStart; i < position; i++) {
     if (isReplayTurnStart(index, index.activeUuids[i]!)) {
@@ -604,7 +626,21 @@ function selectBackwardPageUuids(
       isReplayTurnStart,
     );
     if (previousTurnStart < 0) {
-      selectedStart = 0;
+      if (
+        backwardPageBytesFit(
+          index,
+          0,
+          position,
+          SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
+        )
+      ) {
+        selectedStart = 0;
+      } else {
+        debugLogger.debug(
+          `backward turn expansion skipped session=${sessionId} ` +
+            `start=${index.activeUuids[selectedStart]!} reason=byte-budget`,
+        );
+      }
     }
   } else if (!alignedToReplayBoundary) {
     // Expansion only pays off when it reaches a turn boundary; otherwise
@@ -616,7 +652,21 @@ function selectBackwardPageUuids(
       isReplayTurnStart,
     );
     if (isReplayTurnStart(index, index.activeUuids[candidate]!)) {
-      selectedStart = candidate;
+      if (
+        backwardPageBytesFit(
+          index,
+          candidate,
+          position,
+          SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
+        )
+      ) {
+        selectedStart = candidate;
+      } else {
+        debugLogger.debug(
+          `backward turn expansion skipped session=${sessionId} ` +
+            `start=${index.activeUuids[selectedStart]!} reason=byte-budget`,
+        );
+      }
     }
   }
 
@@ -630,29 +680,40 @@ function selectBackwardPageUuids(
   // persisted parallel batch), and an uncapped walk would balloon the page
   // far past `limit` — reintroducing the unbounded growth this function
   // exists to cap. The extension is likewise bounded to one extra byte
-  // budget: the selection above already stopped at `maxBytes`, so absorbing
-  // a large result batch unchecked could push the page past the route's
-  // response cap, where serialization fails and backward pagination
-  // dead-ends at this anchor on every retry. An owner beyond either budget
-  // keeps the bounded selection, accepting a mid-pair boundary in that edge.
-  const pairFloor = Math.max(0, selectedStart - limit);
-  const pairStart = findReplayBoundaryAtOrBefore(
-    index,
-    selectedStart,
-    pairFloor,
-    isReplayPageStart,
-  );
-  if (
-    isReplayPageStart(index, index.activeUuids[pairStart]!) &&
-    replayExtensionFitsByteBudget(
+  // budget, clamped to the hard ceiling: the selection above already stopped
+  // at `maxBytes`, so absorbing a large result batch unchecked could push
+  // the page past the route's response cap, where serialization fails and
+  // backward pagination dead-ends at this anchor on every retry. An owner
+  // beyond either budget keeps the bounded selection, accepting a mid-pair
+  // boundary in that edge; the skip is logged so such a report stays
+  // diagnosable without re-deriving the budget arithmetic.
+  if (selectedStart > 0) {
+    const pairFloor = Math.max(0, selectedStart - limit);
+    const pairStart = findReplayBoundaryAtOrBefore(
       index,
-      pairStart,
       selectedStart,
-      selectedBytes,
-      maxBytes,
-    )
-  ) {
-    selectedStart = pairStart;
+      pairFloor,
+      isReplayPageStart,
+    );
+    const pairByteBudget =
+      maxBytes === undefined
+        ? SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES
+        : Math.min(2 * maxBytes, SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES);
+    if (!isReplayPageStart(index, index.activeUuids[pairStart]!)) {
+      debugLogger.debug(
+        `backward pair extension skipped session=${sessionId} ` +
+          `start=${index.activeUuids[selectedStart]!} reason=record-budget`,
+      );
+    } else if (
+      !backwardPageBytesFit(index, pairStart, position, pairByteBudget)
+    ) {
+      debugLogger.debug(
+        `backward pair extension skipped session=${sessionId} ` +
+          `start=${index.activeUuids[selectedStart]!} reason=byte-budget`,
+      );
+    } else {
+      selectedStart = pairStart;
+    }
   }
 
   return {

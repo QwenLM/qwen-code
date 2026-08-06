@@ -80,18 +80,26 @@ direction.
 
 Backward pages are returned in chronological display order. Each selected page
 starts at a normal user-turn boundary when one is reachable within one extra
-window (`limit` records) of expansion. Inside a single long turn no boundary is
-reachable within that budget, so pages stay bounded near the anchor, may start
-mid-turn, and chain until the turn start surfaces. A page boundary avoids
-landing between a tool call and its persisted result: the page extends to the
-owning assistant record when that owner is reachable within one further
-window (`limit` records, and one extra page byte budget) below the selection,
-so independently replayed backward pages do not split the pair; an owner
-beyond either budget keeps the bounded selection and the page starts
-mid-pair. The workspace route retains its hard response-byte
-limit: a page whose serialized response exceeds that limit returns
-`transcript_page_too_large`. Forward cursors and responses remain
-byte-for-byte compatible.
+window (`limit` records) of expansion and the expanded page still fits the
+hard page byte ceiling: a small turn rides over the soft page budget whole,
+while a byte-heavy turn that would exceed the ceiling keeps the bounded
+selection so the route can always serialize the page. Inside a single long
+turn no boundary is reachable within that budget, so pages stay the requested
+window (`limit` records) near the anchor, may start mid-turn, and chain until
+the turn start surfaces. A page boundary avoids landing between a tool call
+and its persisted result: the page extends to the owning assistant record
+when that owner is reachable within one further window (`limit` records, and
+one extra page byte budget clamped to the ceiling) below the selection, so
+independently replayed backward pages do not split the pair; an owner beyond
+either budget keeps the bounded selection and the page starts mid-pair.
+Worst case a page holds three windows (`3 * limit` records). The workspace
+route derives its hard response-byte limit as twice the core page ceiling,
+leaving headroom for the response envelope; a page that still exceeds it
+returns `transcript_page_too_large`. Backward page replay carries no state
+across records beyond tool call/result pairing and per-page goal-state
+reseeding — assistant text and thought parts are self-contained within a
+record — so mid-turn boundaries break nothing else. Forward cursors and
+responses remain byte-for-byte compatible.
 
 ### WebUI transcript state
 

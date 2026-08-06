@@ -29,6 +29,7 @@ import {
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   SessionTranscriptCursorCodec,
@@ -1360,9 +1361,11 @@ describe('SessionTranscriptReader', () => {
         limit: 50,
       });
 
-      expect(first.records.length).toBeLessThanOrEqual(100);
+      // No turn boundary is reachable, so the page stays the requested
+      // window (`limit` records, not `2 * limit`).
+      expect(first.records.length).toBe(50);
       expect(first.records.at(-1)?.uuid).toBe('a300');
-      expect(first.records.at(0)?.uuid).toBe('a201');
+      expect(first.records.at(0)?.uuid).toBe('a251');
       expect(first.hasMore).toBe(true);
 
       // Chain backward with beforeRecordId anchors (the client's pagination
@@ -1406,6 +1409,62 @@ describe('SessionTranscriptReader', () => {
       // head once alignment proves unreachable within the expansion budget.
       expect(page.records.map((item) => item.uuid)).toEqual(['a149', 'a150']);
       expect(page.hasMore).toBe(true);
+    });
+
+    it('caps turn-alignment expansion at the hard byte ceiling', async () => {
+      // A byte-heavy turn whose start sits within the expansion window
+      // below the selection: alignment admits a small over-budget turn
+      // whole, but must not absorb records past the hard page ceiling — a
+      // page the workspace route cannot serialize would 413 at its response
+      // cap and dead-end backward pagination at that anchor on every retry.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      for (let i = 1; i <= 60; i++) {
+        records.push(
+          record(`a${i}`, i === 1 ? 'u1' : `a${i - 1}`, 'x'.repeat(300 * 1024)),
+        );
+      }
+      await writeRecords(records);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        direction: 'backward',
+        limit: 50,
+        maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+      });
+
+      // The budget admits ~13 records; the ~18 MB turn does not fit the
+      // 16 MiB ceiling, so the bounded selection stands instead of the
+      // whole turn.
+      expect(page.records.length).toBeLessThan(20);
+      expect(page.records.at(-1)?.uuid).toBe('a60');
+      expect(page.records.some((item) => item.uuid === 'u1')).toBe(false);
+      expect(page.hasMore).toBe(true);
+      expect(
+        mockDebugLogger.debug.mock.calls.some(
+          (args) =>
+            String(args[0]).includes('backward turn expansion skipped') &&
+            String(args[0]).includes('reason=byte-budget'),
+        ),
+      ).toBe(true);
+
+      // Chaining still reaches the turn start: once the remaining turn
+      // fits the ceiling, alignment admits it whole.
+      const seen = new Set(page.records.map((item) => item.uuid));
+      let boundary: string | undefined = page.records.at(0)?.uuid;
+      let pages = 1;
+      while (boundary !== undefined) {
+        const next = await reader.readPage(sessionId, {
+          beforeRecordId: boundary,
+          limit: 50,
+          maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+        });
+        pages += 1;
+        for (const item of next.records) seen.add(item.uuid);
+        boundary = next.hasMore ? next.records.at(0)?.uuid : undefined;
+        expect(pages).toBeLessThan(20);
+      }
+      expect(seen.size).toBe(records.length);
+      expect(seen.has('u1')).toBe(true);
     });
 
     it('keeps tool call/result pairs on the same backward page', async () => {
@@ -1513,26 +1572,22 @@ describe('SessionTranscriptReader', () => {
     });
 
     it('extends the page to an owning call several records below the selection', async () => {
-      // One call owning three tool_result records, deep enough below the
-      // natural selection start that a one-record walk budget cannot reach
-      // it: the page must still extend through the whole result run to the
-      // owning call instead of starting mid-pair on a tool_result.
+      // One call owning a tool_result run long enough that the natural
+      // selection starts mid-run: the page must extend through the whole
+      // result run to the owning call instead of starting mid-pair on a
+      // tool_result.
       const records: ChatRecord[] = [record('u1', null, 'prompt')];
       records.push(toolCallRecord('ac1', 'u1', 'call-1'));
       let parent = 'ac1';
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         records.push(toolResultRecord(`ar${i}`, parent, 'call-1'));
         parent = `ar${i}`;
-      }
-      for (let i = 1; i <= 5; i++) {
-        records.push(record(`af${i}`, parent, `filler ${i}`));
-        parent = `af${i}`;
       }
       await writeRecords(records);
 
       // limit 3 lands the natural selection start on the third result
-      // (ar2); the owning call sits three records below it, at the edge of
-      // the one-window pair-extension budget.
+      // (ar2); the owning call sits exactly three records below it, at the
+      // edge of the one-window pair-extension budget.
       const page = await new SessionTranscriptReader(workspaceDir).readPage(
         sessionId,
         { direction: 'backward', limit: 3 },
@@ -1543,11 +1598,44 @@ describe('SessionTranscriptReader', () => {
         'ar0',
         'ar1',
         'ar2',
+        'ar3',
+        'ar4',
+      ]);
+      expect(page.records.at(0)?.type).not.toBe('tool_result');
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('walks past interleaved realtime records to the owning call', async () => {
+      // Realtime conversation records persist at wall-clock time and can
+      // land between a call and its results. They own no tool results, so
+      // pair extension must pass through them instead of splitting the
+      // pair at the interjection.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      records.push(record('af0', 'u1', 'filler'));
+      records.push(toolCallRecord('ac1', 'af0', 'call-1'));
+      records.push(toolResultRecord('ar0', 'ac1', 'call-1'));
+      records.push({
+        ...record('a-live', 'ar0', 'live interjection'),
+        subtype: 'realtime_message',
+      });
+      records.push(toolResultRecord('ar1', 'a-live', 'call-1'));
+      records.push(record('af1', 'ar1', 'filler'));
+      await writeRecords(records);
+
+      // limit 3 lands the natural selection start on the realtime record;
+      // the owning call sits three records below it, at the edge of the
+      // one-window pair-extension budget.
+      const page = await new SessionTranscriptReader(workspaceDir).readPage(
+        sessionId,
+        { direction: 'backward', limit: 3 },
+      );
+
+      expect(page.records.map((item) => item.uuid)).toEqual([
+        'ac1',
+        'ar0',
+        'a-live',
+        'ar1',
         'af1',
-        'af2',
-        'af3',
-        'af4',
-        'af5',
       ]);
       expect(page.records.at(0)?.type).not.toBe('tool_result');
       expect(page.hasMore).toBe(true);
@@ -1589,16 +1677,47 @@ describe('SessionTranscriptReader', () => {
       }
       await writeRecords(records);
 
-      const page = await new SessionTranscriptReader(workspaceDir).readPage(
-        sessionId,
-        { direction: 'backward', limit: 100, maxBytes: 10000 },
-      );
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        direction: 'backward',
+        limit: 100,
+        maxBytes: 10000,
+      });
 
       // The budget admits two large results; the 49-record extension to the
       // owning call does not fit one extra budget, so the page stays at the
       // bounded selection (a mid-batch boundary) instead of 51 records.
       expect(page.records.map((item) => item.uuid)).toEqual(['ar48', 'ar49']);
       expect(page.hasMore).toBe(true);
+      expect(
+        mockDebugLogger.debug.mock.calls.some(
+          (args) =>
+            String(args[0]).includes('backward pair extension skipped') &&
+            String(args[0]).includes('reason=byte-budget'),
+        ),
+      ).toBe(true);
+
+      // Chaining continues from the mid-batch anchor under the same byte
+      // budget: every page stays bounded, chaining terminates, and the full
+      // record set is covered exactly once.
+      const seen = new Set(page.records.map((item) => item.uuid));
+      let boundary: string | undefined = page.records.at(0)?.uuid;
+      let pages = 1;
+      while (boundary !== undefined) {
+        const next = await reader.readPage(sessionId, {
+          beforeRecordId: boundary,
+          limit: 100,
+          maxBytes: 10000,
+        });
+        pages += 1;
+        expect(next.records.length).toBeGreaterThan(0);
+        expect(next.records.length).toBeLessThanOrEqual(200);
+        for (const item of next.records) seen.add(item.uuid);
+        boundary = next.hasMore ? next.records.at(0)?.uuid : undefined;
+        expect(pages).toBeLessThan(40);
+      }
+      expect(seen.size).toBe(records.length);
+      expect(seen.has('u1')).toBe(true);
     });
 
     it('caps pair extension for a long tool_result run', async () => {
@@ -1628,6 +1747,13 @@ describe('SessionTranscriptReader', () => {
       expect(first.records.at(0)?.type).toBe('tool_result');
       expect(first.records.at(-1)?.uuid).toBe('ar399');
       expect(first.hasMore).toBe(true);
+      expect(
+        mockDebugLogger.debug.mock.calls.some(
+          (args) =>
+            String(args[0]).includes('backward pair extension skipped') &&
+            String(args[0]).includes('reason=record-budget'),
+        ),
+      ).toBe(true);
 
       const seen = new Set(first.records.map((item) => item.uuid));
       let boundary: string | undefined = first.records.at(0)?.uuid;

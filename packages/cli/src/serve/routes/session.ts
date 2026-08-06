@@ -15,6 +15,7 @@ import {
   SessionOrganizationError,
   SessionService,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptCursorCodec,
@@ -175,7 +176,14 @@ interface RegisterSessionRoutesDeps {
   isLiveSessionActive?: (sessionId: string) => boolean;
 }
 
-const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+// Derived from the core hard page ceiling so the two caps cannot drift:
+// an expanded backward page can carry up to
+// SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES of source records, and the
+// serialized response (records re-serialized plus envelope) must fit above
+// that. A page this route cannot serialize would 413 and dead-end backward
+// pagination at its anchor on every retry.
+const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
+  2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
