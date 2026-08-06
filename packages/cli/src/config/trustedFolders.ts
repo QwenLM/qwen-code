@@ -136,16 +136,6 @@ export class LoadedTrustedFolders {
     }
 
     const locationVariants = getPathComparisonVariants(location);
-    for (const trustedPath of trustedPaths) {
-      for (const locationVariant of locationVariants) {
-        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
-          if (isWithinRoot(locationVariant, trustedVariant)) {
-            return true;
-          }
-        }
-      }
-    }
-
     for (const untrustedPath of untrustedPaths) {
       for (const locationVariant of locationVariants) {
         for (const untrustedVariant of getPathComparisonVariants(
@@ -153,6 +143,16 @@ export class LoadedTrustedFolders {
         )) {
           if (locationVariant === untrustedVariant) {
             return false;
+          }
+        }
+      }
+    }
+
+    for (const trustedPath of trustedPaths) {
+      for (const locationVariant of locationVariants) {
+        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
+          if (isWithinRoot(locationVariant, trustedVariant)) {
+            return true;
           }
         }
       }
@@ -338,6 +338,14 @@ function getExplicitTrustLevel(
 ): TrustLevel | null {
   for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
     if (
+      trustLevel === TrustLevel.DO_NOT_TRUST &&
+      arePathsEquivalent(workspaceCwd, rulePath)
+    ) {
+      return trustLevel;
+    }
+  }
+  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
+    if (
       trustLevel === TrustLevel.TRUST_FOLDER &&
       isWithinRootAcrossVariants(workspaceCwd, rulePath)
     ) {
@@ -346,14 +354,6 @@ function getExplicitTrustLevel(
     if (
       trustLevel === TrustLevel.TRUST_PARENT &&
       isWithinRootAcrossVariants(workspaceCwd, path.dirname(rulePath))
-    ) {
-      return trustLevel;
-    }
-  }
-  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (
-      trustLevel === TrustLevel.DO_NOT_TRUST &&
-      arePathsEquivalent(workspaceCwd, rulePath)
     ) {
       return trustLevel;
     }

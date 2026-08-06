@@ -365,22 +365,22 @@ function isPathTrustedFastPath(location: string): boolean | undefined {
   const rules = readTrustedFolderRulesFastPath();
   const locationVariants = getPathComparisonVariants(location);
   for (const rule of rules) {
-    if (rule.level !== 'trusted') continue;
+    if (rule.level !== 'untrusted') continue;
     for (const locationVariant of locationVariants) {
-      for (const trustedVariant of rule.variants) {
-        if (isWithinRoot(locationVariant, trustedVariant)) {
-          return true;
+      for (const untrustedVariant of rule.variants) {
+        if (locationVariant === untrustedVariant) {
+          return false;
         }
       }
     }
   }
 
   for (const rule of rules) {
-    if (rule.level !== 'untrusted') continue;
+    if (rule.level !== 'trusted') continue;
     for (const locationVariant of locationVariants) {
-      for (const untrustedVariant of rule.variants) {
-        if (locationVariant === untrustedVariant) {
-          return false;
+      for (const trustedVariant of rule.variants) {
+        if (isWithinRoot(locationVariant, trustedVariant)) {
+          return true;
         }
       }
     }
