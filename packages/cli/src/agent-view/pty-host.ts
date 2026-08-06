@@ -34,6 +34,8 @@ export interface AgentViewPtyProcess {
   ): AgentViewPtyDisposable | void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
+  pause?(): void;
+  resume?(): void;
 }
 
 export interface AgentViewPtyModule {
@@ -82,6 +84,8 @@ export interface AgentViewPtyHostHandle {
   onData(callback: (data: string) => void): AgentViewPtyDisposable | void;
   resize(size: { columns: number; rows: number }): void;
   kill(signal?: string): void;
+  pause?(): void;
+  resume?(): void;
   shutdown?(): void | Promise<void>;
   dispose(): void;
 }
@@ -101,6 +105,8 @@ export class AgentViewLaunchConfigError extends Error {
 }
 
 export class BoundedOutputRing {
+  private static readonly MAX_CHUNK_BYTES = 8192;
+
   private chunks: Buffer[] = [];
   private retainedBytesValue = 0;
   private totalBytesValue = 0;
@@ -136,7 +142,7 @@ export class BoundedOutputRing {
       return;
     }
 
-    this.chunks.push(chunk);
+    this.appendChunk(chunk);
     this.retainedBytesValue += chunk.byteLength;
     this.trim();
   }
@@ -171,6 +177,19 @@ export class BoundedOutputRing {
       }
     }
     this.trimLeadingUtf8ContinuationBytes();
+  }
+
+  private appendChunk(chunk: Buffer): void {
+    const previous = this.chunks[this.chunks.length - 1];
+    if (
+      previous &&
+      previous.byteLength + chunk.byteLength <=
+        BoundedOutputRing.MAX_CHUNK_BYTES
+    ) {
+      this.chunks[this.chunks.length - 1] = Buffer.concat([previous, chunk]);
+      return;
+    }
+    this.chunks.push(chunk);
   }
 
   private trimLeadingUtf8ContinuationBytes(): void {
@@ -297,11 +316,18 @@ export async function launchAgentViewPtyHost(
       ...launch.env,
       TERM: 'xterm-256color',
     },
-    handleFlowControl: true,
+    handleFlowControl: false,
   });
   const inputDecoder = new StringDecoder('utf8');
 
   const disposables: AgentViewPtyDisposable[] = [];
+  let settled = false;
+  let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
+  const resolveExitOnce = (exit: AgentViewPtyHostExit) => {
+    if (settled) return;
+    settled = true;
+    resolveExit(exit);
+  };
   const dataDisposable = ptyProcess.onData((data) => {
     output.append(data);
   });
@@ -310,8 +336,9 @@ export async function launchAgentViewPtyHost(
   }
 
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
+    resolveExit = resolve;
     const exitDisposable = ptyProcess.onExit((event) => {
-      resolve(event);
+      resolveExitOnce(event);
     });
     if (exitDisposable) {
       disposables.push(exitDisposable);
@@ -336,11 +363,18 @@ export async function launchAgentViewPtyHost(
     kill(signal?: string): void {
       ptyProcess.kill(signal);
     },
+    pause(): void {
+      ptyProcess.pause?.();
+    },
+    resume(): void {
+      ptyProcess.resume?.();
+    },
     shutdown(): void {
       ptyProcess.kill('SIGTERM');
     },
     dispose(): void {
       ptyProcess.kill();
+      resolveExitOnce({ exitCode: 1 });
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();
       }
