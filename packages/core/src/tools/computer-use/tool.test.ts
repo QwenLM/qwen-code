@@ -16,6 +16,7 @@ import { approvalKey } from './constants.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import type { Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
+import { isPlanModeBlocked } from '../../core/permissionFlow.js';
 
 function makeFakeClient(
   callToolImpl: (name: string, args: unknown) => Promise<unknown>,
@@ -347,11 +348,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     }
   });
 
-  it('getConfirmationDetails returns per-action info once install is approved', async () => {
-    // After install approval, the dialog should switch from install-info
-    // to a compact per-action prompt naming THIS specific action — so the
-    // user can decide on each mutating call (click / type_text / drag /
-    // set_value / press_key / scroll / perform_secondary_action).
+  it('getConfirmationDetails keeps mutating actions strongly gated once install is approved', async () => {
     const packageSpec = approvalKey();
     await saveInstallState(tmpHome, {
       approvedPackageSpec: packageSpec,
@@ -364,14 +361,11 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       new AbortController().signal,
     );
 
-    expect(details.type).toBe('info');
-    if (details.type === 'info') {
+    expect(details.type).toBe('mcp');
+    if (details.type === 'mcp') {
       expect(details.title).toContain('scroll');
-      expect(details.prompt).toContain('computer_use__scroll');
-      expect(details.prompt).toContain('down');
-      expect(details.prompt).not.toContain('Qwen CUA driver');
-      // Same per-tool permission rule — user can ProceedAlwaysTool to skip
-      // future confirmations for THIS tool only (not the whole surface).
+      expect(details.toolDisplayName).toBe('computer_use__scroll');
+      expect(invocation.getDescription()).toContain('down');
       expect(details.permissionRules).toContain('computer_use__scroll');
     }
   });
@@ -454,6 +448,13 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       'replay_trajectory',
       'click',
       'type_text',
+      'scroll',
+      'drag',
+      'press_key',
+      'hotkey',
+      'set_value',
+      'browser_click',
+      'browser_type',
       'browser_download',
       'install_ffmpeg',
     ]) {
@@ -463,13 +464,37 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     expect(
       isHighRiskCall('page', { action: 'enable_javascript_apple_events' }),
     ).toBe(true);
+    expect(isHighRiskCall('page', { action: 'click_element' })).toBe(true);
+    expect(isHighRiskCall('page', { action: 'insert_text' })).toBe(true);
+    expect(isHighRiskCall('page', { action: 'type_keystrokes' })).toBe(true);
+    expect(isHighRiskCall('check_permissions', { prompt: true })).toBe(true);
   });
 
-  it('does NOT flag ordinary tools (or page with a non-JS action)', () => {
-    for (const name of ['list_apps', 'get_window_state', 'scroll', 'page']) {
+  it('flags every non-read-only driver tool', () => {
+    for (const [name, schema] of Object.entries(COMPUTER_USE_SCHEMAS)) {
+      if (
+        schema.annotations.readOnlyHint === false &&
+        name !== 'check_permissions'
+      ) {
+        expect(isHighRiskCall(name, {})).toBe(true);
+      }
+    }
+  });
+
+  it('does NOT flag read-only tools (or page with a non-mutating action)', () => {
+    for (const name of [
+      'list_apps',
+      'get_window_state',
+      'list_windows',
+      'get_config',
+    ]) {
       expect(isHighRiskCall(name, {})).toBe(false);
     }
     expect(isHighRiskCall('page', { action: 'get_text' })).toBe(false);
+    expect(isHighRiskCall('page', { action: 'query_dom' })).toBe(false);
+    expect(isHighRiskCall('clipboard_read', {})).toBe(false);
+    expect(isHighRiskCall('clipboard_read', { include_text: true })).toBe(true);
+    expect(isHighRiskCall('check_permissions', {})).toBe(false);
   });
 
   it('high-risk tools surface as mcp type so AUTO_EDIT cannot auto-approve them', async () => {
@@ -477,13 +502,21 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     // AUTO_EDIT shows the dialog instead of silently approving. Args are NOT in
     // the mcp title (no confirmation surface renders it — review round 3); they
     // reach the user via the tool-header line, i.e. getDescription().
-    const tool = new ComputerUseTool('kill_app', COMPUTER_USE_SCHEMAS.kill_app);
-    const invocation = tool.build({ pid: 123 });
+    const tool = new ComputerUseTool(
+      'browser_click',
+      COMPUTER_USE_SCHEMAS.browser_click,
+    );
+    const invocation = tool.build({
+      target_id: 'target-1',
+      tab_id: 'tab-1',
+      ref: 'p1:2',
+    });
     const details = await invocation.getConfirmationDetails(
       new AbortController().signal,
     );
     expect(details.type).toBe('mcp');
-    expect(invocation.getDescription()).toContain('123'); // args via tool-header
+    expect(invocation.getDescription()).toContain('target-1'); // args via tool-header
+    expect(isPlanModeBlocked(true, false, false, details)).toBe(true);
   });
 
   it('read-only tools keep the info confirmation type', async () => {

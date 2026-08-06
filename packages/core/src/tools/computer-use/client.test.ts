@@ -8,6 +8,31 @@ import {
 } from './client.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
+const sdkMocks = vi.hoisted(() => ({
+  transportOptions: vi.fn(),
+  connect: vi.fn().mockResolvedValue(undefined),
+  close: vi.fn().mockResolvedValue(undefined),
+  callTool: vi.fn(),
+  listTools: vi.fn(),
+}));
+
+vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+  StdioClientTransport: class {
+    constructor(options: unknown) {
+      sdkMocks.transportOptions(options);
+    }
+  },
+}));
+
+vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
+  Client: class {
+    connect = sdkMocks.connect;
+    close = sdkMocks.close;
+    callTool = sdkMocks.callTool;
+    listTools = sdkMocks.listTools;
+  },
+}));
+
 describe('ComputerUseClient', () => {
   it('is constructible', () => {
     const client = new ComputerUseClient({
@@ -30,19 +55,59 @@ describe('ComputerUseClient', () => {
     const b = ComputerUseClient.shared();
     expect(a).toBe(b);
   });
+
+  it('passes the filtered absolute-coordinate environment to the stdio transport', async () => {
+    const previousSpace = process.env['CUA_DRIVER_RS_COORDINATE_SPACE'];
+    const previousScale = process.env['CUA_DRIVER_RS_COORDINATE_SCALE'];
+    process.env['CUA_DRIVER_RS_COORDINATE_SPACE'] = '1';
+    process.env['CUA_DRIVER_RS_COORDINATE_SCALE'] = '1000';
+    sdkMocks.transportOptions.mockClear();
+    const client = new ComputerUseClient({ binary: '/fake/cua-driver' });
+    try {
+      await client.start();
+      expect(sdkMocks.transportOptions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ MCP_MODEL_PAYLOAD_FILTER: '1' }),
+        }),
+      );
+      const options = sdkMocks.transportOptions.mock.lastCall?.[0] as {
+        env: Record<string, string>;
+      };
+      expect(options.env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SPACE');
+      expect(options.env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SCALE');
+    } finally {
+      await client.stop();
+      if (previousSpace === undefined) {
+        delete process.env['CUA_DRIVER_RS_COORDINATE_SPACE'];
+      } else {
+        process.env['CUA_DRIVER_RS_COORDINATE_SPACE'] = previousSpace;
+      }
+      if (previousScale === undefined) {
+        delete process.env['CUA_DRIVER_RS_COORDINATE_SCALE'];
+      } else {
+        process.env['CUA_DRIVER_RS_COORDINATE_SCALE'] = previousScale;
+      }
+    }
+  });
 });
 
 describe('computerUseMcpEnv', () => {
-  it('enables model payload filtering without forcing relative coordinates', () => {
+  it('enables model payload filtering while preserving unrelated environment', () => {
     const env = computerUseMcpEnv({ HTTPS_PROXY: 'http://proxy.test' });
     expect(env['MCP_MODEL_PAYLOAD_FILTER']).toBe('1');
     expect(env['HTTPS_PROXY']).toBe('http://proxy.test');
     expect(env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SPACE');
   });
 
-  it('preserves an explicit user opt-in to relative coordinates', () => {
-    const env = computerUseMcpEnv({ CUA_DRIVER_RS_COORDINATE_SPACE: '1' });
-    expect(env['CUA_DRIVER_RS_COORDINATE_SPACE']).toBe('1');
+  it('strips coordinate overrides so Qwen always uses the absolute-coordinate contract', () => {
+    const env = computerUseMcpEnv({
+      CUA_DRIVER_RS_COORDINATE_SPACE: '1',
+      CUA_DRIVER_RS_COORDINATE_SCALE: '1000',
+      OPTIONAL_VALUE: undefined,
+    });
+    expect(env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SPACE');
+    expect(env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SCALE');
+    expect(env).not.toHaveProperty('OPTIONAL_VALUE');
   });
 });
 
@@ -292,6 +357,48 @@ describe('idle shutdown', () => {
     await c.stop();
     expect(inner.close).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(100);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the driver alive while recording and resumes idle shutdown after stop_recording', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('start_recording', { output_dir: '/tmp/recording' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(inner.close).not.toHaveBeenCalled();
+
+    await c.callTool('stop_recording', {});
+    await vi.advanceTimersByTimeAsync(24);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('only resumes idle shutdown when end_session matches the recording owner', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('start_recording', {
+      output_dir: '/tmp/recording',
+      session: 'recording-session',
+    });
+    await c.callTool('end_session', { session: 'unrelated-session' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(inner.close).not.toHaveBeenCalled();
+
+    await c.callTool('end_session', { session: 'recording-session' });
+    await vi.advanceTimersByTimeAsync(25);
     expect(inner.close).toHaveBeenCalledTimes(1);
   });
 

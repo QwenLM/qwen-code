@@ -266,7 +266,7 @@ impl ScrollBy {
 pub struct StartSessionInput {
     /// Stable session id for this run (e.g. "research-run-1").
     pub session: String,
-    /// Per-session perception/action modality. auto starts window-only and requires explicit escalation before desktop tools; window and desktop are strict. Immutable for the live session.
+    /// Per-session perception/action modality for calls carrying this same public session id. auto starts window-only and requires explicit escalation before desktop tools; window and desktop are strict. Sessionless calls use the legacy unrestricted path. Immutable for the live session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "capture_scope_schema")]
     pub capture_scope: Option<CaptureScope>,

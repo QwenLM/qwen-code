@@ -683,7 +683,8 @@ jobs:
             file="$(basename "${path}")"
             curl -fsSL --connect-timeout 15 --max-time 300 "${base}/${file}" -o "${tmp_dir}/${file}"
           done
-          (cd "${tmp_dir}" && sha256sum -c --ignore-missing checksums.txt)
+          cmp dist/cua-driver/checksums.txt "${tmp_dir}/checksums.txt"
+          (cd "${tmp_dir}" && sha256sum -c --ignore-missing "${GITHUB_WORKSPACE}/dist/cua-driver/checksums.txt")
       - name: 'Cleanup Aliyun OSS credentials'
         if: '${{ always() }}'
         run: 'rm -f "${RUNNER_TEMP}/.ossutilconfig"'

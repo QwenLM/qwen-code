@@ -98,6 +98,7 @@ fn def() -> &'static ToolDef {
                 "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),
                 "x": { "type": "number", "description": "Screenshot-pixel X of the field to type into — the element px action form. Pass x,y (no element_index) and the tool pixel-clicks there to establish real renderer focus, then types. Use for Chromium/Electron inputs the AX path can't reach. Read straight off the get_window_state PNG, same convention as click." },
                 "y": { "type": "number", "description": "Screenshot-pixel Y of the field (see x)." },
+                "from_zoom": { "type": "boolean", "description": "Set true after zoom to translate x,y from the latest zoom image back to full-window coordinates." },
                 "delay_ms": {
                     "type": "integer",
                     "minimum": 0,

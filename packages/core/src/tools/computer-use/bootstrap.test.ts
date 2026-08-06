@@ -9,13 +9,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  daemonCleanupTargets,
   runBootstrap,
   parsePermissionsStatus,
   type BootstrapDeps,
   type StatusDaemon,
 } from './bootstrap.js';
+import { approvalKey } from './constants.js';
 
-const KEY = 'cua-driver-rs@0.17.0';
+const KEY = approvalKey();
 
 function makeFakeClient() {
   const start = vi.fn(async () => {});
@@ -236,6 +238,24 @@ describe('runBootstrap', () => {
     // client implies the binary is present, so the downloader must NOT run
     // (otherwise unit tests trigger a real platform-bundle download).
     expect(deps.install).not.toHaveBeenCalled();
+  });
+});
+
+describe('daemonCleanupTargets', () => {
+  it('covers current and legacy daemon identities without touching installed apps', () => {
+    const targets = daemonCleanupTargets('/Users/tester');
+    expect(targets.processPatterns).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('QwenCuaDriver.app'),
+        expect.stringContaining('CuaDriver.app'),
+      ]),
+    );
+    expect(targets.socketPaths).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('/qwen-cua-driver/qwen-cua-driver.sock'),
+        expect.stringContaining('/cua-driver/cua-driver.sock'),
+      ]),
+    );
   });
 });
 

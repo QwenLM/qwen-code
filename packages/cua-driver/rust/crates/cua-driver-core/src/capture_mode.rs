@@ -18,12 +18,10 @@
 /// The `capture_mode` JSON-schema fragment, shared by every platform's
 /// `get_window_state` so the (deprecated) param advertises an identical shape
 /// across macOS / Linux / Windows. Retained for back-compat only — see the
-/// module docs. The enum keeps `ax` / `vision` so a client that still sends one
-/// validates, but the value is ignored.
+/// module docs. Every string is accepted because the value is ignored.
 pub fn capture_mode_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "enum": ["ax", "vision"],
         "description": "DEPRECATED and ignored. get_window_state always returns \
             BOTH the element tree and a screenshot — ground on both. The modality \
             is chosen at action time by how you address the target: an element ax \
@@ -38,12 +36,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_is_marked_deprecated_and_keeps_enum_for_back_compat() {
+    fn schema_is_marked_deprecated_and_accepts_all_legacy_values() {
         let schema = capture_mode_schema();
-        // Enum retained so an old client sending ax/vision still validates.
-        let modes = schema["enum"].as_array().unwrap();
-        assert!(modes.iter().any(|m| m == "ax"));
-        assert!(modes.iter().any(|m| m == "vision"));
+        assert!(schema.get("enum").is_none());
         // Description must signal it's a no-op so nobody relies on it.
         let desc = schema["description"].as_str().unwrap();
         assert!(desc.contains("DEPRECATED"), "must flag deprecation: {desc}");
