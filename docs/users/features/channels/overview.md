@@ -50,30 +50,30 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option                   | Required         | Description                                                                                                                                                            |
-| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, `github`, or a custom type from an extension (see [Plugins](./plugins))                       |
-| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                            |
-| `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                           |
-| `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                    |
-| `botId`                  | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
-| `secret`                 | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
-| `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
-| `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
-| `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
-| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, `chat_thread`, or `single`. Channel plugins may declare a different default (e.g., QQ defaults to `thread`)       |
-| `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
-| `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                  |
-| `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
-| `webhooks`               | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                              |
-| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
-| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                  |
-| `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
-| `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
-| `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
-| `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                        |
-| `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                    |
-| `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                              |
+| Option                   | Required         | Description                                                                                                                                                                                            |
+| ------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, `github`, or a custom type from an extension (see [Plugins](./plugins))                                                       |
+| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                                                            |
+| `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                           |
+| `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                    |
+| `botId`                  | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                       |
+| `secret`                 | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                       |
+| `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                               |
+| `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                   |
+| `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                   |
+| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, `chat_thread`, or `single`. Channel plugins may declare a different default (QQ defaults to `thread`; GitHub and GitLab default to `chat_thread`) |
+| `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                     |
+| `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                  |
+| `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                     |
+| `webhooks`               | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                                                              |
+| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                                                       |
+| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                  |
+| `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply.                                 |
+| `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                     |
+| `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                         |
+| `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                                                        |
+| `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                    |
+| `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                              |
 
 ### Sender Policy
 
@@ -87,7 +87,7 @@ Controls who can interact with the bot:
 
 Controls how conversation sessions are managed:
 
-- **`user`** (default) — One session per user. All messages from the same user share a conversation. `user` is the global default, but a channel plugin can declare a different default for its type (for example, the QQ channel defaults to `thread`).
+- **`user`** (default) — One session per user. All messages from the same user share a conversation. `user` is the global default, but a channel plugin can declare a different default for its type: the QQ channel defaults to `thread`, while the GitHub and GitLab channels default to `chat_thread`.
 - **`thread`** — One session per thread/topic. Useful for group chats with threads.
 - **`chat_thread`** — One session per chat and thread, shared across participants even outside a group (for example, an issue or PR discussion).
 - **`single`** — One shared session for all users. Everyone shares the same conversation.

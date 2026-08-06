@@ -1079,6 +1079,10 @@ export class QQChannel extends ChannelBase {
     // drops them so this turn's chunks cannot leak into the old turn's state.
     const turn = (this.turnCounter.get(sessionId) ?? 0) + 1;
     this.turnCounter.set(sessionId, turn);
+    // A cancelled previous turn may have stashed chunks in the orphan buffer
+    // while its deferred chain still owned the streamState entry; those
+    // chunks belong to the dead turn and must not prepend to this one's HEAD.
+    this.streamOrphanBuffer.delete(sessionId);
     // Release the previous turn's reply anchor through the single release
     // path before overwriting: a raw set/delete here would skip the msgSeqMap
     // cascade and orphan the old msgId's msg_seq counter. No identity
@@ -1156,13 +1160,17 @@ export class QQChannel extends ChannelBase {
       this.idleFlush(sessionId, this._reconnectId);
       return;
     }
+    // Release before the deletes: the release guard scans streamState +
+    // flushingSessions for a live flush, so it must still see this session's
+    // entry (and marker) or it would drop the msg_seq counter under a send
+    // still in flight — QQ dedupes on msg_id + msg_seq and drops the tail.
+    this.releaseSessionReplyAnchor(sessionId);
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
     this.streamOrphanBuffer.delete(sessionId);
-    this.releaseSessionReplyAnchor(sessionId);
   }
 
   // ── Streaming (idle-flush with per-session buffers) ────────────
@@ -1176,64 +1184,57 @@ export class QQChannel extends ChannelBase {
     const currentTurn = this.turnCounter.get(sessionId) ?? 0;
     let state = this.streamState.get(sessionId);
     if (state && state.turn !== currentTurn) {
-      // Stale state left behind by a previous turn of this session. When a
-      // cancelled turn's deferred flush chain still owns a buffered residual
+      // A previous turn's deferred flush chain may still own this entry
       // (onPromptEnd parked the session in pendingStreamDelete with a live
-      // idle timer), the entry must stay in the map untouched: the chain's
-      // identity guard (s === state) needs it to complete its own teardown,
-      // and the timer delivers the residual. Dropping the entry here would
-      // strand the residual forever (its .then() would see `current !==
-      // state` and return). This chunk belongs to the new turn and is
-      // consumed (dropped); the next chunk will find the map empty once the
-      // chain settles and start fresh.
+      // timer that delivers its residual). It must stay untouched then: the
+      // chain's identity guard (s === state) needs it to tear itself down —
+      // dropping it here would strand the residual forever (its .then() sees
+      // `current !== state` and returns). This chunk belongs to the new turn
+      // and is consumed (dropped); once the chain settles the map is empty
+      // and the next chunk starts fresh.
       if (state.buffer && this.pendingStreamDelete.has(sessionId)) {
-        // The old turn's deferred flush chain still owns the streamState
-        // entry; stash this turn's chunks in a side buffer so the HEAD of
-        // this turn's reply is not silently dropped (the chain may take up
-        // to ~10s under rate-limit backoff before it settles and frees the
-        // entry). The stashed chunks are prepended to this turn's first
-        // fresh entry once the chain settles.
+        // Stash this turn's chunks in a side buffer so the HEAD of this
+        // turn's reply is not silently dropped while the old chain settles
+        // (up to ~10s under rate-limit backoff); they are prepended to the
+        // first fresh entry once the chain frees the slot.
         this.streamOrphanBuffer.set(
           sessionId,
           (this.streamOrphanBuffer.get(sessionId) ?? '') + chunk,
         );
         return;
       }
-      // Stale state left behind by a previous turn of this session (a
-      // deferred send parked it in pendingStreamDelete and the new prompt
-      // started before the send settled). Dropping it here keeps the new
-      // turn's chunks from being appended to the old turn's buffer or
-      // delivered under the old turn's msgId. Any chars still buffered
-      // belong to the superseded turn and are discarded — with a log line so
-      // the loss is observable rather than silent. The old turn's in-flight
-      // send chain is safe: its .then()/.catch() identity guards compare the
-      // current map entry against the captured state object, and the fresh
-      // entry created below fails that guard, so the chain releases only its
-      // own anchor — the expectedMsgId captured when the send started — and
-      // can never delete the successor turn's. The flags must be cleared here
-      // too: they belong to the old turn's in-flight chain, whose identity
-      // guards now fail against the fresh entry and would never delete them —
-      // stranding the session so the new turn's onResponseComplete/onPromptEnd
-      // both early-return and the buffer is never flushed (silent reply loss).
+      // Superseded turn (a deferred send parked the entry and the new prompt
+      // started before the send settled): drop the entry so this turn's
+      // chunks cannot append to the old buffer or go out under the old
+      // msgId. Any chars still buffered belong to the dead turn and are
+      // discarded — with a log so the loss is observable rather than silent.
+      // The old chain is safe: its .then()/.catch() identity guards compare
+      // the map entry against the captured state object, and the fresh entry
+      // created below fails that guard, so the chain can release only its
+      // own anchor (expectedMsgId) and never touch a successor's. The flags
+      // must be cleared here too: the old chain's guards now fail against
+      // the fresh entry and would never delete them — stranding the session
+      // so the new turn's onResponseComplete/onPromptEnd both early-return
+      // and the buffer is never flushed (silent reply loss).
       if (state.buffer) {
         process.stderr.write(
           `[QQ:${this.name}] dropping ${state.buffer.length} chars of superseded turn ${state.turn} for ${sanitizeLogText(sessionId, 64)}\n`,
         );
       }
       if (state.timer) clearTimeout(state.timer);
+      // Release before the delete: the release guard scans streamState +
+      // flushingSessions for a live flush, so it must still see this entry
+      // (and marker) or it would drop the msg_seq counter under a send still
+      // in flight — QQ dedupes on msg_id + msg_seq and silently drops the
+      // tail. The expectedMsgId identity check keeps a successor turn's
+      // anchor untouched while still cascading this turn's counter away.
+      if (state.msgId !== undefined) {
+        this.releaseSessionReplyAnchor(sessionId, state.msgId);
+      }
       this.streamState.delete(sessionId);
       this.flushingSessions.delete(sessionId);
       this.pendingStreamDelete.delete(sessionId);
       this.flushedSessions.delete(sessionId);
-      // Release the superseded turn's anchor explicitly: with the entry gone,
-      // the old chain's settle paths (its .then() early-returns on `current
-      // !== state`, and the transient-failure guard fails the same way) can
-      // never reach their own release, orphaning this msgId's msg_seq
-      // counter. The expectedMsgId identity check keeps a successor turn's
-      // anchor untouched while still cascading the counter away.
-      if (state.msgId !== undefined) {
-        this.releaseSessionReplyAnchor(sessionId, state.msgId);
-      }
       state = undefined;
     }
     if (!state) {
@@ -1612,11 +1613,23 @@ export class QQChannel extends ChannelBase {
     const state = this.streamState.get(sessionId);
     if (state?.timer) {
       clearTimeout(state.timer);
+      state.timer = null;
+    }
+    if (state && this.flushingSessions.has(sessionId)) {
+      // A send is still in flight — defer the teardown to its settle chain
+      // (which re-flushes any residual buffer) instead of clearing the entry
+      // and its flushing marker here: the next segment would otherwise start
+      // a second send on the same session while the first is live, and a
+      // failed first send would have its retry skipped by the identity guard
+      // on the replaced entry, dropping the segment's text.
+      this.pendingStreamDelete.add(sessionId);
+      return;
     }
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.streamOrphanBuffer.delete(sessionId);
   }
 
   protected override async onResponseComplete(
@@ -1721,13 +1734,18 @@ export class QQChannel extends ChannelBase {
     if (state?.timer) {
       clearTimeout(state.timer);
     }
+    // Release before the deletes so the release guard still sees this
+    // session's entry (with its buffered/flushing state) and can keep the
+    // msg_seq counter while a live flush owns it — a delete-then-release
+    // order would drop the counter under an in-flight send and its tail
+    // would re-resolve msg_seq from 1 (QQ dedupes on msg_id + msg_seq).
+    this.releaseSessionReplyAnchor(sessionId);
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
     this.streamOrphanBuffer.delete(sessionId);
-    this.releaseSessionReplyAnchor(sessionId);
     super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
@@ -2087,7 +2105,14 @@ export class QQChannel extends ChannelBase {
     // single-scope user session on each channel (re)start.
     if (this.config.sessionScope === 'single') return;
     try {
-      const all = this.router.getAll();
+      // Optional-call like the READY path: an externally supplied router may
+      // not expose getAll; fall back to an empty list rather than crash.
+      const all =
+        (
+          this.router as unknown as {
+            getAll?: () => Array<{ key: string; sessionId: string }>;
+          }
+        ).getAll?.() ?? [];
       let purged = 0;
       for (const entry of all) {
         // Exact-match only this channel's own keys: in daemon mode the router
@@ -2257,10 +2282,13 @@ export class QQChannel extends ChannelBase {
       // a live stream is left alone — and a long stream's anchor, once
       // expired, was already dropped by onResponseChunk's TTL check, so
       // nothing here can double-release.
+      // No dirty flag here: releaseSessionReplyAnchor already persists
+      // internally when it actually drops the msgSeqMap counter — marking
+      // dirty unconditionally would force a full serialization every 60s
+      // tick while an expired anchor is present.
       for (const [sessionId, entry] of this.sessionReplyMsgId) {
         if (entry.timestamp < cutoff) {
           this.releaseSessionReplyAnchor(sessionId, entry.msgId);
-          dirty = true;
         }
       }
       if (dirty) this.saveQQState();
@@ -3374,13 +3402,21 @@ export class QQChannel extends ChannelBase {
     for (const [sid, state] of this.streamState) {
       if (state.chatId === groupId) {
         if (state.timer) clearTimeout(state.timer);
+        // Release before the deletes so the release guard still sees this
+        // entry's live flush state and keeps the msg_seq counter while a
+        // send owns it (wenshao blocking-1 ordering).
+        this.releaseSessionReplyAnchor(sid);
         this.flushingSessions.delete(sid);
         this.pendingStreamDelete.delete(sid);
         this.flushedSessions.delete(sid);
         this.streamState.delete(sid);
-        this.releaseSessionReplyAnchor(sid);
         if (this.config.sessionScope !== 'single') {
           this.onSessionDied(sid);
+        } else {
+          // onSessionDied is gated out for explicit 'single' scope, so its
+          // turn-counter / orphan-buffer teardown must run here instead.
+          this.turnCounter.delete(sid);
+          this.streamOrphanBuffer.delete(sid);
         }
         cleanedStreams++;
       }

@@ -1360,13 +1360,17 @@ describe('群管理事件', () => {
       replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
       streamState.set('sid-1', {
         chatId: groupId,
-        buffer: 'pending text',
-        timer: setTimeout(() => {}, 9999),
+        buffer: '',
+        timer: null,
         retryCount: 0,
         msgId: 'msg-xyz',
         turn: 1,
       });
-      flushingSessions.add('sid-1');
+      // NOTE: no in-flight flush is seeded (no buffer/timer/flushingSessions)
+      // — the release runs FIRST under the fixed ordering, and with nothing
+      // still owning the msgId the orphaned msg_seq counter is cascaded away.
+      // Seeding a live flush here would (correctly, per the wenshao blocking-1
+      // fix) keep the counter until the flush settles instead.
       pendingStreamDelete.add('sid-1');
       flushedSessions.add('sid-1');
       botOpenIdByGroup.set(groupId, 'bot-openid-1');
@@ -1466,6 +1470,85 @@ describe('群管理事件', () => {
       expect(sessionReplyMsgId.has('sid-1')).toBe(false);
       expect(sessionReplyMsgId.get('sid-2')!.msgId).toBe('msg-xyz');
       expect(msgSeqMap.get('msg-xyz')).toBe(3);
+    });
+
+    // B5: wenshao §4 — the per-session release must run BEFORE the
+    // streamState/flushingSessions teardown in the cleanup loop, so the
+    // in-flight flush guard inside releaseSessionReplyAnchor can see the live
+    // tail send and keep the msg_seq counter. A delete-then-release order
+    // would drop the counter here and the in-flight send's re-flush would
+    // resolve nextSeq = 1 (QQ dedupes on msg_id + msg_seq and drops the tail).
+    it('releases before teardown while a flush is in flight, keeping the msg_seq counter and clearing turn/orphan state (wenshao §4)', () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-flight-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const flushingSessions = chp['flushingSessions'] as Set<string>;
+      const turnCounter = chp['turnCounter'] as Map<string, number>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<string, string>;
+
+      // A streaming session in this group with its flush in flight: the
+      // entry still holds the msgId, flushingSessions is armed, and msg-X's
+      // counter has been consumed by a previous segment.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-X', 3);
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: 'pending tail',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-X',
+        turn: 1,
+      });
+      flushingSessions.add('sid-1');
+      turnCounter.set('sid-1', 1);
+      orphanBuffer.set('sid-1', 'stray');
+
+      const releaseSpy = vi.spyOn(
+        ch as unknown as { releaseSessionReplyAnchor: (s: string) => void },
+        'releaseSessionReplyAnchor',
+      );
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Under single scope onSessionDied is NOT invoked, so the cleanup
+      // loop's own release is the only one — exactly once per session.
+      expect(releaseSpy).toHaveBeenCalledTimes(1);
+      // The release saw the live entry + flush marker and kept the counter.
+      expect(msgSeqMap.get('msg-X')).toBe(3);
+      // Everything the turn touched is torn down.
+      expect(streamState.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(flushingSessions.has('sid-1')).toBe(false);
+      expect(turnCounter.has('sid-1')).toBe(false);
+      expect(orphanBuffer.has('sid-1')).toBe(false);
+
+      releaseSpy.mockRestore();
     });
   });
 
