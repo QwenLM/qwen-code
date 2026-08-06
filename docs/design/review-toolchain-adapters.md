@@ -72,7 +72,8 @@ The npm implementation currently:
 - Builds affected workspaces and their reverse dependents.
 - Widens or reorders the build set when the compiler names an undeclared
   workspace dependency.
-- Tests only affected workspaces.
+- Tests the affected workspaces and every workspace declared to depend on
+  them that defines a test script.
 - Runs `npm ci` only for an npm repository with an incomplete dependency tree.
 - Avoids `npm ci` for warm Yarn, pnpm, and Bun trees.
 - Classifies unsupported layouts as a handoff, not a successful verification.
@@ -129,7 +130,7 @@ toolchain: "npm" | "unsupported"
 ```
 
 Changing this to a new generic schema in the same refactor would require
-coordinated edits to Agent 7, base-tree, test-plan, findings, tests, and any
+coordinated edits to Agent 7, base-tree, test-plan, test-delta, tests, and any
 external scripts consuming the report. The adapter boundary does not require
 that migration.
 
@@ -169,6 +170,9 @@ P0 changes:
 
 P1 changes:
 
+- `packages/cli/src/commands/review/build-test.ts`
+  - Widens the `toolchain` discriminant, registers the Maven adapter, and
+    fails closed on mixed-root ambiguity.
 - `packages/cli/src/commands/review/lib/maven-toolchain.ts`
   - Owns Maven reactor discovery, changed-file ownership, the scoped
     lifecycle run, and the Surefire/Failsafe evidence.
@@ -244,9 +248,10 @@ Fastjson2 and Druid establish these requirements:
   `mvnw.cmd` on win32, where `./mvnw` is not runnable). On POSIX a checked-in
   `./mvnw` without the executable bit (a `core.fileMode=false` checkout) also
   falls back to the system `mvn`, because running it would die with exit 126
-  and steer a launch failure at the PR. Druid's older wrapper depends on the
-  process cwd and fails when invoked by absolute path from another repository.
-  When no wrapper exists, use the system `mvn`.
+  and turn the whole run into an infrastructure handoff that verifies
+  nothing. Druid's older wrapper depends on the process cwd and fails when
+  invoked by absolute path from another repository. When no wrapper exists,
+  use the system `mvn`.
 - Module directory and artifactId are not interchangeable. Druid's `core`
   directory produces artifactId `druid`; report paths use module directories,
   while Maven remains responsible for resolving the selected reactor projects.

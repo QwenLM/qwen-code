@@ -103,6 +103,22 @@ const MAX_SELECTOR_CHARS = 4096;
  */
 const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Reactor nesting is a handful of levels in every real repository; a deeper
+ * chain is a hostile checkout shape. Cap the walk so it fails closed with a
+ * reportable error instead of overflowing the stack.
+ */
+const MAX_REACTOR_DEPTH = 512;
+
+/**
+ * Below this much remaining whole-call budget a Maven command is NOT
+ * attempted — the same floor as the npm adapter, for the same reason: Maven
+ * cannot boot and produce signal in a few hundred milliseconds, so an
+ * "attempt" would manufacture a fake timeout where an honest disclosure says
+ * exactly what happened.
+ */
+const BUDGET_MIN_ATTEMPT_MS = 15_000;
+
 function toPosix(path: string): string {
   return path.split(sep).join('/');
 }
@@ -172,6 +188,46 @@ interface PomStructure {
 }
 
 /**
+ * Split POM text into `<…>` tag tokens and text runs in one left-to-right
+ * scan. A `>` inside a quoted attribute value stays inside the tag. An
+ * unterminated tag ends the scan outright: no `>` remains after it, so no
+ * valid tag can follow, and any text it would still emit can only reach an
+ * active capture — which the missing closing tag then fails closed exactly
+ * as the equivalent regex-tokenized garbage did. The regex tokenizer this
+ * replaced backtracked quadratically on repeated `<` with no `>` anywhere,
+ * on bytes a PR fully controls.
+ */
+function tokenizePom(pom: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < pom.length) {
+    if (pom[i] !== '<') {
+      let end = i + 1;
+      while (end < pom.length && pom[end] !== '<') end += 1;
+      tokens.push(pom.slice(i, end));
+      i = end;
+      continue;
+    }
+    let quote: '"' | "'" | null = null;
+    let end = i + 1;
+    for (; end < pom.length; end += 1) {
+      const c = pom[end];
+      if (quote !== null) {
+        if (c === quote) quote = null;
+      } else if (c === '"' || c === "'") {
+        quote = c;
+      } else if (c === '>') {
+        break;
+      }
+    }
+    if (end >= pom.length) break;
+    tokens.push(pom.slice(i, end + 1));
+    i = end + 1;
+  }
+  return tokens;
+}
+
+/**
  * Parse the literal structure this adapter models: `<modules>` entries, the
  * project artifactId, and the `<parent>` reference. Fails closed (null) on
  * any shape it cannot read unambiguously.
@@ -191,7 +247,7 @@ function parsePomStructure(pom: string): PomStructure | null {
   } | null = null;
   // Quote-aware: a `>` inside an attribute value is legal XML and occurs in
   // real plugin config; splitting the tag there fails the whole POM closed.
-  const tokens = stripped.match(/<(?:"[^"]*"|'[^']*'|[^>"'])*>|[^<]+/g) ?? [];
+  const tokens = tokenizePom(stripped);
   for (const token of tokens) {
     if (!token.startsWith('<')) {
       if (capture) capture.text += token;
@@ -288,6 +344,17 @@ function parsePomStructure(pom: string): PomStructure | null {
   };
 }
 
+/**
+ * Prototype-less edge record: the keys are PR-controlled module dir names,
+ * and a module named `constructor` or `toString` must read "no edge" from
+ * `?? []` at the indexing sites, not an inherited Object.prototype member.
+ */
+function edgeRecord(edges: Map<string, string[]>): Record<string, string[]> {
+  const record = Object.create(null) as Record<string, string[]>;
+  for (const [key, value] of edges) record[key] = [...value].sort();
+  return record;
+}
+
 export function readMavenReactor(root: string): MavenReactorResult {
   const reactorRoot = resolve(root);
   const rootPom = join(reactorRoot, 'pom.xml');
@@ -301,7 +368,13 @@ export function readMavenReactor(root: string): MavenReactorResult {
   const structures = new Map<string, PomStructure>();
   const visited = new Set<string>();
 
-  const visit = (pomPath: string): string | null => {
+  const visit = (pomPath: string, depth: number): string | null => {
+    // Real reactors nest a handful of levels; a deeper chain is a hostile
+    // input shape, and the unbounded recursion would overflow the stack
+    // (a RangeError) past the never-throw MavenReactorResult contract.
+    if (depth > MAX_REACTOR_DEPTH) {
+      return `Maven module nesting deeper than ${MAX_REACTOR_DEPTH} levels at ${toPosix(relative(reactorRoot, pomPath))}.`;
+    }
     if (visited.has(pomPath)) return null;
     visited.add(pomPath);
 
@@ -337,13 +410,13 @@ export function readMavenReactor(root: string): MavenReactorResult {
       const aggregated = children.get(aggregatorPath);
       if (aggregated) aggregated.push(modulePath);
       else children.set(aggregatorPath, [modulePath]);
-      const error = visit(childPom);
+      const error = visit(childPom, depth + 1);
       if (error) return error;
     }
     return null;
   };
 
-  const error = visit(rootPom);
+  const error = visit(rootPom, 0);
   if (error) return { error };
 
   // Inheritance edges: resolve each project's `<parent>` relativePath
@@ -419,18 +492,8 @@ export function readMavenReactor(root: string): MavenReactorResult {
     reactor: {
       modules: [...modules].sort(),
       projectDirs: [...projectDirs].sort(),
-      children: Object.fromEntries(
-        [...children.entries()].map(([parent, aggregated]) => [
-          parent,
-          [...aggregated].sort(),
-        ]),
-      ),
-      inheritors: Object.fromEntries(
-        [...inheritors.entries()].map(([parent, inherited]) => [
-          parent,
-          [...inherited].sort(),
-        ]),
-      ),
+      children: edgeRecord(children),
+      inheritors: edgeRecord(inheritors),
       ...(namedParentPoms.size > 0
         ? { parentPomFiles: [...namedParentPoms].sort() }
         : {}),
@@ -703,7 +766,10 @@ function snapshotReports(root: string, reactor: MavenReactor): ReportSnapshot {
 
 function xmlAttributes(source: string): Map<string, string> {
   const attributes = new Map<string, string>();
-  const re = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  // The lookbehind pins each name to a maximal word run: without it, a long
+  // attribute-name run with no `=` backtracked the greedy name from every
+  // start position — quadratic on PR-controlled report bytes.
+  const re = /(?<![\w:.-])([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(source)) !== null) {
     attributes.set(match[1], match[2] ?? match[3] ?? '');
@@ -756,12 +822,32 @@ const XML_WORD_CHAR = /[A-Za-z0-9_]/;
  * parseTestReport handles what was seen until then.
  */
 function xmlOpenTagHeaders(xml: string, name: string): XmlOpenTagHeader[] {
-  const lower = xml.toLowerCase();
   const tag = `<${name.toLowerCase()}`;
+  // toLowerCase() can lengthen UTF-16 text (`İ` → `i` + U+0307), so offsets
+  // located in a lowercased copy would misindex the original xml past the
+  // first such character. Use the copy only while it stayed the same length;
+  // otherwise scan the original case-insensitively.
+  const lower = xml.toLowerCase();
+  const indexOfTag =
+    lower.length === xml.length
+      ? (from: number): number => lower.indexOf(tag, from)
+      : (from: number): number => {
+          for (let i = from; i + tag.length <= xml.length; i += 1) {
+            let matched = true;
+            for (let j = 0; j < tag.length; j += 1) {
+              if (xml[i + j].toLowerCase() !== tag[j]) {
+                matched = false;
+                break;
+              }
+            }
+            if (matched) return i;
+          }
+          return -1;
+        };
   const headers: XmlOpenTagHeader[] = [];
   let from = 0;
   for (;;) {
-    const start = lower.indexOf(tag, from);
+    const start = indexOfTag(from);
     if (start === -1) return headers;
     from = start + 1;
     // `\b` semantics: `<testsuite` must not match `<testsuites`.
@@ -793,27 +879,35 @@ function xmlOpenTagHeaders(xml: string, name: string): XmlOpenTagHeader[] {
 const TESTCASE_CLOSE_RE = /<\/testcase\s*>/gi;
 
 /**
- * Drop terminated `<![CDATA[ … ]]>` sections in one linear pass. An
- * unterminated section stays verbatim: its content then fails closed
- * exactly as it did before CDATA handling existed.
+ * Drop terminated `<![CDATA[ … ]]>` sections and `<!-- … -->` comments in
+ * one linear pass: both are opaque text, never markup, and scanning a
+ * commented-out or CDATA-wrapped suite (aggregate writers like jest-junit
+ * and karma emit both) fabricated phantom suites and failure evidence. The
+ * earlier marker wins — a marker inside the other kind is literal content,
+ * consumed with it. An unterminated section stays verbatim: its content
+ * then fails closed exactly as it did before this handling existed.
  */
-function stripCdataSections(xml: string): string {
-  if (!xml.includes('<![CDATA[')) return xml;
+function stripOpaqueSections(xml: string): string {
+  if (!xml.includes('<![CDATA[') && !xml.includes('<!--')) return xml;
   const chunks: string[] = [];
   let from = 0;
   for (;;) {
-    const start = xml.indexOf('<![CDATA[', from);
-    if (start === -1) {
+    const cdata = xml.indexOf('<![CDATA[', from);
+    const comment = xml.indexOf('<!--', from);
+    if (cdata === -1 && comment === -1) {
       chunks.push(xml.slice(from));
       return chunks.join('');
     }
-    const end = xml.indexOf(']]>', start + 9);
+    const cdataFirst = cdata !== -1 && (comment === -1 || cdata < comment);
+    const start = cdataFirst ? cdata : comment;
+    const closer = cdataFirst ? ']]>' : '-->';
+    const end = xml.indexOf(closer, start + (cdataFirst ? 9 : 4));
     if (end === -1) {
       chunks.push(xml.slice(from));
       return chunks.join('');
     }
     chunks.push(xml.slice(from, start));
-    from = end + 3;
+    from = end + closer.length;
   }
 }
 
@@ -829,11 +923,12 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
   } catch {
     return null;
   }
-  // CDATA content is opaque text, never markup: test output wrapped in
-  // `<system-out>` CDATA routinely CONTAINS XML samples, and scanning it as
-  // markup fabricated phantom suites and failure evidence. Drop terminated
+  // CDATA and comment content is opaque text, never markup: test output
+  // wrapped in `<system-out>` CDATA routinely CONTAINS XML samples, and
+  // aggregate writers also emit commented-out markup; scanning either as
+  // real fabricated phantom suites and failure evidence. Drop terminated
   // sections; an unterminated one stays as-is and fails closed as before.
-  xml = stripCdataSections(xml);
+  xml = stripOpaqueSections(xml);
   // Aggregate counts across EVERY suite in the file: aggregate JUnit writers
   // (jest-junit, karma reporters aimed at target/surefire-reports/ for
   // SonarQube) emit several `<testsuite>` elements, and reading only the
@@ -853,16 +948,23 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
   }
   if (suites === 0) return null;
   const failedCases: string[] = [];
+  let consumedUntil = 0;
   for (const header of xmlOpenTagHeaders(xml, 'testcase')) {
     const bodyStart = header.index + header.text.length;
     let body = '';
     if (!header.text.endsWith('/>')) {
+      // Closing tags are consumed forward-only: an opener whose body starts
+      // before the last consumed close overlaps an already-attributed body —
+      // malformed XML, and the pre-fix shape that re-found the same early
+      // close for every later opener, quadratic over the whole file.
+      if (bodyStart < consumedUntil) continue;
       TESTCASE_CLOSE_RE.lastIndex = bodyStart;
       const close = TESTCASE_CLOSE_RE.exec(xml);
       // A file truncated mid-case has no closing tag to attribute a body to;
       // every later opener has the same hole, so stop rather than rescan.
       if (!close) break;
       body = xml.slice(bodyStart, close.index);
+      consumedUntil = close.index + close[0].length;
     }
     if (!/<(?:failure|error)\b/i.test(body)) continue;
     const testcaseAttributes = xmlAttributes(header.attributes);
@@ -1037,6 +1139,18 @@ function unsupportedReport(note: string): BuildTestReport {
   };
 }
 
+/** How a non-clean best-effort dependency warm-up ended. */
+function warmUpOutcome(install: CommandResult, timeoutSeconds: number): string {
+  return (
+    `Dependency warm-up (\`${install.command}\`) ` +
+    (install.timedOut
+      ? `ran out of time (${timeoutSeconds}s)`
+      : install.exitCode === null
+        ? 'ended without an exit code (a spawn failure or signal outside the deadline)'
+        : `exited ${install.exitCode}`)
+  );
+}
+
 function mavenReport(
   fields: Omit<BuildTestReport, 'toolchain'>,
 ): BuildTestReport {
@@ -1168,8 +1282,9 @@ export function shellSelector(
   // literal and a `"…"` wrap does not stop %VAR% expansion or an embedded
   // quote. That stays safe only because readMavenReactor rejects any module
   // entry whose pom.xml is missing from disk (the existsSync gate), rejects
-  // `%` outright (moduleEntries — cmd.exe expands it even inside `"…"`), and
-  // a Windows filename cannot contain `"` or `|` — do not remove those gates.
+  // `%` outright (the `/[<$>{}&%,:]/` gate parsePomStructure applies to
+  // `<module>` entries — cmd.exe expands it even inside `"…"`), and a
+  // Windows filename cannot contain `"` or `|` — do not remove those gates.
   return platform === 'win32' ? `"${selector}"` : shellQuotePath(selector);
 }
 
@@ -1178,7 +1293,8 @@ export function shellSelector(
  * `mvnw` and `mvnw.cmd`; `./mvnw` is not runnable under win32 `cmd.exe`. On
  * POSIX a wrapper without the executable bit (a `core.fileMode=false`
  * checkout) falls back to the system `mvn` rather than dying with exit 126
- * and steering a launch failure at the PR.
+ * and turning the whole run into an infrastructure handoff that verifies
+ * nothing.
  */
 export function mavenExecutable(
   root: string,
@@ -1220,6 +1336,10 @@ function mavenConfigDependencyInputs(root: string): string[] {
       value = token.slice('--global-settings='.length);
     else if (token.startsWith('-Dmaven.repo.local='))
       value = token.slice('-Dmaven.repo.local='.length);
+    // commons-cli also accepts the attached short forms (`-s<path>`): the
+    // remainder of a token whose option bears an argument becomes the value.
+    else if (/^-s.+/.test(token)) value = token.slice('-s'.length);
+    else if (/^-gs.+/.test(token)) value = token.slice('-gs'.length);
     if (!value) continue;
     const path = normalizedChangedPath(root, value);
     if (path !== null) inputs.push(path);
@@ -1228,6 +1348,33 @@ function mavenConfigDependencyInputs(root: string): string[] {
 }
 
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
+  const perCommandMs = args.timeout * 1000;
+  // The floor never exceeds the caller's own per-command deadline: a run
+  // whose whole budget is one short deadline still gets that attempt,
+  // exactly as it did before budgeting existed.
+  const attemptFloorMs = Math.min(BUDGET_MIN_ATTEMPT_MS, perCommandMs);
+  // The whole-call budget the npm adapter runs under, for the same reason:
+  // the warm-up and the lifecycle command SUM against the outer tool
+  // timeout, and a cold reactor whose warm-up takes the whole sum leaves
+  // the lifecycle command nothing — or the outer kill discards the report.
+  // It bounds what the COMMANDS spend: reactor parsing and scoping are
+  // linear and fast, and charging them would let millisecond overhead
+  // starve a call whose whole budget is one short deadline.
+  const callBudgetMs =
+    (args.budget ?? Math.max(args.timeout, args.timeout * 2 - 30)) * 1000;
+  let spentMs = 0;
+  /** Budget left for the whole call; every command spends from it. */
+  const remainingMs = (): number => callBudgetMs - spentMs;
+  const budgetedExec = (
+    command: string,
+    cwd: string,
+    timeoutMs: number,
+  ): CommandResult => {
+    const startedAt = Date.now();
+    const r = args.exec(command, cwd, timeoutMs);
+    spentMs += Date.now() - startedAt;
+    return r;
+  };
   const parsed = readMavenReactor(args.root);
   if (!parsed.reactor) {
     return unsupportedReport(
@@ -1314,6 +1461,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     const path = normalizedChangedPath(args.root, file);
     if (path === null) return false;
     if (path === 'pom.xml' || path.startsWith('.mvn/')) return true;
+    // Named parent POM files backing a recorded inheritance edge are
+    // resolution inputs exactly like a member's `pom.xml`: ownership routing
+    // already models them as build inputs (namedParentDirs).
+    if ((parsed.reactor.parentPomFiles ?? []).includes(path)) return true;
     if (executedWrapper !== null && path === executedWrapper) return true;
     if (
       settingsInputs.some(
@@ -1385,12 +1536,34 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // install flag as `npm ci`: `--no-install` means "assume warm, fetch
   // nothing".
   let install: CommandResult | null = null;
-  if (args.install) {
-    install = args.exec(
+  if (args.install && remainingMs() >= attemptFloorMs) {
+    install = budgetedExec(
       `${executable} --batch-mode --no-transfer-progress${narrowing} dependency:go-offline -q`,
       args.root,
-      args.timeout * 1000,
+      Math.min(perCommandMs, remainingMs()),
     );
+  }
+  if (remainingMs() < attemptFloorMs) {
+    let note =
+      `The whole-call budget (${Math.round(callBudgetMs / 1000)}s) was spent ` +
+      `before \`${command}\` could start, so nothing could be built or tested. ` +
+      'This is an infrastructure result, not a defect in the diff — report it as informational.';
+    if (install && (install.timedOut || install.exitCode !== 0)) {
+      note +=
+        ` ${warmUpOutcome(install, args.timeout)} — the budget it consumed ` +
+        'is what stopped the lifecycle command.';
+    }
+    return mavenReport({
+      affected,
+      buildSet,
+      widenedWith: [],
+      install,
+      build: [],
+      test: [],
+      ok: false,
+      timedOut: [],
+      note,
+    });
   }
   // A build-only run never reads the evidence, so it skips the snapshot too
   // — on a large reactor that is a readdir + statSync sweep of every
@@ -1398,7 +1571,11 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const before = args.buildOnly
     ? null
     : snapshotReports(args.root, parsed.reactor);
-  const executed = args.exec(command, args.root, args.timeout * 1000);
+  const executed = budgetedExec(
+    command,
+    args.root,
+    Math.min(perCommandMs, remainingMs()),
+  );
   const summaries = before
     ? freshTestSummaries(args.root, parsed.reactor, before)
     : [];
@@ -1546,13 +1723,8 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   }
   if (install && (install.timedOut || install.exitCode !== 0)) {
     report.note +=
-      ` Dependency warm-up (\`${install.command}\`) ` +
-      (install.timedOut
-        ? `ran out of time (${args.timeout}s)`
-        : install.exitCode === null
-          ? 'ended without an exit code (a spawn failure or signal outside the deadline)'
-          : `exited ${install.exitCode}`) +
-      ' — it is best-effort, and the lifecycle outcome above stands on its own.';
+      ` ${warmUpOutcome(install, args.timeout)} — it is best-effort, and the ` +
+      'lifecycle outcome above stands on its own.';
   }
   if (wrapperChanged && !executedWrapperChanged) {
     report.note +=

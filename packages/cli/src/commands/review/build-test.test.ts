@@ -1523,6 +1523,107 @@ describe('runBuildTest', () => {
     expect(rep.ok).toBe(true);
   });
 
+  it('names budget-stopped UNTESTABLE suites in notRun too', () => {
+    // The budget-break push must be UNFILTERED: a suite the build phase
+    // left unbuilt (untestable) and the budget then never attempted
+    // otherwise stayed in testScope.workspaces — reported as run and
+    // passed though zero test commands executed.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/d', {
+      name: '@x/d',
+      dependencies: { '@x/a': '*', '@x/x': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/x', {
+      name: '@x/x',
+      scripts: { build: 'exit 0' },
+    });
+    writePlan(['packages/a/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 16,
+      install: false,
+      exec: (command) => {
+        if (command.startsWith('npm run build')) {
+          // Real wall clock, so the budget actually drains.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    // `a` builds (2s), then the floor stops the build phase with x and d
+    // unbuilt, and the test phase starts below the floor.
+    expect(rep.test).toEqual([]);
+    expect(rep.testScope?.workspaces).toEqual([]);
+    expect(rep.testScope?.notRun).toEqual(['packages/a', 'packages/d']);
+    expect(rep.note).toContain('not run: packages/a, packages/d');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('discloses a budget-stopped single-root suite instead of claiming no test script', () => {
+    // The workspace branch names the budget when every suite was trimmed;
+    // a single-root repo carries no testScope, and its note used to claim
+    // the package defines no test script — though the script is exactly
+    // why the suite sits in notRun.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    writePlan(['src/a.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 16,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        if (command.startsWith('npm run build')) {
+          // Real wall clock, so the budget actually drains.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(calls).toEqual(['npm run build']);
+    expect(rep.test).toEqual([]);
+    expect(rep.note).toContain(
+      'whole-call budget was spent before any suite could run',
+    );
+    expect(rep.note).not.toContain('defines no test script');
+    expect(rep.note).toContain('not run: .');
+    expect(rep.ok).toBe(true);
+  });
+
   it('runs the AFFECTED workspace first, so the budget trims dependents, never the changed suite', () => {
     // The closure is alphabetical — `alpha` before `zebra` — but the diff
     // changed zebra, and its own suite is the one most likely to catch the

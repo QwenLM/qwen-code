@@ -635,7 +635,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     if (remaining < BUDGET_MIN_ATTEMPT_MS) {
       // Below the floor an "attempt" cannot even boot npm — it would
       // manufacture a fake timeout where an honest notRun says what happened.
-      notRun.push(...runnableDirs.slice(i).filter((d) => !untestable.has(d)));
+      // Unfiltered: an untestable dir the budget also stopped must still
+      // leave `testScope.workspaces` (which names what RAN), and no dir at
+      // index >= i can already have been pushed.
+      notRun.push(...runnableDirs.slice(i));
       break;
     }
     const r = exec(testCommand(dir), root, Math.min(perCommandMs, remaining));
@@ -701,7 +704,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       } else if (!testScope) {
         testsClause =
           results.test.length === 0
-            ? ', but the package defines no test script, so no tests ran.'
+            ? notRun.length > 0
+              ? // The loop pushed the suite to notRun: the script exists.
+                ', but the whole-call budget was spent before any suite could run.'
+              : ', but the package defines no test script, so no tests ran.'
             : ' and ran the tests of the changed ones. Everything passed.';
       } else if (testScope.workspaces.length === 0) {
         testsClause = testScope.notRun?.length

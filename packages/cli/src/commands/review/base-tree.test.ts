@@ -548,6 +548,79 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('models ./-prefixed workspace globs like their bare form', () => {
+    // The on-disk twin strips a leading `./` from each glob; without it
+    // here, `workspaceDirFor` never matched the expanded dirs and an npm
+    // base was misclassified as Maven, losing A/B attribution.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'app', 'package.json'),
+      JSON.stringify({ name: '@x/app', scripts: { build: 'tsc' } }),
+    );
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['./packages/*'] }),
+    );
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'dot-slash workspace + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
+  it('does NOT count an unreadable member manifest as an npm package', () => {
+    // applies() requires at least one readable package: a manifest that
+    // does not parse lands in `skipped` on disk, so counting it on blob
+    // EXISTENCE alone suppressed the nested-pom probe for a standalone-
+    // module Maven base.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(join(repo, 'packages', 'app', 'package.json'), '{oops');
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'broken member manifest + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+  });
+
   it.skipIf(process.platform === 'win32')(
     'still detects a nested pom under a directory named with a line terminator',
     () => {

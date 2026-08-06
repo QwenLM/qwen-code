@@ -648,17 +648,47 @@ function mavenPlModules(command: string): string[] | null {
   let value: string | undefined;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    if (token === '-pl' || token === '--projects') value = tokens[i + 1];
-    else if (token.startsWith('-pl=')) value = token.slice('-pl='.length);
+    let raw: string | undefined;
+    if (token === '-pl' || token === '--projects') raw = tokens[i + 1];
+    else if (token.startsWith('-pl=')) raw = token.slice('-pl='.length);
     else if (token.startsWith('--projects='))
-      value = token.slice('--projects='.length);
+      raw = token.slice('--projects='.length);
+    if (raw === undefined) continue;
+    // A module dir can carry a space (it passes the POM entry gate), so
+    // shellSelector wraps the selector in quotes, and the split above broke
+    // it into its first word — collapsing two different module sets that
+    // share one. Rejoin through the closing quote before splitting on `,`.
+    const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
+    if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
+      const parts = [raw];
+      while (
+        i + 1 < tokens.length &&
+        !parts[parts.length - 1].endsWith(quote)
+      ) {
+        i += 1;
+        parts.push(tokens[i]);
+      }
+      raw = parts.join(' ');
+    }
+    if (quote !== null && raw.length > 1 && raw.endsWith(quote)) {
+      value = raw.slice(1, -1);
+      // Undo shellQuotePath's `'\''` dance for dirs with an apostrophe.
+      if (quote === "'") value = value.replace(/'\\''/g, "'");
+    } else {
+      value = raw;
+    }
   }
   if (!value) return null;
   const modules = [
     ...new Set(
       value
         .split(',')
-        .map((module) => module.trim())
+        .map((module) => {
+          const trimmed = module.trim();
+          // Quoted and unquoted spellings compare equal.
+          const quoted = /^(['"])(.*)\1$/.exec(trimmed);
+          return quoted ? quoted[2] : trimmed;
+        })
         .filter((module) => module.length > 0),
     ),
   ].sort();
@@ -716,6 +746,13 @@ function ruleCommand(
     token === '-amd' ||
     token === '--also-make-dependents';
   const claimTokens = claimed.split(/\s+/);
+  // Lifecycle phases the claim names, in order: a multi-phase claim
+  // (`clean test`) runs phases the recorded single-phase run never did.
+  const claimPhases = claimTokens.filter((token) =>
+    /^(?:clean|validate|compile|test-compile|test|package|verify|install)$/.test(
+      token,
+    ),
+  );
   const claimScopesItself = claimTokens.some(
     (token) =>
       token === '-pl' ||
@@ -800,14 +837,39 @@ function ruleCommand(
   // `contradicted` — the first match could be a green package that merely
   // sorted first, stating the opposite of the authoritative `ok: false`.
   const ran =
-    matches.find((c) => finished(c) && ranFailed(c)) ?? matches.find(finished);
+    matches.find((c) => finished(c) && ranFailed(c)) ??
+    matches.find(finished) ??
+    // A spawn-level death (exitCode null, no deadline kill) is a failed run
+    // for a non-Maven claim: it never finished, so the manifest fallback
+    // must not rule it `reproduces`. Maven claims keep the cascade below,
+    // which reports the same result as unchecked.
+    (!mavenRunnerClaim
+      ? matches.find(
+          (c) => !c.timedOut && c.exitCode === null && !c.infrastructure,
+        )
+      : undefined);
   if (ran) {
     // Reactor-wide recorded runs carry no `-pl`; calling those module-scoped
     // would understate what the evidence verified.
+    const settledReduced = settledByLifecycle(ran.command.trim());
     const scoped =
-      (settledByLifecycle(ran.command.trim()) ||
-        settledBySameScope(ran.command.trim())) &&
+      (settledReduced || settledBySameScope(ran.command.trim())) &&
       /(?:^|\s)-pl(?:\s|=|$)/.test(ran.command);
+    // A multi-phase claim (`clean test`) settles on its FINAL phase when it
+    // carries no scoping of its own — the adapter only ever runs `test` or
+    // `test-compile`, so the note must not read as if the earlier phases
+    // ran.
+    const phaseReduced = settledReduced && claimPhases.length > 1;
+    const howItRan =
+      scoped && phaseReduced
+        ? `this review ran a module-scoped form of its final phase (\`${claimedLifecycle}\`), ` +
+          `not the full \`${claimPhases.join(' ')}\` it claims`
+        : scoped
+          ? 'this review ran a module-scoped form of it'
+          : phaseReduced
+            ? `this review ran its final phase (\`${claimedLifecycle}\`), ` +
+              `not the full \`${claimPhases.join(' ')}\` it claims`
+            : 'this review ran it';
     if (ran.exitCode === 0 && ranFailed(ran)) {
       return {
         kind: 'command',
@@ -816,13 +878,11 @@ function ruleCommand(
         observed: freshTestFailures(ran)
           ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
           : 'exit 0, but the output records failures the exit code did not fail on',
-        note: freshTestFailures(ran)
-          ? scoped
-            ? 'this review ran a module-scoped form of it, and fresh test reports record failures despite the zero exit'
-            : 'this review ran it, but fresh test reports record failures despite the zero exit'
-          : scoped
-            ? 'this review ran a module-scoped form of it, and the run recorded failures despite the zero exit'
-            : 'this review ran it, but the run recorded failures despite the zero exit',
+        note:
+          `${howItRan}, but ` +
+          (freshTestFailures(ran)
+            ? 'fresh test reports record failures despite the zero exit'
+            : 'the run recorded failures despite the zero exit'),
       };
     }
     return ran.exitCode === 0
@@ -831,18 +891,17 @@ function ruleCommand(
           text,
           verdict: 'reproduces',
           observed: 'exit 0',
-          note: scoped
-            ? 'this review ran a module-scoped form of it'
-            : 'this review ran it',
+          note: howItRan,
         }
       : {
           kind: 'command',
           text,
           verdict: 'contradicted',
           observed: `exit ${ran.exitCode}`,
-          note: scoped
-            ? 'this review ran a module-scoped form of it, and that failed'
-            : 'this review ran it and it failed',
+          note:
+            scoped || phaseReduced
+              ? `${howItRan}, and that failed`
+              : 'this review ran it and it failed',
         };
   }
 
@@ -853,7 +912,18 @@ function ruleCommand(
     // interruption as neutral while the build-test side reports ok:false.
     if (
       matches.some(
-        (c) => (c.timedOut || c.exitCode === null) && freshTestFailures(c),
+        (c) =>
+          (c.timedOut || c.exitCode === null) &&
+          freshTestFailures(c) &&
+          // The same scope asymmetry the `-am` guard above applies to
+          // finished runs: an interrupted `-am` run's fresh failures may
+          // live entirely in upstream modules the claim never tests, so it
+          // cannot contradict the claim either.
+          !(
+            settledBySameScope(c.command.trim()) &&
+            mavenHasAlsoMake(c.command) &&
+            !mavenHasAlsoMake(claimed)
+          ),
       )
     ) {
       return {

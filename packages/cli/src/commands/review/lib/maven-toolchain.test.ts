@@ -2222,6 +2222,9 @@ describe('maven toolchain adapter', () => {
       root,
       changedFiles: ['core/src/main/java/example/Core.java'],
       timeout: 9,
+      // A budget above the two 9s deadlines keeps them whole; the budget
+      // regime itself is pinned by the tests below.
+      budget: 600,
       install: true,
       exec: (command, _cwd, timeoutMs) => {
         calls.push([command, timeoutMs]);
@@ -2251,6 +2254,8 @@ describe('maven toolchain adapter', () => {
       root,
       changedFiles: ['core/src/Main.java'],
       timeout: 5,
+      // Keep both 5s deadlines whole despite the warm-up's wall time.
+      budget: 600,
       install: true,
       exec: (command) =>
         command.includes('dependency:go-offline')
@@ -2267,6 +2272,7 @@ describe('maven toolchain adapter', () => {
       root,
       changedFiles: ['core/src/Main.java'],
       timeout: 5,
+      budget: 600,
       install: true,
       exec: (command) =>
         command.includes('dependency:go-offline')
@@ -2551,7 +2557,9 @@ describe('maven toolchain adapter', () => {
     // never-closed `<testcase` openers — a denial of service through
     // PR-controlled report bytes. The linear scan must stay fast at the
     // size cap; the bound is generous (slow CI) yet far below the
-    // pre-fix extrapolation of tens of seconds at this input size.
+    // pre-fix extrapolation of tens of seconds at this input size. The
+    // suite header is load-bearing: without it parseTestReport returns at
+    // `suites === 0` and never reaches the testcase walk this pins.
     writeReactor();
     const startedAt = Date.now();
 
@@ -2565,7 +2573,10 @@ describe('maven toolchain adapter', () => {
         mkdirSync(dir, { recursive: true });
         writeFileSync(
           join(dir, 'TEST-Core.xml'),
-          '<testcase x '.repeat(100_000),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.CoreTest" name="passes"/>' +
+            '</testsuite>' +
+            '<testcase x '.repeat(100_000),
         );
         return result(command);
       },
@@ -2574,4 +2585,343 @@ describe('maven toolchain adapter', () => {
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(report.ok).toBe(true);
   }, 20_000);
+
+  it('parses a suite header of unpaired attribute-name runs in linear time', () => {
+    // `xmlAttributes` backtracked quadratically on a long attribute-name
+    // run with no `=` — the same denial-of-service class, entering through
+    // the suite header instead of the testcase walk.
+    writeReactor();
+    const startedAt = Date.now();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          `<testsuite ${'a'.repeat(1_000_000)} tests="1" failures="0" ` +
+            'errors="0" skipped="0"></testsuite>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(report.ok).toBe(true);
+  }, 20_000);
+
+  it('walks stacked openers-before-closers reports in linear time', () => {
+    // Every opener preceding every closer used to re-find the same early
+    // closing tag for each later opener — quadratic inside the 2 MiB cap,
+    // and still reporting ok:true while burning the outer deadline. Bodies
+    // are consumed forward-only now, so the walk stays O(n).
+    writeReactor();
+    const startedAt = Date.now();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.T" name="t">'.repeat(30_000) +
+            '</testcase>'.repeat(30_000) +
+            '</testsuite>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(report.ok).toBe(true);
+  }, 20_000);
+
+  it('reads a reactor of unclosed-tag module POMs in linear time', () => {
+    // The regex POM tokenizer backtracked quadratically on repeated `<`
+    // with no `>` anywhere, and POM reads carry no size cap — a hostile
+    // module POM must cost milliseconds, not the minutes the pre-fix
+    // extrapolation measured.
+    writeProject('.', ['core']);
+    writeProject('core');
+    writeFileSync(join(root, 'core', 'pom.xml'), '<a'.repeat(1_000_000));
+    const startedAt = Date.now();
+
+    const parsed = readMavenReactor(root);
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(parsed.error).toBeUndefined();
+  }, 20_000);
+
+  it('does not parse commented-out report content as markup', () => {
+    // The CDATA fix left comments scanned as real markup: aggregate
+    // writers (jest-junit, karma) emit comments, and a commented-out
+    // suite fabricated phantom failures for a passing run.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.CoreTest" name="passes"/>' +
+            '<!-- <testsuite name="ghost" tests="3" failures="2" errors="1" skipped="0">' +
+            '<testcase classname="ghost.C" name="g"><failure/>' +
+            '</testcase></testsuite> -->' +
+            '</testsuite>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.output).toContain('tests=1, failures=0');
+    expect(report.test[0]?.output).not.toContain('[maven-test-failure]');
+  });
+
+  it('keeps case identity when lowercase mapping changes UTF-16 length', () => {
+    // `İ` (U+0130) lowercases to TWO code units; locating tag headers in a
+    // lowercased copy and indexing the original with those offsets shifted
+    // every later body window and dropped the failing case's evidence line.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="2" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="\u0130.Pass" name="passes"/>' +
+            '<testcase classname="example.Fail" name="fails">' +
+            '<failure>boom</failure></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, {
+          exitCode: 1,
+          output: '[ERROR] Tests failed',
+        });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.output).toContain(
+      '[maven-test-failure] core/target/surefire-reports/TEST-Core.xml: example.Fail#fails',
+    );
+  });
+
+  it('walks descendants of a module named after an Object.prototype key', () => {
+    // children/inheritors are indexed by PR-controlled dir names; a plain
+    // Record read `constructor` as the inherited prototype member and the
+    // `?? []` guard never fired — one module name threw a TypeError out of
+    // the whole ownership walk.
+    writeProject('.', ['constructor', 'heir']);
+    writeProject('constructor');
+    writeProject('heir');
+    writeFileSync(
+      join(root, 'heir', 'pom.xml'),
+      childPomInheriting('../constructor/pom.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(parsed.reactor.inheritors).toEqual({ constructor: ['heir'] });
+    expect(
+      detectMavenOwnership(root, ['constructor/pom.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['constructor', 'heir'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('fails closed on reactor nesting deeper than the cap', () => {
+    // Real reactors nest a handful of levels; a deeper chain is a hostile
+    // checkout shape, and the walk must hand back the { error } contract
+    // instead of overflowing the stack.
+    let parent = '.';
+    for (let i = 0; i < 600; i++) {
+      const name = `d${i}`;
+      writeProject(parent, [name]);
+      parent = parent === '.' ? name : `${parent}/${name}`;
+    }
+    writeProject(parent);
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.error).toContain('deeper than 512 levels');
+  });
+
+  it('treats a changed named parent POM as a dependency input', () => {
+    // Ownership routing models named parent files as build inputs; the
+    // resolution carve-out must too, or a PR-caused resolution failure
+    // through one is laundered into infrastructure.
+    writeProject('.', ['base', 'app']);
+    writeProject('base');
+    writeProject('app');
+    writeFileSync(join(root, 'base', 'parent.xml'), pom());
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../base/parent.xml'),
+    );
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['base/parent.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:app',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('treats attached -s<path> settings as dependency inputs too', () => {
+    // commons-cli accepts the attached short form (`-sci/settings.xml`);
+    // missing it laundered a PR-caused resolution break into
+    // infrastructure.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    mkdirSync(join(root, 'ci'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-sci/settings.xml\n');
+    writeFileSync(join(root, 'ci', 'settings.xml'), '<settings/>\n');
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['ci/settings.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('spends the whole-call budget across warm-up and lifecycle', () => {
+    // The warm-up and the lifecycle command share one budget: each gets
+    // the smaller of its own deadline and what remains, and --budget
+    // shortens the sum (both execs would otherwise take the full 300s).
+    writeReactor();
+    let clock = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const calls: Array<[string, number]> = [];
+
+    try {
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['core/src/Main.java'],
+        timeout: 300,
+        budget: 60,
+        install: true,
+        exec: (command, _cwd, timeoutMs) => {
+          calls.push([command, timeoutMs]);
+          clock += 40_000;
+          return result(command);
+        },
+      });
+
+      expect(calls).toEqual([
+        [
+          'mvn --batch-mode --no-transfer-progress -pl core -am dependency:go-offline -q',
+          60_000,
+        ],
+        ['mvn --batch-mode --no-transfer-progress -pl core -am test', 20_000],
+      ]);
+      expect(report.ok).toBe(true);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('discloses instead of attempting a lifecycle below the attempt floor', () => {
+    // A warm-up that spends the budget leaves less than the 15s floor for
+    // the lifecycle: an "attempt" would manufacture a fake timeout, so the
+    // run discloses that nothing could be built or tested.
+    writeReactor();
+    let clock = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const calls: string[] = [];
+
+    try {
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['core/src/Main.java'],
+        timeout: 300,
+        budget: 60,
+        install: true,
+        exec: (command) => {
+          calls.push(command);
+          clock += 50_000;
+          // A cold reactor's warm-up really does eat the budget by timing
+          // out; the disclosure must survive the budget early-return.
+          return command.includes('dependency:go-offline')
+            ? result(command, { exitCode: null, timedOut: true, seconds: 50 })
+            : result(command);
+        },
+      });
+
+      expect(calls).toEqual([
+        'mvn --batch-mode --no-transfer-progress -pl core -am dependency:go-offline -q',
+      ]);
+      expect(report.ok).toBe(false);
+      expect(report.test).toEqual([]);
+      expect(report.install?.command).toContain('dependency:go-offline');
+      expect(report.note).toContain('whole-call budget (60s) was spent');
+      expect(report.note).toContain('informational');
+      expect(report.note).toContain('ran out of time');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('runs nothing when the budget is below the attempt floor from the start', () => {
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 300,
+      budget: 5,
+      install: true,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(calls).toEqual([]);
+    expect(report.ok).toBe(false);
+    expect(report.install).toBeNull();
+    expect(report.note).toContain('whole-call budget (5s) was spent');
+  });
 });

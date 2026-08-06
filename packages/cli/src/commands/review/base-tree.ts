@@ -128,6 +128,23 @@ function gitBlob(cwd: string, sha: string, path: string): string | null {
 }
 
 /**
+ * The base-tree twin of readWorkspacePackages' manifest gate: a member
+ * counts only when its manifest parses and has a usable `name` — the disk
+ * side puts every other manifest in `skipped`, not `packages`, and
+ * `npmToolchainAdapter.applies` requires at least one package.
+ */
+function hasUsableManifestAt(cwd: string, sha: string, path: string): boolean {
+  const blob = gitBlob(cwd, sha, path);
+  if (blob === null) return false;
+  try {
+    const pkg = JSON.parse(blob) as { name?: unknown } | null;
+    return pkg !== null && typeof pkg.name === 'string' && pkg.name !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A root package.json the npm adapter would actually apply to — mirroring
  * `npmToolchainAdapter.applies` against the BASE tree: MODELED workspace
  * globs that resolve to at least one package there, or a root build/test
@@ -159,7 +176,7 @@ function blobIsNpmProject(blob: string, cwd: string, sha: string): boolean {
             // A directory a negation excludes is not a workspace — the same
             // check readWorkspacePackages applies on disk.
             workspaceDirFor(`${dir}/package.json`, globs) === dir &&
-            gitHasPath(cwd, sha, `${dir}/package.json`),
+            hasUsableManifestAt(cwd, sha, `${dir}/package.json`),
         )
       );
     }
@@ -182,7 +199,8 @@ function workspaceDirsAt(cwd: string, sha: string, globs: string[]): string[] {
   const dirs = new Set<string>();
   for (const glob of globs) {
     if (glob.startsWith('!')) continue;
-    const g = glob.replace(/\/$/, '');
+    // Strip a leading `./` exactly as workspaceDirCandidates does on disk.
+    const g = glob.replace(/^\.\//, '').replace(/\/$/, '');
     if (g.endsWith('/*')) {
       const base = g.slice(0, -2);
       for (const child of gitTreeChildDirs(cwd, sha, base)) {

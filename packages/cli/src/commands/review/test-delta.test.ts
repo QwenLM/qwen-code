@@ -336,6 +336,31 @@ describe('runTestDelta', () => {
     expect(r.note).toContain('judge them by the diff');
   });
 
+  it('refuses the Maven lifecycle commands the Maven adapter records', () => {
+    // build-test's test[] can now carry Maven command strings; the rerun
+    // grammar stays npm-only. Pin the guard so a future widening of
+    // RERUNNABLE_COMMAND_RE — or a Maven report handed straight to
+    // `qwen review test-delta --report` — cannot re-execute a Maven
+    // lifecycle command in the base worktree.
+    const ran: string[] = [];
+    const r = runWith(
+      [
+        cmd({
+          command:
+            './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+          output: '[ERROR] Tests failed',
+        }),
+      ],
+      (command) => {
+        ran.push(command);
+        return cmd({ command, output: '' });
+      },
+    );
+    expect(ran).toEqual([]);
+    expect(r.entries).toEqual([]);
+    expect(r.note).toContain('not the shape');
+  });
+
   it('reruns both shapes build-test actually emits', () => {
     const ran: string[] = [];
     runWith(

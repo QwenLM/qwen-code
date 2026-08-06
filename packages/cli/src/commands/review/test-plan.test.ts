@@ -1607,6 +1607,167 @@ describe('runTestPlan', () => {
       }
     });
 
+    it('does not contradict a -pl claim on an INTERRUPTED -am run of the same module set', () => {
+      // The finished twin of this guard is pinned above; the interrupted
+      // fresh-failure branch must apply the same scope asymmetry — the
+      // failures may live entirely in upstream modules only `-am` pulled
+      // in, which the claim never tests.
+      const output =
+        '[maven-test-report] upstream/target/surefire-reports/TEST-A.xml: tests=2, failures=1, errors=0, skipped=0\n' +
+        '[maven-test-failure] upstream/target/surefire-reports/TEST-A.xml: example.ATest#fails';
+      for (const timedOut of [true, false]) {
+        const bt = {
+          build: [],
+          test: [
+            {
+              command:
+                './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+              exitCode: null,
+              seconds: 3,
+              timedOut,
+              output,
+            },
+          ],
+        } as unknown as BuildTestReport;
+        const r = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], bt);
+        expect(verdictOf(r.claims, './mvnw -pl core test')).toBe('unchecked');
+      }
+    });
+
+    it('rules a spawn-level death contradicted for non-Maven claims', () => {
+      // exitCode null without a deadline kill is a run that never finished;
+      // the manifest fallback must not certify it as reproduced. (Maven
+      // claims keep their unchecked cascade, pinned above, and a deadline
+      // kill keeps falling through to the manifest, pinned as 'does not
+      // rule on a command killed by the deadline'.)
+      const bt = {
+        build: [],
+        test: [
+          {
+            command: 'npm test --workspace="packages/a"',
+            exitCode: null,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `npm test`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'npm test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit null');
+    });
+
+    it('compares quoted -pl selectors as their module sets', () => {
+      // A module dir with a space passes the POM entry gate, and
+      // shellSelector quotes the whole selector; the parser must rejoin it
+      // instead of collapsing it to its first word.
+      const withRecorded = (command: string) =>
+        ({
+          build: [],
+          test: [
+            { command, exitCode: 0, seconds: 3, timedOut: false, output: '' },
+          ],
+        }) as unknown as BuildTestReport;
+
+      const same = run(
+        "## Test Plan\n\nRan `./mvnw -pl 'my module,my other' test`",
+        [],
+        withRecorded(
+          "./mvnw --batch-mode --no-transfer-progress -pl 'my module,my other' -am test",
+        ),
+      );
+      expect(
+        verdictOf(same.claims, "./mvnw -pl 'my module,my other' test"),
+      ).toBe('reproduces');
+
+      // Sharing a first word is NOT the same module set: the recorded run
+      // never tested `my module` alone.
+      const different = run(
+        "## Test Plan\n\nRan `./mvnw -pl 'my module' test`",
+        [],
+        withRecorded(
+          "./mvnw --batch-mode --no-transfer-progress -pl 'my module,my other' -am test",
+        ),
+      );
+      expect(verdictOf(different.claims, "./mvnw -pl 'my module' test")).toBe(
+        'unchecked',
+      );
+    });
+
+    it('contradicts an -am claim when a same-scope run WITHOUT -am failed', () => {
+      // The converse of the -am exclusion: a run that never pulled in
+      // upstream modules and still failed inside the claimed module set
+      // falsifies the wider claim too. The implementation comment relies
+      // on this direction, so pin it.
+      const failed = {
+        build: [],
+        test: [
+          {
+            command: './mvnw --batch-mode --no-transfer-progress -pl core test',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: '[ERROR] Tests failed',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      const r = run(
+        '## Test Plan\n\nRan `./mvnw -pl core -am test`',
+        [],
+        failed,
+      );
+      const claim = r.claims.find((c) => c.text === './mvnw -pl core -am test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit 1');
+    });
+
+    it('discloses the phase reduction of a multi-phase claim', () => {
+      // The adapter only ever runs `test`/`test-compile`; settling
+      // `clean test` on one must not read as if `clean` ran — neither in
+      // the reactor-wide shape nor the module-scoped one.
+      const reactorWide = {
+        build: [],
+        test: [
+          {
+            command: 'mvn --batch-mode --no-transfer-progress test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const wide = run(
+        '## Test Plan\n\nRan `./mvnw clean test`',
+        [],
+        reactorWide,
+      );
+      const wideClaim = wide.claims.find((c) => c.text === './mvnw clean test');
+      expect(wideClaim?.verdict).toBe('reproduces');
+      expect(wideClaim?.note).toContain('final phase (`test`)');
+      expect(wideClaim?.note).toContain('`clean test`');
+
+      const scoped = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const narrow = run('## Test Plan\n\nRan `./mvnw clean test`', [], scoped);
+      expect(
+        narrow.claims.find((c) => c.text === './mvnw clean test')?.note,
+      ).toContain('module-scoped form of its final phase');
+    });
+
     it('does not reproduce a claim on a run whose exit 0 swallowed failures', () => {
       const bt = {
         build: [],
