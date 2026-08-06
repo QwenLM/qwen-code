@@ -93,6 +93,13 @@ const ENVIRONMENT_KEYS = [
       expectsMcpConfirmation: true,
     },
     {
+      name: 'asks for content confirmation in auto-edit mode',
+      approvalMode: 'auto-edit',
+      approveWrite: true,
+      expectedRequests: 1,
+      expectsMcpConfirmation: true,
+    },
+    {
       name: 'still asks for content confirmation in YOLO mode',
       approvalMode: 'yolo',
       approveWrite: true,

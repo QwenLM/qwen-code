@@ -12,7 +12,7 @@ import {
 } from './write-confirmation.js';
 
 describe('write confirmation Hook', () => {
-  it.each(['default', 'auto', 'auto_edit', 'yolo'])(
+  it.each(['default', 'auto', 'auto_edit', 'auto-edit', 'yolo'])(
     'asks in %s mode and displays a reversible escaped representation',
     (permissionMode) => {
       const content =
@@ -67,10 +67,6 @@ describe('write confirmation Hook', () => {
 
   it.each([
     ['plan', 'External context memory writes are not allowed in plan mode.'],
-    [
-      'auto-edit',
-      'External context memory write permission mode is unsupported.',
-    ],
     ['future', 'External context memory write permission mode is unsupported.'],
   ])('denies %s mode with a specific reason', (permissionMode, reason) => {
     const result = runWriteConfirmation(

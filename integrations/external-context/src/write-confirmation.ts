@@ -14,7 +14,13 @@ import {
 
 const MAX_HOOK_INPUT_BYTES = 1024 * 1024;
 const REMEMBER_TOOL_NAME = 'mcp__external-context__context_remember';
-const ASK_PERMISSION_MODES = new Set(['default', 'auto', 'auto_edit', 'yolo']);
+const ASK_PERMISSION_MODES = new Set([
+  'default',
+  'auto',
+  'auto_edit',
+  'auto-edit',
+  'yolo',
+]);
 
 interface HookOutput {
   hookSpecificOutput: {
