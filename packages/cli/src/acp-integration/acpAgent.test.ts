@@ -279,6 +279,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isReplayTurnStartType: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isReplayTurnStartType,
+  findBoundaryAtOrBefore: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).findBoundaryAtOrBefore,
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -15193,6 +15196,133 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       _meta?: Record<string, { hasMore?: boolean }>;
     };
 
+    expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession bulk replay extends a mid-pair window to the owning call', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant' | 'tool_result',
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-midpair',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      cwd: '/tmp',
+      version: 'test',
+      message: {
+        role: type === 'assistant' ? ('model' as const) : ('user' as const),
+        parts: [],
+      },
+    });
+    // One call owning a result run; the requested window lands mid-run, so
+    // without pair extension the page would start on an orphaned
+    // tool_result (replaying the completed call as failed).
+    const messages = [
+      makeMessage('u1', null, 'user'),
+      makeMessage('ac1', 'u1', 'assistant'),
+      makeMessage('ar1', 'ac1', 'tool_result'),
+      makeMessage('ar2', 'ar1', 'tool_result'),
+      makeMessage('ar3', 'ar2', 'tool_result'),
+    ];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    let capturedHistory: unknown;
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      capturedHistory = history;
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-midpair',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<
+        string,
+        { hasMore?: boolean; partial?: boolean; replayError?: string }
+      >;
+    };
+
+    // The pageSize-2 window lands on ar2/ar3; pair extension pulls the page
+    // down to the owning call ac1 so it does not start mid-pair.
+    expect(capturedHistory).toEqual(messages.slice(1));
+    expect(
+      response._meta?.['qwen.session.loadReplay']?.partial,
+    ).toBeUndefined();
+    expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession bulk replay passes over mid-turn notification records', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant',
+      subtype?: string,
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-notification',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      ...(subtype !== undefined ? { subtype } : {}),
+      cwd: '/tmp',
+      version: 'test',
+      message: { role: type === 'user' ? 'user' : 'model', parts: [] },
+    });
+    const messages = [
+      makeMessage('u1', null, 'user'),
+      makeMessage('a1', 'u1', 'assistant'),
+      makeMessage('notif', 'a1', 'user', 'notification'),
+      makeMessage('a2', 'notif', 'assistant'),
+      makeMessage('a3', 'a2', 'assistant'),
+    ];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    let capturedHistory: unknown;
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      capturedHistory = history;
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-notification',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<
+        string,
+        { hasMore?: boolean; partial?: boolean; replayError?: string }
+      >;
+    };
+
+    // A notification is a mid-turn record, not a turn start: the bounded
+    // alignment passes over it and keeps the trailing window instead of
+    // realigning the page onto it.
+    expect(capturedHistory).toEqual(messages.slice(3));
+    expect(
+      response._meta?.['qwen.session.loadReplay']?.partial,
+    ).toBeUndefined();
     expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
 
     mockConnectionState.resolve();

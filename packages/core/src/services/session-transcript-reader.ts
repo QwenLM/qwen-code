@@ -540,24 +540,34 @@ function isReplayPageStart(index: TranscriptIndex, uuid: string): boolean {
   );
 }
 
-// Walk backward from `from` toward the nearest record matching `isBoundary`,
+// Walk backward from `from` toward the nearest item matching `isBoundary`,
 // never below `floor`. The returned index is a boundary only if one exists
 // within the bound; otherwise it is `floor` itself, so callers must re-check
-// the result.
+// the result. Shared by the uuid-indexed reader and the record-array
+// selectors (ACP bulk replay) so the walk/floor/accept policy lives in one
+// place.
+export function findBoundaryAtOrBefore<T>(
+  items: ArrayLike<T>,
+  from: number,
+  floor: number,
+  isBoundary: (item: T) => boolean,
+): number {
+  let candidate = from;
+  while (candidate > floor && !isBoundary(items[candidate]!)) {
+    candidate--;
+  }
+  return candidate;
+}
+
 function findReplayBoundaryAtOrBefore(
   index: TranscriptIndex,
   from: number,
   floor: number,
   isBoundary: (index: TranscriptIndex, uuid: string) => boolean,
 ): number {
-  let candidate = from;
-  while (
-    candidate > floor &&
-    !isBoundary(index, index.activeUuids[candidate]!)
-  ) {
-    candidate--;
-  }
-  return candidate;
+  return findBoundaryAtOrBefore(index.activeUuids, from, floor, (uuid) =>
+    isBoundary(index, uuid),
+  );
 }
 
 function backwardPageBytesFit(
@@ -737,12 +747,16 @@ function selectBackwardPageUuids(
   // an arbitrarily long contiguous tool_result run (a persisted parallel
   // batch), and an uncapped walk would balloon the page far past `limit` —
   // reintroducing the unbounded growth this function exists to cap. The
-  // budget covers only the records the extension adds — the selection above
-  // already respected `maxBytes` — so a single oversized result the
-  // selection was forced to take cannot fail the check on its own. An owner
-  // beyond either budget keeps the bounded selection, accepting a mid-pair
-  // boundary in that edge; the skip is logged so such a report stays
-  // diagnosable without re-deriving the budget arithmetic.
+  // budget covers only the records the extension adds beyond the owner —
+  // the selection above already respected `maxBytes`, and the owner itself
+  // is exempt the way the selection loop exempts its forced first record,
+  // so a single oversized owner (which the next page would force-take
+  // anyway) cannot fail the check by construction and split the pair.
+  // Records between the owner and the selection — a result batch — still
+  // count against the budget; an extension that would absorb more than the
+  // budget keeps the bounded selection, accepting a mid-pair boundary in
+  // that edge. The skip is logged so such a report stays diagnosable
+  // without re-deriving the budget arithmetic.
   if (
     selectedStart > 0 &&
     selectionOrphansToolResult(index, selectedStart, position)
@@ -762,7 +776,7 @@ function selectBackwardPageUuids(
     } else if (
       !backwardPageBytesFit(
         index,
-        pairStart,
+        pairStart + 1,
         selectedStart,
         expansionByteBudget,
       )

@@ -63,7 +63,11 @@ present, so older servers retain their bulk-load behavior.
 When the option is absent, load is unchanged. When present, the ACP agent keeps
 the complete resumed conversation in core but converts only the latest record
 suffix for the UI replay envelope. The suffix begins at a normal user-turn
-boundary. The envelope reports whether older active-chain records exist.
+boundary when one is reachable within one extra window of expansion;
+otherwise it keeps the requested window and may start mid-turn (extending to
+the owning assistant record when the window would otherwise start mid tool
+call/result pair), with older records paged backward. The envelope reports
+whether older active-chain records exist.
 
 The bridge seeds only that page into the session EventBus. Its response still
 contains the replay events and the EventBus `lastEventId` from one load

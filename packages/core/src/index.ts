@@ -288,6 +288,7 @@ export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
+  findBoundaryAtOrBefore,
   InvalidSessionTranscriptCursorError,
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,

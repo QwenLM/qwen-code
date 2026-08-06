@@ -1417,21 +1417,23 @@ describe('SessionTranscriptReader', () => {
 
     it('caps turn-alignment expansion at the hard byte ceiling', async () => {
       // A byte-heavy turn whose start sits within the expansion window
-      // below the selection: alignment admits a small over-budget turn
-      // whole, but must not absorb records past the hard page ceiling — a
-      // page the workspace route cannot serialize would 413 at its response
-      // cap and dead-end backward pagination at that anchor on every retry.
-      // The test-only ceiling override keeps this fixture in kilobytes.
+      // below the selection. The caller's maxBytes is above half the
+      // (test-only) ceiling, so the expansion budget is the ceiling itself
+      // rather than 2 * maxBytes: the ~56 KB turn fits 2 * maxBytes
+      // (64 KB) but not the 48 KB ceiling, so alignment must keep the
+      // bounded selection. A mutant that dropped the ceiling clamp (or
+      // ignored the override) would admit the whole turn and fail the u1
+      // assertion below.
       setSessionTranscriptExpandedPageBytesForTest(48 * 1024);
       const records: ChatRecord[] = [record('u1', null, 'prompt')];
-      for (let i = 1; i <= 60; i++) {
+      for (let i = 1; i <= 20; i++) {
         records.push(
-          record(`a${i}`, i === 1 ? 'u1' : `a${i - 1}`, 'x'.repeat(3 * 1024)),
+          record(`a${i}`, i === 1 ? 'u1' : `a${i - 1}`, 'x'.repeat(2560)),
         );
       }
       await writeRecords(records);
 
-      const maxBytes = 16 * 1024;
+      const maxBytes = 32 * 1024;
       const reader = new SessionTranscriptReader(workspaceDir);
       const page = await reader.readPage(sessionId, {
         direction: 'backward',
@@ -1439,11 +1441,11 @@ describe('SessionTranscriptReader', () => {
         maxBytes,
       });
 
-      // The budget admits a few records; the ~200 KB turn fits neither
-      // the 2 * maxBytes expansion budget nor the 48 KB ceiling, so the
-      // bounded selection stands instead of the whole turn.
+      // The soft budget admits a handful of records from the tail; the
+      // ~56 KB turn exceeds the 48 KB ceiling clamp, so the bounded
+      // selection stands instead of the whole turn.
       expect(page.records.length).toBeLessThan(20);
-      expect(page.records.at(-1)?.uuid).toBe('a60');
+      expect(page.records.at(-1)?.uuid).toBe('a20');
       expect(page.records.some((item) => item.uuid === 'u1')).toBe(false);
       expect(page.hasMore).toBe(true);
       expect(
@@ -1476,10 +1478,9 @@ describe('SessionTranscriptReader', () => {
 
     it('keeps chained backward pages within a bounded multiple of the byte budget', async () => {
       // Turn-alignment expansion is capped at a bounded multiple of the
-      // caller's maxBytes (clamped to the hard ceiling), not at the
-      // ceiling alone: with the nominal route budget a chained page must
-      // not balloon straight to the ceiling.
-      setSessionTranscriptExpandedPageBytesForTest(48 * 1024);
+      // caller's maxBytes, not at the hard ceiling: with the nominal route
+      // budget a chained page must not balloon straight to the ceiling.
+      // The ceiling clamp itself is exercised by the test above.
       const records: ChatRecord[] = [record('u1', null, 'prompt')];
       for (let i = 1; i <= 60; i++) {
         records.push(
@@ -1582,6 +1583,42 @@ describe('SessionTranscriptReader', () => {
       const page = await new SessionTranscriptReader(workspaceDir).readPage(
         sessionId,
         { direction: 'backward', limit: 50, maxBytes: 1024 * 1024 },
+      );
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['ac1', 'ar1']);
+      expect(page.records.at(0)?.type).toBe('assistant');
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('keeps the pair together when the owning call exceeds the expansion budget', async () => {
+      // The owner assistant record can itself exceed the expansion byte
+      // budget (e.g. one write_file call carrying a large file body). Pair
+      // extension exempts the force-joined owner the way the selection loop
+      // exempts its forced first record, instead of failing the byte check
+      // by construction and splitting the pair — which would replay the
+      // successful call as failed ("result missing") on the older page.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      records.push({
+        ...toolCallRecord('ac1', 'u1', 'call-1'),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'write_file',
+                id: 'call-1',
+                args: { content: 'x'.repeat(40 * 1024) },
+              },
+            },
+          ],
+        },
+      });
+      records.push(toolResultRecord('ar1', 'ac1', 'call-1'));
+      await writeRecords(records);
+
+      const page = await new SessionTranscriptReader(workspaceDir).readPage(
+        sessionId,
+        { direction: 'backward', limit: 50, maxBytes: 16 * 1024 },
       );
 
       expect(page.records.map((item) => item.uuid)).toEqual(['ac1', 'ar1']);
