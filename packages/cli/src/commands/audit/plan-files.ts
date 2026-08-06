@@ -7,18 +7,21 @@
 // `qwen audit plan-files`: enumerate a directory of existing code and write
 // the audit plan as JSON. This is the audit pipeline's counterpart of
 // `qwen review plan-diff` — the deterministic step that fixes WHAT will be
-// audited before any agent is launched, so the roster is computed by code
-// and cannot be shrunk by the orchestrator.
+// audited (and what refuses) before any agent is launched, so the roster,
+// gates, and budget are computed by code and cannot be shrunk by the
+// orchestrator.
 
 import type { CommandModule } from 'yargs';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  applyExcludeRemedy,
+  AuditRefusal,
   buildFilesPlan,
+  checkLocalOnlyGuard,
   collectAuditFiles,
   resolveAuditRoot,
-  DEFAULT_MAX_CHUNK_LINES,
   type AuditEffort,
 } from './lib/files-plan.js';
 import type { ParsedAuditArgs } from './parse-args.js';
@@ -27,8 +30,8 @@ interface PlanFilesArgs {
   path?: string;
   argsReport?: string;
   out: string;
-  maxChunkLines: number;
   effort?: AuditEffort;
+  applyExcludeRemedy?: boolean;
 }
 
 function runPlanFiles(args: PlanFilesArgs): void {
@@ -37,51 +40,80 @@ function runPlanFiles(args: PlanFilesArgs): void {
       'plan-files: pass exactly one of <path> or --args-report <path>.',
     );
   }
-  if (!Number.isSafeInteger(args.maxChunkLines) || args.maxChunkLines <= 0) {
-    throw new Error(
-      'plan-files: --max-chunk-lines must be a positive integer.',
-    );
-  }
   const parsed = args.argsReport
     ? (JSON.parse(readFileSync(args.argsReport, 'utf8')) as ParsedAuditArgs)
     : undefined;
   const targetPath = parsed?.targetPath ?? args.path!;
   const rootAbs = parsed?.targetPathAbsolute ?? resolveAuditRoot(targetPath);
   const effort = parsed?.effort ?? args.effort ?? 'medium';
-  const files = collectAuditFiles(rootAbs);
-  const plan = buildFilesPlan(files, effort, args.maxChunkLines);
+  const projectRoot = process.cwd();
 
-  if (plan.totalFiles === 0) {
+  if (args.applyExcludeRemedy) {
+    const excludeFile = applyExcludeRemedy(projectRoot);
     writeStderrLine(
-      `WARNING: no production files found under ${targetPath} — the plan is ` +
-        `empty. Check the path (tests, docs and generated files are not ` +
-        `audit subjects).`,
+      `Added ignore rules for /.qwen/audits/ and /.qwen/tmp/ to ${excludeFile} ` +
+        `(applies to every worktree of this repository).`,
     );
   }
 
-  const result = {
-    targetPath,
-    targetPathAbsolute: rootAbs,
-    effort,
-    ...plan,
-  };
+  const collection = collectAuditFiles(rootAbs);
+  let plan;
+  try {
+    plan = buildFilesPlan(rootAbs, targetPath, effort, collection);
+  } catch (err) {
+    if (err instanceof AuditRefusal) {
+      const refusal = {
+        targetPath,
+        targetPathAbsolute: rootAbs,
+        effort,
+        ...err.refusal,
+      };
+      mkdirSync(dirname(resolve(args.out)), { recursive: true });
+      writeFileSync(args.out, JSON.stringify(refusal, null, 2), 'utf8');
+      writeStderrLine(err.refusal.message);
+      writeStderrLine(`Wrote refusal to ${args.out}`);
+      process.exitCode = 3;
+      return;
+    }
+    throw err;
+  }
+
+  const guard = checkLocalOnlyGuard(
+    projectRoot,
+    `${plan.artifacts.reportSlug}.md`,
+  );
+  plan.artifacts.fallbackRoot = guard.fallbackRoot;
+
+  const result = { targetPath, ...plan, guard };
   mkdirSync(dirname(resolve(args.out)), { recursive: true });
   writeFileSync(args.out, JSON.stringify(result, null, 2), 'utf8');
   writeStdoutLine(`Wrote audit plan to ${args.out}`);
+
+  const unprotected = guard.dirs.filter(
+    (d) => d.status !== 'ok' && d.status !== 'no-worktree',
+  );
+  if (unprotected.length > 0) {
+    writeStderrLine(
+      `WARNING: ${unprotected.map((d) => `${d.dir} (${d.status})`).join(', ')} ` +
+        `can land in version control. Add the exclude remedy (--apply-exclude-remedy) ` +
+        `or land artifacts outside the repo (${guard.fallbackRoot}).`,
+    );
+  }
   writeStderrLine(
-    `Audit: ${plan.srcLines} source lines across ${plan.totalFiles} files ` +
-      `(${plan.evidenceFiles.length} test, ${plan.docsFiles.length} docs, ` +
-      `${plan.generatedFiles.length} generated excluded) -> ` +
-      `${plan.topology === 'whole' ? 'whole-read topology' : `${plan.chunks.length} chunk(s)`}, ` +
-      `${plan.heavyFiles.length} heavy file(s), roster: ` +
-      `${plan.roster.length > 0 ? plan.roster.join(',') : 'inline (low effort)'}`,
+    `Audit: ${plan.subjectLines} subject lines across ${plan.subjectFiles.length} files ` +
+      `(${plan.testCorpus.length} test files / ${plan.testLines} lines, ` +
+      `${plan.uncoverable.length} uncoverable, ${plan.excludedDirs.length} excluded dirs) — ` +
+      (effort === 'low'
+        ? `low tier: single reader sub-agent, cap ${plan.lowTier?.findingCap} findings`
+        : `roster: ${plan.roster.join(',')}; estimate ${plan.estimate?.floorTokens}–${plan.estimate?.topTokens} tokens`) +
+      (plan.eventModule.detected ? '; event/lifecycle module detected' : ''),
   );
 }
 
 export const planFilesCommand: CommandModule = {
   command: 'plan-files [path]',
   describe:
-    'Enumerate a directory of existing code into an audit plan (files, topology, chunks, roster) and write it as JSON',
+    'Enumerate a directory of existing code into an audit plan (subjects, gates, budget estimate, roster) and write it as JSON; exits 3 with a refusal JSON when a plan-time gate refuses',
   builder: (yargs) =>
     yargs
       .positional('path', {
@@ -99,16 +131,15 @@ export const planFilesCommand: CommandModule = {
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
       })
-      .option('max-chunk-lines', {
-        type: 'number',
-        default: DEFAULT_MAX_CHUNK_LINES,
-        describe:
-          'Target size, in file lines, of each audit chunk; only used above the whole-read threshold',
-      })
       .option('effort', {
         choices: ['low', 'medium', 'high'] as const,
         describe:
-          'Audit effort. `low` is an inline read (no agents); `medium` (default) runs the replicated roster; `high` adds the remaining personas and a reverse-audit round.',
+          'Audit effort. `low` is one reader sub-agent (unverified triage); `medium` (default) runs the replicated roster plus verification; `high` adds the remaining personas and reverse-audit rounds.',
+      })
+      .option('apply-exclude-remedy', {
+        type: 'boolean',
+        describe:
+          "Append ignore rules for /.qwen/audits/ and /.qwen/tmp/ to the repository's common-dir exclude file (.git/info/exclude), then re-probe",
       }),
   handler: (argv) => {
     runPlanFiles(argv as unknown as PlanFilesArgs);

@@ -18,6 +18,10 @@ describe('auditCommand', () => {
       'parseArgsCommand',
       'planFilesCommand',
       'agentPromptCommand',
+      'snapshotCommand',
+      'driftCheckCommand',
+      'guardCheckCommand',
+      'checkAnchorsCommand',
     ]);
   });
 
@@ -25,6 +29,10 @@ describe('auditCommand', () => {
     const source = readFileSync('src/commands/audit.ts', 'utf8');
     expect(source).toContain('plan-files');
     expect(source).toContain('agent-prompt');
+    expect(source).toContain('snapshot');
+    expect(source).toContain('drift-check');
+    expect(source).toContain('guard-check');
+    expect(source).toContain('check-anchors');
   });
 
   it('is a CommandModule with an empty dispatch handler', () => {

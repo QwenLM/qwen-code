@@ -33,7 +33,7 @@ export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
   [
     'audit <command>',
-    'Helpers used by the /audit skill (audit planning, brief printing)',
+    'Helpers used by the /audit skill (argument parsing, audit planning, brief printing, run-state captures)',
   ],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],

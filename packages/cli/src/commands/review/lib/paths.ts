@@ -10,6 +10,7 @@
 // concatenation so Windows backslashes are produced when needed.
 
 import { join, resolve } from 'node:path';
+import { safeTarget } from '../../../utils/paths.js';
 
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
@@ -73,23 +74,6 @@ export function baseWorktreePath(worktree: string): string {
 /** Local branch ref name for a fetched PR head. */
 export function reviewBranch(prNumber: string | number): string {
   return `qwen-review/pr-${prNumber}`;
-}
-
-/**
- * A `target` reduced to a single safe filename component.
- *
- * `target` is a file-path review's own path — `src/foo.ts` — or a PR/local
- * label. Interpolated raw, `src/foo.ts` becomes `qwen-review-src/foo.ts-diff.txt`,
- * a nested path whose parent nobody created (ENOENT), and a crafted `../../evil`
- * escapes `.qwen/tmp` and lets `writeFileSync` land anywhere. Flatten every
- * separator and dot-segment to a single component so the file always sits
- * directly in the temp dir.
- */
-function safeTarget(target: string): string {
-  const flat = target
-    .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
-    .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
-  return flat.replace(/^[._]+/, '') || 'target';
 }
 
 /**
