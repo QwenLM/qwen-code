@@ -1232,3 +1232,175 @@ describe('capture-tools step wiring', () => {
     ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
   });
 });
+
+describe('docs-only medium gate', () => {
+  // The downgrade logic is inline bash in two steps; these tests extract and
+  // EXECUTE the load-bearing fragments (prompt branch, timeout floor, the
+  // completion-line allowlist) rather than asserting on their text, because
+  // the surviving mutations are behavioral: swapping the if/elif order makes
+  // parse-args force high effort back on AND post inline comments while the
+  // relay still claims medium posted nothing; flipping the floor comparison
+  // caps every size-tiered docs run at 90 minutes.
+  const run = (() => {
+    const doc = parse(workflow);
+    return doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').run;
+  })();
+
+  function promptBranchSource() {
+    const start = run.indexOf('PROMPT="/review ${REVIEW_URL}"');
+    expect(start).toBeGreaterThan(-1);
+    const end = run.indexOf('\nfi', start) + '\nfi'.length;
+    return run.slice(start, end);
+  }
+
+  function buildPrompt({ docsOnlyMedium, reviewMode }) {
+    const script = [
+      'set -euo pipefail',
+      'REVIEW_URL="https://x/pull/1"',
+      `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
+      `REVIEW_MODE=${reviewMode}`,
+      promptBranchSource(),
+      'printf "%s" "$PROMPT"',
+    ].join('\n');
+    return execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+  }
+
+  it('emits --effort medium INSTEAD OF --comment on the docs-only path', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'true',
+      reviewMode: 'comment',
+    });
+    expect(prompt).toContain('--effort medium');
+    expect(prompt).not.toContain('--comment');
+  });
+
+  it('keeps --comment on the non-docs comment path', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'false',
+      reviewMode: 'comment',
+    });
+    expect(prompt).toContain('--comment');
+    expect(prompt).not.toContain('--effort');
+  });
+
+  function floorSource() {
+    const anchor = run.indexOf('# Medium measures at one-third to one-half');
+    expect(anchor).toBeGreaterThan(-1);
+    const start = run.indexOf('EFFECTIVE_TIMEOUT_MINUTES=$((', anchor);
+    // The YAML parser strips the block scalar's base indentation, so the
+    // floor's closing `fi` sits at four spaces in the parsed text.
+    const end = run.indexOf('\n    fi', start) + '\n    fi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  it.each([
+    [360, 180],
+    [180, 90],
+    [100, 90],
+  ])(
+    'halves the size-aware budget with a 90-minute floor (%i → %i)',
+    (input, want) => {
+      const script = [
+        'set -euo pipefail',
+        `EFFECTIVE_TIMEOUT_MINUTES=${input}`,
+        floorSource(),
+        'printf "%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
+      ].join('\n');
+      expect(execFileSync('bash', ['-c', script], { encoding: 'utf8' })).toBe(
+        String(want),
+      );
+    },
+  );
+
+  function completionBlockSource() {
+    const anchor = run.indexOf('machine-readable completion contract');
+    expect(anchor).toBeGreaterThan(-1);
+    const start = run.lastIndexOf(
+      'if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then',
+      anchor,
+    );
+    // Base indentation is stripped by the YAML parser: the block's outer `fi`
+    // sits at column 0, its inner allowlist `fi` at two spaces — so `\nfi`
+    // uniquely anchors the outer close.
+    const end = run.indexOf('\nfi', anchor) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function relayLine(resultText) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-completion-'));
+    try {
+      const gho = join(dir, 'gho');
+      writeFileSync(gho, '');
+      const script = [
+        'set -euo pipefail',
+        'DOCS_ONLY_MEDIUM=true',
+        'PR_NUMBER=123',
+        `GITHUB_OUTPUT="${gho}"`,
+        `RESULT_TEXT=$(cat "${join(dir, 'result')}")`,
+        completionBlockSource(),
+      ].join('\n');
+      writeFileSync(join(dir, 'result'), resultText);
+      execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+      return readFileSync(gho, 'utf8').trim();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('relays only the not-posted disposition shape', () => {
+    expect(
+      relayLine(
+        'prose...\nReview complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)',
+      ),
+    ).toBe(
+      'completion_line=Review complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)',
+    );
+  });
+
+  it.each([
+    // The measured phantom: a posted-form disposition on a path that never posts.
+    'Review complete: pr-123 — APPROVE posted',
+    'Review complete: pr-123 — COMMENT posted (0 Critical, 1 Suggestion inline)',
+    // Reworded/missing completion lines.
+    'The review finished fine, trust me.',
+    '',
+  ])('falls back to the neutral non-scrapable form for %j', (text) => {
+    const line = relayLine(text);
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+    // The fallback must never mint the reserved machine prefix.
+    expect(line).not.toContain('completion_line=Review complete:');
+  });
+
+  it('classifies review_requested as an explicit ask, never automatic', () => {
+    const doc = parse(workflow);
+    const context = doc.jobs['review-pr'].steps.find((s) => s.id === 'context');
+    // One assignment site, guarded on both the event and the action.
+    expect(context.run.match(/AUTO_REVIEW=true/g)).toHaveLength(1);
+    expect(context.run).toMatch(
+      /!= "review_requested" \]; then\s*\n\s*AUTO_REVIEW=true/,
+    );
+  });
+
+  it('registers the relay marker in every autofix bot-comment filter site', () => {
+    const autofix = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+    // Definition + five inline jq copies; the trailing space is part of the
+    // pattern (marker text is always followed by a space before `-->`).
+    const hits = autofix.match(/\|qwen-review docs-only-medium\) /g) ?? [];
+    expect(hits.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('routes classification through the shared classify-pr-profile wrapper', () => {
+    // Both this gate and ci.yml must consume the classifier via the shared
+    // script so its input contract lives in one place.
+    expect(run).toContain('.github/scripts/ci/classify-pr-profile.sh');
+    const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+    expect(ci).toContain('.github/scripts/ci/classify-pr-profile.sh');
+    expect(ci).not.toContain(
+      "--jq '.[] | {filename, status, previous_filename}'",
+    );
+  });
+});

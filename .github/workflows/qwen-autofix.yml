@@ -2701,7 +2701,7 @@ jobs:
             # bot's own eval markers, and known non-actionable bot comments
             # (triage stages, coverage reports, legacy suggestion summaries,
             # force-push reminders).
-            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review docs-only-medium) '
             # Command-style comments (@qwen-code /takeover, /triage, /review …)
             # are INSTRUCTIONS to tooling, not review feedback on the diff:
             # counting them as actionable burns a full agent cycle to post a
@@ -3486,7 +3486,7 @@ jobs:
             + (.[2] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review docs-only-medium) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3571,7 +3571,7 @@ jobs:
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review docs-only-medium) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3658,7 +3658,7 @@ jobs:
                      ) | not)
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
                  + [ ($ic | add)[]
-                   | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                   | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review docs-only-medium) ") | not)
                    | select((.body // "") | test("^\\s*@qwen-code /") | not)
                    | select(((.body // "") | contains("**[Critical]**")) | not)
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
@@ -3723,7 +3723,7 @@ jobs:
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
-                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review docs-only-medium) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
                 | select(((.body // "") | contains("**[Critical]**")) | not)
                 | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
@@ -3802,7 +3802,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review docs-only-medium) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))

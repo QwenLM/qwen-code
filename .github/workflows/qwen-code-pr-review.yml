@@ -445,7 +445,10 @@ jobs:
           TIMEOUT_EXPLICIT=false
           # True only for the automatic pull_request_target review — every
           # other path is a human asking for a review explicitly, and an
-          # explicit ask always gets the full high-effort run.
+          # explicit ask always gets the full high-effort run. That includes
+          # the review_requested action: a maintainer clicking "Request
+          # review" is an explicit ask (authorize write-permission-checks the
+          # requester for exactly that action), so it is excluded below.
           AUTO_REVIEW=false
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
 
@@ -471,7 +474,8 @@ jobs:
             fi
             PR_NUMBER="${{ github.event.pull_request.number }}"
             REVIEW_MODE="comment"
-            if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            if [ "${{ github.event_name }}" = "pull_request_target" ] &&
+               [ "${{ github.event.action }}" != "review_requested" ]; then
               AUTO_REVIEW=true
             fi
           else
@@ -975,22 +979,25 @@ jobs:
           # Explicit requests (dispatch, @qwen-code /review) never downgrade.
           DOCS_ONLY_MEDIUM=false
           if [ "${AUTO_REVIEW:-false}" = "true" ]; then
-            changed_files="${RUNNER_TEMP}/review-changed-files.jsonl"
-            if gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-                --jq '.[] | {filename, status, previous_filename}' > "$changed_files" 2>/dev/null; then
-              if profile="$(node .github/scripts/ci/classify-profile.mjs "$changed_files")" \
-                  && [ "$profile" = "docs_only" ]; then
-                DOCS_ONLY_MEDIUM=true
-                # Medium measures at one-third to one-half of high, so halve
-                # the size-aware budget with a 90-minute floor.
-                EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
-                if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
-                  EFFECTIVE_TIMEOUT_MINUTES=90
-                fi
-                echo "PR #${PR_NUMBER} is docs-only; automatic review runs at --effort medium (${EFFECTIVE_TIMEOUT_MINUTES}-minute budget)."
+            # Fetch + classify through the shared wrapper so this gate and
+            # ci.yml's profile gate cannot drift on the classifier's input
+            # contract. Exit 2 = listing failed, 3 = classifier failed —
+            # either way the fallback is the full review.
+            set +e
+            profile="$(.github/scripts/ci/classify-pr-profile.sh "${REPO}" "${PR_NUMBER}")"
+            classify_rc=$?
+            set -e
+            if [ "$classify_rc" -ne 0 ]; then
+              echo "::warning::Docs-only gate could not classify PR files (exit ${classify_rc}); running the full review."
+            elif [ "$profile" = "docs_only" ]; then
+              DOCS_ONLY_MEDIUM=true
+              # Medium measures at one-third to one-half of high, so halve
+              # the size-aware budget with a 90-minute floor.
+              EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
+              if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
+                EFFECTIVE_TIMEOUT_MINUTES=90
               fi
-            else
-              echo "::warning::Could not list changed files for the docs-only gate; running the full review."
+              echo "PR #${PR_NUMBER} is docs-only; automatic review runs at --effort medium (${EFFECTIVE_TIMEOUT_MINUTES}-minute budget)."
             fi
           fi
           echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"
@@ -1210,8 +1217,20 @@ jobs:
             # drivers detect completion by this exact line, and it is the one
             # verdict statement the relay step may quote (asserting a verdict
             # the run did not print is the failure the review skill measures).
+            # The line is model-authored, so relaying it under the bot's name
+            # gets a strict allowlist, not a prefix check: this path never
+            # posts (no --comment), so any `posted`-form disposition is false
+            # by definition — the skill's DESIGN.md records a measured phantom
+            # `APPROVE posted` — and anything outside the not-posted shape
+            # (including injection-steered text) falls back to the neutral
+            # form, which deliberately does NOT start with the reserved
+            # `Review complete: ` prefix so log scrapers never parse it.
             COMPLETION_LINE="$(printf '%s\n' "$RESULT_TEXT" | grep -E '^Review complete: ' | tail -n1 || true)"
-            echo "completion_line=${COMPLETION_LINE:-Review complete: pr-${PR_NUMBER} — (completion line not found; see the run log)}" >> "$GITHUB_OUTPUT"
+            if ! printf '%s' "$COMPLETION_LINE" \
+              | grep -qE '^Review complete: \S+ — (Approve|Request changes|Comment), not posted \([0-9]+ Critical, [0-9]+ Suggestion\)$'; then
+              COMPLETION_LINE=""
+            fi
+            echo "completion_line=${COMPLETION_LINE:-(no relayable \"Review complete:\" line in the run output — see the run log)}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 'Report docs-only medium outcome'
@@ -1223,15 +1242,15 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
-          COMPLETION_LINE: "${{ steps.review.outputs.completion_line || 'Review complete: (see the run log)' }}"
+          COMPLETION_LINE: "${{ steps.review.outputs.completion_line || '(no relayable \"Review complete:\" line in the run output — see the run log)' }}"
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
           # Medium never posts inline comments and --comment would force high
           # effort back on (parse-args), so a docs-only automatic review
-          # reports through this single relay instead. The quoted line is the
-          # CLI's own completion contract, relayed verbatim — this step asserts
-          # nothing the run did not print.
+          # reports through this single relay instead. The quoted line arrives
+          # allowlisted by "Run review" (not-posted disposition shape only) —
+          # this step asserts nothing the run did not print.
           BODY="$(printf '%s\n' \
             '<!-- qwen-review docs-only-medium -->' \
             '' \
@@ -1243,11 +1262,42 @@ jobs:
             '' \
             '<details><summary>中文说明</summary>' \
             '' \
-            "📄 **纯文档变更** —— 自动评审以 \`--effort medium\` 运行（发现已验证、无反向审计；medium 不发行内评论），结果见上方引用行。完整报告见 [workflow 运行](${RUN_URL})；如需带行内评论的完整高档评审，请评论 \`@qwen-code /review\`。" \
+            "📄 **纯文档变更** —— 自动评审以 \`--effort medium\` 运行（发现已验证、无反向审计；medium 不发布行内评论），结果见上方引用行。完整报告见 [workflow 运行](${RUN_URL})；如需带行内评论的完整高强度（high-effort）评审，请评论 \`@qwen-code /review\`。" \
             '' \
             '</details>')"
-          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$BODY" >/dev/null
-          echo "docs-only medium outcome relayed to PR #${PR_NUMBER}."
+          # Upsert by marker, mirroring the queued-acknowledgement step: each
+          # push of a docs-only PR re-runs the automatic review, and without
+          # the PATCH branch every run would stack another near-identical
+          # relay comment on the PR page.
+          EXISTING_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review docs-only-medium -->"))] | last | .id // empty'
+          )" || EXISTING_ID=""
+          # Bounded retry, and never fail the job over the relay: the review
+          # itself succeeded, and a failing step here would trip the
+          # post-failure fallback into announcing a review failure that never
+          # happened. Losing the relay costs a comment; the outcome line below
+          # keeps it recoverable from the job log.
+          posted=false
+          for attempt in 1 2 3; do
+            if [ -n "$EXISTING_ID" ]; then
+              gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
+                -f body="$BODY" >/dev/null && posted=true && break
+            else
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+                -f body="$BODY" >/dev/null && posted=true && break
+            fi
+            sleep 10
+          done
+          if [ "$posted" = "true" ]; then
+            echo "docs-only medium outcome relayed to PR #${PR_NUMBER}."
+          else
+            echo "::warning::Docs-only relay comment could not be posted after 3 attempts; the review itself succeeded. Outcome: ${COMPLETION_LINE}"
+          fi
 
       - name: 'Post fallback comment on failure'
         if: |-
