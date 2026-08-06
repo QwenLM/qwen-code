@@ -34,7 +34,6 @@ const caseInsensitiveFs = (() => {
 })();
 
 let root: string;
-let previousProjectDir: string | undefined;
 
 const finding: Finding = {
   id: 'R1-1',
@@ -80,22 +79,18 @@ function fixture() {
   writeJson(composed, verdict);
   mkdirSync(join(root, '.qwen/reviews'), { recursive: true });
   writeFileSync(report, '# Review\n');
-  return { findings, composed, report, out };
+  // The workspace root is explicit here because the test process's cwd is the
+  // package directory, not the temp root — the same situation `--workspace-root`
+  // exists for.
+  return { findings, composed, report, out, workspaceRoot: root };
 }
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'review-artifact-'));
-  previousProjectDir = process.env['QWEN_CODE_PROJECT_DIR'];
-  process.env['QWEN_CODE_PROJECT_DIR'] = root;
 });
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
-  if (previousProjectDir === undefined) {
-    delete process.env['QWEN_CODE_PROJECT_DIR'];
-  } else {
-    process.env['QWEN_CODE_PROJECT_DIR'] = previousProjectDir;
-  }
 });
 
 describe('saveReviewArtifact', () => {
@@ -384,10 +379,10 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
-  it('resolves relative paths against the workspace root, not cwd', () => {
-    // The form SKILL.md documents. beforeEach points QWEN_CODE_PROJECT_DIR at
-    // the temp root while cwd stays the package directory, so the two roots
-    // differ and the resolution direction is observable.
+  it('resolves relative paths against the explicit workspace root, not cwd', () => {
+    // The embedder form. --workspace-root points at the temp root while cwd
+    // stays the package directory, so the two roots differ and the resolution
+    // direction is observable.
     fixture();
 
     const saved = saveReviewArtifact({
@@ -397,17 +392,50 @@ describe('saveReviewArtifact', () => {
       out: '.qwen/reviews/review.json',
       target: 'pr-123',
       effort: 'high',
+      workspaceRoot: root,
     });
 
     expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
     // The registration value `record_artifact` wants, printed so the skill
-    // copies it verbatim — including from a PR worktree run where cwd (the
-    // disposable review worktree) differs from the workspace root.
+    // copies it verbatim.
     expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
     expect(JSON.parse(readFileSync(saved.path, 'utf8'))).toMatchObject({
       schemaVersion: 1,
       target: 'pr-123',
       markdownReportPath: '.qwen/reviews/review.md',
     });
+  });
+
+  it('ignores QWEN_CODE_PROJECT_DIR entirely', () => {
+    // The variable names the session-storage directory under the runtime
+    // base, never the main checkout — six of six measured CI reviews fumbled
+    // on the old preference for it (DESIGN.md — The artifact root that
+    // pointed at qwen-home). Point it at a decoy root that would accept the
+    // relative paths, and confirm resolution stays on the explicit root.
+    const decoy = mkdtempSync(join(tmpdir(), 'review-artifact-decoy-'));
+    const previous = process.env['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = decoy;
+    try {
+      fixture();
+      const saved = saveReviewArtifact({
+        findings: '.qwen/tmp/findings.json',
+        composed: '.qwen/tmp/composed.json',
+        report: '.qwen/reviews/review.md',
+        out: '.qwen/reviews/review.json',
+        target: 'pr-123',
+        effort: 'high',
+        workspaceRoot: root,
+      });
+
+      expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
+      expect(existsSync(join(decoy, '.qwen/reviews/review.json'))).toBe(false);
+    } finally {
+      if (previous === undefined) {
+        delete process.env['QWEN_CODE_PROJECT_DIR'];
+      } else {
+        process.env['QWEN_CODE_PROJECT_DIR'] = previous;
+      }
+      rmSync(decoy, { recursive: true, force: true });
+    }
   });
 });
