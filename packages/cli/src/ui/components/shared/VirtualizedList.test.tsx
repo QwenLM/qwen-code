@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import type { RefObject } from 'react';
 import { describe, it, expect } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
@@ -20,6 +21,13 @@ import {
   type VirtualizedListRef,
   SCROLL_TO_ITEM_END,
 } from './VirtualizedList.js';
+import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
+import { SettingsContext } from '../../contexts/SettingsContext.js';
+import { VirtualViewportContext } from '../../contexts/VirtualViewportContext.js';
+import { KeypressProvider } from '../../contexts/KeypressContext.js';
+import { ThoughtExpandedProvider } from '../../contexts/ThoughtExpandedContext.js';
+import type { LoadedSettings } from '../../../config/settings.js';
+import type { HistoryItem } from '../../types.js';
 
 type Item = { id: number; label: string };
 
@@ -839,5 +847,133 @@ describe('<VirtualizedList />', () => {
       rerender(<Wrapper />);
       expect(listRef!.getScrollIndex()).toBe(24);
     });
+  });
+});
+
+describe('<VirtualizedList /> VP collapsed thought groups', () => {
+  const settings = {
+    merged: { ui: { useTerminalBuffer: true, mouseTracking: false } },
+  } as unknown as LoadedSettings;
+
+  const line = (n: number) => `thought line ${n}`.padEnd(40, '.');
+  const body = (seed: string, rows = 12) =>
+    Array.from({ length: rows }, (_, i) => `${seed} ${line(i)}`).join('\n');
+
+  const HEAD_ID = 1;
+  const thoughtHistory = (rows: number): HistoryItem[] => [
+    { id: 0, type: 'user', text: 'hello' },
+    {
+      id: HEAD_ID,
+      type: 'gemini_thought',
+      text: body('head', rows),
+      durationMs: 101_000,
+    } as HistoryItem,
+    {
+      id: 2,
+      type: 'gemini_thought_content',
+      text: body('c1', rows),
+    } as HistoryItem,
+    {
+      id: 3,
+      type: 'gemini_thought_content',
+      text: body('c2', rows),
+    } as HistoryItem,
+    {
+      id: 4,
+      type: 'gemini_thought_content',
+      text: body('c3', rows),
+    } as HistoryItem,
+    { id: 5, type: 'gemini', text: 'final answer' },
+  ];
+
+  const thoughtHeadIdFor = (item: HistoryItem): number | undefined =>
+    item.type === 'gemini_thought_content' ? HEAD_ID : undefined;
+
+  const renderThoughtItem = ({ item }: { item: HistoryItem }) => (
+    <HistoryItemDisplay
+      terminalWidth={80}
+      mainAreaWidth={80}
+      availableTerminalHeight={40}
+      item={item}
+      isPending={false}
+      thoughtHeadId={thoughtHeadIdFor(item)}
+    />
+  );
+
+  const thoughtTree = (
+    expandedHeadIds: ReadonlySet<number>,
+    ref: RefObject<VirtualizedListRef<HistoryItem> | null>,
+    data: HistoryItem[],
+  ) => (
+    <SettingsContext.Provider value={settings}>
+      <VirtualViewportContext.Provider value={true}>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <ThoughtExpandedProvider
+            value={{ allExpanded: false, expandedHeadIds, toggle: () => {} }}
+          >
+            <VirtualizedList
+              ref={ref}
+              data={data}
+              renderItem={renderThoughtItem}
+              estimatedItemHeight={() => 3}
+              keyExtractor={(item) => `h-${item.id}`}
+              isStaticItem={() => true}
+              containerHeight={40}
+              showScrollbar={false}
+            />
+          </ThoughtExpandedProvider>
+        </KeypressProvider>
+      </VirtualViewportContext.Provider>
+    </SettingsContext.Provider>
+  );
+
+  const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  it('releases reserved height when a thought group collapses', async () => {
+    const data = thoughtHistory(12);
+    const ref: RefObject<VirtualizedListRef<HistoryItem> | null> = {
+      current: null,
+    };
+    const harness = render(thoughtTree(new Set([HEAD_ID]), ref, data));
+    await tick();
+    await tick();
+    expect((harness.lastFrame() ?? '').includes('c3 thought line 0')).toBe(
+      true,
+    );
+
+    harness.rerender(thoughtTree(new Set(), ref, data));
+    await tick();
+    await tick();
+    const lines = (harness.lastFrame() ?? '').split('\n');
+    expect(lines.some((l) => l.includes('c1 thought line 0'))).toBe(false);
+    expect(lines.filter((l) => l.trim() !== '').length).toBeLessThanOrEqual(6);
+    expect(lines.length).toBeLessThanOrEqual(8);
+  });
+
+  it('does not lock the render window when a tall thought collapses off-screen', async () => {
+    const data = thoughtHistory(60);
+    const ref: RefObject<VirtualizedListRef<HistoryItem> | null> = {
+      current: null,
+    };
+    const harness = render(thoughtTree(new Set([HEAD_ID]), ref, data));
+    await tick();
+    await tick();
+
+    // Collapse while sticking to the bottom: the thought group leaves the
+    // render window unmounted, so only height reports can release its
+    // cached expanded heights.
+    harness.rerender(thoughtTree(new Set(), ref, data));
+    await tick();
+    await tick();
+
+    ref.current?.scrollToIndex({ index: 1, viewOffset: 2 });
+    await tick();
+    for (let i = 0; i < 10; i++) {
+      await tick();
+    }
+
+    const lines = (harness.lastFrame() ?? '').split('\n');
+    expect(lines.some((l) => l.includes('Thought for 1m 41s'))).toBe(true);
+    expect(lines.filter((l) => l.trim() === '').length).toBeLessThanOrEqual(4);
   });
 });
