@@ -177,7 +177,9 @@ fn require_file(path: &Path, description: &str) -> Result<(), String> {
 }
 
 fn resolve_workspace(configured: &Path) -> Result<PathBuf, String> {
-    let workspace = fs::canonicalize(configured).map_err(|error| {
+    // dunce::canonicalize keeps the Windows `\\?\` verbatim prefix out of the
+    // child cwd and `--workspace` argument (#8615).
+    let workspace = dunce::canonicalize(configured).map_err(|error| {
         format!(
             "Failed to resolve desktop workspace {}: {error}",
             configured.display()
@@ -459,12 +461,25 @@ fn runtime_arguments(workspace: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_failure_output, parse_listening_url, runtime_arguments, DesktopRuntime,
-        RuntimeStopped, FAILURE_OUTPUT_LIMIT,
+        append_failure_output, parse_listening_url, resolve_workspace, runtime_arguments,
+        DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
     use std::path::Path;
     use std::sync::Mutex;
     use url::Url;
+
+    #[test]
+    fn resolve_workspace_strips_windows_verbatim_prefix() {
+        let dir = std::env::temp_dir().join(format!("qwen-desktop-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp workspace");
+        let resolved = resolve_workspace(&dir).expect("resolve workspace");
+        std::fs::remove_dir_all(&dir).expect("cleanup temp workspace");
+        let resolved = resolved.to_string_lossy();
+        assert!(
+            !resolved.starts_with("\\\\?\\"),
+            "workspace keeps the verbatim prefix: {resolved}"
+        );
+    }
 
     #[test]
     fn parses_loopback_listening_line() {

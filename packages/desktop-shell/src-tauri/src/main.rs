@@ -307,7 +307,11 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
     let _ = app.emit("runtime-starting", workspace.to_string_lossy().into_owned());
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<ApplicationState>();
-        let canonical = match fs::canonicalize(&workspace) {
+        // dunce::canonicalize strips the Windows `\\?\` verbatim prefix that
+        // fs::canonicalize produces: the bundled Node runtime mis-resolves a
+        // verbatim cwd/workspace during bootstrap (EISDIR lstat 'C:'), and the
+        // persisted path would re-crash every subsequent launch (#8615).
+        let canonical = match dunce::canonicalize(&workspace) {
             Ok(path) if path.is_dir() => path,
             Ok(path) => {
                 emit_runtime_failure(
