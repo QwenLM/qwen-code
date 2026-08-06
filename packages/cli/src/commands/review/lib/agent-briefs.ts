@@ -115,8 +115,8 @@ export interface Brief {
    */
   acceptsChunk?: boolean;
   /**
-   * May this role be launched `--role <r> --findings <file>`, folding a findings
-   * list into the prompt the command prints?
+   * May this role be launched `--role <r> --findings <file>`, so the command
+   * prints a launch block pointed at the findings list?
    *
    * The verifier rules on findings; the reverse auditor avoids re-reporting them.
    * Both used to get their findings the same way: the command printed a launch
@@ -124,10 +124,13 @@ export interface Brief {
    * hand-assembly is where the prompt got paraphrased — the model added a round
    * number, inserted its own summary, and truncated the line telling it the brief
    * is authoritative — so the delivery check failed even though the agent opened
-   * its brief. With this flag the command folds the findings in and prints one
-   * block to paste, and there is no assembly step left to drift. The findings are
-   * part of the recorded prompt (see runAgentPrompt), keyed per findings digest,
-   * so a launch that drops or rewrites them matches no record.
+   * its brief. With this flag the command copies the list to a digest-named file
+   * and prints one block to paste — a pointer to that file, not the list itself,
+   * which inlined made a 12-14-agent launch one 65-82 KB message (issue #8597) —
+   * and there is no assembly step left to drift. The pointer is part of the
+   * recorded prompt (see runAgentPrompt), keyed per findings digest, so a launch
+   * that drops it matches no record, and the delivery floor counts the read it
+   * instructs exactly as it counts the brief's.
    */
   acceptsFindings?: boolean;
   /** The agent-facing text. */

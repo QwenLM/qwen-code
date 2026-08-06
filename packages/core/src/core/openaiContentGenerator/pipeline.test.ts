@@ -5863,7 +5863,12 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('disables the lifetime cap when streamMaxLifetimeMs is 0', async () => {
+    it('keeps the idle guard answering when the lifetime cap is disabled', async () => {
+      // The guards are independent: disabling the lifetime cap must not
+      // disable the idle watchdog with it. (The disable itself is pinned by
+      // the both-guards-0 tests below — a silent stream with the idle guard
+      // active would trip the idle timer at 1s for ANY lifetime value, so it
+      // cannot distinguish a working disable.)
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -5885,6 +5890,137 @@ describe('ContentGenerationPipeline', () => {
       await consume;
       // The idle guard still answers for a silent stream; no lifetime error.
       expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+    });
+
+    it('caps the lifetime even when the idle watchdog is disabled', async () => {
+      // The wrap condition's other half: idle off, lifetime on. Deployments
+      // that set QWEN_STREAM_IDLE_TIMEOUT_MS=0 rely on the cap as their only
+      // remaining guard, so the cap must still wrap the stream for them.
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(0, 3000); // idle disabled; lifetime 3s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      for (let i = 0; i < 5; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=3500 — past the 3s cap
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('disables both guards when both are 0 — no wrap, no cap, no idle abort', async () => {
+      // Pins BOTH the config-`0` lifetime disable and the wrap condition's
+      // false branch (`guarded = stream`): with neither guard positive the
+      // stream must not be wrapped at all. An always-wrap refactor arms a
+      // timer this deployment never asked for — on real Node
+      // `setTimeout(cb, Infinity)` clamps to ~1ms and aborts the stream
+      // almost immediately (TimeoutOverflowWarning).
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(0, 0); // both guards off
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // Well past the default idle window AND the default lifetime cap.
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_MAX_LIFETIME_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end(); // unblock so the test doesn't leak a pending stream
+      await consume;
+    });
+
+    it('disables both guards when both env knobs are 0', async () => {
+      // The env-`0` twin of the test above: a `0` on either deployment knob
+      // must reach the guard, not fall through to the default.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0');
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '0');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; both env knobs 0 → both off
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_MAX_LIFETIME_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('caps a stream whose chunks are already buffered and never await I/O', async () => {
+      // The deadline is consulted at the top of the loop, not only enforced
+      // by the timer race: an already-buffered chunk resolves `it.next()` as
+      // a microtask, which beats `setTimeout(…, 0)` every time, so a
+      // race-only cap would deliver every buffered chunk however far past
+      // the deadline the wall clock sat.
+      const gated = gatedStream();
+      for (let i = 0; i < 10; i++) gated.push(chunk('x')); // all pre-buffered
+      gated.end();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000); // idle 1s, lifetime 3s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const received: GenerateContentResponse[] = [];
+      let error: unknown;
+      const consume = (async () => {
+        for await (const r of gen) {
+          received.push(r);
+          // A slow consumer: the wall clock jumps 2s per chunk, so the
+          // deadline passes mid-stream while every next() stays a microtask.
+          await vi.advanceTimersByTimeAsync(2000);
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      // Two chunks land before the resumed loop sees the deadline pass
+      // (t=0 and t=2000); the remaining eight must NOT be delivered.
+      expect(received).toHaveLength(2);
+      expect(gated.wasReturned()).toBe(true);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
   });
 });

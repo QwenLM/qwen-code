@@ -1112,8 +1112,8 @@ export function buildRoleLaunchPrompt(
 }
 
 /**
- * The findings block folded above a verify / reverse-audit launch prompt, so the
- * caller pastes one thing instead of hand-assembling it.
+ * The findings section folded above a verify / reverse-audit launch prompt, so
+ * the caller pastes one thing instead of hand-assembling it.
  *
  * The list itself rides a file the block points at (`findingsFile`), named by
  * the same findings digest that keys the record — the block stays a few hundred
@@ -1123,8 +1123,9 @@ export function buildRoleLaunchPrompt(
  * record. Inlined in EVERY block of a 12-14-auditor round, though, the list made
  * the launch one 65-82 KB assistant message, and the stream generating it never
  * completed (issue #8597). The pointer keeps the guarantee — a launch that drops
- * the read matches no record, and the agent's read is a fact in the harness's
- * transcript — at a size the orchestrator will actually carry. The section's
+ * it matches no record, and the delivery floor counts the read it instructs
+ * exactly as it counts the brief's — at a size the orchestrator will actually
+ * carry. The section's
  * closing line restates that the brief is authoritative — the exact sentence the
  * orchestrator truncated when it used to build this by hand.
  *
@@ -1757,7 +1758,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           `role "${role}" does not take --file.`,
       );
     }
-    // `--findings` folds a findings list into the printed prompt, for the two roles
+    // `--findings` hands a findings list to the printed block, for the two roles
     // that take one: the verifier rules on findings, the reverse auditor avoids
     // re-reporting them. Declared on the brief (`acceptsFindings`), like `acceptsChunk`.
     // A role that TAKES findings must be GIVEN them. Without this the command still
@@ -1770,10 +1771,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // yet passes an empty file — the command says so in the prompt.
     if (!hasFindings && BRIEFS[role]?.acceptsFindings) {
       bad(
-        `--role ${role} needs --findings <file>: it is launched with a findings ` +
-          `list folded in, and this command builds that block so there is nothing ` +
-          `for you to assemble. Write the list to a file and pass it — an early ` +
-          `reverse-audit round with nothing confirmed yet passes an empty file.`,
+        `--role ${role} needs --findings <file>: it is launched against a ` +
+          `findings list, and this command builds that block (a pointer to the ` +
+          `digest-named list file) so there is nothing for you to assemble. ` +
+          `Write the list to a file and pass it — an early reverse-audit round ` +
+          `with nothing confirmed yet passes an empty file.`,
       );
     }
     if (hasFindings && !BRIEFS[role]?.acceptsFindings) {
@@ -1781,8 +1783,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         (r) => BRIEFS[r].acceptsFindings,
       );
       bad(
-        `--findings folds a findings list into the prompt, only for a role that ` +
-          `takes one (${findingRoles.join(', ')}); role "${role}" does not.`,
+        `--findings hands a findings list to the printed block, only for a ` +
+          `role that takes one (${findingRoles.join(', ')}); role "${role}" ` +
+          `does not.`,
       );
     }
     // `--round` labels a repeat launch of a findings role. Only those roles run
@@ -1829,8 +1832,8 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       (r) => BRIEFS[r].acceptsFindings,
     );
     bad(
-      `--findings folds a findings list into a ` +
-        `${findingRoles.map((r) => `--role ${r}`).join(' / ')} prompt; ` +
+      `--findings hands a findings list to a ` +
+        `${findingRoles.map((r) => `--role ${r}`).join(' / ')} block; ` +
         'it needs one of those roles.',
     );
   } else if (args.allChunks) {

@@ -19,8 +19,22 @@
 // enforces is the rule the skill states: **you may add; you may not remove, alter,
 // or reorder.**
 
-import { describe, it, expect } from 'vitest';
-import { wasDeliveredVerbatim } from './prompt-record.js';
+import { describe, it, expect, vi, type Mock } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  wasDeliveredVerbatim,
+  findingsPointerOf,
+  findingsFilePath,
+  writeFindingsFile,
+} from './prompt-record.js';
+import { writeStderrLine } from '../../../utils/stdioHelpers.js';
+
+vi.mock('../../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
 
 const BUILT = [
   'You are review agent `chunk 1 of 5` — the territory agent for lines 1-389.',
@@ -118,5 +132,50 @@ describe('wasDeliveredVerbatim — you may add; you may not remove, alter or reo
     // transcript the roster looked at first.
     expect(wasDeliveredVerbatim('anything at all', '')).toBe(false);
     expect(wasDeliveredVerbatim('anything at all', '   \n  \n ')).toBe(false);
+  });
+});
+
+describe('findingsPointerOf — the list file a recorded launch points at', () => {
+  it('extracts the pointer from a findings-role block', () => {
+    const prompt = [
+      'You are review agent `verify`.',
+      '',
+      '```',
+      'read_file(file_path="/t/verify--round-1--abc123.findings.md")',
+      '```',
+      '',
+      '**Your brief is a file. Read it first.**',
+      'read_file(file_path="/t/verify--abc123.brief.md")',
+    ].join('\n');
+    expect(findingsPointerOf(prompt)).toBe(
+      '/t/verify--round-1--abc123.findings.md',
+    );
+  });
+
+  it('returns null for a prompt with no findings pointer', () => {
+    // A chunk agent's block: brief and diff only — and a `.brief.md` path can
+    // never match the `.findings.md` suffix the pointer carries.
+    expect(findingsPointerOf(BUILT)).toBeNull();
+  });
+});
+
+describe('writeFindingsFile — a failed write must not be silent', () => {
+  it('reports the failure on stderr and still returns the path', () => {
+    // The build must not die on an unwritable record dir — but the miss must
+    // be visible: the whole round's blocks point at the file this one write
+    // owes. A FILE where the record directory must sit makes mkdir fail.
+    const dir = mkdtempSync(join(tmpdir(), 'pr-ff-'));
+    try {
+      const blocker = join(dir, 'blocker');
+      writeFileSync(blocker, 'a file where a directory would go');
+      const planPath = join(blocker, 'plan.json');
+      const p = writeFindingsFile(planPath, 'verify--abc', 'the list');
+      expect(p).toBe(findingsFilePath(planPath, 'verify--abc'));
+      expect((writeStderrLine as unknown as Mock).mock.calls[0][0]).toContain(
+        'failed to write findings file',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

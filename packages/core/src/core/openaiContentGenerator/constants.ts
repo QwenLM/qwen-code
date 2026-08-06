@@ -48,7 +48,10 @@ export const MAX_STREAM_GUARD_TIMEOUT_MS = 2_147_483_647;
 // burned 2.5–4.5 h on such a stream and died by the outer kill). 15 minutes
 // gives even a slow, oversized single response ample room, and a false trip
 // is cheap: the error rides the transport-continuation recovery, which
-// resumes a healthy generation where the cap cut it.
+// resumes a healthy generation where the cap cut it. Note the cap bounds ONE
+// attempt — each replay/continuation the recovery earns gets a fresh stream
+// (TRANSPORT_STREAM_RETRY_CONFIG), so a pathological upstream's wall-clock
+// bound per request is a small multiple of this value, not this value alone.
 export const DEFAULT_STREAM_MAX_LIFETIME_MS = 900000;
 // Env override (deployment knob) for the stream lifetime cap — same
 // conventions as QWEN_STREAM_IDLE_TIMEOUT_MS: an explicit

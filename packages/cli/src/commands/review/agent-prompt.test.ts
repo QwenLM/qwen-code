@@ -1376,10 +1376,11 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 // Dogfooded on a real 3A review: the orchestrator delivered Step 3 prompts verbatim
 // but PARAPHRASED the Step 4/5 ones — added "(round 2)", inserted its own summary,
 // truncated the "nothing replaces the brief" line — because it hand-prepended the
-// findings list. `--findings` removes that assembly step: the command folds the list
-// in and prints one block. The record stays findings-free, so the shared key still
-// matches by the add-only delivery rule.
-describe('--findings — fold the list in, print one block, record EXACTLY that block', () => {
+// findings list. `--findings` removes that assembly step: the command copies the
+// list to a digest-named file and prints one block pointing at it. The record IS
+// that block — pointer included, keyed per findings digest — so a launch that
+// drops the pointer matches no record.
+describe('--findings — point the block at the list file, record EXACTLY that block', () => {
   // Every temp dir this block makes, cleaned up after each test — the rest of the
   // file uses try/finally; a helper-based block tracks and sweeps instead.
   let dirs: string[] = [];
@@ -1449,8 +1450,9 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     );
     // Recorded: EXACTLY what was printed, pointer included, under a digest
     // key. The findings-free record was a receipt a partial delivery could
-    // satisfy; the pointer keeps that guarantee — a launch that drops the
-    // read matches no record, and the agent's read is a transcript fact.
+    // satisfy; the pointer keeps that guarantee — a launch that drops it
+    // matches no record, and the delivery floor counts the read it
+    // instructs (see the verificationGaps tests).
     const recorded = recordByPrefix(plan, 'verify--');
     expect(recorded).toBe(printed);
     // The identity line leads the output — the one spot a real run edited on a
@@ -1664,12 +1666,12 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     [
       'a dimension role',
       { role: '2', findings: '/f' },
-      /--findings folds a findings list into the prompt, only for a role that takes one/,
+      /--findings hands a findings list to the printed block, only for a role that takes one/,
     ],
     [
       'no role',
       { findings: '/f' },
-      /--findings folds a findings list into a --role verify \/ --role reverse-audit/,
+      /--findings hands a findings list to a --role verify \/ --role reverse-audit/,
     ],
     [
       'whole-diff',

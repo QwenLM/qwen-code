@@ -35,6 +35,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, basename, resolve } from 'node:path';
+import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 
 /**
  * Where the prompts this plan's agents were built from are recorded.
@@ -72,6 +73,21 @@ export function findingsFilePath(planPath: string, key: string): string {
 }
 
 /**
+ * The findings file a recorded launch prompt points at, if any — the pointer
+ * `findingsSection` bakes into the block. One pointer per block, and a brief
+ * path (`.brief.md`) can never match the `.findings.md` suffix, so the first
+ * match is the match. Shared by every reader of the pointer: the delivery
+ * floor (coverage) and the retirement echo-guard both extract it from the
+ * harness's copy of the launch prompt rather than deriving a path from the
+ * record key — a per-chunk record key and its round's findings file are
+ * keyed differently, so the prompt is the only source that is always right.
+ */
+export function findingsPointerOf(prompt: string): string | null {
+  const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(prompt);
+  return m && m[1] !== undefined ? m[1] : null;
+}
+
+/**
  * Write the findings list a verify/reverse-audit launch block points at.
  *
  * The list used to be folded verbatim into every printed block — the point was
@@ -81,8 +97,9 @@ export function findingsFilePath(planPath: string, key: string): string {
  * message never completed (issue #8597). So the list goes where the brief already
  * goes: on disk, named by the same digest that keys the record, read by the
  * agent. The block carries the pointer; dropping it mismatches the recorded
- * prompt exactly as dropping the list did, and whether the agent read it is a
- * fact in the harness's transcript — the same standard the brief already meets.
+ * prompt exactly as dropping the list did, and the delivery floor counts the
+ * read it instructs exactly as it counts the brief's — an agent that opens
+ * its brief but skips this file does not clear it.
  */
 export function writeFindingsFile(
   planPath: string,
@@ -93,9 +110,16 @@ export function writeFindingsFile(
   try {
     mkdirSync(promptRecordDir(planPath), { recursive: true });
     writeFileSync(p, content);
-  } catch {
-    // Same reasoning as writeBrief/recordPrompt: a read-only tmp dir fails at
-    // the delivery check, where a reader can act on it, not here.
+  } catch (err) {
+    // A read-only tmp dir must not stop a review being BUILT — the delivery
+    // floor fails the launch whose findings read never happens, where a
+    // reader can act on it. But say so now: a silent miss used to leave a
+    // whole round's agents pointing at a file that does not exist, and
+    // nothing downstream noticed until the floor was taught to count reads.
+    writeStderrLine(
+      `agent-prompt: failed to write findings file ${p}: ` +
+        `${(err as Error).message}`,
+    );
   }
   return p;
 }

@@ -305,6 +305,26 @@ async function* withStreamInactivityTimeout(
   let chunksReceived = 0;
   try {
     while (true) {
+      // Consult the deadline before arming the race, not only when the timer
+      // wins it: a chunk that is already buffered resolves `it.next()` as a
+      // microtask, which beats `setTimeout(…, 0)` every time, so a source
+      // with pre-buffered chunks (or a slow consumer resuming long after the
+      // deadline passed at `yield`) would otherwise sail past the cap.
+      if (maxLifetimeMs > 0 && Date.now() >= deadline) {
+        // Same precedence as the timer below: a user cancellation wins over
+        // the cap's retryable ETIMEDOUT.
+        if (parentSignal?.aborted) {
+          const abortErr = new Error('Aborted');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
+        abortRequest();
+        throw new StreamLifetimeExceededError(
+          maxLifetimeMs,
+          chunksReceived,
+          Date.now() - streamStartedAt,
+        );
+      }
       const nextPromise = it.next();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {
@@ -780,23 +800,28 @@ export class ContentGenerationPipeline {
       }
 
       // Bypass handleError: it strips `code` from timeout errors, which would
-      // prevent classifyRetryError from recognizing retryable ETIMEDOUT.
-      if (error instanceof StreamInactivityTimeoutError) {
-        debugLogger.warn('OpenAI stream inactivity timeout', {
-          idleMs: error.idleMs,
-          chunksReceived: error.chunksReceived,
-          streamLifetimeMs: error.streamLifetimeMs,
-        });
-        throw redactProxyError(error);
-      }
-      // Same bypass for the lifetime cap (issue #8597) — same ETIMEDOUT code,
-      // same retry path.
-      if (error instanceof StreamLifetimeExceededError) {
-        debugLogger.warn('OpenAI stream lifetime cap exceeded', {
-          maxLifetimeMs: error.maxLifetimeMs,
-          chunksReceived: error.chunksReceived,
-          streamLifetimeMs: error.streamLifetimeMs,
-        });
+      // prevent classifyRetryError from recognizing retryable ETIMEDOUT. Both
+      // stream guards share that code and the same retry path (issue #8597).
+      if (
+        error instanceof StreamInactivityTimeoutError ||
+        error instanceof StreamLifetimeExceededError
+      ) {
+        debugLogger.warn(
+          error instanceof StreamLifetimeExceededError
+            ? 'OpenAI stream lifetime cap exceeded'
+            : 'OpenAI stream inactivity timeout',
+          error instanceof StreamLifetimeExceededError
+            ? {
+                maxLifetimeMs: error.maxLifetimeMs,
+                chunksReceived: error.chunksReceived,
+                streamLifetimeMs: error.streamLifetimeMs,
+              }
+            : {
+                idleMs: error.idleMs,
+                chunksReceived: error.chunksReceived,
+                streamLifetimeMs: error.streamLifetimeMs,
+              },
+        );
         throw redactProxyError(error);
       }
 

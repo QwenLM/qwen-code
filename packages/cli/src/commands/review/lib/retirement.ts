@@ -41,6 +41,7 @@ import { readTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
   deliveredVerbatimLines,
+  findingsPointerOf,
   flattenPrompt,
   promptLines,
   readRecordedPrompts,
@@ -246,10 +247,10 @@ function substantiveClause(clause: string): boolean {
  * every failure in this module lands on the audit side.
  */
 function findingsListOf(launchPrompt: string): string {
-  const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(launchPrompt);
-  if (m) {
+  const pointer = findingsPointerOf(launchPrompt);
+  if (pointer !== null) {
     try {
-      return readFileSync(m[1], 'utf8');
+      return readFileSync(pointer, 'utf8');
     } catch {
       // Fall through to the prompt.
     }
