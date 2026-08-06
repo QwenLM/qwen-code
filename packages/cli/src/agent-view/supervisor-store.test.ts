@@ -17,6 +17,7 @@ import {
   readAgentViewSessionState,
   removeAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
+  writeAgentViewRoster,
   writeAgentViewActivity,
   writeAgentViewLaunch,
   writeAgentViewSessionState,
@@ -185,6 +186,44 @@ describe('agent view supervisor store', () => {
     ).resolves.toMatchObject({ sessions: [] });
   });
 
+  it('collapses pre-existing case-variant roster duplicates on update', async () => {
+    await writeAgentViewRoster(
+      {
+        schemaVersion: 1,
+        updatedAt: '2026-07-16T00:00:00.000Z',
+        sessions: [
+          rosterEntry('MySession', {
+            displayName: 'upper',
+            updatedAt: '2026-07-16T00:00:00.000Z',
+          }),
+          rosterEntry('mysession', {
+            displayName: 'lower',
+            updatedAt: '2026-07-16T00:00:01.000Z',
+          }),
+        ],
+      },
+      { globalDir: tempDir },
+    );
+
+    await updateAgentViewRosterEntry(
+      'MYSESSION',
+      (entry) => ({
+        ...entry,
+        displayName: 'merged',
+        updatedAt: '2026-07-16T00:00:02.000Z',
+      }),
+      { globalDir: tempDir },
+    );
+
+    const roster = await readAgentViewRoster({ globalDir: tempDir });
+    expect(roster.sessions).toEqual([
+      expect.objectContaining({
+        sessionId: 'mysession',
+        displayName: 'merged',
+      }),
+    ]);
+  });
+
   it('writes session files and preserves unknown fields on updates', async () => {
     await writeAgentViewSessionState(
       sessionState('session-1', {
@@ -241,6 +280,20 @@ describe('agent view supervisor store', () => {
     await writeAgentViewSessionState(sessionState('session-1'), {
       globalDir: tempDir,
     });
+    await writeAgentViewLaunch(
+      {
+        schemaVersion: 1,
+        sessionId: 'session-1',
+        argv: ['qwen'],
+        env: { QWEN_AGENT_VIEW_TOKEN: 'secret' },
+        entrypoint: '/tmp/qwen',
+        projectCwd: tempDir,
+        activeCwd: tempDir,
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
+      },
+      { globalDir: tempDir },
+    );
     await upsertAgentViewRosterEntry(
       rosterEntry('session-1', {
         displayName: 'Build Fix',
@@ -260,6 +313,9 @@ describe('agent view supervisor store', () => {
         displayName: 'Build Fix',
         pinned: true,
       },
+      launch: expect.objectContaining({
+        env: {},
+      }),
     });
   });
 

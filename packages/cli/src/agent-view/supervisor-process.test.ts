@@ -56,8 +56,12 @@ describe('Agent View supervisor process helpers', () => {
       runtimeDir,
     });
 
-    expect(path.dirname(socketPath)).toBe(runtimeDir);
-    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+    expect(path.dirname(socketPath)).toEqual(
+      expect.stringMatching(
+        new RegExp(`^${escapeRegExp(runtimeDir)}${escapeRegExp(path.sep)}`),
+      ),
+    );
+    expect(path.basename(socketPath)).toMatch(/^[a-z0-9-]+\.sock$/);
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
 
@@ -66,11 +70,12 @@ describe('Agent View supervisor process helpers', () => {
       globalDir: path.join(os.tmpdir(), 'a'.repeat(140)),
       platform: 'linux',
     });
-    const uid =
-      typeof process.getuid === 'function' ? process.getuid() : 'user';
-
-    expect(path.dirname(socketPath)).toBe(path.join(os.tmpdir(), `qav-${uid}`));
-    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+    expect(path.dirname(socketPath)).toEqual(
+      expect.stringMatching(
+        new RegExp(`^${escapeRegExp(os.tmpdir())}${escapeRegExp(path.sep)}`),
+      ),
+    );
+    expect(path.basename(socketPath)).toMatch(/^[a-z0-9-]+\.sock$/);
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
 
@@ -212,6 +217,12 @@ describe('Agent View supervisor process helpers', () => {
       sessionId,
       state: expect.objectContaining({ sessionId }),
     });
+    await expect(
+      handler.peek?.({ sessionId: sessionId.slice(0, 8).toUpperCase() }),
+    ).resolves.toMatchObject({
+      sessionId,
+      state: expect.objectContaining({ sessionId }),
+    });
     expect(launchedArgv).toEqual(
       expect.arrayContaining([
         '--session-id',
@@ -228,18 +239,22 @@ describe('Agent View supervisor process helpers', () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
+    let launchedArgv: string[] | undefined;
+    let token = '';
     const handler = createAgentViewSupervisorHandler({
       globalDir,
       platform: 'linux',
       waitForWorkerReady: true,
       workerReadyTimeoutMs: 1000,
       launchPtyHost: async (launch) => {
+        launchedArgv = launch.argv;
+        token = launch.env['QWEN_AGENT_VIEW_TOKEN'] ?? '';
         setImmediate(() => {
           void Promise.resolve(
             handler.workerEvent?.({
               type: 'ready',
               sessionId: launch.sessionId,
-              token: launch.env['QWEN_AGENT_VIEW_TOKEN'],
+              token,
               cwd: launch.activeCwd,
               at: '2026-07-17T00:00:00.000Z',
             }),
@@ -261,6 +276,17 @@ describe('Agent View supervisor process helpers', () => {
       processState: 'alive',
       activeCwd: globalDir,
       updatedAt: '2026-07-17T00:00:00.000Z',
+    });
+    expect(launchedArgv).not.toContain('write tests');
+    await expect(
+      handler.workerControl?.({ sessionId: result.sessionId, token }),
+    ).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({
+          type: 'prompt',
+          text: 'write tests',
+        }),
+      ],
     });
 
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -680,6 +706,58 @@ describe('Agent View supervisor process helpers', () => {
       waitingFor: 'approval',
       lastActivityAt: '2026-07-17T00:00:01.000Z',
     });
+
+    const blockedState = await readAgentViewSessionState(result.sessionId, {
+      globalDir,
+    });
+    if (!blockedState) {
+      throw new Error('expected blocked state');
+    }
+    await writeAgentViewSessionState(
+      {
+        ...blockedState,
+        lastError: {
+          code: 'stale_worker',
+          message: 'old failure',
+          at: '2026-07-17T00:00:01.000Z',
+        },
+      },
+      { globalDir },
+    );
+    await writeAgentViewActivity(
+      result.sessionId,
+      {
+        schemaVersion: 1,
+        waitingFor: 'approval',
+        inputKind: 'blocking',
+        lastResult: 'old result',
+        queuedPromptCount: 1,
+        queuedPromptPreview: 'old prompt',
+        lastQueuedPromptAt: '2026-07-17T00:00:01.000Z',
+        lastActivityAt: '2026-07-17T00:00:01.000Z',
+        capabilities: ['ready'],
+      },
+      { globalDir },
+    );
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+      capabilities: ['ready'],
+      at: '2026-07-17T00:00:02.000Z',
+    });
+    const readyState = await readAgentViewSessionState(result.sessionId, {
+      globalDir,
+    });
+    const readyActivity = await readAgentViewActivity(result.sessionId, {
+      globalDir,
+    });
+    expect(readyState).not.toHaveProperty('lastError');
+    expect(readyActivity).not.toHaveProperty('waitingFor');
+    expect(readyActivity).not.toHaveProperty('inputKind');
+    expect(readyActivity).not.toHaveProperty('lastResult');
+    expect(readyActivity).not.toHaveProperty('queuedPromptCount');
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -2485,6 +2563,14 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({ processState: 'hibernated' });
+    hosts[0]?.resolveExit(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      sessionState: 'idle',
+      processState: 'hibernated',
+    });
 
     await handler.respawn?.({ sessionId: result.sessionId });
     await writeSessionStateForTest(result.sessionId, globalDir, 'working');
@@ -2955,7 +3041,15 @@ async function readWorkerTokenForTest(
 }
 
 function shortHostSocketPath(): string {
-  return path.join('/tmp', `qah-${process.pid}-${Date.now()}.sock`);
+  const unique = `qah-${process.pid}-${Date.now()}`;
+  if (process.platform === 'win32') {
+    return `\\\\.\\pipe\\${unique}`;
+  }
+  return path.join(os.tmpdir(), `${unique}.sock`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 class FakeAttachSocket extends Duplex {

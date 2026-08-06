@@ -146,19 +146,20 @@ export async function updateAgentViewRosterEntry(
   return mutateAgentViewRoster(options, async () => {
     const roster = await readAgentViewRosterForWrite(options);
     const sessionKey = sanitizeSessionId(sessionId);
-    let updated: AgentViewRosterEntry | undefined;
-    const sessions = roster.sessions.map((entry) => {
-      if (sanitizeSessionId(entry.sessionId) !== sessionKey) return entry;
-      updated = update(entry);
-      return updated;
-    });
-    if (!updated) return undefined;
+    const existing = roster.sessions.find(
+      (entry) => sanitizeSessionId(entry.sessionId) === sessionKey,
+    );
+    if (!existing) return undefined;
+    const updated = update(existing);
+    const sessions = roster.sessions.filter(
+      (entry) => sanitizeSessionId(entry.sessionId) !== sessionKey,
+    );
 
     const next: AgentViewRosterFile = {
       ...roster,
       schemaVersion: 1,
       updatedAt: updated.updatedAt,
-      sessions: sessions.sort(compareRosterEntries),
+      sessions: [...sessions, updated].sort(compareRosterEntries),
     };
     await writeAgentViewRoster(next, options);
     return updated;
@@ -223,10 +224,12 @@ export async function listAgentViewSessionSnapshots(
     states.map(async (state) => ({
       sessionId: state.sessionId,
       state,
-      launch: await readAgentViewLaunch(state.sessionId, options),
+      launch: redactAgentViewLaunch(
+        await readAgentViewLaunch(state.sessionId, options),
+      ),
       activity: await readAgentViewActivity(state.sessionId, options),
       worker: await readAgentViewWorker(state.sessionId, options),
-      rosterEntry: rosterEntries.get(state.sessionId),
+      rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
     })),
   );
   return snapshots.sort((left, right) =>
@@ -531,6 +534,16 @@ function normalizeLaunch(
     activeCwd: path.resolve(activeCwd),
     includeDirectories: stringArrayValue(raw['includeDirectories']),
     terminal: terminalValue(raw['terminal']),
+  };
+}
+
+function redactAgentViewLaunch(
+  launch: AgentViewLaunchFile | undefined,
+): AgentViewLaunchFile | undefined {
+  if (!launch) return undefined;
+  return {
+    ...launch,
+    env: {},
   };
 }
 
