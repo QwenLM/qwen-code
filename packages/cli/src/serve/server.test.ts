@@ -3114,6 +3114,17 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
+      // Express non-strict routing matches a raw `//` against `app.get('/')`
+      // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app).get('//').set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
     it('allows configured extension origins to frame the shell without self-framing', async () => {
       const app = createServeApp(
         {
@@ -3151,7 +3162,7 @@ describe('createServeApp', () => {
       expect(res.text).not.toContain('<div id="root">');
     });
 
-    it('falls back to the shell for SPA deep-link navigations', async () => {
+    it('serves the shell for /session/:id document navigations (pre-auth route)', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
         .get('/session/abc123')
@@ -3159,6 +3170,86 @@ describe('createServeApp', () => {
         .set('Accept', 'text/html');
       expect(res.status).toBe(200);
       expect(res.text).toContain('<div id="root">');
+    });
+
+    it('serves the shell for GET and HEAD /session/:id document navigations', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const shell = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(shell.status).toBe(200);
+      expect(shell.text).toContain('<div id="root">');
+
+      const head = await request(app)
+        .head('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(head.status).toBe(200);
+      expect(head.headers['content-type']).toContain('text/html');
+
+      // Express non-strict routing: a refresh URL with a trailing slash is a
+      // real client shape and must load the shell too.
+      const trailingSlash = await request(app)
+        .get('/session/abc123/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(trailingSlash.status).toBe(200);
+      expect(trailingSlash.text).toContain('<div id="root">');
+    });
+
+    it('serves the shell for /session/:id on a sec-fetch-only navigation signal', async () => {
+      // A refresh navigates with `Sec-Fetch-Mode: navigate` and no HTML
+      // Accept prefix; the pre-auth route must honor the full
+      // isDocumentNavigation signal or this exact flow falls through to
+      // bearerAuth and 401s.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', '*/*')
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('401s /session/:id for JSON requests', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'application/json');
+      expect(res.status).toBe(401);
+    });
+
+    it('401s session API subpaths', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/session/abc123/status')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(401);
+    });
+
+    it('401s /session/:id document navigations when the shell is disabled', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', serveWebShell: false },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(401);
     });
 
     it('leaves non-navigation API misses as JSON 404s', async () => {
@@ -3207,10 +3298,23 @@ describe('createServeApp', () => {
     it('falls back to the shell on a sec-fetch navigation signal', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
-        .get('/session/deep')
+        .get('/deep/link')
         .set('Host', host)
         .set('Accept', '*/*')
         .set('Sec-Fetch-Mode', 'navigate');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('falls back to the shell for non-session SPA deep-link navigations', async () => {
+      // The pre-auth `/session/:id` route claims the session deep-link shapes
+      // above, so these non-session navigations are the direct coverage of
+      // mountWebShellSpaFallback's shell branch.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/deep/link')
+        .set('Host', host)
+        .set('Accept', 'text/html');
       expect(res.status).toBe(200);
       expect(res.text).toContain('<div id="root">');
     });
