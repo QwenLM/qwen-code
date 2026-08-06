@@ -162,13 +162,15 @@ function withNonBotMentionContext(
     // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
     if (dingtalkId === data.chatbotUserId) continue;
     const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
-    const stableId = dingtalkId || staffId;
+    // Prefer staffId so the model sees the same identifier space as senderId.
+    const stableId = staffId || dingtalkId;
     if (stableId) mentions.add(stableId);
   }
 
   if (mentions.size === 0) return text;
   const memberLabel = mentions.size === 1 ? 'member' : 'members';
-  const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
+  const ids = [...mentions].join(', ');
+  const context = `[Mentioned ${mentions.size} other group ${memberLabel}: ${ids}]`;
   return text ? `${context}\n${text}` : context;
 }
 
