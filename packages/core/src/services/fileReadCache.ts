@@ -6,6 +6,7 @@
 
 import type { Stats } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import { hasVerifiableInode } from '../utils/file-identity.js';
 
 /**
  * Session-scoped cache that tracks which files the model has Read or
@@ -32,6 +33,16 @@ import { resolve as resolvePath } from 'node:path';
  * `dev:0` entry. On Windows, non-zero `ino` values from `nFileIndex`
  * can also collide across volumes and on ReFS; a path-based key
  * fallback for that case is not yet implemented.
+ *
+ * Keying on the resolved path when `ino === 0` would keep Edit /
+ * WriteFile usable on those filesystems while still giving distinct
+ * paths distinct entries, and it is the obvious follow-up if anyone
+ * reports the loss. It is deliberately not done here: a path key is
+ * strictly weaker (an in-place replacement that preserves mtime and
+ * size reads as the same file, and FAT's 2-second mtime granularity
+ * makes that collision cheap), so it trades a silent wrong edit for
+ * an availability win. This cache chose the honest failure first;
+ * availability can be added later behind an explicit decision.
  *
  * Lifecycle: one instance is created per `Config` via the field
  * initializer, so any code that constructs its own Config — notably
@@ -145,8 +156,9 @@ export class FileReadCache {
     return `${stats.dev}:${stats.ino}`;
   }
 
+  /** See {@link hasVerifiableInode}. */
   static hasVerifiableIdentity(stats: Stats): boolean {
-    return stats.ino !== 0;
+    return hasVerifiableInode(stats.ino);
   }
 
   /**
@@ -187,6 +199,11 @@ export class FileReadCache {
    * The fast-path `file_unchanged` check still gates on the
    * incoming request's own `isFullRead` (in `read-file.ts`), so a
    * partial read does not get a placeholder it shouldn't.
+   *
+   * When `stats.ino` is `0` the read is not stored and the returned
+   * entry is **detached**: it describes this read for the immediate
+   * caller, but it is not in the map, so mutating it has no effect
+   * and a later {@link check} still reports `unverifiable`.
    */
   recordRead(
     absPath: string,
@@ -254,6 +271,9 @@ export class FileReadCache {
    * the default `cacheable: true`; structured writers such as notebook cell
    * editors can set `cacheable: false` so regular Edit / WriteFile still
    * reject the file as a non-text payload.
+   *
+   * As with {@link recordRead}, an `ino === 0` write returns a
+   * **detached** entry that was never added to the map.
    */
   recordWrite(
     absPath: string,

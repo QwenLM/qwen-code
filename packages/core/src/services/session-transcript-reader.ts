@@ -558,11 +558,28 @@ function fileIdentityFromStats(stats: fs.Stats): SessionTranscriptFileIdentity {
   return { dev: stats.dev, ino: stats.ino };
 }
 
+// `ino: 0` (FAT/exFAT, some SMB mounts) is not proof that two stats describe
+// the same file, but it is not treated as unverifiable here the way
+// `FileReadCache` and the writer lease treat it. Those two compare identities
+// that can belong to *different* files — a global `dev:ino` cache key, and an
+// open handle against the path it was opened from — so a zero-inode match
+// there is a false positive with real consequences.
+//
+// This reader only ever compares the same session's transcript path against
+// itself across time, and the cursor carries a content-derived proof
+// (`leafUuid` + `snapshotSize` + `lastUpdated`, all re-checked below) that
+// already detects the replacement an inode comparison would catch. Refusing
+// zero here bought nothing and broke pagination outright: `readPage` hands
+// back a cursor built from the current identity, so on such a filesystem
+// every continuation rejected the cursor the reader itself had just issued.
+//
+// Comparing the raw values still catches a zero/non-zero transition, which
+// does mean the file changed.
 function sameFileIdentity(
   a: SessionTranscriptFileIdentity,
   b: SessionTranscriptFileIdentity,
 ): boolean {
-  return a.ino !== 0 && b.ino !== 0 && a.dev === b.dev && a.ino === b.ino;
+  return a.dev === b.dev && a.ino === b.ino;
 }
 
 function makeCacheKey(
@@ -1057,7 +1074,7 @@ export class SessionTranscriptReader {
     const fileIdentity = cursor?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
-      (cursor !== undefined && !sameFileIdentity(currentIdentity, fileIdentity))
+      !sameFileIdentity(currentIdentity, fileIdentity)
     ) {
       debugLogger.warn(
         `snapshot unavailable session=${sessionId} ` +

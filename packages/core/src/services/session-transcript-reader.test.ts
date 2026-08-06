@@ -760,7 +760,27 @@ describe('SessionTranscriptReader', () => {
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
   });
 
-  it('rejects a cursor when the frozen file identity has inode zero', async () => {
+  it('paginates when the filesystem reports inode zero', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+      record('u2', 'a1', 'second'),
+    ]);
+    statFault.zeroInode = true;
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    expect(first.records.map((item) => item.uuid)).toEqual(['u1']);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursorState!.fileIdentity.ino).toBe(0);
+
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+    });
+    expect(second.records.map((item) => item.uuid)).toEqual(['a1', 'u2']);
+  });
+
+  it('rejects a cursor whose frozen inode no longer matches the file', async () => {
     await writeRecords([
       record('u1', null, 'root'),
       record('a1', 'u1', 'assistant'),
@@ -781,23 +801,6 @@ describe('SessionTranscriptReader', () => {
         }),
       }),
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
-  });
-
-  it('allows the first cursor-less read when the filesystem reports inode zero', async () => {
-    await writeRecords([
-      record('u1', null, 'root'),
-      record('a1', 'u1', 'assistant'),
-    ]);
-    statFault.zeroInode = true;
-    try {
-      const page = await new SessionTranscriptReader(workspaceDir).readPage(
-        sessionId,
-        { limit: 1 },
-      );
-      expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
-    } finally {
-      statFault.zeroInode = false;
-    }
   });
 
   it('accepts a file identity whose inode exceeds 2^53 (Windows file index)', async () => {

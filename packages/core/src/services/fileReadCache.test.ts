@@ -47,6 +47,15 @@ describe('FileReadCache', () => {
         true,
       );
     });
+
+    it('treats a bigint ino 0 as unverifiable identity', () => {
+      // `stat(..., { bigint: true })` is used elsewhere in the repo, and
+      // `0n !== 0` is true, so the check must not be a raw `!==`.
+      const bigintStats = makeStats({
+        ino: 0n as unknown as number,
+      });
+      expect(FileReadCache.hasVerifiableIdentity(bigintStats)).toBe(false);
+    });
   });
 
   describe('check', () => {
@@ -130,19 +139,6 @@ describe('FileReadCache', () => {
   });
 
   describe('recordRead', () => {
-    it('does not let ino 0 reads collide across paths', () => {
-      const cache = new FileReadCache();
-      const first = makeStats({ dev: 9, ino: 0, size: 10 });
-      const second = makeStats({ dev: 9, ino: 0, size: 20 });
-
-      cache.recordRead('/x/a.ts', first, { full: true, cacheable: true });
-      cache.recordRead('/x/b.ts', second, { full: true, cacheable: true });
-
-      expect(cache.size()).toBe(0);
-      expect(cache.check(first).state).toBe('unverifiable');
-      expect(cache.check(second).state).toBe('unverifiable');
-    });
-
     beforeEach(() => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-29T00:00:00Z'));
@@ -158,6 +154,33 @@ describe('FileReadCache', () => {
         cacheable: true,
       });
       expect(entry.lastReadAt).toBe(Date.now());
+    });
+
+    it('does not let ino 0 reads collide across paths', () => {
+      const cache = new FileReadCache();
+      const first = makeStats({ dev: 9, ino: 0, size: 10 });
+      const second = makeStats({ dev: 9, ino: 0, size: 20 });
+
+      cache.recordRead('/x/a.ts', first, { full: true, cacheable: true });
+      cache.recordRead('/x/b.ts', second, { full: true, cacheable: true });
+
+      expect(cache.size()).toBe(0);
+      expect(cache.check(first).state).toBe('unverifiable');
+      expect(cache.check(second).state).toBe('unverifiable');
+    });
+
+    it('returns a detached entry for an ino 0 read', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats({ dev: 9, ino: 0 });
+
+      const entry = cache.recordRead('/x/a.ts', stats, {
+        full: true,
+        cacheable: true,
+      });
+      entry.readResidentInHistory = true;
+
+      expect(cache.size()).toBe(0);
+      expect(cache.check(stats).state).toBe('unverifiable');
     });
 
     it('preserves full vs ranged read distinction', () => {
