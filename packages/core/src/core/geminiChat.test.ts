@@ -7730,16 +7730,16 @@ describe('GeminiChat', async () => {
       /**
        * The JSONL transcript that `--resume` / `--continue` reads is written
        * by `recordAssistantTurn`, not by `this.history`. The continuation
-       * attempt's own record carries only the resumed remainder, so without
-       * merging the delivered prefix into it the durable transcript starts
-       * the recovered turn mid-sentence while in-memory history is coherent.
+       * attempt's own parts carry only the resumed remainder, so without
+       * merging the delivered prefix back in, the durable transcript starts
+       * the recovered turn mid-sentence.
        *
-       * The merge has to happen while the record is being built. The record
-       * is appended from inside `processStreamResponse`, before the outer
-       * send loop reaches `prependTextToLastModelTurn`, and the recorder is
-       * append-only — so appending the prefix as a second record afterwards
-       * would land it after the remainder and resume would read the halves
-       * in the wrong order.
+       * `processStreamResponse` folds the prefix into the response parts once,
+       * before it writes either layer, so these tests assert the record and
+       * history agree — not just that the record is merged. Two earlier
+       * shapes failed exactly there: deduping the record against the trimmed
+       * `contentText` while history used the raw part, and merging in the
+       * outer send loop after the record had already been appended.
        */
       function chatWithRecorder(recordAssistantTurn: ReturnType<typeof vi.fn>) {
         return new GeminiChat(
@@ -7793,6 +7793,146 @@ describe('GeminiChat', async () => {
             role: 'model',
             parts: [{ text: 'first half second half' }],
           });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('merges a whitespace-leading remainder identically in both layers', async () => {
+        // R1-1: the record used to dedupe against `contentText`, which is
+        // trimmed, while history merged the raw part. A cut landing on a token
+        // boundary (before a space) then fused the two words in the transcript
+        // only — "The result is" + " 42." recorded as "The result is42.".
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('The result is')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk(' 42.', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-record-boundary',
+          );
+          await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('The result is 42.');
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'The result is 42.' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps a whitespace-boundary overlap dedup consistent across layers', async () => {
+        // The dedup-divergence half of R1-1: " total" is a 6-byte overlap only
+        // while untrimmed, so trimming the operand lost the dedup entirely and
+        // recorded "The grand totaltotal sum is 9.".
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('The grand total')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk(' total sum is 9.', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-record-boundary-overlap',
+          );
+          await collectStreamWithFakeTimers(stream, 5_000);
+
+          const history = chatWithRecording.getHistory().at(-1);
+          const historyText = history?.parts?.find(
+            (part) => part.text !== undefined,
+          )?.text;
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          // Whatever the dedup decides, both layers must decide it the same.
+          expect(recordedText(recordAssistantTurn)).toBe(historyText);
+          expect(recordedText(recordAssistantTurn)).not.toContain('totaltotal');
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('agrees across layers when the consumer aborts at the deferred finish chunk', async () => {
+        // R2-2: on a tool-result continuation the finishReason is withheld and
+        // re-emitted as a synthetic chunk AFTER the history push — a
+        // suspension point. `Turn.run` returns at exactly that kind of chunk
+        // when the user hits Esc. While the merge lived in the outer send
+        // loop, abandoning here left a merged record against a remainder-only
+        // history, and the JSONL is append-only so nothing reconciles it.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('Analysis: the file ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('contains the bug.', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            {
+              // A functionResponse turn is what makes this a tool-result
+              // continuation, which is what defers the finishReason.
+              message: [
+                {
+                  functionResponse: {
+                    id: 'call_deferred_window',
+                    name: 'read_file',
+                    response: { output: 'file contents' },
+                  },
+                },
+              ],
+            },
+            'prompt-transport-continuation-record-deferred-abort',
+          );
+
+          const collecting = (async () => {
+            for await (const event of stream) {
+              // The pass-through chunks have their finishReason stripped, so
+              // this fires only on the synthetic deferred chunk.
+              if (
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.finishReason
+              ) {
+                break;
+              }
+            }
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(5_000);
+          await collecting;
+
+          const historyText = chatWithRecording
+            .getHistory()
+            .at(-1)
+            ?.parts?.find((part) => part.text !== undefined)?.text;
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe(
+            'Analysis: the file contains the bug.',
+          );
+          // The durable record and in-memory history must not disagree, even
+          // though the send was abandoned before it could finish.
+          expect(historyText).toBe(recordedText(recordAssistantTurn));
         } finally {
           vi.useRealTimers();
         }
