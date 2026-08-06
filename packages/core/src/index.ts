@@ -113,6 +113,7 @@ export * from './tools/mcp-client-manager.js';
 // Shared MCP resource content formatter (used by the `@` injection path and
 // the read_mcp_resource tool).
 export * from './tools/mcp-resource-content.js';
+export { runWithTimeout } from './tools/mcp-discovery-timeout.js';
 // pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
