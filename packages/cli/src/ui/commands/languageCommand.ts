@@ -149,17 +149,20 @@ async function setUiLanguage(
     };
   }
 
-  if (services.settings?.setValues) {
+  if (services.settings?.setValue) {
     try {
-      services.settings.setValues([
-        { scope, key: 'general.language', value: lang },
-      ]);
+      services.settings.setValue(scope, 'general.language', lang, undefined, {
+        throwOnWriteFailure: true,
+      });
     } catch (error) {
       debugLogger.warn('Failed to save language setting:', error);
       return {
         type: 'message',
         messageType: 'error',
-        content: t('Failed to save UI language setting.'),
+        content: t('Failed to set "{{key}}": {{error}}', {
+          key: 'general.language',
+          error: error instanceof Error ? error.message : String(error),
+        }),
       };
     }
   }
