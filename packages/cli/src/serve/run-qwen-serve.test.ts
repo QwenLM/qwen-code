@@ -125,6 +125,34 @@ describe('buildProviderSetupInputs', () => {
       'kimi-for-coding-highspeed',
     ]);
   });
+
+  it('uses Kimi API defaults for the international API endpoint', () => {
+    const baseUrl = 'https://api.moonshot.ai/v1';
+    const getDefaultModelIds = vi.fn(qwenCore.getDefaultModelIds);
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        apiKey: 'sk-kimi',
+        baseUrl,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+      },
+    );
+
+    expect(getDefaultModelIds).toHaveBeenCalledWith(
+      qwenCore.kimiProvider,
+      baseUrl,
+    );
+    expect(inputs.modelIds).toEqual([
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'kimi-k2.7-code-highspeed',
+      'kimi-k2.6',
+    ]);
+  });
 });
 
 describe('createBoundChannelDeliveryHandler', () => {

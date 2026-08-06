@@ -297,6 +297,11 @@ describe('useProviderUpdates', () => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
 
+    const entry = result.current.providerUpdateRequest?.entries[0];
+    expect(entry?.diff.added).toEqual([]);
+    expect(entry?.diff.removed).toEqual([]);
+    expect(entry?.diff.currentModelAffected).toBe(false);
+
     await result.current.providerUpdateRequest!.onConfirm('update');
 
     await waitFor(() => {

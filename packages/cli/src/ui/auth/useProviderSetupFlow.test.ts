@@ -100,16 +100,13 @@ describe('useProviderSetupFlow', () => {
     const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
 
     act(() => {
-      result.current.start(provider);
-    });
-    act(() => {
-      result.current.selectBaseUrl(apiCnUrl);
-    });
-    // code-model is a built-in of the Code endpoint only — neither the
-    // source nor the destination of this switch — so it is user input and
-    // must survive the switch.
-    act(() => {
-      result.current.changeModelIds('api-model, code-model');
+      result.current.start(
+        provider,
+        undefined,
+        undefined,
+        ['code-model'],
+        apiCnUrl,
+      );
     });
     act(() => {
       result.current.selectBaseUrl(apiIntlUrl);
@@ -440,6 +437,67 @@ describe('useProviderSetupFlow', () => {
     });
     // Provider B must see the stored env value, never provider A's draft.
     expect(result.current.state.apiKey).toBe('stored-shared');
+  });
+
+  it('resets dirty model state when starting another provider flow', () => {
+    const providerA: ProviderConfig = {
+      id: 'provider-a',
+      label: 'Provider A',
+      description: 'First provider',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'a-first',
+          label: 'A First',
+          url: 'https://a-first.example/v1',
+          models: [{ id: 'a-first-model' }],
+        },
+      ],
+      envKey: () => 'A_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'A',
+    };
+    const bFirstUrl = 'https://b-first.example/v1';
+    const bSecondUrl = 'https://b-second.example/v1';
+    const providerB: ProviderConfig = {
+      id: 'provider-b',
+      label: 'Provider B',
+      description: 'Second provider',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'b-first',
+          label: 'B First',
+          url: bFirstUrl,
+          models: [{ id: 'b-first-model' }],
+        },
+        {
+          id: 'b-second',
+          label: 'B Second',
+          url: bSecondUrl,
+          models: [{ id: 'b-second-model' }],
+        },
+      ],
+      envKey: () => 'B_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'B',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(providerA);
+    });
+    act(() => {
+      result.current.changeModelIds('a-custom-model');
+    });
+    act(() => {
+      result.current.start(providerB);
+    });
+    act(() => {
+      result.current.selectBaseUrl(bSecondUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('b-second-model');
   });
 
   it('starts from a previously installed endpoint', () => {

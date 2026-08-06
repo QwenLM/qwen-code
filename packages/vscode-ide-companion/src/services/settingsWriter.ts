@@ -700,7 +700,11 @@ export function clearPersistedAuth(): void {
           : [p.baseUrl ?? ''];
         for (const protocol of protocols) {
           for (const baseUrl of baseUrls) {
-            delete env[p.envKey(protocol, baseUrl)];
+            try {
+              delete env[p.envKey(protocol, baseUrl)];
+            } catch {
+              continue;
+            }
           }
         }
       }

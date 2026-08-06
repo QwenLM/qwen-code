@@ -49,6 +49,10 @@ function buildAuthProviderDescriptor(
   );
   const defaultBaseUrl = resolveBaseUrl(provider);
   const models = resolveProviderModels(provider, defaultBaseUrl);
+  const documentationUrl =
+    typeof provider.documentationUrl === 'function'
+      ? provider.documentationUrl(defaultBaseUrl)
+      : provider.documentationUrl;
   const envKey =
     typeof provider.envKey === 'string'
       ? provider.envKey
@@ -88,9 +92,7 @@ function buildAuthProviderDescriptor(
     ...(provider.apiKeyPlaceholder
       ? { apiKeyPlaceholder: provider.apiKeyPlaceholder }
       : {}),
-    ...(typeof provider.documentationUrl === 'string'
-      ? { documentationUrl: provider.documentationUrl }
-      : {}),
+    ...(documentationUrl ? { documentationUrl } : {}),
     ...(provider.showAdvancedConfig !== undefined
       ? { showAdvancedConfig: provider.showAdvancedConfig }
       : {}),

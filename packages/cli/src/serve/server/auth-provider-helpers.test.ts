@@ -14,6 +14,7 @@ describe('buildAuthProviderCatalog', () => {
     const kimi = catalog.providers.find((provider) => provider.id === 'kimi');
 
     expect(kimi?.envKey).toBe('KIMI_CODE_API_KEY');
+    expect(kimi?.documentationUrl).toBe('https://www.kimi.com/code/docs/en/');
     expect(kimi?.models?.map((model) => model.id)).toEqual([
       'k3-256k',
       'k3',
@@ -48,6 +49,9 @@ describe('buildAuthProviderCatalog', () => {
     );
 
     expect(xiaomi?.envKey).toBe('MIMO_API_KEY');
+    expect(xiaomi?.documentationUrl).toBe(
+      'https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call',
+    );
     const options = xiaomi?.baseUrl as ServeAuthProviderBaseUrlOption[];
     expect(options).toHaveLength(4);
     for (const option of options) {

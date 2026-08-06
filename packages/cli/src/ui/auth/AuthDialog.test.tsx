@@ -454,6 +454,23 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     expect(frame).toContain('▼');
   });
 
+  it('keeps the main menu within the exact height when an error is shown', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      { authError: 'Authentication failed' },
+      {},
+      undefined,
+      undefined,
+      19,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(19);
+    expect(frame).toContain('Authentication failed');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
   it('should show an error if the initial auth type is invalid', () => {
     process.env['GEMINI_API_KEY'] = '';
 
@@ -967,40 +984,6 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   itWhenTuiInputReliable(
     'should preserve the selected main entry when returning from each top-level flow',
     async () => {
-      const createSettings = () =>
-        new LoadedSettings(
-          {
-            settings: { ui: { customThemes: {} }, mcpServers: {} },
-            originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-            path: '',
-          },
-          {
-            settings: {},
-            originalSettings: {},
-            path: '',
-          },
-          {
-            settings: {
-              security: { auth: { selectedType: undefined } },
-              ui: { customThemes: {} },
-              mcpServers: {},
-            },
-            originalSettings: {
-              security: { auth: { selectedType: undefined } },
-              ui: { customThemes: {} },
-              mcpServers: {},
-            },
-            path: '',
-          },
-          {
-            settings: { ui: { customThemes: {} }, mcpServers: {} },
-            originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-            path: '',
-          },
-          true,
-          new Set(),
-        );
-
       const cases = [
         {
           label: 'Alibaba ModelStudio',
@@ -1210,7 +1193,14 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         new Set(),
       );
 
-      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      const { stdin, lastFrame, unmount } = renderAuthDialog(
+        settings,
+        { authError: 'Authentication failed' },
+        {},
+        undefined,
+        undefined,
+        22,
+      );
 
       await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
       await wait();
@@ -1230,6 +1220,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await vi.waitFor(
         () => {
           const frame = lastFrame();
+          expect(frame?.split('\n')).toHaveLength(22);
+          expect(frame).toContain('Authentication failed');
           expect(frame).toContain('DeepSeek API Key');
           expect(frame).toContain('Kimi');
           expect(frame).not.toContain('MiniMax API Key');
@@ -1316,6 +1308,11 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'Idealab API Key',
         'Kimi',
         'MiniMax API Key',
+        'ModelScope API Key',
+        'OpenRouter',
+        'Requesty',
+        'Xiaomi MiMo API Key',
+        'Z.AI API Key',
       ]) {
         await moveDownAndWaitForSelection(stdin, lastFrame, label);
         await wait();
@@ -1323,14 +1320,14 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'MiniMax API Key · Step 1/3 · Endpoint',
+        'Z.AI API Key · Step 1/3 · Endpoint',
       );
 
       await vi.waitFor(
         () => {
           const frame = lastFrame();
-          expect(frame).toContain('International');
-          expect(frame).toContain('China');
+          expect(frame).toContain('Standard API Key');
+          expect(frame).toContain('Coding Plan');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );

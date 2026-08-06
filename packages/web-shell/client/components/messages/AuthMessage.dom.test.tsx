@@ -58,12 +58,19 @@ const providerB: DaemonAuthProviderDescriptor = {
   description: 'Second provider sharing the env-key domain',
   protocol: 'openai',
   baseUrl: [
-    { id: 'b-one', label: 'Beta One', url: B_ONE_URL, envKey: 'B_ONE_KEY' },
+    {
+      id: 'b-one',
+      label: 'Beta One',
+      url: B_ONE_URL,
+      envKey: 'B_ONE_KEY',
+      models: [{ id: 'beta-one-default' }],
+    },
     {
       id: 'b-two',
       label: 'Beta Two',
       url: B_TWO_URL,
       envKey: 'SHARED_KEY',
+      models: [{ id: 'beta-two-default' }],
     },
   ],
   models: [{ id: 'beta-model' }],
@@ -264,6 +271,35 @@ describe('AuthMessage draft isolation', () => {
     click(findButtonContaining('Alpha Two'));
     expect(passwordInput().value).toBe('draft-a');
   });
+
+  it('resets dirty model state before starting another provider', async () => {
+    actions.getAuthProviders.mockResolvedValue(catalog);
+    actions.installAuthProvider.mockResolvedValue({
+      v: 1,
+      providerId: 'provider-b',
+      providerLabel: 'Provider Beta',
+      authType: 'openai',
+      message: 'ok',
+    });
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Alpha'));
+    click(findButtonContaining('Alpha Two'));
+    setInput(passwordInput(), 'sk-alpha');
+    click(findButtonContaining('next'));
+    setInput(textInput(), 'alpha-custom');
+
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Provider Beta'));
+    click(findButtonContaining('Beta Two'));
+    setInput(passwordInput(), 'sk-beta');
+    click(findButtonContaining('next'));
+
+    expect(textInput().value).toBe('beta-two-default');
+  });
 });
 
 function textInput(): HTMLInputElement {
@@ -287,6 +323,38 @@ async function renderAuthMessage() {
 }
 
 describe('AuthMessage model field preservation', () => {
+  it('keeps the selected endpoint after navigating backward and forward', async () => {
+    actions.getAuthProviders.mockResolvedValue(gammaCatalog);
+    actions.installAuthProvider.mockResolvedValue({
+      v: 1,
+      providerId: 'provider-c',
+      providerLabel: 'Provider Gamma',
+      authType: 'openai',
+      message: 'ok',
+    });
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Gamma'));
+    click(findButtonContaining('Gamma Two'));
+    setInput(passwordInput(), 'sk-test');
+
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('next'));
+    click(findButtonContaining('next'));
+    expect(textInput().value).toBe('gamma-two-default, gamma-two-extra');
+    click(findButtonContaining('next'));
+    await flush();
+
+    expect(actions.installAuthProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: 'provider-c',
+        baseUrl: 'https://c-two.example/v1',
+        modelIds: ['gamma-two-default', 'gamma-two-extra'],
+      }),
+    );
+  });
+
   it('keeps typed model IDs across an endpoint round trip', async () => {
     actions.getAuthProviders.mockResolvedValue(gammaCatalog);
     actions.installAuthProvider.mockResolvedValue({

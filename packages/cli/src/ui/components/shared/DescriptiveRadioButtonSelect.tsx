@@ -74,7 +74,9 @@ export function DescriptiveRadioButtonSelect<T>({
             <Text color={titleColor}>{item.title}</Text>
             {hasDescription &&
               (typeof item.description === 'string' ? (
-                <Text color={theme.text.secondary}>{item.description}</Text>
+                <Text color={theme.text.secondary} wrap="truncate">
+                  {item.description}
+                </Text>
               ) : (
                 item.description
               ))}

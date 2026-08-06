@@ -54,12 +54,8 @@ const MAIN_ITEMS = [
     key: 'ALIBABA_MODELSTUDIO',
     title: t('Alibaba ModelStudio'),
     label: t('Alibaba ModelStudio'),
-    description: (
-      <Text color={theme.text.secondary} wrap="truncate">
-        {t(
-          'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
-        )}
-      </Text>
+    description: t(
+      'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
     ),
     value: 'ALIBABA_MODELSTUDIO' as MainOption,
   },
@@ -67,21 +63,15 @@ const MAIN_ITEMS = [
     key: 'THIRD_PARTY_PROVIDERS',
     title: t('Third-party Providers'),
     label: t('Third-party Providers'),
-    description: (
-      <Text color={theme.text.secondary} wrap="truncate">
-        {t('Choose a built-in provider and connect with an API key')}
-      </Text>
-    ),
+    description: t('Choose a built-in provider and connect with an API key'),
     value: 'THIRD_PARTY_PROVIDERS' as MainOption,
   },
   {
     key: 'CUSTOM_PROVIDER',
     title: t('Custom Provider'),
     label: t('Custom Provider'),
-    description: (
-      <Text color={theme.text.secondary} wrap="truncate">
-        {t('Manually connect a local server, proxy, or unsupported provider')}
-      </Text>
+    description: t(
+      'Manually connect a local server, proxy, or unsupported provider',
     ),
     value: 'CUSTOM_PROVIDER' as MainOption,
   },
@@ -290,13 +280,14 @@ export function AuthDialog({
 
   const activeSubMenu = subMenus[viewLevel];
   const dialogHeight = availableTerminalHeight ?? DEFAULT_DIALOG_HEIGHT;
+  const listHeight = dialogHeight - (authError || errorMessage ? 2 : 0);
   const maxMainItems = getMaxItemsToShow(
-    dialogHeight,
+    listHeight,
     MAIN_ITEMS.length,
     MAIN_LIST_FIXED_ROWS,
   );
   const maxSubMenuItems = getMaxItemsToShow(
-    dialogHeight,
+    listHeight,
     activeSubMenu?.items.length ?? 0,
     SUB_MENU_LIST_FIXED_ROWS,
   );

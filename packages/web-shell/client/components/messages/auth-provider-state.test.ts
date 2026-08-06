@@ -3,6 +3,7 @@ import type { DaemonAuthProviderDescriptor } from '@qwen-code/webui/daemon-react
 import {
   apiKeyAfterBaseUrlChange,
   baseUrlOptionModelIds,
+  normalizeModelIds,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
   selectedBaseUrlOptionIndex,
@@ -58,6 +59,10 @@ const mimo: DaemonAuthProviderDescriptor = {
 };
 
 describe('auth provider endpoint state', () => {
+  it('normalizes comma-separated model IDs', () => {
+    expect(normalizeModelIds('a, b , a,,c')).toEqual(['a', 'b', 'c']);
+  });
+
   it('uses endpoint-specific environment keys and model defaults', () => {
     expect(
       selectedBaseUrlEnvKey(kimi, 'https://api.kimi.com/coding/v1', 'openai'),

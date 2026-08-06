@@ -12,7 +12,9 @@ import {
   KIMI_CODE_BASE_URL,
   KIMI_CODE_ENV_KEY,
   THIRD_PARTY_PROVIDERS,
+  buildProviderTemplate,
   buildInstallPlan,
+  computeModelListVersion,
   findProviderByCredentials,
   findProviderById,
   getAllProviderBaseUrls,
@@ -129,6 +131,45 @@ describe('kimiProvider', () => {
       baseUrl: 'https://api.kimi.com/coding/v1',
       envKey: 'KIMI_CODE_API_KEY',
     });
+    expect(
+      plan.modelProviders?.[0]?.models.map(({ id, generationConfig }) => ({
+        id,
+        generationConfig,
+      })),
+    ).toEqual([
+      {
+        id: 'k3-256k',
+        generationConfig: {
+          thinkingMandatory: true,
+          contextWindowSize: 262144,
+          modalities: { image: true },
+        },
+      },
+      {
+        id: 'k3',
+        generationConfig: {
+          thinkingMandatory: true,
+          contextWindowSize: 1048576,
+          modalities: { image: true, video: true },
+        },
+      },
+      {
+        id: 'kimi-for-coding',
+        generationConfig: {
+          thinkingMandatory: true,
+          contextWindowSize: 262144,
+          modalities: { image: true, video: true },
+        },
+      },
+      {
+        id: 'kimi-for-coding-highspeed',
+        generationConfig: {
+          thinkingMandatory: true,
+          contextWindowSize: 262144,
+          modalities: { image: true, video: true },
+        },
+      },
+    ]);
   });
 
   it('creates an API install with only Kimi API models', () => {
@@ -145,6 +186,64 @@ describe('kimiProvider', () => {
       name: '[Kimi API] kimi-k3',
       baseUrl: 'https://api.moonshot.ai/v1',
       envKey: 'MOONSHOT_API_KEY',
+    });
+    expect(
+      plan.modelProviders?.[0]?.models.map(({ id, generationConfig }) => ({
+        id,
+        generationConfig,
+      })),
+    ).toEqual([
+      {
+        id: 'kimi-k3',
+        generationConfig: {
+          thinkingMandatory: true,
+          contextWindowSize: 1048576,
+          modalities: { image: true, video: true },
+        },
+      },
+      {
+        id: 'kimi-k2.7-code',
+        generationConfig: {
+          thinkingMandatory: true,
+          contextWindowSize: 262144,
+          modalities: { image: true, video: true },
+        },
+      },
+      {
+        id: 'kimi-k2.7-code-highspeed',
+        generationConfig: {
+          thinkingMandatory: true,
+          contextWindowSize: 262144,
+          modalities: { image: true, video: true },
+        },
+      },
+      {
+        id: 'kimi-k2.6',
+        generationConfig: {
+          contextWindowSize: 262144,
+          modalities: { image: true, video: true },
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    'https://api.kimi.com/coding/v1',
+    'https://api.moonshot.cn/v1',
+    'https://api.moonshot.ai/v1',
+  ])('records endpoint-scoped provider state for %s', (baseUrl) => {
+    const template = buildProviderTemplate(kimiProvider, baseUrl);
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl,
+      apiKey: 'sk-kimi',
+      modelIds: template.map((model) => model.id),
+    });
+
+    expect(plan.providerState).toEqual({
+      'providerMetadata.kimi': {
+        baseUrl,
+        version: computeModelListVersion(template),
+      },
     });
   });
 

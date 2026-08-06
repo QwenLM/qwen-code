@@ -9,7 +9,9 @@ import {
   ALL_PROVIDERS,
   AuthType,
   THIRD_PARTY_PROVIDERS,
+  buildProviderTemplate,
   buildInstallPlan,
+  computeModelListVersion,
   findProviderByCredentials,
   findProviderById,
   getAllProviderBaseUrls,
@@ -83,6 +85,27 @@ describe('xiaomiMimoProvider', () => {
         },
       }),
     ]);
+  });
+
+  it.each([
+    'https://api.xiaomimimo.com/v1',
+    'https://token-plan-cn.xiaomimimo.com/v1',
+    'https://token-plan-sgp.xiaomimimo.com/v1',
+    'https://token-plan-ams.xiaomimimo.com/v1',
+  ])('records endpoint-scoped provider state for %s', (baseUrl) => {
+    const template = buildProviderTemplate(xiaomiMimoProvider, baseUrl);
+    const plan = buildInstallPlan(xiaomiMimoProvider, {
+      baseUrl,
+      apiKey: 'sk-mimo',
+      modelIds: template.map((model) => model.id),
+    });
+
+    expect(plan.providerState).toEqual({
+      'providerMetadata.xiaomi-mimo': {
+        baseUrl,
+        version: computeModelListVersion(template),
+      },
+    });
   });
 
   it('is registered and discoverable by credentials', () => {

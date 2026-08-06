@@ -174,11 +174,12 @@ function readInstalledOwnedIds(
 function getInstalledOwnedModelIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
+  baseUrl: string,
 ): string[] {
   // Only compare built-in model IDs — user-added custom models should not
   // appear as "removed" in the diff since they were never part of the
   // provider's built-in list.
-  const builtinIds = new Set(getDefaultModelIds(provider));
+  const builtinIds = new Set(getDefaultModelIds(provider, baseUrl));
   return readInstalledOwnedIds(settings, provider).filter((id) =>
     builtinIds.has(id),
   );
@@ -203,7 +204,11 @@ function findAllPendingUpdates(
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
 
-    const existingModelIds = getInstalledOwnedModelIds(settings, provider);
+    const existingModelIds = getInstalledOwnedModelIds(
+      settings,
+      provider,
+      baseUrl,
+    );
     const newModelIds = getDefaultModelIds(provider, baseUrl);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
 
