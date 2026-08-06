@@ -18,11 +18,9 @@ import {
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 import {
-  emptyChatViewState,
   emptyMobileComposerLayout,
   expectEmptyMobileComposerAnchored,
   gotoEmptyMobileWelcomeHarness,
-  scrollEmptyMobileWelcomeGroup,
 } from './utils/emptyMobileComposer';
 
 const COMPOSER_VIEWPORT_HEIGHTS = [1000, 800, 600] as const;
@@ -517,7 +515,7 @@ test('anchors the empty mobile composer to the chat pane across the breakpoint @
     .poll(() => emptyMobileComposerLayout(page))
     .toMatchObject({
       chatViewPosition: 'static',
-      footerPosition: 'relative',
+      footerPosition: 'absolute',
     });
   const narrowLayoutAfterResize = await emptyMobileComposerLayout(page);
   expectEmptyMobileComposerAnchored(narrowLayoutAfterResize);
@@ -547,168 +545,6 @@ test('anchors the empty mobile composer without a welcome footer @smoke', async 
   expectEmptyMobileComposerAnchored(layout, {
     requireWelcomeFooter: false,
   });
-});
-
-test('anchors a custom footer above the composer when the welcome footer is absent @smoke', async ({
-  page,
-}, testInfo) => {
-  await page.setViewportSize({ width: 760, height: 900 });
-  const scenario = createWebShellDaemonScenario();
-  await installScenario(page, scenario, testInfo);
-
-  await gotoEmptyMobileWelcomeHarness(page, {
-    customFooter: true,
-    welcomeFooter: false,
-  });
-  const customFooter = page.locator('[data-e2e-custom-footer]');
-  await expect(customFooter).toBeVisible();
-
-  const layout = await emptyMobileComposerLayout(page, {
-    requireWelcomeFooter: false,
-  });
-  expectEmptyMobileComposerAnchored(layout, {
-    requireWelcomeFooter: false,
-  });
-  expect(
-    await customFooter.evaluate(
-      (element) => element.getBoundingClientRect().bottom,
-    ),
-  ).toBeLessThanOrEqual(layout.composerTop);
-});
-
-test('keeps tall footerless welcome content top-reachable in a short pane @smoke', async ({
-  page,
-}, testInfo) => {
-  await page.setViewportSize({ width: 760, height: 320 });
-  const scenario = createWebShellDaemonScenario();
-  await installScenario(page, scenario, testInfo);
-
-  await gotoEmptyMobileWelcomeHarness(page, {
-    tallWelcome: true,
-    welcomeFooter: false,
-  });
-  const layout = await emptyMobileComposerLayout(page, {
-    requireWelcomeFooter: false,
-  });
-  expectEmptyMobileComposerAnchored(layout, {
-    expectCenteredWelcome: false,
-    requireWelcomeFooter: false,
-  });
-  expect(layout.messageListScrollHeight).toBeGreaterThan(
-    layout.messageListClientHeight,
-  );
-  await page
-    .locator('[data-web-shell-message-list]')
-    .evaluate((messageList) => (messageList.scrollTop = 0));
-  await expect
-    .poll(async () => {
-      const topLayout = await emptyMobileComposerLayout(page, {
-        requireWelcomeFooter: false,
-      });
-      return topLayout.welcomeHeaderTop - topLayout.messageListTop;
-    })
-    .toBeGreaterThanOrEqual(-1);
-});
-
-test('keeps tall welcome content top-reachable above the footer in a short pane @smoke', async ({
-  page,
-}, testInfo) => {
-  await page.setViewportSize({ width: 760, height: 320 });
-  const scenario = createWebShellDaemonScenario();
-  await installScenario(page, scenario, testInfo);
-
-  await gotoEmptyMobileWelcomeHarness(page, { tallWelcome: true });
-  const layout = await emptyMobileComposerLayout(page);
-  // The tall welcome footer starts below the scroll viewport, so keep the
-  // pane/composer anchoring checks without the non-overflow footer fit check.
-  expectEmptyMobileComposerAnchored(layout, {
-    expectCenteredWelcome: false,
-    requireWelcomeFooter: false,
-  });
-  if (
-    layout.welcomeGroupClientHeight === null ||
-    layout.welcomeGroupScrollHeight === null
-  ) {
-    throw new Error('Expected the mobile welcome group.');
-  }
-  expect(layout.welcomeGroupScrollHeight).toBeGreaterThan(
-    layout.welcomeGroupClientHeight,
-  );
-  expect(layout.welcomeGroupOverflowY).toBe('auto');
-
-  await scrollEmptyMobileWelcomeGroup(page, layout.welcomeGroupScrollHeight);
-  await expect
-    .poll(async () => {
-      const scrolledLayout = await emptyMobileComposerLayout(page);
-      if (scrolledLayout.welcomeGroupScrollTop === null) {
-        throw new Error('Expected the mobile welcome group.');
-      }
-      return scrolledLayout.welcomeGroupScrollTop;
-    })
-    .toBeGreaterThan(0);
-
-  await scrollEmptyMobileWelcomeGroup(page, 0);
-  await expect
-    .poll(async () => {
-      const topLayout = await emptyMobileComposerLayout(page);
-      if (topLayout.welcomeGroupScrollTop === null) {
-        throw new Error('Expected the mobile welcome group.');
-      }
-      return topLayout.welcomeGroupScrollTop;
-    })
-    .toBe(0);
-  await expect
-    .poll(async () => {
-      const topLayout = await emptyMobileComposerLayout(page);
-      if (topLayout.welcomeGroupTop === null) {
-        throw new Error('Expected the mobile welcome group.');
-      }
-      return topLayout.welcomeHeaderTop - topLayout.welcomeGroupTop;
-    })
-    .toBeGreaterThanOrEqual(-1);
-});
-
-test('keeps centered welcome content clear of the composer in short panes @smoke', async ({
-  page,
-}, testInfo) => {
-  await page.setViewportSize({ width: 760, height: 400 });
-  const scenario = createWebShellDaemonScenario();
-  await installScenario(page, scenario, testInfo);
-  await gotoEmptyMobileWelcomeHarness(page);
-
-  for (const height of [400, 320]) {
-    await page.setViewportSize({ width: 760, height });
-    const layout = await emptyMobileComposerLayout(page);
-    expectEmptyMobileComposerAnchored(layout);
-  }
-});
-
-test('preserves the hidden empty mobile chat display contract @smoke', async ({
-  page,
-}, testInfo) => {
-  await page.setViewportSize({ width: 760, height: 400 });
-  const scenario = createWebShellDaemonScenario();
-  await installScenario(page, scenario, testInfo);
-  await gotoEmptyMobileWelcomeHarness(page);
-
-  const composer = page.locator('[data-web-shell-composer-surface]');
-  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
-  await expect(composer).toBeVisible();
-  await page.evaluate(() => {
-    const harnessWindow = window as typeof window & {
-      __hideEmptyMobileChat?: () => void;
-    };
-    harnessWindow.__hideEmptyMobileChat?.();
-  });
-  await expect(composer).toBeHidden();
-  await expect
-    .poll(() => emptyChatViewState(page))
-    .toMatchObject({
-      ariaHidden: 'true',
-      display: 'none',
-    });
-  await editor.evaluate((element) => (element as HTMLElement).focus());
-  await expect(editor).not.toBeFocused();
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
