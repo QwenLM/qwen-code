@@ -52,7 +52,7 @@ export interface AgentViewWorkerHeartbeat {
   dispose(): void;
 }
 
-let lastStateReportKey: string | undefined;
+const lastStateReportKeys = new Map<string, string>();
 
 export function createAgentViewWorkerSidebandEnv(
   config: AgentViewWorkerSidebandEnv,
@@ -135,7 +135,8 @@ export async function reportAgentViewWorkerState(
   report: AgentViewWorkerStateReport,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  if (!readAgentViewWorkerSidebandEnv(env)) return;
+  const sideband = readAgentViewWorkerSidebandEnv(env);
+  if (!sideband) return;
 
   const event = {
     type: 'state',
@@ -143,13 +144,13 @@ export async function reportAgentViewWorkerState(
     cwd: report.cwd ?? process.cwd(),
   } as const;
   const key = JSON.stringify(event);
-  if (key === lastStateReportKey) return;
-  lastStateReportKey = key;
+  if (key === lastStateReportKeys.get(sideband.sessionId)) return;
 
   try {
     await sendAgentViewWorkerEvent(event, env);
+    lastStateReportKeys.set(sideband.sessionId, key);
   } catch {
-    lastStateReportKey = undefined;
+    lastStateReportKeys.delete(sideband.sessionId);
   }
 }
 
@@ -170,7 +171,7 @@ export function startAgentViewWorkerHeartbeat(
 }
 
 export function resetAgentViewWorkerStateReportForTests(): void {
-  lastStateReportKey = undefined;
+  lastStateReportKeys.clear();
 }
 
 function isAgentViewWorkerControlEvent(
