@@ -279,6 +279,23 @@ describe('acpModelUtils', () => {
     // KNOWN RESIDUAL: digit-prefix + space password is vetoed like a pathless
     // port URL and leaks. Documented tradeoff (#8136 R1-2).
     ['https://user:1234 secret@host', 'https://user:1234 secret@host'],
+    // #8136 R3: passwords/hostnames the previous host-shaped-char heuristic
+    // mishandled. `new URL()` resolves the terminator authoritatively for these.
+    // Password containing '@' (pathless): strip at the LAST '@', not the first.
+    ['https://user:p@ss@host', 'https://host'],
+    // Underscore-leading host (previously outside HOST_SHAPED_CHAR): strip.
+    ['https://user:pass@_host', 'https://_host'],
+    // Tab immediately after '@' (WHATWG strips it as userinfo terminator): strip.
+    [`https://user:pass@\thost`, 'https://\thost'],
+    // Password containing '@' AND whitespace (bounded authority): the last '@'
+    // within the bounded authority is the terminator.
+    ['https://user:p@ss word@host.example/v1', 'https://host.example/v1'],
+    // #8136 repro-1 (with-path port + prose email): must stay unchanged - the
+    // path bounds the authority, so the prose '@' is never the strip point.
+    [
+      'https://api.example:8443/v1 - contact admin@example.com',
+      'https://api.example:8443/v1 - contact admin@example.com',
+    ],
     // URL-throwing shapes (invalid %, space in host) + prose email: do not
     // strip the prose '@'. #8136 R2-2.
     [

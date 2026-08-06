@@ -260,7 +260,7 @@ function sanitizeProviderWarning(warning: string): string {
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
     const segment = warning.slice(next.index, segmentEnd);
-    result += sanitizeProviderWarningSegment(segment, next.marker.length);
+    result += sanitizeProviderWarningSegment(segment);
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);
@@ -295,10 +295,7 @@ function findUrlSegmentEnd(
   return Math.min(lineEnd, nextUrl?.index ?? value.length);
 }
 
-function sanitizeProviderWarningSegment(
-  segment: string,
-  _markerLength: number,
-): string {
+function sanitizeProviderWarningSegment(segment: string): string {
   // When the whole segment is a URL that sanitizeProviderBaseUrl confirms
   // carries real userinfo (it changes the segment), use its result directly.
   // This handles space-containing-credential URLs that URL_LIKE_PATTERN cannot
