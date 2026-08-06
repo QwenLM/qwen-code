@@ -10,6 +10,7 @@ import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
+  computeProviderTemplateVersion,
   findExistingProviderModels,
   findProviderByCredentials,
   getDefaultModelIds,
@@ -241,8 +242,9 @@ describe('buildInstallPlan', () => {
     expect(plan.providerState).toEqual({
       'providerMetadata.test': {
         baseUrl: 'https://api.test.com/v1',
-        version: computeModelListVersion(
-          buildProviderTemplate(config, 'https://api.test.com/v1'),
+        version: computeProviderTemplateVersion(
+          config,
+          'https://api.test.com/v1',
         ),
       },
     });

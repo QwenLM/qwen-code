@@ -237,9 +237,7 @@ function resolveProviderState(
         // Version tracks the built-in template, not the caller's model list:
         // installs can carry user-added custom IDs, and update detection
         // compares this value against the template hash.
-        version: computeModelListVersion(
-          buildProviderTemplate(config, baseUrl),
-        ),
+        version: computeProviderTemplateVersion(config, baseUrl),
         baseUrl,
       },
     };
@@ -520,4 +518,16 @@ export function buildProviderTemplate(
     apiKey: '',
     modelIds: getDefaultModelIds(config),
   });
+}
+
+/**
+ * Version oracle for the provider's built-in template. Install persists this
+ * value and update detection compares against it, so both sides must call
+ * this helper instead of re-spelling the hash.
+ */
+export function computeProviderTemplateVersion(
+  config: ProviderConfig,
+  baseUrl?: string,
+): string {
+  return computeModelListVersion(buildProviderTemplate(config, baseUrl));
 }
