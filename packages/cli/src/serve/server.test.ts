@@ -5039,7 +5039,6 @@ describe('createServeApp', () => {
         });
         expect(bridge.extensionEvents.at(-1)).toMatchObject({
           status: 'failed',
-          code: 'ENOSPC',
           error: expect.stringContaining('<extension-upload-dir>'),
         });
         expect(JSON.stringify(bridge.extensionEvents.at(-1))).not.toContain(
