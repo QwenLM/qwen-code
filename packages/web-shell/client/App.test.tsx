@@ -1495,106 +1495,118 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
-  it('expands the right panel to fullscreen and exits with Escape', async () => {
-    const originalMatchMedia = window.matchMedia;
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: query.includes('min-width'),
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
+  it('expands the right panel to fullscreen and shrinks it back from the toolbar or Escape', async () => {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+      toolUseId: 'monitor-call',
+    };
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [task],
     });
-    try {
-      const task: DaemonSessionMonitorTaskStatus = {
-        kind: 'monitor',
-        id: 'monitor-1',
-        label: 'monitor-label',
-        description: 'watch server log',
-        status: 'running',
-        startTime: 1_000,
-        runtimeMs: 5_000,
-        command: 'tail -f server.log',
-        eventCount: 3,
-        lastEventTime: 5_000,
-        droppedLines: 0,
-        toolUseId: 'monitor-call',
-      };
-      mockSessionActions.getTasks.mockResolvedValue({
-        v: 1,
-        sessionId: 'session-1',
-        now: 6_000,
-        tasks: [task],
+    mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestMonitorDetailsOnOpen).toBeTypeOf('function');
+
+    await act(async () => {
+      await testState.latestMonitorDetailsOnOpen?.({
+        callId: 'monitor-call',
+        toolName: 'monitor',
+        status: 'completed',
       });
-      mockConnection.capabilities.features = [
-        'session_monitor_tool_correlation',
-      ];
-      const { container } = renderApp();
-      await flush();
-      expect(testState.latestMonitorDetailsOnOpen).toBeTypeOf('function');
+      await Promise.resolve();
+    });
+    await flush();
 
-      await act(async () => {
-        await testState.latestMonitorDetailsOnOpen?.({
-          callId: 'monitor-call',
-          toolName: 'monitor',
-          status: 'completed',
-        });
-        await Promise.resolve();
-      });
-      await flush();
+    expect(
+      container.querySelector('button[title="watch server log"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
 
-      expect(
-        container.querySelector('button[title="watch server log"]'),
-      ).not.toBeNull();
-      expect(
-        container.querySelector('[class*="artifactPanelFullscreen"]'),
-      ).toBeNull();
+    const dockedAside = container.querySelector(
+      'aside[aria-label="Right panel"]',
+    );
+    expect(dockedAside).not.toBeNull();
+    const enterFullscreen = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Fullscreen"]',
+    );
+    expect(enterFullscreen).not.toBeNull();
+    await act(async () => {
+      enterFullscreen?.click();
+      await Promise.resolve();
+    });
 
-      const enterFullscreen = container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Fullscreen"]',
+    const fullscreenOverlay = container.querySelector(
+      '[class*="artifactPanelFullscreen"]',
+    );
+    expect(fullscreenOverlay).not.toBeNull();
+    const fullscreenAside = fullscreenOverlay?.querySelector('aside');
+    // The docked instance must stay mounted across the mode change — a
+    // remount would silently discard panel-local state (drafts, scroll).
+    expect(fullscreenAside).toBe(dockedAside);
+    expect(fullscreenAside?.className).toContain('panelFullscreen');
+    const exitFullscreenButton =
+      fullscreenAside?.querySelector<HTMLButtonElement>(
+        'button[aria-label="Exit fullscreen"]',
       );
-      expect(enterFullscreen).not.toBeNull();
-      await act(async () => {
-        enterFullscreen?.click();
-        await Promise.resolve();
-      });
+    expect(exitFullscreenButton).not.toBeNull();
+    expect(container.querySelector('[role="separator"]')).toBeNull();
 
-      const fullscreenOverlay = container.querySelector(
-        '[class*="artifactPanelFullscreen"]',
+    await act(async () => {
+      exitFullscreenButton?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="separator"]')).not.toBeNull();
+    // The same instance must survive the shrink too — the resize handle
+    // remounting beside it must not displace the panel's tree position.
+    expect(container.querySelector('aside[aria-label="Right panel"]')).toBe(
+      dockedAside,
+    );
+
+    await act(async () => {
+      enterFullscreen?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
       );
-      expect(fullscreenOverlay).not.toBeNull();
-      const fullscreenAside = fullscreenOverlay?.querySelector('aside');
-      expect(fullscreenAside?.className).toContain('panelFullscreen');
-      expect(
-        fullscreenAside?.querySelector('button[aria-label="Exit fullscreen"]'),
-      ).not.toBeNull();
-      expect(container.querySelector('[role="separator"]')).toBeNull();
+      await Promise.resolve();
+    });
 
-      await act(async () => {
-        window.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Escape',
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-        await Promise.resolve();
-      });
-
-      expect(
-        container.querySelector('[class*="artifactPanelFullscreen"]'),
-      ).toBeNull();
-      expect(container.querySelector('[role="separator"]')).not.toBeNull();
-      expect(
-        container.querySelector('button[title="watch server log"]'),
-      ).not.toBeNull();
-    } finally {
-      Object.defineProperty(window, 'matchMedia', {
-        configurable: true,
-        value: originalMatchMedia,
-      });
-    }
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="separator"]')).not.toBeNull();
+    expect(
+      container.querySelector('button[title="watch server log"]'),
+    ).not.toBeNull();
   });
 
   it('merges a reopened monitor into its existing tab', async () => {
@@ -1795,6 +1807,194 @@ describe('task activity key', () => {
       container.querySelector('button[title="watch old session"]'),
     ).toBeNull();
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(0);
+  });
+});
+
+describe('artifact panel fullscreen', () => {
+  it('drops fullscreen when the panel closes and reopens docked', () => {
+    const { container } = renderApp();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // Close the panel with its own toggle while it is fullscreen.
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'aside button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).toBeNull();
+
+    // Reopening must restore the docked default, not fullscreen.
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="separator"]')).not.toBeNull();
+  });
+
+  it('does not carry fullscreen into a switched-to session', async () => {
+    const { container, rerender } = renderApp();
+    const openPanel = () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    const enterFullscreen = () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+
+    // Seed session-2 with a saved open-panel state.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    act(openPanel);
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+
+    // Session-1: open the panel and expand it to fullscreen.
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      rerender();
+    });
+    await flush();
+    act(openPanel);
+    act(enterFullscreen);
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // Back to session-2: its saved state reopens the panel docked; the
+    // fullscreen flag must not leak across sessions.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="separator"]')).not.toBeNull();
+  });
+
+  it('expands the floating drawer to fullscreen without remounting the panel', async () => {
+    // No min-width query matches: the panel floats in a drawer instead of
+    // docking.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    const portal = '[data-web-shell-portal-root]';
+    const drawerAside = document.querySelector(
+      `${portal} aside[aria-label="Right panel"]`,
+    );
+    expect(drawerAside).not.toBeNull();
+    const drawerContent = document.querySelector<HTMLElement>(
+      `${portal} [data-slot="drawer-content"]`,
+    );
+    expect(drawerContent?.className).toContain('min(520px');
+
+    act(() => {
+      drawerAside
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    await flush();
+
+    // The same mounted instance now fills the viewport.
+    const fullscreenAside = document.querySelector(
+      `${portal} aside[aria-label="Right panel"]`,
+    );
+    expect(fullscreenAside).toBe(drawerAside);
+    expect(fullscreenAside?.className).toContain('panelFullscreen');
+    const fullscreenContent = document.querySelector<HTMLElement>(
+      `${portal} [data-slot="drawer-content"]`,
+    );
+    expect(fullscreenContent).toBe(drawerContent);
+    expect(fullscreenContent?.className).toContain('w-full');
+    expect(fullscreenContent?.className).not.toContain('min(520px');
+    expect(
+      fullscreenAside?.querySelector('button[aria-label="Exit fullscreen"]'),
+    ).not.toBeNull();
+
+    // Escape shrinks the panel back to its drawer width; it must not close
+    // the panel entirely.
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    const restoredAside = document.querySelector(
+      `${portal} aside[aria-label="Right panel"]`,
+    );
+    expect(restoredAside).toBe(drawerAside);
+    expect(restoredAside?.className).not.toContain('panelFullscreen');
+    const restoredContent = document.querySelector<HTMLElement>(
+      `${portal} [data-slot="drawer-content"]`,
+    );
+    expect(restoredContent?.className).toContain('min(520px');
   });
 });
 

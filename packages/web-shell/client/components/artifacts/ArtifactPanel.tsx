@@ -17,7 +17,9 @@ import { DownloadIcon } from 'lucide-react';
 import {
   ChevronRightIcon,
   CirclePlusIcon,
+  Maximize2Icon,
   MessageCirclePlusIcon,
+  Minimize2Icon,
   PanelRightIcon,
   PlusIcon,
   SquareActivityIcon,
@@ -442,7 +444,11 @@ export function ArtifactPanel({
                 fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
               )}
             >
-              {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
+              {fullscreen ? (
+                <Minimize2Icon className={styles.toolbarIcon} aria-hidden />
+              ) : (
+                <Maximize2Icon className={styles.toolbarIcon} aria-hidden />
+              )}
             </button>
           )}
           <button
@@ -721,46 +727,6 @@ function CloseIcon() {
         stroke="currentColor"
         strokeWidth="1.7"
         strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function FullscreenIcon() {
-  return (
-    <svg
-      className={styles.toolbarIcon}
-      viewBox="0 0 24 24"
-      fill="none"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <path
-        d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ExitFullscreenIcon() {
-  return (
-    <svg
-      className={styles.toolbarIcon}
-      viewBox="0 0 24 24"
-      fill="none"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <path
-        d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
       />
     </svg>
   );

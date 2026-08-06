@@ -170,6 +170,13 @@
   display: flex;
 }
 
+/* The fullscreen artifact panel covers the sidebar and the chat column; drop
+   the covered shells from layout, tab order, and AT while it is up (same
+   treatment chatViewHidden gives the chat behind covering panels/pages). */
+.shellHidden {
+  display: none;
+}
+
 /* Positioning context so the scheduled-tasks page (position:absolute) covers
    exactly the chat pane. Only applied while the page is shown, so normal chat
    layout is untouched. */

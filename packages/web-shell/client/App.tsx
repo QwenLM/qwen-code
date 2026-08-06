@@ -8777,6 +8777,40 @@ export function App({
     };
   }, [appClassName, appStyle, portalRoot, selectedLanguage, selectedTheme]);
 
+  // Shared by the drawer and docked render sites below; only the genuine
+  // per-variant props (variant / panelWidth) stay at each site.
+  const artifactPanelSharedProps = {
+    artifacts: artifactPanelArtifacts,
+    tabs: artifactPanelTabs,
+    activeTabId: activeArtifactPanelTabId,
+    reviewChanges,
+    selectedReviewPath,
+    workspaceCwd: connection.workspaceCwd || '',
+    loading: artifactsLoading,
+    error: artifactsError,
+    onSelectTab: setActiveArtifactPanelTabId,
+    onCloseTab: closeArtifactPanelTab,
+    onOpenFilePreview: openFilePreview,
+    latestReviewAvailable: latestReviewChanges.length > 0,
+    onOpenLatestReview: openLatestReviewPanel,
+    items: rightPanelItems,
+    sideTaskAvailable: sideTasksAvailable,
+    sideTasks: visibleSideTasks,
+    sideTasksLoading,
+    onCreateSideTask: createEmptySideTask,
+    onOpenSideTask: openSideTask,
+    onCreateSideTaskSession: createSideTaskSession,
+    onSideTaskCreated: handleSideTaskCreated,
+    onSideTaskTitleChange: handleSideTaskTitleChange,
+    onNestedRightPanelOpen: handleTurnOutputOpen,
+    onNestedArtifactsChange: handlePaneArtifactsChange,
+    onError: reportError,
+    sessionWorkflowEnabled,
+    onClose: closeArtifactPanel,
+    fullscreen: artifactPanelFullscreen,
+    onToggleFullscreen: toggleArtifactPanelFullscreen,
+  };
+
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
@@ -9105,10 +9139,12 @@ export function App({
                   ? { role: 'dialog', 'aria-modal': 'true' as const }
                   : {})}
                 aria-label={t('sidebar.label')}
+                aria-hidden={artifactPanelFullscreen || undefined}
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
                   forceMobileDrawer ? styles.mobileDrawerForced : undefined,
+                  artifactPanelFullscreen ? styles.shellHidden : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -9223,7 +9259,15 @@ export function App({
                 />
               </div>
             )}
-            <div className={styles.contextShell}>
+            <div
+              className={[
+                styles.contextShell,
+                artifactPanelFullscreen ? styles.shellHidden : undefined,
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              aria-hidden={artifactPanelFullscreen || undefined}
+            >
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&
@@ -9805,19 +9849,26 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
-                  activePanel || mainView !== 'chat'
+                  activePanel ||
+                  mainView !== 'chat' ||
+                  artifactPanelFullscreen
                     ? styles.chatViewHidden
                     : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
-                // Hide the outer chat whenever a panel or a full-page view (split
-                // / scheduled tasks) is up. `display:none` drops the subtree from
-                // layout and the tab order, and aria-hidden keeps AT out — so no
-                // keyboard/AT can reach the outer composer/toolbar behind the
-                // split. State is preserved (the node stays mounted).
+                // Hide the outer chat whenever a panel, a full-page view (split
+                // / scheduled tasks), or the fullscreen artifact panel covers
+                // it. `display:none` drops the subtree from layout and the tab
+                // order, and aria-hidden keeps AT out — so no keyboard/AT can
+                // reach the outer composer/toolbar behind the covering surface.
+                // State is preserved (the node stays mounted).
                 aria-hidden={
-                  activePanel || mainView !== 'chat' ? true : undefined
+                  activePanel ||
+                  mainView !== 'chat' ||
+                  artifactPanelFullscreen
+                    ? true
+                    : undefined
                 }
               >
                 {showMissingSessionState && (
@@ -10426,41 +10477,7 @@ export function App({
                 onDismiss={dismissEnvironmentPanel}
               />
             )}
-            {artifactPanelOpen && artifactPanelFullscreen ? (
-              <div className={styles.artifactPanelFullscreen}>
-                <ArtifactPanel
-                  artifacts={artifactPanelArtifacts}
-                  tabs={artifactPanelTabs}
-                  activeTabId={activeArtifactPanelTabId}
-                  reviewChanges={reviewChanges}
-                  selectedReviewPath={selectedReviewPath}
-                  workspaceCwd={connection.workspaceCwd || ''}
-                  loading={artifactsLoading}
-                  error={artifactsError}
-                  onSelectTab={setActiveArtifactPanelTabId}
-                  onCloseTab={closeArtifactPanelTab}
-                  onOpenFilePreview={openFilePreview}
-                  latestReviewAvailable={latestReviewChanges.length > 0}
-                  onOpenLatestReview={openLatestReviewPanel}
-                  items={rightPanelItems}
-                  sideTaskAvailable={sideTasksAvailable}
-                  sideTasks={visibleSideTasks}
-                  sideTasksLoading={sideTasksLoading}
-                  onCreateSideTask={createEmptySideTask}
-                  onOpenSideTask={openSideTask}
-                  onCreateSideTaskSession={createSideTaskSession}
-                  onSideTaskCreated={handleSideTaskCreated}
-                  onSideTaskTitleChange={handleSideTaskTitleChange}
-                  onNestedRightPanelOpen={handleTurnOutputOpen}
-                  onNestedArtifactsChange={handlePaneArtifactsChange}
-                  onError={reportError}
-                  sessionWorkflowEnabled={sessionWorkflowEnabled}
-                  onClose={closeArtifactPanel}
-                  fullscreen
-                  onToggleFullscreen={toggleArtifactPanelFullscreen}
-                />
-              </div>
-            ) : artifactPanelOpen && useFloatingArtifactPanel ? (
+            {artifactPanelOpen && useFloatingArtifactPanel && (
               <Drawer
                 open
                 direction="right"
@@ -10469,95 +10486,59 @@ export function App({
                   if (!open) closeArtifactPanel();
                 }}
               >
-                <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]">
+                <DrawerContent
+                  className={
+                    artifactPanelFullscreen
+                      ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0'
+                      : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
+                  }
+                  onEscapeKeyDown={(event) => {
+                    // Fullscreen is the topmost surface: Escape shrinks the
+                    // panel back to its drawer width. Without this the
+                    // drawer's dismiss layer would close the panel instead.
+                    if (!artifactPanelFullscreen) return;
+                    event.preventDefault();
+                    setArtifactPanelFullscreen(false);
+                  }}
+                >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <ArtifactPanel
-                    artifacts={artifactPanelArtifacts}
-                    tabs={artifactPanelTabs}
-                    activeTabId={activeArtifactPanelTabId}
-                    reviewChanges={reviewChanges}
-                    selectedReviewPath={selectedReviewPath}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    loading={artifactsLoading}
-                    error={artifactsError}
-                    onSelectTab={setActiveArtifactPanelTabId}
-                    onCloseTab={closeArtifactPanelTab}
-                    onOpenFilePreview={openFilePreview}
-                    latestReviewAvailable={latestReviewChanges.length > 0}
-                    onOpenLatestReview={openLatestReviewPanel}
-                    items={rightPanelItems}
-                    sideTaskAvailable={sideTasksAvailable}
-                    sideTasks={visibleSideTasks}
-                    sideTasksLoading={sideTasksLoading}
-                    onCreateSideTask={createEmptySideTask}
-                    onOpenSideTask={openSideTask}
-                    onCreateSideTaskSession={createSideTaskSession}
-                    onSideTaskCreated={handleSideTaskCreated}
-                    onSideTaskTitleChange={handleSideTaskTitleChange}
-                    onNestedRightPanelOpen={handleTurnOutputOpen}
-                    onNestedArtifactsChange={handlePaneArtifactsChange}
-                    onError={reportError}
-                    sessionWorkflowEnabled={sessionWorkflowEnabled}
-                    onClose={closeArtifactPanel}
-                    onToggleFullscreen={toggleArtifactPanelFullscreen}
+                    {...artifactPanelSharedProps}
                     variant="drawer"
                   />
                 </DrawerContent>
               </Drawer>
-            ) : null}
+            )}
               </div>
             </div>
-            {artifactPanelOpen &&
-              !useFloatingArtifactPanel &&
-              !artifactPanelFullscreen && (
+            {artifactPanelOpen && !useFloatingArtifactPanel && (
               <div
-                className={styles.artifactPanelDock}
+                className={
+                  artifactPanelFullscreen
+                    ? styles.artifactPanelFullscreen
+                    : styles.artifactPanelDock
+                }
                 style={
                   {
                     '--artifact-panel-dock-width': `${artifactPanelWidth + 4}px`,
                   } as CSSProperties
                 }
               >
-                <div
-                  className={styles.artifactResizeHandle}
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
-                  aria-valuemax={getMaxArtifactPanelWidth()}
-                  aria-valuenow={artifactPanelWidth}
-                  onPointerDown={handleArtifactPanelResizeStart}
-                />
+                {!artifactPanelFullscreen && (
+                  <div
+                    className={styles.artifactResizeHandle}
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
+                    aria-valuemax={getMaxArtifactPanelWidth()}
+                    aria-valuenow={artifactPanelWidth}
+                    onPointerDown={handleArtifactPanelResizeStart}
+                  />
+                )}
                 <div className={styles.artifactPanelClip}>
                   <ArtifactPanel
-                    artifacts={artifactPanelArtifacts}
-                    tabs={artifactPanelTabs}
-                    activeTabId={activeArtifactPanelTabId}
-                    reviewChanges={reviewChanges}
-                    selectedReviewPath={selectedReviewPath}
+                    {...artifactPanelSharedProps}
                     panelWidth={artifactPanelWidth}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    loading={artifactsLoading}
-                    error={artifactsError}
-                    onSelectTab={setActiveArtifactPanelTabId}
-                    onCloseTab={closeArtifactPanelTab}
-                    onOpenFilePreview={openFilePreview}
-                    latestReviewAvailable={latestReviewChanges.length > 0}
-                    onOpenLatestReview={openLatestReviewPanel}
-                    items={rightPanelItems}
-                    sideTaskAvailable={sideTasksAvailable}
-                    sideTasks={visibleSideTasks}
-                    sideTasksLoading={sideTasksLoading}
-                    onCreateSideTask={createEmptySideTask}
-                    onOpenSideTask={openSideTask}
-                    onCreateSideTaskSession={createSideTaskSession}
-                    onSideTaskCreated={handleSideTaskCreated}
-                    onSideTaskTitleChange={handleSideTaskTitleChange}
-                    onNestedRightPanelOpen={handleTurnOutputOpen}
-                    onNestedArtifactsChange={handlePaneArtifactsChange}
-                    onError={reportError}
-                    sessionWorkflowEnabled={sessionWorkflowEnabled}
-                    onClose={closeArtifactPanel}
-                    onToggleFullscreen={toggleArtifactPanelFullscreen}
                   />
                 </div>
               </div>
