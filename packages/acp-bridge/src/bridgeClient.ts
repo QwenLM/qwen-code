@@ -26,10 +26,70 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  type ActiveWorkHoldV1,
+  type ActiveWorkSnapshotV1,
 } from './bridgeTypes.js';
+
+/**
+ * Validate a channel-wide active-work snapshot off the wire.
+ *
+ * Returns `undefined` for anything malformed so a bad report is ignored
+ * outright: the daemon's cached copy then simply ages, which its freshness
+ * grading already treats as untrustworthy. Partially applying a half-parsed
+ * snapshot would be worse than applying none, because full-snapshot semantics
+ * are what let a Session's absence mean "released".
+ */
+function parseActiveWorkSnapshot(
+  params: Record<string, unknown>,
+): ActiveWorkSnapshotV1 | undefined {
+  const seq = params['seq'];
+  const sessions = params['sessions'];
+  if (
+    params['v'] !== ACTIVE_WORK_HEARTBEAT_VERSION ||
+    typeof seq !== 'number' ||
+    !Number.isSafeInteger(seq) ||
+    seq <= 0 ||
+    !Array.isArray(sessions)
+  ) {
+    return undefined;
+  }
+  const parsed: ActiveWorkSnapshotV1['sessions'] = [];
+  for (const raw of sessions) {
+    if (typeof raw !== 'object' || raw === null) return undefined;
+    const entry = raw as Record<string, unknown>;
+    const sessionId = entry['sessionId'];
+    const holds = entry['holds'];
+    if (typeof sessionId !== 'string' || !Array.isArray(holds)) {
+      return undefined;
+    }
+    const parsedHolds: ActiveWorkHoldV1[] = [];
+    for (const rawHold of holds) {
+      if (typeof rawHold !== 'object' || rawHold === null) return undefined;
+      const hold = rawHold as Record<string, unknown>;
+      const category = hold['category'];
+      const id = hold['id'];
+      if (
+        typeof id !== 'string' ||
+        typeof category !== 'string' ||
+        !ACTIVE_WORK_HOLD_CATEGORIES.includes(
+          category as ActiveWorkHoldV1['category'],
+        )
+      ) {
+        return undefined;
+      }
+      parsedHolds.push({
+        category: category as ActiveWorkHoldV1['category'],
+        id,
+      });
+    }
+    parsed.push({ sessionId, holds: parsedHolds });
+  }
+  return { v: ACTIVE_WORK_HEARTBEAT_VERSION, seq, sessions: parsed };
+}
 import type {
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
@@ -735,11 +795,7 @@ export class BridgeClient implements Client {
      * existing direct BridgeClient constructors remain source-compatible.
      */
     private readonly externalToolGuard?: ExternalToolGuardHandler,
-    private readonly onActiveWork?: (
-      sessionId: string,
-      active: boolean,
-      seq: number,
-    ) => void,
+    private readonly onActiveWork?: (snapshot: ActiveWorkSnapshotV1) => void,
   ) {}
 
   async requestPermission(
@@ -1734,19 +1790,18 @@ export class BridgeClient implements Client {
     params: Record<string, unknown>,
   ): Promise<void> {
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
-      const sessionId = params['sessionId'];
-      const active = params['active'];
-      const seq = params['seq'];
-      if (
-        params['v'] === ACTIVE_WORK_HEARTBEAT_VERSION &&
-        typeof sessionId === 'string' &&
-        typeof active === 'boolean' &&
-        typeof seq === 'number' &&
-        Number.isSafeInteger(seq) &&
-        seq > 0 &&
-        this.ownsSession(sessionId)
-      ) {
-        this.onActiveWork?.(sessionId, active, seq);
+      const snapshot = parseActiveWorkSnapshot(params);
+      if (snapshot) {
+        // Sessions the child claims but this channel does not own are dropped
+        // rather than rejecting the whole snapshot: the rest of it is still
+        // usable, and a channel must never influence another channel's state.
+        this.onActiveWork?.({
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          seq: snapshot.seq,
+          sessions: snapshot.sessions.filter((session) =>
+            this.ownsSession(session.sessionId),
+          ),
+        });
       }
       return;
     }

@@ -105,8 +105,11 @@ import {
 import {
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
-  ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS,
   ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  clampActiveWorkIntervalMs,
+  type ActiveWorkHoldCategory,
+  type ActiveWorkSnapshotV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
@@ -480,7 +483,20 @@ interface ChannelInfo {
    * two-bit (alive, dying) state.
    */
   isDying: boolean;
-  activeWorkHeartbeat: boolean;
+  /**
+   * Negotiated active-work reporting for this channel, or `undefined` when the
+   * child never acknowledged the capability. `undefined` is *not* "idle": it
+   * means this channel contributes no active-work facts at all, so the
+   * daemon's reporting grade degrades and pre-existing cleanup behavior
+   * applies unchanged. Conflating the two would let an older child either
+   * pin every Session forever or look permanently idle.
+   */
+  activeWork?: {
+    intervalMs: number;
+    categories: readonly ActiveWorkHoldCategory[];
+    /** Highest snapshot sequence applied; guards against reordering only. */
+    seq: number;
+  };
   handshakeComplete: boolean;
 }
 
@@ -524,10 +540,25 @@ interface SessionEntry {
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
   pendingAgentNotificationCount: number;
-  childActiveWork: boolean;
-  childActiveWorkSeq: number;
-  childActiveWorkAt: number | null;
-  activeWorkDeadline?: ReturnType<typeof setTimeout>;
+  /**
+   * Last hold set the owning child reported for this Session, or `null` while
+   * the channel has negotiated reporting but has not yet been heard from.
+   *
+   * `null` (unknown) reads as *retained*, never as idle — but it is also the
+   * state that makes the daemon go ask, rather than a state it sits in
+   * forever. A channel that never negotiated leaves this `null` too; the
+   * `ChannelInfo.activeWork` presence check is what separates the two.
+   */
+  childHolds: Map<string, ActiveWorkHoldCategory> | null;
+  /** `Date.now()` of the snapshot behind `childHolds`; null while unknown. */
+  childHoldsAt: number | null;
+  /**
+   * A close-if-unheld request is on the wire. Only one may be outstanding: on
+   * timeout the daemon cannot tell whether the child already closed, so it
+   * neither retries nor assumes — it clears this flag and lets the next
+   * snapshot settle the question.
+   */
+  activeWorkCloseInFlight: boolean;
   /**
    * Detailed list of prompts accepted into the FIFO queue. Each entry
    * carries its `promptId`, summary, and an `abortController` so the
@@ -1621,51 +1652,120 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     lastActivityTimestamp = Date.now();
   }
 
-  function entryHasActiveWork(entry: SessionEntry): boolean {
+  /**
+   * Daemon-owned facts only: prompts this daemon accepted (queued *or*
+   * dispatched) and notifications it is currently pushing into the child.
+   * These never depend on the child reporting anything, which is why they
+   * stay authoritative for a channel that never negotiated.
+   */
+  function entryHasLocalWork(entry: SessionEntry): boolean {
     return (
-      entry.pendingPromptCount > 0 ||
-      entry.pendingAgentNotificationCount > 0 ||
-      entry.childActiveWork
+      entry.pendingPromptCount > 0 || entry.pendingAgentNotificationCount > 0
     );
   }
 
-  function clearActiveWorkDeadline(entry: SessionEntry): void {
-    if (entry.activeWorkDeadline) {
-      clearTimeout(entry.activeWorkDeadline);
-      entry.activeWorkDeadline = undefined;
-    }
+  /**
+   * Whether this Session must be preserved from automatic cleanup.
+   *
+   * Fails closed on ignorance: a channel that negotiated reporting but has not
+   * yet been heard from holds the Session. That is deliberately not a terminal
+   * state — `maybeCloseIdleSession` asks the child directly rather than
+   * waiting for a report that may never come.
+   */
+  function entryHasActiveWork(entry: SessionEntry): boolean {
+    if (entryHasLocalWork(entry)) return true;
+    const owner = channelInfoForEntry(entry);
+    if (!owner?.activeWork) return false;
+    if (entry.childHolds === null) return true;
+    return entry.childHolds.size > 0;
   }
 
-  function syncActiveWorkDeadline(entry: SessionEntry): void {
-    clearActiveWorkDeadline(entry);
-    const owner = channelInfoForEntry(entry);
-    if (
-      !owner?.activeWorkHeartbeat ||
-      owner.isDying ||
-      (!entry.promptActive && !entry.childActiveWork)
-    ) {
+  /**
+   * Single decision point for "this Session is detached and has nothing left
+   * to do — let it go".
+   *
+   * Every automatic cleanup path funnels through here (last-client detach,
+   * prompt settle, notification settle, a child reporting itself idle) so the
+   * preservation rule lives in exactly one place. Explicit close, kill, and
+   * shutdown deliberately do NOT come through here: they keep their force
+   * semantics.
+   */
+  async function maybeCloseIdleSession(
+    entry: SessionEntry,
+    reason: string,
+  ): Promise<void> {
+    if (byId.get(entry.sessionId) !== entry) return;
+    if (entry.events.subscriberCount > 0) return;
+    if (entryHasActiveWork(entry)) return;
+    // Note the asymmetry, preserved from the call sites this replaces: the
+    // kill path keys off `attachCount`, the close path off `clientIds`. A
+    // spawn owner that asked for a kill gets one once nothing is attached,
+    // even if some client id is still registered.
+    if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+      await bridgeApi.killSession(entry.sessionId).catch(() => {
+        /* best-effort; channel.exited will eventually reap anyway */
+      });
       return;
     }
-    entry.activeWorkDeadline = setTimeout(() => {
-      entry.activeWorkDeadline = undefined;
-      const currentOwner = channelInfoForEntry(entry);
-      if (
-        !currentOwner?.activeWorkHeartbeat ||
-        currentOwner.isDying ||
-        (!entry.promptActive && !entry.childActiveWork)
-      ) {
-        return;
-      }
-      const childSilence =
-        entry.childActiveWorkAt === null
-          ? 'no child report received'
-          : `${Date.now() - entry.childActiveWorkAt}ms since last child report`;
+    if (entry.clientIds.size > 0) return;
+    await closeSessionImpl(entry.sessionId, undefined, {
+      reason: 'last_client_detached',
+    }).catch((err) => {
       writeStderrLine(
-        `qwen serve: active-work heartbeat timed out for session ${entry.sessionId} (${childSilence}); recycling channel`,
+        `qwen serve: deferred close (${reason}) failed for ` +
+          `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
-      void killChannelWithLog(currentOwner, 'active-work heartbeat timeout');
-    }, ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS);
-    entry.activeWorkDeadline.unref?.();
+    });
+  }
+
+  /** Applies a validated channel-wide snapshot to every Session it names. */
+  function applyActiveWorkSnapshot(
+    info: ChannelInfo,
+    snapshot: ActiveWorkSnapshotV1,
+  ): void {
+    if (!info.activeWork || info.isDying) return;
+    // Reordering guard only. A gap is not an error: each snapshot is complete,
+    // so the newest one that arrives is the whole truth regardless of what was
+    // lost before it.
+    if (snapshot.seq <= info.activeWork.seq) return;
+    info.activeWork.seq = snapshot.seq;
+    const now = Date.now();
+    const reported = new Set<string>();
+    for (const session of snapshot.sessions) {
+      const entry = byId.get(session.sessionId);
+      if (!entry || entry.channel !== info.channel) continue;
+      reported.add(session.sessionId);
+      const previouslyHeld = entry.childHolds
+        ? entry.childHolds.size > 0
+        : undefined;
+      const holds = new Map<string, ActiveWorkHoldCategory>();
+      for (const hold of session.holds) holds.set(hold.id, hold.category);
+      entry.childHolds = holds;
+      entry.childHoldsAt = now;
+      // Only a change in whether the Session holds anything counts as
+      // activity. Cadence reports must not keep `lastActivityAt` warm, or a
+      // long-running agent would defeat every idle-based reclaim downstream.
+      if (previouslyHeld !== undefined && previouslyHeld !== holds.size > 0) {
+        touchActivity();
+      }
+      if (holds.size === 0) void maybeCloseIdleSession(entry, 'child_idle');
+    }
+    // A Session this channel owns that the child did not mention is gone on
+    // the child side — including when our close request landed but its
+    // response never made it back.
+    for (const sessionId of Array.from(info.sessionIds)) {
+      if (reported.has(sessionId)) continue;
+      const entry = byId.get(sessionId);
+      if (!entry || entry.channel !== info.channel) continue;
+      if (entry.activeWorkCloseInFlight) continue;
+      if (entryHasLocalWork(entry)) continue;
+      writeStderrLine(
+        `qwen serve: session ${JSON.stringify(sessionId)} absent from child active-work snapshot; tearing down`,
+      );
+      void closeSessionImpl(sessionId, undefined, {
+        reason: 'last_client_detached',
+      }).catch(() => undefined);
+    }
   }
 
   /**
@@ -1689,7 +1789,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       entry.sessionLastSeenAt = Date.now();
       touchActivity();
     }
-    syncActiveWorkDeadline(entry);
   }
 
   function resolvePositiveFiniteMs(
@@ -2396,45 +2495,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () => liveTaskToolRequestHandler,
           () => liveSpeakToUserHandler,
           opts.externalToolGuard,
-          (sessionId, active, seq) => {
+          (snapshot) => {
             const currentInfo = infoRef.current;
-            const entry = byId.get(sessionId);
-            if (
-              !currentInfo?.activeWorkHeartbeat ||
-              currentInfo.isDying ||
-              !currentInfo.sessionIds.has(sessionId) ||
-              !entry ||
-              entry.channel !== currentInfo.channel ||
-              seq <= entry.childActiveWorkSeq
-            ) {
-              return;
-            }
-            entry.childActiveWorkSeq = seq;
-            entry.childActiveWorkAt = Date.now();
-            if (entry.childActiveWork !== active) {
-              entry.childActiveWork = active;
-              touchActivity();
-            }
-            syncActiveWorkDeadline(entry);
-            if (
-              !active &&
-              entry.clientIds.size === 0 &&
-              entry.events.subscriberCount === 0 &&
-              !entryHasActiveWork(entry)
-            ) {
-              if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
-                void bridgeApi.killSession(sessionId).catch(() => undefined);
-              } else {
-                void closeSessionImpl(sessionId, undefined, {
-                  reason: 'last_client_detached',
-                }).catch((err) => {
-                  writeStderrLine(
-                    `qwen serve: deferred close-on-active-work-complete failed for ` +
-                      `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-                  );
-                });
-              }
-            }
+            if (!currentInfo) return;
+            applyActiveWorkSnapshot(currentInfo, snapshot);
           },
         );
         connection = new ClientSideConnection(() => client, channel.stream);
@@ -2485,7 +2549,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceMcpAuthenticationTimers: new Map(),
         emptyReapPending: false,
         isDying: false,
-        activeWorkHeartbeat: false,
         handshakeComplete: false,
       };
       infoRef.current = info;
@@ -2577,7 +2640,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         for (const sid of sessions) {
           const sessEntry = byId.get(sid);
           if (!sessEntry) continue;
-          clearActiveWorkDeadline(sessEntry);
           cancelPendingForSession(sid);
           // DAEMON-002/005: every still-pending prompt owes its formal
           // terminal before the bus closes below.
@@ -2668,11 +2730,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const activeWorkCapability = isRecord(response._meta)
               ? response._meta[ACTIVE_WORK_HEARTBEAT_META_KEY]
               : undefined;
-            info.activeWorkHeartbeat =
+            if (
               isRecord(activeWorkCapability) &&
-              activeWorkCapability['v'] === ACTIVE_WORK_HEARTBEAT_VERSION &&
-              activeWorkCapability['intervalMs'] ===
-                ACTIVE_WORK_HEARTBEAT_INTERVAL_MS;
+              activeWorkCapability['v'] === ACTIVE_WORK_HEARTBEAT_VERSION
+            ) {
+              const advertised = activeWorkCapability['categories'];
+              // Take the child's cadence rather than demanding it match ours,
+              // but clamp it: an out-of-range value would either flood the
+              // transport or make the freshness grade meaningless.
+              info.activeWork = {
+                intervalMs: clampActiveWorkIntervalMs(
+                  activeWorkCapability['intervalMs'],
+                ),
+                categories: Array.isArray(advertised)
+                  ? ACTIVE_WORK_HOLD_CATEGORIES.filter((category) =>
+                      advertised.includes(category),
+                    )
+                  : [],
+                seq: 0,
+              };
+            }
             try {
               const attributes = getChannelStartupProfileAttributes(
                 response,
@@ -4086,9 +4163,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachRefs: new Map(),
       spawnOwnerWantedKill: false,
       promptActive: false,
-      childActiveWork: false,
-      childActiveWorkSeq: 0,
-      childActiveWorkAt: null,
+      childHolds: null,
+      childHoldsAt: null,
+      activeWorkCloseInFlight: false,
       retryAllowed: false,
     };
     ci.sessionIds.add(entry.sessionId);
@@ -5021,7 +5098,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         let removedRestoreEntry = false;
         const restoreEntry = byId.get(req.sessionId);
         if (restoreEntry?.events === restoreEvents) {
-          clearActiveWorkDeadline(restoreEntry);
           byId.delete(req.sessionId);
           ci?.sessionIds.delete(req.sessionId);
           emitSessionLifecycle({
@@ -5151,7 +5227,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       activePromptCounter--;
       touchActivity();
     }
-    clearActiveWorkDeadline(entry);
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     emitSessionLifecycle({
@@ -5895,7 +5970,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
                 touchActivity();
-                syncActiveWorkDeadline(entry);
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -6163,21 +6237,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // exact entry is still registered — after killSession's eager
           // delete the same persisted id can be re-registered as a NEW
           // entry by `session/load`, which a late settle must not close.
-          if (
-            entry.clientIds.size === 0 &&
-            entry.events.subscriberCount === 0 &&
-            !entryHasActiveWork(entry) &&
-            byId.get(sessionId) === entry
-          ) {
-            void closeSessionImpl(sessionId, undefined, {
-              reason: 'last_client_detached',
-            }).catch((err) => {
-              writeStderrLine(
-                `qwen serve: deferred close-on-prompt-complete failed for ` +
-                  `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-              );
-            });
-          }
+          void maybeCloseIdleSession(entry, 'prompt_settled');
         })
         .catch(() => {});
       return result;
@@ -8075,25 +8135,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           0,
           entry.pendingAgentNotificationCount - 1,
         );
-        if (
-          entry.clientIds.size === 0 &&
-          entry.events.subscriberCount === 0 &&
-          !entryHasActiveWork(entry) &&
-          byId.get(sessionId) === entry
-        ) {
-          if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
-            void bridgeApi.killSession(sessionId).catch(() => undefined);
-          } else {
-            void closeSessionImpl(sessionId, undefined, {
-              reason: 'last_client_detached',
-            }).catch((err) => {
-              writeStderrLine(
-                `qwen serve: deferred close-on-Agent-notification-complete failed for ` +
-                  `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-              );
-            });
-          }
-        }
+        void maybeCloseIdleSession(entry, 'agent_notification_settled');
       }
     },
 
@@ -8950,7 +8992,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
-      clearActiveWorkDeadline(entry);
       byId.delete(sessionId);
       telemetry.metrics?.sessionLifecycle('die');
       emitSessionLifecycle({
@@ -9098,7 +9139,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const channels = Array.from(aliveChannels);
       const entries = Array.from(byId.values());
       defaultEntry = undefined;
-      for (const entry of entries) clearActiveWorkDeadline(entry);
       byId.clear();
       for (const entry of entries) {
         emitSessionLifecycle({
@@ -9159,7 +9199,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           e.pendingInteractions.clear();
         }
         defaultEntry = undefined;
-        for (const entry of entries) clearActiveWorkDeadline(entry);
         byId.clear();
         // Publish a terminal `session_died` BEFORE closing each bus so SSE
         // subscribers can distinguish "daemon shut down" from a transient

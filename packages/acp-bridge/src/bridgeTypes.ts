@@ -193,22 +193,79 @@ export const CHANNEL_STARTUP_PROFILE_META_KEY =
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
 export const ACTIVE_WORK_HEARTBEAT_META_KEY = 'qwen.daemon.activeWorkHeartbeat';
 export const ACTIVE_WORK_HEARTBEAT_VERSION = 1 as const;
+/** Reporting cadence the daemon asks for; the child may choose another value
+ *  inside [MIN, MAX] and the daemon clamps whatever comes back. */
 export const ACTIVE_WORK_HEARTBEAT_INTERVAL_MS = 15_000;
-export const ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS = 45_000;
+export const ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS = 5_000;
+export const ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS = 60_000;
+/** A channel's cached snapshot goes stale after this many report intervals. */
+export const ACTIVE_WORK_STALE_INTERVALS = 3;
 export const ACTIVE_WORK_NOTIFICATION_METHOD =
-  'qwen/notify/session/active-work';
+  'qwen/notify/channel/active-work';
+export const ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM = 'onlyIfUnheld';
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
+
+/**
+ * Work categories a child reports holds for. Deliberately excludes background
+ * shells, Monitors, workflows, and cron: those are out of `activeWork`'s
+ * declared scope. The category travels on every hold so widening the scope
+ * later adds data rather than changing what the `activeWork` boolean means.
+ */
+export type ActiveWorkHoldCategory = 'agent' | 'notification';
+
+export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
+  'agent',
+  'notification',
+];
 
 export interface ActiveWorkHeartbeatCapabilityV1 {
   v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
   intervalMs: number;
+  /** Which categories this child actually reports. A daemon that cares about
+   *  a category the child omits degrades its reporting grade rather than
+   *  silently treating the gap as "no work". */
+  categories: ActiveWorkHoldCategory[];
 }
 
-export interface ActiveWorkNotificationV1 {
-  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
+/**
+ * Coerce a peer-supplied reporting cadence into the agreed range.
+ *
+ * Both sides call this on whatever the other side sent. Neither is treated as
+ * hostile, but a version-skewed or buggy peer proposing 1ms would flood the
+ * transport and one proposing hours would make the daemon's freshness grade
+ * meaningless, so the value is never used raw. Anything unusable falls back to
+ * the default cadence rather than disabling reporting.
+ */
+export function clampActiveWorkIntervalMs(raw: unknown): number {
+  const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : NaN;
+  if (Number.isNaN(value)) return ACTIVE_WORK_HEARTBEAT_INTERVAL_MS;
+  return Math.min(
+    ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS,
+    Math.max(ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS, Math.round(value)),
+  );
+}
+
+export interface ActiveWorkHoldV1 {
+  category: ActiveWorkHoldCategory;
+  id: string;
+}
+
+export interface ActiveWorkSessionSnapshotV1 {
   sessionId: string;
-  active: boolean;
+  holds: ActiveWorkHoldV1[];
+}
+
+/**
+ * A full, channel-wide snapshot: every Session the child currently owns, with
+ * every hold it currently holds. Full-snapshot (rather than incremental
+ * transition) semantics are what make a dropped report self-correcting in
+ * both directions, and a Session's *absence* from a fresh snapshot is
+ * positive evidence the child no longer owns it.
+ */
+export interface ActiveWorkSnapshotV1 {
+  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
   seq: number;
+  sessions: ActiveWorkSessionSnapshotV1[];
 }
 
 export interface ChannelStartupProfileV1 {

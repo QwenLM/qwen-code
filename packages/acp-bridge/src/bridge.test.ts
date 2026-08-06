@@ -66,7 +66,6 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
-  ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   CHANNEL_STARTUP_PROFILE_META_KEY,
@@ -255,103 +254,6 @@ describe('createAcpSessionBridge', () => {
       await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
 
       await bridge.shutdown();
-    });
-
-    it('expires each Session independently when child heartbeats stop', async () => {
-      vi.useFakeTimers();
-      try {
-        const handle = makeChannel({
-          initializeImpl: () => activeWorkInitializeResponse(),
-          promptImpl: () => new Promise<never>(() => {}),
-        });
-        const bridge = makeBridge({
-          channelFactory: async () => handle.channel,
-          sessionReapIntervalMs: 0,
-        });
-        const first = await bridge.spawnOrAttach({
-          workspaceCwd: WS_A,
-          sessionScope: 'thread',
-        });
-        const second = await bridge.spawnOrAttach({
-          workspaceCwd: WS_A,
-          sessionScope: 'thread',
-        });
-        const firstPrompt = bridge
-          .sendPrompt(first.sessionId, {
-            sessionId: first.sessionId,
-            prompt: [{ type: 'text', text: 'first' }],
-          })
-          .catch(() => undefined);
-        const secondPrompt = bridge
-          .sendPrompt(second.sessionId, {
-            sessionId: second.sessionId,
-            prompt: [{ type: 'text', text: 'second' }],
-          })
-          .catch(() => undefined);
-        await vi.waitFor(() => {
-          expect(handle.agent.promptCalls).toHaveLength(2);
-        });
-
-        for (const [elapsed, seq] of [
-          [15_000, 1],
-          [30_000, 2],
-          [44_000, 3],
-        ] as const) {
-          await vi.advanceTimersByTimeAsync(
-            elapsed - (seq === 1 ? 0 : seq === 2 ? 15_000 : 30_000),
-          );
-          await handle.agentConnection.extNotification(
-            ACTIVE_WORK_NOTIFICATION_METHOD,
-            {
-              v: ACTIVE_WORK_HEARTBEAT_VERSION,
-              sessionId: first.sessionId,
-              active: true,
-              seq,
-            },
-          );
-          expect(handle.killed).toBe(false);
-        }
-
-        await vi.advanceTimersByTimeAsync(
-          ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS - 44_000,
-        );
-        expect(handle.killed).toBe(true);
-        await Promise.all([firstPrompt, secondPrompt]);
-        await bridge.shutdown();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('does not enforce heartbeat expiry without negotiation', async () => {
-      vi.useFakeTimers();
-      try {
-        const handle = makeChannel({
-          promptImpl: () => new Promise<never>(() => {}),
-        });
-        const bridge = makeBridge({
-          channelFactory: async () => handle.channel,
-          sessionReapIntervalMs: 0,
-        });
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        const prompt = bridge
-          .sendPrompt(session.sessionId, {
-            sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'legacy child' }],
-          })
-          .catch(() => undefined);
-        await vi.waitFor(() => {
-          expect(handle.agent.promptCalls).toHaveLength(1);
-        });
-
-        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS * 2);
-        expect(handle.killed).toBe(false);
-
-        await bridge.shutdown();
-        await prompt;
-      } finally {
-        vi.useRealTimers();
-      }
     });
   });
 

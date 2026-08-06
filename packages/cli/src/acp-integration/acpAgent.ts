@@ -219,6 +219,7 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { ActiveWorkReporter } from './activeWorkReporter.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
@@ -308,9 +309,10 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
-  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  clampActiveWorkIntervalMs,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
@@ -3536,7 +3538,8 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
-  private activeWorkHeartbeatIntervalMs: number | undefined;
+  /** Set once the daemon negotiates active-work reporting; one per channel. */
+  private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
     | 'uninitialized'
     | 'trusted'
@@ -4093,6 +4096,9 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // A Session missing from the next snapshot is how the daemon learns the
+    // child released it — including when it never saw our close response.
+    this.activeWorkReporter?.notifyChanged();
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -4304,6 +4310,8 @@ class QwenAgent implements Agent {
   }
 
   async disposeSessions(): Promise<void> {
+    this.activeWorkReporter?.dispose();
+    this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -4530,9 +4538,23 @@ class QwenAgent implements Agent {
       !Array.isArray(requestedActiveWork) &&
       (requestedActiveWork as Record<string, unknown>)['v'] ===
         ACTIVE_WORK_HEARTBEAT_VERSION;
-    this.activeWorkHeartbeatIntervalMs = activeWorkRequested
-      ? ACTIVE_WORK_HEARTBEAT_INTERVAL_MS
+    // The daemon proposes a cadence; we answer with the one we will actually
+    // use, clamped into the range both sides agree on. The daemon clamps the
+    // echo again — neither side trusts the other to pick a sane number, and a
+    // flood or a multi-hour interval would each break freshness in its own way.
+    const activeWorkIntervalMs = activeWorkRequested
+      ? clampActiveWorkIntervalMs(
+          (requestedActiveWork as Record<string, unknown>)['intervalMs'],
+        )
       : undefined;
+    if (activeWorkIntervalMs !== undefined) {
+      this.activeWorkReporter?.dispose();
+      this.activeWorkReporter = new ActiveWorkReporter(
+        (method, params) => this.connection.extNotification(method, params),
+        () => this.sessions.values(),
+        activeWorkIntervalMs,
+      );
+    }
 
     const responseMeta: Record<string, unknown> = {
       ...(this.managedToolInvocationGuard
@@ -4544,11 +4566,12 @@ class QwenAgent implements Agent {
       ...(profileRequested && startupProfile
         ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
         : {}),
-      ...(activeWorkRequested
+      ...(activeWorkIntervalMs !== undefined
         ? {
             [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
               v: ACTIVE_WORK_HEARTBEAT_VERSION,
-              intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+              intervalMs: activeWorkIntervalMs,
+              categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
             },
           }
         : {}),
@@ -5221,6 +5244,12 @@ class QwenAgent implements Agent {
         this.activePromptCalls.delete(params.sessionId);
       }
       settleCall();
+      // Order a fresh snapshot ahead of this response on the same stream. The
+      // daemon drops its own pending-prompt count the instant the response
+      // lands, so any hold this prompt left behind — a background agent it
+      // started, its terminal notification — has to already be on the wire or
+      // the daemon sees an idle Session for as long as the next report takes.
+      await this.activeWorkReporter?.flush();
     }
   }
 
@@ -11780,9 +11809,12 @@ class QwenAgent implements Agent {
       config,
       this.connection,
       settings,
-      this.activeWorkHeartbeatIntervalMs,
+      () => this.activeWorkReporter?.notifyChanged(),
     );
     this.sessions.set(sessionId, session);
+    // The Session set itself is part of the snapshot: publish so the daemon
+    // learns about this Session from a report rather than inferring it.
+    this.activeWorkReporter?.notifyChanged();
     this.initializingConfigs.delete(config);
     try {
       if (options.enableLiveScreenContext) {
