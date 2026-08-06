@@ -5541,8 +5541,10 @@ describe('qwen-autofix workflow', () => {
     for (const step of resetAutofixWorkspaceSteps) {
       expect(step).toContain('rm -rf "${WORKDIR}"');
       expect(step).toContain('mkdir -p "${WORKDIR}"');
-      // 0700: the dirs hold agent transcripts and decision files.
-      expect(step).toContain('chmod 700 "${WORKDIR}"');
+      // 0700 at creation via umask — mkdir-then-chmod leaves a
+      // world-readable window on the shared /tmp.
+      expect(step).toContain('(umask 077; mkdir -p "${WORKDIR}")');
+      expect(step).not.toContain('chmod 700');
     }
     // Per-run/per-target teardown after the artifact upload: nothing else
     // removes these dirs on the persistent pool (PR numbers only increase).

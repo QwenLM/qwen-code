@@ -779,11 +779,11 @@ jobs:
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
-          mkdir -p "${WORKDIR}"
           # 0700: the dir holds agent transcripts and decision files; the
           # sandbox container runs as this same user, so the tighter mode
-          # costs the job nothing.
-          chmod 700 "${WORKDIR}"
+          # costs the job nothing. umask at creation, not mkdir-then-chmod —
+          # the chmod form leaves a world-readable window on this shared /tmp.
+          (umask 077; mkdir -p "${WORKDIR}")
           # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
           # runner kill skips the always() teardown and run_id never repeats,
           # so nothing else ever reclaims them.
@@ -1532,7 +1532,9 @@ jobs:
       # Nothing else removes the per-run WORKDIR; on the persistent pool
       # every run would leave its transcripts and decision files behind
       # forever. Last step, after every reader including the artifact
-      # upload; a cancelled run leaves the dir to the next run's reset.
+      # upload. always() covers cancellation too; only a hard runner kill
+      # abandons the dir, and run_id never repeats — the age sweep in
+      # Reset autofix workspace reclaims it.
       - name: 'Clean up autofix workdir'
         if: 'always()'
         run: 'rm -rf "${WORKDIR}"'
@@ -3136,11 +3138,11 @@ jobs:
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
-          mkdir -p "${WORKDIR}"
           # 0700: the dir holds agent transcripts and decision files; the
           # sandbox container runs as this same user, so the tighter mode
-          # costs the job nothing.
-          chmod 700 "${WORKDIR}"
+          # costs the job nothing. umask at creation, not mkdir-then-chmod —
+          # the chmod form leaves a world-readable window on this shared /tmp.
+          (umask 077; mkdir -p "${WORKDIR}")
           # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
           # runner kill skips the always() teardown and run_id never repeats,
           # so nothing else ever reclaims them.
@@ -5190,8 +5192,10 @@ jobs:
       # Nothing else removes the per-target WORKDIR; PR numbers only
       # increase, so on the persistent pool every addressed PR would leave
       # its transcripts and decision files behind forever. Last step, after
-      # every reader including the artifact upload; a cancelled run leaves
-      # the dir to the next run's reset.
+      # every reader including the artifact upload. always() covers
+      # cancellation too; a dir abandoned by a hard runner kill is reclaimed
+      # by the next same-PR run's reset, or by the age sweep in Reset
+      # autofix workspace if that PR is never addressed again.
       - name: 'Clean up autofix workdir'
         if: 'always()'
         run: 'rm -rf "${WORKDIR}"'
