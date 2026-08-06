@@ -195,7 +195,6 @@ function parseClaim(
     !hasOnlyKeys(value, ['proofKind', 'claim', 'sourceRefs']) ||
     !isProofKind(value['proofKind']) ||
     typeof value['claim'] !== 'string' ||
-    value['claim'].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS ||
     !Array.isArray(value['sourceRefs']) ||
     value['sourceRefs'].length === 0 ||
     value['sourceRefs'].length > GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT ||
@@ -206,8 +205,10 @@ function parseClaim(
   ) {
     throw new Error(`Goal checkpoint verifier claim ${index + 1} is invalid`);
   }
+  // Trim before measuring, and count code points, so this validator agrees
+  // with materializeGoalEvidenceCheckpoint on the shared protocol limit.
   const claim = value['claim'].trim();
-  if (!claim) {
+  if (!claim || [...claim].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS) {
     throw new Error(`Goal checkpoint verifier claim ${index + 1} is invalid`);
   }
   return {

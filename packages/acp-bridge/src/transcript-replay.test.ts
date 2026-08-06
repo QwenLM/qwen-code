@@ -204,6 +204,54 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
   });
 
+  it('persists goalCause so bookkeeping suppression survives a page boundary', () => {
+    const first = createTranscriptReplayMachine();
+    updates(first, goalStateRecord('goal-create', 'create', GOAL));
+    const turned: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      updatedAt: 300,
+    };
+    updates(first, goalStateRecord('goal-turn', 'turn_finished', turned));
+    const rejected: GoalRecord = {
+      ...turned,
+      lastReason: 'More work remains',
+      activeTimeMs: 2200,
+      updatedAt: 310,
+    };
+    expect(
+      updates(
+        first,
+        goalStateRecord('goal-reject', 'verifier_reject', rejected),
+      ),
+    ).toHaveLength(1);
+
+    const state = first.snapshot();
+    expect(state.goalCause).toBe('verifier_reject');
+
+    // A page boundary falls between the genuine rejection and the
+    // shape-equal bookkeeping re-commit; the second machine must still
+    // recognize the re-commit as bookkeeping.
+    const second = createTranscriptReplayMachine({ initialState: state });
+    const recommitted: GoalRecord = {
+      ...rejected,
+      activeTimeMs: 2300,
+      updatedAt: 320,
+    };
+    expect(
+      updates(
+        second,
+        goalStateRecord(
+          'goal-reject-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+    expect(second.snapshot().goalState?.goal).toEqual(recommitted);
+  });
+
   it('emits a repeated verifier rejection that follows an empty turn', () => {
     const machine = createTranscriptReplayMachine();
 
@@ -687,6 +735,33 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     expect(machine.snapshot().goalState).toBeUndefined();
+  });
+
+  it('drops a malformed goalCause from initialState and reports it', () => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({
+      onDiagnostic,
+      initialState: {
+        v: 1,
+        pendingToolCalls: [],
+        cumulativeUsage: {
+          promptTokens: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          apiTimeMs: 0,
+        },
+        goalCause: 'bogus',
+      } as unknown as TranscriptReplayStateV1,
+    });
+
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'invalid_replay_state',
+        message: 'Dropped a malformed Goal cause from replay state.',
+        affectsCompleteness: true,
+      }),
+    );
+    expect(machine.snapshot().goalCause).toBeUndefined();
   });
 
   it('emits gaps, todo plans, and cumulative usage deterministically', () => {

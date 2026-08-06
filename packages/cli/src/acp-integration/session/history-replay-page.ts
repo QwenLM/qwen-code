@@ -6,9 +6,11 @@
 
 import {
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   type ChatRecord,
   type Config,
   type GoalSnapshotV2,
+  type GoalStateCause,
   type HistoryGap,
   type SessionTranscriptCursorState,
   type SessionTranscriptRecordPage,
@@ -93,6 +95,7 @@ function parseTranscriptReplayState(
   pendingToolCalls: PendingReplayToolCall[];
   cumulativeUsage: CumulativeUsage;
   goalState?: GoalSnapshotV2;
+  goalCause?: GoalStateCause;
 } {
   if (!isObjectRecord(replay)) {
     return {
@@ -141,10 +144,17 @@ function parseTranscriptReplayState(
   if (logger && rawGoalState !== undefined && !goalState) {
     logger.warn('[transcript] replay state dropped a malformed Goal state');
   }
+  const rawGoalCause = replay['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (logger && rawGoalCause !== undefined && !goalCause) {
+    logger.warn('[transcript] replay state dropped a malformed Goal cause');
+  }
   return {
     pendingToolCalls,
     cumulativeUsage,
     ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
   };
 }
 
@@ -271,6 +281,7 @@ export async function replayTranscriptRecordPage({
         finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
       ...(state.goalState ? { goalState: state.goalState } : {}),
+      ...(state.goalCause ? { goalCause: state.goalCause } : {}),
     });
     replayState = replayPageState.replay;
   } catch (error) {

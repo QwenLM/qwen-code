@@ -42,6 +42,7 @@ export {
   elapsedActiveTime,
   parseGoalControlRequest,
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
   reduceGoalControl,
   reduceGoalTurnFinished,

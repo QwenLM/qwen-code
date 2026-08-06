@@ -291,6 +291,12 @@ export function parseGoalSnapshotV2(
     : undefined;
 }
 
+export function parseGoalStateCause(
+  value: unknown,
+): GoalStateCause | undefined {
+  return isGoalStateCause(value) ? value : undefined;
+}
+
 function createGoal(
   goalId: string,
   objective: string,

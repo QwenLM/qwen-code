@@ -8,7 +8,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import type { GoalCheckpointVerifierInput } from './goal-checkpoint.js';
-import { GOAL_CHECKPOINT_CLAIM_MAX_BYTES } from './goal-protocol.js';
+import {
+  GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
+  GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
+} from './goal-protocol.js';
 import {
   createGoalCheckpointVerifier,
   GoalCheckpointVerifierInputTooLargeError,
@@ -161,6 +164,56 @@ describe('createGoalCheckpointVerifier', () => {
       createGoalCheckpointVerifier(config, { timeoutMs: 1 })(input()),
     ).rejects.toThrow('Goal checkpoint verifier timed out after 1ms');
     expect(generateText).toHaveBeenCalledOnce();
+  });
+
+  it('measures the claim limit after trimming, in code points', () => {
+    // A max-length claim with trailing padding must parse the same way
+    // materializeGoalEvidenceCheckpoint validates it: trimmed, code points.
+    const atLimit = 'a'.repeat(GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS);
+    const parsed = parseGoalCheckpointVerifierText(
+      JSON.stringify({
+        claims: [
+          {
+            proofKind: 'external_fact',
+            claim: `${atLimit}\n`,
+            sourceRefs: ['tool-1'],
+          },
+        ],
+      }),
+    );
+    expect(parsed.claims[0]?.claim).toBe(atLimit);
+
+    // Code points, not UTF-16 code units: astral characters count once.
+    const astralAtLimit = '\u{1F600}'.repeat(
+      GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
+    );
+    expect(
+      parseGoalCheckpointVerifierText(
+        JSON.stringify({
+          claims: [
+            {
+              proofKind: 'external_fact',
+              claim: astralAtLimit,
+              sourceRefs: ['tool-1'],
+            },
+          ],
+        }),
+      ).claims[0]?.claim,
+    ).toBe(astralAtLimit);
+
+    expect(() =>
+      parseGoalCheckpointVerifierText(
+        JSON.stringify({
+          claims: [
+            {
+              proofKind: 'external_fact',
+              claim: `${atLimit}b`,
+              sourceRefs: ['tool-1'],
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/claim 1 is invalid/i);
   });
 
   it('rejects non-exact or internally duplicate claim output', () => {
