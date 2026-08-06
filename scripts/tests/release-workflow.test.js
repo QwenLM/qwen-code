@@ -131,6 +131,11 @@ describe('Live Host release workflow', () => {
     expect(liveHostReleaseWorkflow).toContain(
       'echo "APPLE_API_KEY_ID=$api_key_id"',
     );
+    expect(liveHostReleaseWorkflow).toContain(
+      'identity_name="${identity#Developer ID Application: }"',
+    );
+    expect(liveHostReleaseWorkflow).toContain('echo "CSC_NAME=$identity_name"');
+    expect(liveHostReleaseWorkflow).not.toContain('echo "CSC_NAME=$identity"');
   });
 });
 
