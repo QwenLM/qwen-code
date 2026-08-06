@@ -27,6 +27,8 @@ interface DispatchOptions {
   globalDir?: string;
   sidebandEndpoint?: string;
   token?: string;
+  publishRoster?: boolean;
+  promptInArgv?: boolean;
 }
 
 export async function dispatchAgentViewSession(
@@ -58,7 +60,10 @@ export async function dispatchAgentViewSession(
       {
         schemaVersion: 1,
         sessionId,
-        argv: buildNativeWorkerArgv(sessionId, prompt),
+        argv: buildNativeWorkerArgv(
+          sessionId,
+          options.promptInArgv === false ? undefined : prompt,
+        ),
         env: createAgentViewWorkerSidebandEnv({
           sessionId,
           sidebandEndpoint: options.sidebandEndpoint ?? '',
@@ -101,16 +106,18 @@ export async function dispatchAgentViewSession(
       },
       options,
     );
-    await upsertAgentViewRosterEntry(
-      {
-        sessionId,
-        projectCwd: resolvedCwd,
-        activeCwd: resolvedCwd,
-        createdAt: now,
-        updatedAt: now,
-      },
-      options,
-    );
+    if (options.publishRoster ?? true) {
+      await upsertAgentViewRosterEntry(
+        {
+          sessionId,
+          projectCwd: resolvedCwd,
+          activeCwd: resolvedCwd,
+          createdAt: now,
+          updatedAt: now,
+        },
+        options,
+      );
+    }
   } catch (error) {
     await cleanupFailedDispatchCreation(sessionId, state, options);
     throw error;
@@ -171,11 +178,10 @@ function digestToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-function buildNativeWorkerArgv(sessionId: string, prompt: string): string[] {
+function buildNativeWorkerArgv(sessionId: string, prompt?: string): string[] {
   return buildCurrentQwenCliArgv([
     '--session-id',
     sessionId,
-    '--prompt-interactive',
-    prompt,
+    ...(prompt ? ['--prompt-interactive', prompt] : []),
   ]);
 }
