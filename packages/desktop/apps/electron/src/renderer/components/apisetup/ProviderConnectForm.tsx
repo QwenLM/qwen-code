@@ -114,6 +114,7 @@ export function ProviderConnectForm({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [modelIdsText, setModelIdsText] = useState('');
+  const [modelsEdited, setModelsEdited] = useState(false);
   const [enableThinking, setEnableThinking] = useState(false);
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -192,6 +193,7 @@ export function ProviderConnectForm({
       (id) => !seededDefaults.has(id),
     );
     setModelIdsText(seededModelIds.join(', '));
+    setModelsEdited(false);
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
@@ -443,15 +445,20 @@ export function ProviderConnectForm({
                         apiKeyDraftsRef.current,
                       ),
                     );
-                    const nextModelIds = modelIdsAfterBaseUrlChange(
-                      selectedProvider,
-                      baseUrl,
-                      value,
-                      modelIdsText,
-                      customModelIdsRef.current,
-                    );
-                    customModelIdsRef.current = nextModelIds.customModelIds;
-                    setModelIdsText(nextModelIds.modelIds.join(', '));
+                    // Once the user has edited the models field it is
+                    // authoritative — rebuilding it here would resurrect
+                    // defaults the user explicitly deleted.
+                    if (!modelsEdited) {
+                      const nextModelIds = modelIdsAfterBaseUrlChange(
+                        selectedProvider,
+                        baseUrl,
+                        value,
+                        modelIdsText,
+                        customModelIdsRef.current,
+                      );
+                      customModelIdsRef.current = nextModelIds.customModelIds;
+                      setModelIdsText(nextModelIds.modelIds.join(', '));
+                    }
                   }
                 }}
                 disabled={submitting}
@@ -499,7 +506,10 @@ export function ProviderConnectForm({
           <Label>{t('providerConnect.models')}</Label>
           <Textarea
             value={modelIdsText}
-            onChange={(event) => setModelIdsText(event.target.value)}
+            onChange={(event) => {
+              setModelIdsText(event.target.value);
+              setModelsEdited(true);
+            }}
             placeholder={t('providerConnect.modelsPlaceholder')}
             className="min-h-20"
             disabled={submitting || !selectedProvider.modelsEditable}

@@ -124,8 +124,16 @@ export function useProviderSetupFlow(
     Record<string, string>
   >({});
   const apiKeyDraftsRef = useRef(new Map<string, string>());
+  // Snapshot of what start() seeded, so reselecting the seeded protocol
+  // after switching away can restore the saved endpoint and key.
+  const seededSetupRef = useRef<{
+    protocol: AuthType;
+    baseUrl: string;
+    apiKey: string;
+  } | null>(null);
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
+  const [modelsDirty, setModelsDirty] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -176,6 +184,11 @@ export function useProviderSetupFlow(
       }
       setApiKey(prefillKey);
       setExistingProviderEnv(existingEnv ?? {});
+      seededSetupRef.current = {
+        protocol: proto,
+        baseUrl: resolved,
+        apiKey: prefillKey,
+      };
 
       setApiKeyError(null);
       // Built-in defaults go to the recommended list (checked), user-added
@@ -185,6 +198,7 @@ export function useProviderSetupFlow(
       const customIds = existingModelIds ?? [];
       setModelIds([...defaultIds, ...customIds].join(', '));
       setModelIdsError(null);
+      setModelsDirty(false);
       setThinkingEnabled(false);
       setModalityEnabled(false);
       setModalityImage(true);
@@ -199,6 +213,7 @@ export function useProviderSetupFlow(
 
   const reset = useCallback(() => {
     apiKeyDraftsRef.current.clear();
+    seededSetupRef.current = null;
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
@@ -223,12 +238,24 @@ export function useProviderSetupFlow(
     (selectedProtocol: AuthType) => {
       setProtocol(selectedProtocol);
       if (selectedProtocol !== protocol) {
-        // Clear baseUrl so the user types fresh; show the protocol's default
-        // endpoint as a placeholder (used if they submit blank). Reselecting
-        // the seeded protocol keeps the restored endpoint and key.
-        setBaseUrl('');
-        setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
-        setApiKey('');
+        const seeded = seededSetupRef.current;
+        if (seeded && seeded.protocol === selectedProtocol) {
+          // Reselecting the seeded protocol restores the endpoint and key
+          // seeded from the saved setup; switching away cleared them.
+          setBaseUrl(seeded.baseUrl);
+          setBaseUrlPlaceholder(
+            seeded.baseUrl
+              ? ''
+              : getDefaultBaseUrlForProtocol(selectedProtocol),
+          );
+          setApiKey(seeded.apiKey);
+        } else {
+          // Clear baseUrl so the user types fresh; show the protocol's
+          // default endpoint as a placeholder (used if they submit blank).
+          setBaseUrl('');
+          setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
+          setApiKey('');
+        }
         setApiKeyError(null);
       }
       goNext();
@@ -243,21 +270,27 @@ export function useProviderSetupFlow(
       if (provider && selectedUrl !== baseUrl) {
         setApiKeyError(null);
         setModelIdsError(null);
-        // Only the source and destination endpoints' defaults are replaceable:
-        // a typed id colliding with some other sibling endpoint's built-in is
-        // user input for the current endpoint and must survive the switch.
-        const builtInIds = new Set([
-          ...getDefaultModelIds(provider, baseUrl),
-          ...getDefaultModelIds(provider, selectedUrl),
-        ]);
-        const customIds = normalizeModelIds(modelIds).filter(
-          (id) => !builtInIds.has(id),
-        );
-        setModelIds(
-          [...getDefaultModelIds(provider, selectedUrl), ...customIds].join(
-            ', ',
-          ),
-        );
+        // Once the user has edited the models step the field is
+        // authoritative — rebuilding it here would resurrect defaults the
+        // user explicitly unchecked.
+        if (!modelsDirty) {
+          // Only the source and destination endpoints' defaults are
+          // replaceable: a typed id colliding with some other sibling
+          // endpoint's built-in is user input for the current endpoint and
+          // must survive the switch.
+          const builtInIds = new Set([
+            ...getDefaultModelIds(provider, baseUrl),
+            ...getDefaultModelIds(provider, selectedUrl),
+          ]);
+          const customIds = normalizeModelIds(modelIds).filter(
+            (id) => !builtInIds.has(id),
+          );
+          setModelIds(
+            [...getDefaultModelIds(provider, selectedUrl), ...customIds].join(
+              ', ',
+            ),
+          );
+        }
         const previousEnvKey = providerEnvKey(provider, protocol, baseUrl);
         const nextEnvKey = providerEnvKey(provider, protocol, selectedUrl);
         if (nextEnvKey !== previousEnvKey) {
@@ -277,6 +310,7 @@ export function useProviderSetupFlow(
       existingProviderEnv,
       goNext,
       modelIds,
+      modelsDirty,
       protocol,
       provider,
     ],
@@ -370,6 +404,7 @@ export function useProviderSetupFlow(
   const changeModelIds = useCallback((value: string) => {
     setModelIds(value);
     setModelIdsError(null);
+    setModelsDirty(true);
   }, []);
 
   const submitModelIds = useCallback(

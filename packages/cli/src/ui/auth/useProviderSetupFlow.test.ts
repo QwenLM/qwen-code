@@ -118,6 +118,54 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('api-model, code-model');
   });
 
+  it('does not resurrect deselected defaults after an endpoint round trip', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'endpoint-provider',
+      label: 'Endpoint Provider',
+      description: 'Provider with endpoint-specific defaults',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-model-a' }, { id: 'first-model-b' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-model' }],
+        },
+      ],
+      envKey: () => 'SHARED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Endpoint',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider);
+    });
+    expect(result.current.state.modelIds).toBe('first-model-a, first-model-b');
+
+    // The user unchecks first-model-b at the models step; the deselection
+    // must survive an A→B→A endpoint round trip.
+    act(() => {
+      result.current.changeModelIds('first-model-a');
+    });
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    act(() => {
+      result.current.selectBaseUrl(firstUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('first-model-a');
+  });
+
   it('preserves edited models and API key when reselecting the current endpoint', () => {
     const url = 'https://first.example/v1';
     const provider: ProviderConfig = {
@@ -320,6 +368,15 @@ describe('useProviderSetupFlow', () => {
     });
     expect(result.current.state.baseUrl).toBe('');
     expect(result.current.state.apiKey).toBe('');
+
+    // A seeded→other→seeded round trip restores the saved endpoint and key
+    // instead of falling back to the protocol-default placeholder.
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    expect(result.current.state.baseUrl).toBe('https://my-proxy.example/v1');
+    expect(result.current.state.baseUrlPlaceholder).toBe('');
+    expect(result.current.state.apiKey).toBe('sk-stored');
   });
 
   it('does not leak API key drafts into the next provider flow', () => {

@@ -227,6 +227,43 @@ describe('AuthMessage draft isolation', () => {
 
     expect(actions.installAuthProvider).not.toHaveBeenCalled();
   });
+
+  it('restores a key draft when reselecting its endpoint after a round trip', async () => {
+    actions.getAuthProviders.mockResolvedValue(catalog);
+    actions.installAuthProvider.mockResolvedValue({
+      v: 1,
+      providerId: 'provider-a',
+      providerLabel: 'Provider Alpha',
+      authType: 'openai',
+      message: 'ok',
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <AuthMessage onMessage={vi.fn()} onClose={vi.fn()} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Alpha'));
+
+    // Type a key on Alpha Two, then round trip through Alpha One: the draft
+    // must come back when Alpha Two is reselected.
+    click(findButtonContaining('Alpha Two'));
+    setInput(passwordInput(), 'draft-a');
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Alpha One'));
+    expect(passwordInput().value).toBe('');
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Alpha Two'));
+    expect(passwordInput().value).toBe('draft-a');
+  });
 });
 
 function textInput(): HTMLInputElement {
