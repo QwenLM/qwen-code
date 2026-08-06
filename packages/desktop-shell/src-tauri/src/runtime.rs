@@ -182,7 +182,7 @@ fn ensure_supported_workspace_path(path: &Path) -> Result<(), String> {
         Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim()
     ) {
         return Err(format!(
-            "Desktop workspace path requires an unsupported Windows verbatim form: {}. Choose a shorter local path.",
+            "Desktop workspace path uses an unsupported Windows extended-length form: {}. Choose a local drive path; network (UNC) shares, paths over 260 characters, and names ending in a dot or space are not supported.",
             path.display()
         ));
     }
@@ -478,6 +478,8 @@ mod tests {
         DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
     use std::path::Path;
+    #[cfg(windows)]
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use url::Url;
 
@@ -504,8 +506,27 @@ mod tests {
         ] {
             let error = super::ensure_supported_workspace_path(Path::new(path))
                 .expect_err("reject residual verbatim path");
-            assert!(error.contains("unsupported Windows verbatim form"));
+            assert!(error.contains("unsupported Windows extended-length form"));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_workspace_rejects_residual_verbatim_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let base =
+            std::env::temp_dir().join(format!("qwen-desktop-long-ws-{}", std::process::id()));
+        let mut workspace = PathBuf::from(format!(r"\\?\{}", base.display()));
+        while workspace.as_os_str().encode_wide().count() <= 270 {
+            workspace.push("long-workspace-component");
+        }
+        std::fs::create_dir_all(&workspace).expect("create long workspace");
+        let result = resolve_workspace(&workspace);
+        std::fs::remove_dir_all(PathBuf::from(format!(r"\\?\{}", base.display())))
+            .expect("cleanup long workspace");
+        let error = result.expect_err("reject long workspace");
+        assert!(error.contains("unsupported Windows extended-length form"));
     }
 
     #[test]
