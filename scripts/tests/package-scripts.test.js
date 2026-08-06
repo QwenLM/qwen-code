@@ -17,6 +17,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '../..');
 
@@ -26,34 +28,6 @@ function readPackageJson() {
 
 function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
-}
-
-function getWorkflowJob(workflow, jobName) {
-  const marker = `  ${jobName}:`;
-  const start = workflow.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-
-  const afterMarker = workflow.slice(start + marker.length);
-  const nextJob = afterMarker.match(/\n {2}[a-zA-Z0-9_-]+:\n/);
-
-  return workflow.slice(
-    start,
-    nextJob ? start + marker.length + nextJob.index : undefined,
-  );
-}
-
-function getWorkflowStep(job, stepName) {
-  const marker = `      - name: '${stepName}'`;
-  const start = job.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-
-  const afterMarker = job.slice(start + marker.length);
-  const nextStep = afterMarker.match(/\n {6}- name: /);
-
-  return job.slice(
-    start,
-    nextStep ? start + marker.length + nextStep.index : undefined,
-  );
 }
 
 describe('package scripts', () => {
@@ -117,11 +91,11 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
-          '@echo npm %* >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(npm %*>>"%PREPARE_LOG_FILE%"\r\n',
         );
       } else {
         writeFileSync(
@@ -172,11 +146,11 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
-          '@echo npm %* >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(npm %*>>"%PREPARE_LOG_FILE%"\r\n',
         );
       } else {
         writeFileSync(
@@ -271,12 +245,12 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
           [
-            '@echo npm %* >> "%PREPARE_LOG_FILE%"',
+            '@echo(npm %*>>"%PREPARE_LOG_FILE%"',
             '@if "%1 %2"=="run build" exit /b 7',
             '@exit /b 0',
             '',

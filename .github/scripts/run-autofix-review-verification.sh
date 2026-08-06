@@ -84,6 +84,21 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 VERIFICATION_HEAD="$(git rev-parse HEAD)"
 
+# The schema generator resolves '@qwen-code/qwen-code-core' to core's DIST
+# entry point, which the CLI bundle restored from the TRUSTED BASE. When the
+# branch itself changed core's sources, that base-built dist can disagree
+# with the branch's committed schema (changed runtime constants) or crash
+# the generator (changed exports) — the same false "settings schema is
+# stale" rejection class this gate exists to prevent. Rebuild core from
+# branch sources in that case: the gate already runs a full `npm run build`
+# on branch sources for every commit path, so this widens no trust surface,
+# and the build's git-ignored output cannot trip the dirty-tree asserts.
+if git diff --name-only "origin/main...${BRANCH}" \
+  | grep -Eq '^packages/core/(src/|index\.ts$)'; then
+  run_check 'core rebuild failed on the agent-committed fix' \
+    npm run build --workspace packages/core
+fi
+
 # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
 # write no-action.md, and without this the no-op path would report the
