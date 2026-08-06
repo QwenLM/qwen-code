@@ -143,6 +143,8 @@ describe('Session review-worktree lease sweep', () => {
       getStopHookBlockingCap: vi.fn().mockReturnValue(0),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        listUnfinalizedBackgroundAgentIds: vi.fn().mockReturnValue([]),
       }),
       getMonitorRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),

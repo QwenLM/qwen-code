@@ -760,13 +760,19 @@ vi.mock('../ui/commands/contextCommand.js', () => ({
     .fn()
     .mockReturnValue('## Context Usage\nformatted'),
 }));
-vi.mock('./session/Session.js', () => ({
-  Session: vi.fn(),
-  buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
-    availableCommands: [],
-    availableSkills: [],
-  }),
-}));
+vi.mock('./session/Session.js', () => {
+  const SessionMock = vi.fn();
+  // The agent's active-work reporter walks every live Session on a timer, so
+  // even tests that never look at reporting need this to exist on instances.
+  SessionMock.prototype.collectActiveWorkHolds = () => [];
+  return {
+    Session: SessionMock,
+    buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    }),
+  };
+});
 vi.mock('../utils/languageUtils.js', () => ({
   updateOutputLanguageFile: vi.fn(),
   writeOutputLanguageAndRegisterPath: vi.fn(

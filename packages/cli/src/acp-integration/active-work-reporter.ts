@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+
+const debugLogger = createDebugLogger('ACTIVE_WORK');
 
 /**
  * A Session, as far as active-work reporting is concerned. `collectHolds()`
@@ -94,7 +97,9 @@ export class ActiveWorkReporter {
   async flush(): Promise<void> {
     this.#coalescing = false;
     this.#publish();
-    await this.#tail;
+    // Never reject: this is awaited on the prompt path, and a reporting
+    // problem must not turn into a failed prompt for the user.
+    await this.#tail.catch(() => undefined);
   }
 
   dispose(): void {
@@ -108,12 +113,29 @@ export class ActiveWorkReporter {
 
   #publish(): void {
     if (this.#disposed) return;
-    const sessions = [];
-    for (const source of this.listSources()) {
-      sessions.push({
-        sessionId: source.sessionId,
-        holds: source.collectActiveWorkHolds(),
-      });
+    let sessions: ActiveWorkSnapshotV1['sessions'];
+    try {
+      sessions = [];
+      for (const source of this.listSources()) {
+        sessions.push({
+          sessionId: source.sessionId,
+          holds: source.collectActiveWorkHolds(),
+        });
+      }
+    } catch (error) {
+      // Abandon the whole snapshot rather than send a partial one. A Session
+      // missing from a report means "the child released it", and a Session
+      // reported with no holds means "safe to close" — so publishing whatever
+      // we managed to collect before the failure would actively invite the
+      // daemon to destroy live work. Sending nothing instead just lets the
+      // daemon's copy age, which its freshness grading already treats as
+      // untrustworthy and retains.
+      debugLogger.warn(
+        `active-work snapshot collection failed; skipping this report: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
     }
     const snapshot: ActiveWorkSnapshotV1 = {
       v: ACTIVE_WORK_HEARTBEAT_VERSION,
