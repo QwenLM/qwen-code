@@ -3932,4 +3932,24 @@ describe('git config execution probe wiring (#8575)', () => {
       }),
     ).resolves.toBe('allow');
   });
+
+  it('falls back to config.getCwd() when ctx.cwd is absent', async () => {
+    const dirtyManager = new PermissionManager(makeConfig({ cwd: dirtyRepo }));
+    dirtyManager.initialize();
+    await expect(
+      dirtyManager.evaluate({
+        toolName: 'run_shell_command',
+        command: 'git status',
+      }),
+    ).resolves.toBe('ask');
+
+    const cleanManager = new PermissionManager(makeConfig({ cwd: cleanRepo }));
+    cleanManager.initialize();
+    await expect(
+      cleanManager.evaluate({
+        toolName: 'run_shell_command',
+        command: 'git status',
+      }),
+    ).resolves.toBe('allow');
+  });
 });

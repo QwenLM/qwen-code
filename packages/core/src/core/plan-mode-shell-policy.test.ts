@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
@@ -455,5 +458,53 @@ describe('plan-mode shell policy', () => {
       outcome: ToolConfirmationOutcome.Cancel,
       payload: { cancelMessage: 'Host cancelled approval' },
     });
+  });
+});
+
+describe('git config probe cwd threading (#8575)', () => {
+  let root: string;
+  let cleanRepo: string;
+  let dirtyRepo: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-mode-git-config-'));
+
+    cleanRepo = path.join(root, 'clean');
+    fs.mkdirSync(path.join(cleanRepo, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(cleanRepo, '.git', 'config'), '[core]\n');
+
+    dirtyRepo = path.join(root, 'dirty');
+    fs.mkdirSync(path.join(dirtyRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dirtyRepo, '.git', 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('classifies dirty-repo git commands as unknown', async () => {
+    await expect(
+      evaluate('git status', {
+        config: createConfig({ targetDir: () => dirtyRepo }),
+      }),
+    ).resolves.toMatchObject({ classification: 'unknown' });
+
+    await expect(
+      evaluate('git status', {
+        config: createConfig({ targetDir: () => cleanRepo }),
+      }),
+    ).resolves.toMatchObject({ classification: 'read-only' });
+  });
+
+  it('honors the directory invocation param over the target dir', async () => {
+    await expect(
+      evaluate('git status', {
+        config: createConfig({ targetDir: () => cleanRepo }),
+        invocationParams: { command: 'git status', directory: dirtyRepo },
+      }),
+    ).resolves.toMatchObject({ classification: 'unknown' });
   });
 });

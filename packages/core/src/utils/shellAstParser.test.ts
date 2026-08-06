@@ -1310,3 +1310,101 @@ describe('git config execution probe (#8575)', () => {
     );
   });
 });
+
+// =========================================================================
+// cd tracking for the git config probe (issue #8575) — compound commands
+// must be probed against the repository they actually run in.
+// =========================================================================
+
+describe('git config probe cd tracking (#8575)', () => {
+  let root: string;
+  let cleanRepo: string;
+  let dirtyRepo: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-ast-cd-tracking-'));
+
+    cleanRepo = path.join(root, 'clean-repo');
+    fs.mkdirSync(path.join(cleanRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cleanRepo, '.git', 'config'),
+      '[core]\n\tbare = false\n',
+    );
+    fs.mkdirSync(path.join(cleanRepo, 'sub'), { recursive: true });
+
+    dirtyRepo = path.join(root, 'dirty-repo');
+    fs.mkdirSync(path.join(dirtyRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dirtyRepo, '.git', 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('probes the post-cd repository for absolute targets', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${dirtyRepo} && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${cleanRepo} && git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(true);
+  });
+
+  it('probes the post-cd repository for relative targets', async () => {
+    expect(
+      await isShellCommandReadOnlyAST('cd ../dirty-repo && git status', {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps same-repo cd read-only', async () => {
+    expect(
+      await isShellCommandReadOnlyAST('cd sub && git status', {
+        cwd: cleanRepo,
+      }),
+    ).toBe(true);
+    expect(
+      await classifyShellCommandSafety('cd sub && git status', {
+        cwd: cleanRepo,
+      }),
+    ).toBe('read-only');
+  });
+
+  it('downgrades git after an unresolvable cd', async () => {
+    for (const command of [
+      'cd $TARGET && git status',
+      'cd && git status',
+      'cd - && git status',
+      'popd && git status',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command, { cwd: cleanRepo })).toBe(
+        false,
+      );
+    }
+  });
+
+  it('tracks chained cd segments', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(
+        'cd sub && cd ../../dirty-repo && git status',
+        { cwd: cleanRepo },
+      ),
+    ).toBe(false);
+  });
+
+  it('leaves non-git commands after cd untouched', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${dirtyRepo} && ls -la`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(true);
+  });
+});

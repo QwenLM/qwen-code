@@ -477,6 +477,38 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
+  it('threads cwd into the shell read-only classifier (#8575)', async () => {
+    const cleanRepo = path.join(tempDir, 'clean-repo');
+    await fs.mkdir(path.join(cleanRepo, '.git'), { recursive: true });
+    await fs.writeFile(path.join(cleanRepo, '.git', 'config'), '[core]\n');
+    const dirtyRepo = path.join(tempDir, 'dirty-repo');
+    await fs.mkdir(path.join(dirtyRepo, '.git'), { recursive: true });
+    await fs.writeFile(
+      path.join(dirtyRepo, '.git', 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+
+    const enabled = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        allowShell: true,
+      }),
+    );
+    await expect(
+      enabled.evaluate({
+        toolName: ToolNames.SHELL,
+        command: 'git status',
+        cwd: dirtyRepo,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      enabled.evaluate({
+        toolName: ToolNames.SHELL,
+        command: 'git status',
+        cwd: cleanRepo,
+      }),
+    ).resolves.toBe('allow');
+  });
+
   it('lets base deny rules override scoped allows', async () => {
     const basePm: Pick<
       PermissionManager,

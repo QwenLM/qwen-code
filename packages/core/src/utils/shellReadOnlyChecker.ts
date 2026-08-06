@@ -11,6 +11,7 @@
  */
 
 import { parse } from 'shell-quote';
+import path from 'node:path';
 import {
   detectCommandSubstitution,
   splitCommands,
@@ -263,9 +264,11 @@ function evaluateGitCommand(
   // A whitelisted sub-command can still execute programs configured in the
   // repository-local `.git/config` (diff.external, core.fsmonitor, pagers,
   // credential/ssh helpers). Require confirmation when such keys are
-  // present. See issue #8575.
+  // present, or when the effective directory after an unresolvable `cd` is
+  // unknown. See issue #8575.
   return (
     allowed &&
+    !checkOptions?.unknownDir &&
     !(checkOptions?.cwd && gitConfigMayExecutePrograms(checkOptions.cwd))
   );
 }
@@ -348,6 +351,44 @@ function evaluateShellSegment(
 }
 
 /**
+ * Update the tracked execution directory across compound segments.
+ * `cd`/`pushd` with a statically resolvable target move the probe's base
+ * directory; anything unresolvable (`cd` alone, `cd -`, expansions,
+ * `popd`) marks the directory as unknown so later git segments are
+ * downgraded (#8575).
+ */
+const DIR_CHANGE_COMMAND = /^(?:cd|pushd|popd)(?:\s|$)/;
+
+function trackDirectoryChange(
+  segment: string,
+  currentCwd: string | undefined,
+): { currentCwd?: string; unknownDir: boolean } {
+  const trimmed = segment.trim();
+  if (!DIR_CHANGE_COMMAND.test(trimmed)) {
+    return { currentCwd, unknownDir: false };
+  }
+  if (/^popd/.test(trimmed)) {
+    return { currentCwd: undefined, unknownDir: true };
+  }
+  const target = trimmed.split(/\s+/)[1];
+  if (
+    target === undefined ||
+    target === '-' ||
+    target.startsWith('~') ||
+    /[$`'"\\*?[\]{}()<>|;&]/.test(target)
+  ) {
+    return { currentCwd: undefined, unknownDir: true };
+  }
+  if (path.isAbsolute(target)) {
+    return { currentCwd: target, unknownDir: false };
+  }
+  if (!currentCwd) {
+    return { currentCwd: undefined, unknownDir: true };
+  }
+  return { currentCwd: `${currentCwd}/${target}`, unknownDir: false };
+}
+
+/**
  * @deprecated Use `isShellCommandReadOnlyAST` from `./shellAstParser.js` instead.
  * This function uses regex + shell-quote for command parsing with known edge-case
  * limitations. The AST-based replacement provides accurate parsing via tree-sitter-bash.
@@ -372,9 +413,24 @@ export function isShellCommandReadOnly(
 
   const segments = splitCommands(command);
 
+  let currentCwd = checkOptions?.cwd;
+  let unknownDir = checkOptions?.unknownDir === true;
+
   for (const segment of segments) {
-    if (!evaluateShellSegment(segment, checkOptions)) {
+    const segmentOptions: ShellReadOnlyCheckOptions | undefined = unknownDir
+      ? { cwd: undefined, unknownDir: true }
+      : currentCwd
+        ? { cwd: currentCwd }
+        : undefined;
+    if (!evaluateShellSegment(segment, segmentOptions)) {
       return false;
+    }
+    const tracked = trackDirectoryChange(segment, currentCwd);
+    if (tracked.unknownDir) {
+      unknownDir = true;
+      currentCwd = undefined;
+    } else if (tracked.currentCwd !== undefined) {
+      currentCwd = tracked.currentCwd;
     }
   }
 

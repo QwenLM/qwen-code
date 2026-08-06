@@ -147,6 +147,36 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(incIf)).toBe(true);
   });
 
+  it('flags filter clean/smudge/process programs (git diff triggers them)', () => {
+    const repo = makeRepo('filter', '[filter "evil"]\n\tclean = /tmp/evil\n');
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('flags ext:: url.<base>.insteadOf rewrite targets', () => {
+    const repo = makeRepo(
+      'url-insteadof',
+      '[url "ext::sh -c evil"]\n\tinsteadOf = https://example.com/\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('does not flag boolean pager overrides', () => {
+    const repo = makeRepo(
+      'pager-bool',
+      '[pager]\n\tlog = false\n\tdiff = true\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+  });
+
+  it('fails closed on implausibly large config files', () => {
+    const repo = makeRepo('huge', '');
+    fs.writeFileSync(
+      path.join(repo, '.git', 'config'),
+      `[core]\n\tbare = false\n# ${'x'.repeat(1 << 20)}\n`,
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
   it('reads config.worktree of the main checkout (extensions.worktreeConfig)', () => {
     const repo = makeRepo(
       'wtcfg',

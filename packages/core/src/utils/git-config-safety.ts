@@ -56,10 +56,19 @@ export interface ShellReadOnlyCheckOptions {
    * directory contains keys that make git execute a program.
    */
   cwd?: string;
+  /**
+   * A directory-changing segment (`cd`/`pushd`) precedes this command and
+   * its target could not be resolved statically. Downgrades git commands
+   * the same way a dirty config does — the effective repo is unknown.
+   */
+  unknownDir?: boolean;
 }
 
 /** Bound on the upward search for the enclosing `.git`. */
 const MAX_REPO_SEARCH_DEPTH = 64;
+
+/** Config files larger than this fail closed instead of being read. */
+const MAX_CONFIG_FILE_BYTES = 1 << 20; // 1 MiB
 
 /**
  * Flat `section.key` names (lowercased — git config names are
@@ -198,7 +207,11 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
 
     if (entry.subsection === null) {
       // `[pager] <cmd> = <program>` overrides live in the flat section.
-      if (entry.section === 'pager') return true;
+      if (entry.section === 'pager') {
+        // true/false enable or disable paging without naming a program.
+        if (/^(?:true|false)$/i.test(value)) continue;
+        return true;
+      }
       const name = `${entry.section}.${entry.key}`;
       if (!PROGRAM_VALUED_KEYS.has(name)) continue;
       // core.fsmonitor true/false selects the built-in daemon or disables
@@ -222,6 +235,23 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
       case 'remote':
         if (entry.key === 'proxy') return true;
         if (entry.key === 'url' && /^ext::/.test(value)) return true;
+        break;
+      case 'filter':
+        // `git diff` cleans worktree content through the configured filter
+        // when comparing against the index — no flag needed.
+        if (
+          entry.key === 'clean' ||
+          entry.key === 'smudge' ||
+          entry.key === 'process'
+        ) {
+          return true;
+        }
+        break;
+      case 'url':
+        // `url.<base>.insteadOf` rewrites remote URLs before connecting;
+        // an ext:: rewrite target executes a program (the transport
+        // block can be lifted via protocol.ext.allow in the same file).
+        if (entry.subsection!.startsWith('ext::')) return true;
         break;
       default:
         break;
@@ -331,6 +361,13 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
     let readWorktreeConfig = false;
     for (const file of findLocalGitConfigFiles(cwd)) {
       if (file.endsWith('config.worktree') && !readWorktreeConfig) continue;
+      try {
+        if (fs.statSync(file).size > MAX_CONFIG_FILE_BYTES) {
+          return true; // implausibly large config — fail closed
+        }
+      } catch {
+        // stat can race with the read below; fall through.
+      }
       let content: string;
       try {
         content = fs.readFileSync(file, 'utf8');

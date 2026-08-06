@@ -1000,15 +1000,16 @@ function evaluateCommandSafety(
     // Whitelisted read-only sub-commands can still execute programs
     // configured in the repository-local `.git/config` (diff.external,
     // core.fsmonitor, pagers, credential/ssh helpers). Require confirmation
-    // when such keys are present. Bare `git`, `git --version` and
+    // when such keys are present, or when the effective directory after an
+    // unresolvable `cd` is unknown. Bare `git`, `git --version` and
     // `git --help` are left as-is: they do not run repo-config programs.
     // See issue #8575.
     if (
       result === 'read-only' &&
       args.length > 0 &&
       !args[0]!.startsWith('-') &&
-      checkOptions?.cwd &&
-      gitConfigMayExecutePrograms(checkOptions.cwd)
+      (checkOptions?.unknownDir ||
+        (checkOptions?.cwd && gitConfigMayExecutePrograms(checkOptions.cwd)))
     ) {
       result = 'unknown';
     }
@@ -1114,11 +1115,73 @@ function childrenSafety(
   );
 }
 
+/**
+ * Statements in a `list` (`&&`, `||`, `;`) run sequentially, and `cd` /
+ * `pushd` change the directory later segments execute in. Track the
+ * directory so the git-config probe is applied to the repository each git
+ * segment actually reaches (#8575). Nested lists are flattened so cd state
+ * propagates across the whole chain (tree-sitter nests `a && b && c`).
+ */
+function evaluateListSafety(
+  node: SyntaxNode,
+  checkOptions?: ShellReadOnlyCheckOptions,
+): ShellCommandSafety {
+  let context = checkOptions;
+  let result: ShellCommandSafety = 'read-only';
+
+  const visit = (child: SyntaxNode): void => {
+    if (child.type === 'list') {
+      for (const nested of child.namedChildren) visit(nested);
+      return;
+    }
+    if (child.type === 'command') {
+      const name = getCommandName(child);
+      if (name === 'cd' || name === 'pushd') {
+        context = resolveCdContext(child, context);
+      } else if (name === 'popd') {
+        context = { ...context, cwd: undefined, unknownDir: true };
+      }
+    }
+    result = mergeSafety(result, evaluateStatementSafety(child, context));
+  };
+
+  for (const child of node.namedChildren) visit(child);
+  return result;
+}
+
+function resolveCdContext(
+  commandNode: SyntaxNode,
+  context?: ShellReadOnlyCheckOptions,
+): ShellReadOnlyCheckOptions | undefined {
+  const argNodes = getArgumentNodes(commandNode);
+  const target = argNodes[0] ? stripOuterQuotes(argNodes[0]!.text) : undefined;
+  if (
+    target === undefined ||
+    target === '-' || // previous directory (OLDPWD) — unknown
+    target.startsWith('~') || // home-relative — unknown without $HOME
+    argNodes.some((arg) => hasShellExpansion(arg))
+  ) {
+    return { ...context, cwd: undefined, unknownDir: true };
+  }
+  if (path.isAbsolute(target)) {
+    return { ...context, cwd: target, unknownDir: false };
+  }
+  if (!context?.cwd) {
+    return { ...context, cwd: undefined, unknownDir: true };
+  }
+  return {
+    ...context,
+    cwd: path.resolve(context.cwd, target),
+    unknownDir: false,
+  };
+}
+
 function evaluateStatementSafety(
   node: SyntaxNode,
   checkOptions?: ShellReadOnlyCheckOptions,
 ): ShellCommandSafety {
   if (node.type === 'command') return evaluateCommandSafety(node, checkOptions);
+  if (node.type === 'list') return evaluateListSafety(node, checkOptions);
   if (CHILD_STATEMENT.test(node.type))
     return childrenSafety(node, 'read-only', checkOptions);
   if (node.type === 'redirected_statement')
