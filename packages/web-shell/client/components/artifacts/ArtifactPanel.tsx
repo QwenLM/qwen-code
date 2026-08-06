@@ -24,6 +24,8 @@ import {
   SquareTerminalIcon,
 } from 'lucide-react';
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -83,7 +85,14 @@ import {
   MonitorTaskDetail,
   ShellTaskDetail,
 } from '../messages/TasksStatusMessage';
-import { TerminalPanel } from '../terminal/TerminalPanel';
+
+// Lazy-load the terminal panel so importing ArtifactPanel does not eagerly
+// pull @xterm into the module graph (it breaks non-jsdom test environments).
+const TerminalPanel = lazy(() =>
+  import('../terminal/TerminalPanel').then((module) => ({
+    default: module.TerminalPanel,
+  })),
+);
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -655,11 +664,15 @@ export function ArtifactPanel({
               : {})}
           />
         ) : activeTab.kind === 'terminal' ? (
-          <TerminalPanel
-            key={activeTab.id}
-            taskId={activeTab.task.id}
-            {...(activeTab.sessionId ? { sessionId: activeTab.sessionId } : {})}
-          />
+          <Suspense fallback={null}>
+            <TerminalPanel
+              key={activeTab.id}
+              taskId={activeTab.task.id}
+              {...(activeTab.sessionId
+                ? { sessionId: activeTab.sessionId }
+                : {})}
+            />
+          </Suspense>
         ) : activeTab.kind === 'side_task' ? (
           <SideTaskPanel
             key={activeTab.id}

@@ -208,6 +208,7 @@ export default {
   'toolDisplayName.SendMessage': '傳送訊息',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
+  'toolDisplayName.Tmux': '終端',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
   'toolDisplayName.ToolSearch': '工具搜尋',
   'toolDisplayName.EnterWorktree': '進入 Worktree',
