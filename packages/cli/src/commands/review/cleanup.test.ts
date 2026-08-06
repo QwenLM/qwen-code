@@ -170,8 +170,8 @@ describe('runCleanup', () => {
       const deadPid2 = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
       const orphan = `qwen-review-capture-${deadPid}-aaaa`;
       // Listed AFTER the wedged orphan: an unreapable entry must not stop the
-      // sweep (a continue→break mutant leaves this one alive for the holder's
-      // full 2h with no stderr trail).
+      // sweep (a continue→break mutant leaves this one alive for the
+      // holder's full bounded window — up to three hours — with no stderr trail).
       const orphan2 = `qwen-review-capture-${deadPid2}-cccc`;
       const live = `qwen-review-capture-${process.pid}-bbbb`;
 
@@ -184,7 +184,7 @@ describe('runCleanup', () => {
           // socket), leaving every orphan after it alive.
           // Live socket BEFORE the orphans: an `if (alive) continue` →
           // `break` mutant would stop at the first live socket and leave
-          // every orphan after it holding its unbounded pane hold.
+          // every orphan after it holding its bounded pane hold.
           p === dir ? ['some-other-socket', live, orphan, orphan2] : [],
         );
         mocks.execFileSync.mockReturnValue(Buffer.from(''));
@@ -256,7 +256,7 @@ describe('runCleanup', () => {
           expect.anything(),
         );
         // The sweep REACHED the orphan listed after the wedged one — a
-        // continue→break mutant left it alive for the unbounded holder, unnoted.
+        // continue→break mutant left it alive for the holder's bounded window, unnoted.
         expect(mocks.execFileSync).toHaveBeenCalledWith(
           'tmux',
           ['-L', orphan2, 'kill-server'],
@@ -306,45 +306,45 @@ describe('runCleanup', () => {
       });
 
       it('falls back to /tmp when TMUX_TMPDIR is unset — the common host', () => {
-      // All other fixtures set TMUX_TMPDIR; the fallback branch governs
-      // standard CI lanes and dev machines, and a wrong-literal mutant
-      // scanned the wrong directory and returned clean forever.
-      delete process.env['TMUX_TMPDIR'];
-      const tmpDir = `/tmp/tmux-${String(uid)}`;
-      mocks.existsSync.mockImplementation((p: string) => p === tmpDir);
-      mocks.readdirSync.mockImplementation((p: string) =>
-        p === tmpDir ? [orphan] : [],
-      );
-      runCleanup('local');
-      expect(mocks.readdirSync).toHaveBeenCalledWith(tmpDir);
-      expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
-        `Reaped orphaned capture server: ${orphan}`,
-      );
-    });
-
-    it('reaps on the SECOND kill attempt — the sweep retry is real', () => {
-      let calls = 0;
-      mocks.execFileSync.mockImplementation((bin: string) => {
-        if (bin === 'tmux') {
-          calls++;
-          if (calls === 1) {
-            throw Object.assign(new Error('transient'), {
-              stderr: 'transient client failure',
-            });
-          }
-        }
-        return Buffer.from('');
+        // All other fixtures set TMUX_TMPDIR; the fallback branch governs
+        // standard CI lanes and dev machines, and a wrong-literal mutant
+        // scanned the wrong directory and returned clean forever.
+        delete process.env['TMUX_TMPDIR'];
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation((p: string) => p === tmpDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === tmpDir ? [orphan] : [],
+        );
+        runCleanup('local');
+        expect(mocks.readdirSync).toHaveBeenCalledWith(tmpDir);
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
       });
-      runCleanup('local');
-      expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
-        `Reaped orphaned capture server: ${orphan}`,
-      );
-      expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
-        expect.stringContaining('could not reap'),
-      );
-    });
 
-    it('an ONLY-unreapable-orphan run is a failure, not "Nothing to clean"', () => {
+      it('reaps on the SECOND kill attempt — the sweep retry is real', () => {
+        let calls = 0;
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === 'tmux') {
+            calls++;
+            if (calls === 1) {
+              throw Object.assign(new Error('transient'), {
+                stderr: 'transient client failure',
+              });
+            }
+          }
+          return Buffer.from('');
+        });
+        runCleanup('local');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('could not reap'),
+        );
+      });
+
+      it('reports an ONLY-unreapable-orphan sweep without "Nothing to clean" — and without holding the lease', () => {
         // With a second reapable orphan in the fixture, removedAny masks
         // the sweep.failed propagation — deleting it shipped green. Here
         // the sole capture socket is unreapable: stdout must not claim
@@ -368,6 +368,14 @@ describe('runCleanup', () => {
         );
         expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
           expect.stringContaining('Nothing to clean'),
+        );
+        // The sweep is host-wide, the lease is target-scoped: an
+        // unreapable orphan from ANY capture must not wedge THIS target's
+        // worktree lease (measured complaint: an unrelated review's orphan
+        // blocked the lease release with nothing connecting the two).
+        expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+          process.cwd(),
+          'local',
         );
       });
     },

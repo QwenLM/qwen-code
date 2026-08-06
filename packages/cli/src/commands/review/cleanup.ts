@@ -375,11 +375,15 @@ function auditPrWrites(target: string, prNumber: string): void {
 /**
  * Reap the capture servers capture-tui's own reap could not reach: a
  * SIGKILL'd or OOM'd harness skips finally and the signal net alike, and
- * the private server then lives until its pane holder's sleep expires (up
- * to for good — the hold loop is unbounded and the config-free server has nothing else to destroy it). The launcher's pid rides in the socket name for exactly
+ * the private server then lives until its pane holder's bounded hold loop
+ * expires (up to three hours) — the config-free server has nothing else to
+ * destroy it, so this sweep (or a hand kill-server) is the only reaper in
+ * that window. The launcher's pid rides in the socket name for exactly
  * this — a socket whose pid is dead is an orphan. A reap that fails is
- * noted on stderr AND surfaced as `failed`, so runCleanup neither claims
- * "Nothing to clean" over a live orphan nor clears the worktree lease.
+ * noted on stderr and suppresses the "Nothing to clean" claim — but does
+ * NOT hold the target-scoped worktree lease: the sweep is host-wide, and
+ * an unrelated review's orphan would otherwise wedge this review's lease
+ * with nothing connecting the two in the output.
  */
 function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   const uid = process.getuid?.();
@@ -433,7 +437,8 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
     // and an unlinked socket makes a live server unreachable forever — and
     // one retry before giving up: a transient client-spawn failure (EMFILE
     // after a long review's many spawns) is the named shape, and the
-    // identical second attempt reaps what otherwise lives out the unbounded holder.
+    // identical second attempt reaps what otherwise lives out the holder's
+    // bounded three-hour window.
     let serverDead = false;
     for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
       try {
@@ -581,15 +586,20 @@ export function runCleanup(target: string): void {
 
   // --- Orphaned capture servers (capture-tui) ---------------------------
   // Not target-scoped: any crashed capture on this host left them, and
-  // Step 9's sweep is the only deterministic pass that reliably runs.
+  // Step 9's sweep is the only deterministic pass that reliably runs. Its
+  // failure therefore must NOT gate the target-scoped lease below — an
+  // orphan from an UNRELATED review, a wedged server outlasting the belt,
+  // or a host where tmux vanished after the socket dir was created would
+  // otherwise wedge THIS review's worktree lease forever, with nothing in
+  // the output connecting the two. It still suppresses "Nothing to clean":
+  // stderr saying "could not reap" next to stdout's "nothing to clean" is
+  // the two streams contradicting each other, and stdout is the one a
+  // script reads.
+  let sweepFailed = false;
   {
-    // An unreapable orphan is a FAILURE, not a nothing: without threading it
-    // into failedAny, stderr says "could not reap" while stdout announces
-    // "Nothing to clean" — the two streams contradicting each other, and
-    // the stdout half is the one a script reads.
     const sweep = reapOrphanedCaptureServers();
     if (sweep.reaped) removedAny = true;
-    if (sweep.failed) failedAny = true;
+    sweepFailed = sweep.failed;
   }
 
   if (!failedAny) {
@@ -599,7 +609,7 @@ export function runCleanup(target: string): void {
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It
   // is only true when there was nothing there — not when there was and we could
   // not get rid of it.
-  if (!removedAny && !failedAny) {
+  if (!removedAny && !failedAny && !sweepFailed) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
   }
 }

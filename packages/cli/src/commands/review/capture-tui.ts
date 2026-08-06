@@ -40,6 +40,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -106,10 +107,7 @@ function probeOutput(bin: string, flag: string): ProbeResult {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (r.status === 0) return { status: 'ok', out: (r.stdout ?? '').trim() };
-  if (
-    r.error &&
-    (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
-  ) {
+  if (r.error && (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
     return { status: 'hung' };
   }
   return { status: 'absent' };
@@ -232,9 +230,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     process.exitCode = 3;
     try {
       writeStderrLine(`capture-tui: refused — ${reason}`);
-    // The reason rides on stdout too: the consumer is an agent that must
-    // tell an environment refusal from a caller mistake without scraping
-    // stderr, and `evidence: 'none'` names the ladder's bottom rung.
+      // The reason rides on stdout too: the consumer is an agent that must
+      // tell an environment refusal from a caller mistake without scraping
+      // stderr, and `evidence: 'none'` names the ladder's bottom rung.
       writeStdoutLine(
         JSON.stringify({ captured: false, evidence: 'none', reason }),
       );
@@ -270,26 +268,53 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // Clears FIRST — before even mkdir and before the directory-shaped
     // --out refusal below: under fd exhaustion (EMFILE, measured on macOS)
     // mkdirSync itself can throw, and EVERY nameable refusal must leave no
-    // stale evidence ("only an --out we cannot even name refuses without
-    // clearing"). unlink needs no descriptor, and recursive matches the
-    // later failure cleanups — an externally-created DIRECTORY at an
-    // artifact path made a plain rmSync throw EISDIR mid-clear (measured),
-    // aborting the clear with the stale evidence still there.
-    // Plain unlink first (no descriptor needed — survives EMFILE), the
-    // recursive form only as the EISDIR fallback for an externally-created
-    // DIRECTORY at an artifact path (recursive rm opens the dir, which
-    // needs a descriptor and would itself die under fd exhaustion).
+    // stale capture evidence ("only an --out we cannot even name refuses
+    // without clearing"). But clear ONLY what looks like a previous
+    // capture: the artifact names are not reserved, and a colliding --out
+    // must not force-delete an unrelated file on a run that later refuses
+    // (measured: --out package deleted package.json at the --cols 0
+    // refusal — the brief's template puts --out inside the plan dir). A
+    // manifest that parses with an evidence rung is the capture's own
+    // signature; .ans/.png/.json clear alongside it. The sentinel clears
+    // unconditionally: this tool alone writes it, and a stale one from a
+    // SIGKILL'd run would pass the ready gate before the new holder
+    // installs its trap.
     const clearArtifact = (path: string): void => {
+      // Plain unlink first (no descriptor needed — survives EMFILE), the
+      // recursive form only as the EISDIR fallback for an externally-
+      // created DIRECTORY at an artifact path (measured: plain rmSync
+      // threw EISDIR mid-clear, aborting with the stale evidence still
+      // there; recursive rm opens the dir, which needs a descriptor and
+      // would itself die under fd exhaustion).
       try {
         rmSync(path, { force: true });
       } catch {
         rmSync(path, { recursive: true, force: true });
       }
     };
-    clearArtifact(ansPath);
-    clearArtifact(pngPath);
-    clearArtifact(manifestPath);
+    let shaped: boolean | undefined;
+    try {
+      const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        evidence?: unknown;
+      };
+      shaped =
+        m !== null &&
+        typeof m === 'object' &&
+        (m.evidence === 'png' || m.evidence === 'ans-only');
+    } catch (e) {
+      // No descriptor to decide with (EMFILE/ENFILE): fall back to the
+      // unconditional clear rather than strand stale evidence — the unlink
+      // above needs no descriptor, and a process that cannot read is
+      // refusing anyway.
+      const code = (e as NodeJS.ErrnoException).code;
+      shaped = code === 'EMFILE' || code === 'ENFILE' ? undefined : false;
+    }
     clearArtifact(holderReadyPath);
+    if (shaped !== false) {
+      clearArtifact(ansPath);
+      clearArtifact(pngPath);
+      clearArtifact(manifestPath);
+    }
     mkdirSync(dirname(outBase), { recursive: true });
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
@@ -509,16 +534,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   let serverStarted = false;
   let reaped = false;
   const reap = (): void => {
-    // A start that threw never created a server: killing would fail twice
-    // and the warning would send an operator hunting a socket that was
-    // never created — on the one refusal path most likely on a broken host.
+    // serverStarted is set BEFORE the start call: the call forks the
+    // server before it returns, so a start that threw or was belt-cut can
+    // still have a live server behind it — skipping the reap on that path
+    // orphaned server, session and holder (measured on loaded runners).
+    // kill-server against a server that never came up answers "no server
+    // running" — the goal state below — so the attempt stays warning-free.
     if (reaped || !serverStarted) return;
     reaped = true;
     // Unlink the socket ONLY when the server is known dead: kill can throw
     // with the server alive (the tmux CLIENT failing to spawn — EMFILE, a
     // wedged server outlasting the 15s timeout), and unlinking then makes
     // the live server unreachable forever — nothing addressable by -L can
-    // ever kill it again, while it holds the pane holder for two hours.
+    // ever kill it again, while it holds the pane holder (the bounded
+    // hold loop runs up to three hours).
     // One retry before giving up: a transient client-spawn failure is the
     // named shape, and a second attempt reaps it (measured).
     let serverDead = false;
@@ -535,7 +564,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
     if (!serverDead) {
       // A presumed-alive private server is never a silent outcome: the
-      // holder keeps it up for two hours, and the briefs encourage many
+      // holder keeps it up for up to three hours, and the briefs encourage many
       // captures per review — orphans would accumulate invisibly.
       writeStderrLine(
         `capture-tui: WARNING — kill-server failed twice; the private tmux ` +
@@ -546,12 +575,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // tmux does not always unlink the socket of a killed server; a review
     // that captures often would litter the socket dir with dead sockets.
     // tmux resolves that dir from TMUX_TMPDIR, falling back to /tmp — it
-    // does NOT consult TMPDIR, so neither do we.
+    // does NOT consult TMPDIR, so neither do we. BOTH candidate bases,
+    // like the orphan sweep: tmux takes the first USABLE base, so a stale
+    // TMUX_TMPDIR pointing at an unusable path puts the socket under /tmp
+    // while a single-base unlink misses it.
     try {
       const uid = process.getuid?.();
       if (uid !== undefined) {
-        const base = process.env['TMUX_TMPDIR']?.trim() || '/tmp';
-        rmSync(join(base, `tmux-${uid}`, server), { force: true });
+        const envBase = process.env['TMUX_TMPDIR']?.trim();
+        for (const base of new Set([envBase || '/tmp', '/tmp'])) {
+          rmSync(join(base, `tmux-${uid}`, server), { force: true });
+        }
       }
     } catch {
       // Litter is cosmetic; never let cleanup mask the capture's own result.
@@ -587,8 +621,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   let matchOverruns = 0;
   let captureFailed = false;
   try {
-    tmux(plan.start);
+    // BEFORE the call: plan.start forks the server in the same client
+    // invocation that creates the session, so a start cut by the control
+    // belt throws with the server ALREADY UP — exactly the window an
+    // after-the-call flag left unreaped (measured orphan shape on loaded
+    // runners). kill-server against a server that never came up answers
+    // the goal state, so the early flag adds no false warnings.
     serverStarted = true;
+    tmux(plan.start);
     // Before ANY key can be sent, wait for the holder's ready sentinel: the
     // pty's INTR fires the instant tmux writes 0x03 — a C-c racing the
     // holder's own `trap : INT` line killed pane, session and server

@@ -185,7 +185,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       mkdirSync(binDir, { recursive: true });
       writeFileSync(
         join(binDir, 'tmux'),
-        '#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho "fake tmux: refusing" >&2\nexit 1\n',
+        '#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho "fake tmux: refusing" >&2\nexit 1\n',
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -297,6 +297,44 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(stderr).not.toContain('mid-capture');
     },
   );
+
+  it('leaves UNRELATED files at the artifact paths alone on refusal', async () => {
+    // The artifact names are not reserved: a colliding --out must not
+    // force-delete unrelated files on a run that refuses (measured shape:
+    // --out package → the --cols 0 refusal deleted package.json). The
+    // clear keys on the manifest's evidence rung — a JSON that is not a
+    // capture manifest leaves its sibling files untouched too.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-unrelated-'));
+    try {
+      writeFileSync(
+        join(dir, 'cap.json'),
+        '{"name":"not-a-manifest","version":"1.0.0"}',
+      );
+      writeFileSync(join(dir, 'cap.ans'), 'user file');
+      writeFileSync(join(dir, 'cap.png'), 'user file');
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 0,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('--cols must');
+      expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+      expect(existsSync(join(dir, 'cap.png'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('clears stale artifacts even when a SHAPE guard refuses', async () => {
     // The measured R4-1 regression: an array-shaped --command refused at
@@ -530,7 +568,7 @@ describe('capture-tui without tmux (probe seam)', () => {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
         writeFileSync(join(dir, 'cap.png'), 'old run');
         writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
-      writeFileSync(join(dir, 'cap.holder-ready'), '');
+        writeFileSync(join(dir, 'cap.holder-ready'), '');
         const fdSource = join(dir, 'fd-source');
         writeFileSync(fdSource, 'x');
         for (;;) {
@@ -558,7 +596,7 @@ describe('capture-tui without tmux (probe seam)', () => {
         expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
         expect(existsSync(join(dir, 'cap.png'))).toBe(false);
         expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+        expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
       } finally {
         for (const fd of fds) {
           try {
@@ -800,7 +838,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      '#!/bin/sh\n[ "$1" = "-V" ] && exit 0\necho "fake tmux: refusing" >&2\nexit 1\n',
+      '#!/bin/sh\n[ "$1" = "-V" ] && exit 0\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho "fake tmux: refusing" >&2\nexit 1\n',
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];
@@ -818,14 +856,58 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // operands swapped the reason degrades to the failed argv line and the
     // real cause is lost to the consumer.
     expect(stderr).toContain('fake tmux: refusing');
-    // The start that threw created no server: reap() must stay silent — a
-    // kill-server warning here would send an operator hunting a socket that
+    // The start that threw created no server: reap() still attempts the
+    // kill (the flag precedes the call), and the goal-state answer keeps it
+    // silent — a warning here would send an operator hunting a socket that
     // was never created.
     expect(stderr).not.toContain('may still be running');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
   });
+
+  it('reaps a server whose START died on the belt — the flag precedes the call', async () => {
+    // plan.start forks the server in the SAME client call that creates the
+    // session: a start cut by the control belt throws with the server
+    // ALREADY UP. serverStarted must precede the call, or reap() skips
+    // exactly that window and orphans the server (measured shape on loaded
+    // runners). The fake's new-session hangs past the seam and its
+    // kill-server answers the goal state: the call log proves the kill was
+    // ATTEMPTED — with the flag after the call, reap() returns early and
+    // no kill-server ever reaches the log.
+    const binDir = join(dir, 'fakebin');
+    mkdirSync(binDir, { recursive: true });
+    const callLog = join(dir, 'tmux-calls');
+    writeFileSync(
+      join(binDir, 'tmux'),
+      `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "new-session" ] && sleep 5; done\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho ""\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realBelt = tmuxControl.timeoutMs;
+    tmuxControl.timeoutMs = 500;
+    const started = performance.now();
+    const realPath = process.env['PATH'];
+    process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+    let stderr = '';
+    try {
+      ({ stderr } = await withStdio(() =>
+        run({ until: undefined, settleMs: 0 }),
+      ));
+    } finally {
+      if (realPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = realPath;
+      tmuxControl.timeoutMs = realBelt;
+    }
+    const elapsed = performance.now() - started;
+    // The belt cut the hung start — the 5s sleep never ran out.
+    expect(elapsed).toBeGreaterThanOrEqual(450);
+    expect(elapsed).toBeLessThan(4_000);
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('tmux failed mid-capture');
+    // The reap ATTEMPTED the kill despite the start never returning.
+    expect(readFileSync(callLog, 'utf8')).toContain('kill-server');
+    expect(stderr).not.toContain('may still be running');
+  }, 15_000);
 
   it('refuses a FAILED .ans write after capture — contract, not stack trace', async () => {
     // The capture window legally runs up to an hour; the disk can fill (or
@@ -850,7 +932,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
   });
 
   it('refuses a FAILED manifest write and removes what it already wrote', async () => {
@@ -874,14 +956,14 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
   });
 
   it('WARNS when kill-server fails twice — never an unqualified success', async () => {
     // A fake tmux that succeeds at everything except kill-server models the
     // wedged-server shape: the reap retries once, then must say so — a
-    // presumed-alive private server holding a 2h pane is not a silent
-    // outcome.
+    // presumed-alive private server holding a pane for up to three hours
+    // is not a silent outcome.
     const binDir = join(dir, 'fakebin');
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
@@ -1062,7 +1144,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
     let stderr = '';
     try {
-      ({ stderr } = await withStdio(() => run({ until: undefined, settleMs: 0 })));
+      ({ stderr } = await withStdio(() =>
+        run({ until: undefined, settleMs: 0 }),
+      ));
     } finally {
       if (realPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = realPath;
@@ -1332,7 +1416,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBe(3);
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
     // The reason pins the path: validated up front, this reads "not a valid
     // regex"; thrown after tmux started, it would read "tmux failed
     // mid-capture: Invalid regular expression…" — a caller mistake blamed
@@ -2048,66 +2132,63 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     },
   );
 
-  it(
-    // No pgrep needed: sentinel + child disposition only.
-    'dies OF the signal even when it lands during the render window',
-    async () => {
-      // The tail after reap is synchronous (freeze render up to its belt);
-      // a queued signal must drain to the handler before the listeners go
-      // away — without the drain the process exited 0 with the success JSON
-      // as if the harness's kill never landed.
-      let captureTuiTs = join(
+  it(// No pgrep needed: sentinel + child disposition only.
+  'dies OF the signal even when it lands during the render window', async () => {
+    // The tail after reap is synchronous (freeze render up to its belt);
+    // a queued signal must drain to the handler before the listeners go
+    // away — without the drain the process exited 0 with the success JSON
+    // as if the harness's kill never landed.
+    let captureTuiTs = join(
+      process.cwd(),
+      'src/commands/review/capture-tui.ts',
+    );
+    if (!existsSync(captureTuiTs)) {
+      captureTuiTs = join(
         process.cwd(),
-        'src/commands/review/capture-tui.ts',
+        'packages/cli/src/commands/review/capture-tui.ts',
       );
-      if (!existsSync(captureTuiTs)) {
-        captureTuiTs = join(
-          process.cwd(),
-          'packages/cli/src/commands/review/capture-tui.ts',
-        );
-      }
-      const slowFreeze = join(dir, 'slow-freeze');
-      writeFileSync(slowFreeze, '#!/bin/sh\n/bin/sleep 4\nprintf x > "$5"\n', {
-        mode: 0o755,
-      });
-      const renderStarted = join(dir, 'render-started');
-      writeFileSync(
-        slowFreeze,
-        `#!/bin/sh\n: > "${renderStarted}"\n/bin/sleep 4\nprintf x > "$5"\n`,
-        { mode: 0o755 },
-      );
-      const driver = join(dir, 'driver-render.mts');
-      writeFileSync(
-        driver,
-        [
-          `const mod = await import(${JSON.stringify(captureTuiTs)});`,
-          `mod.probes.freeze = () => ({ status: 'ok', out: '' });`,
-          `mod.freezeRender.bin = ${JSON.stringify(slowFreeze)};`,
-          `await mod.runCaptureTui({ command: 'printf "RSIG\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'RSIG', keys: undefined, out: ${JSON.stringify(join(dir, 'rsig'))}, timeoutMs: 30_000 } as never);`,
-        ].join('\n'),
-      );
-      const { spawn } = await import('node:child_process');
-      const child = spawn(process.execPath, ['--import', 'tsx', driver], {
-        cwd: process.cwd(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let waited = 0;
-      while (!existsSync(renderStarted) && waited < 200) {
-        await sleep(50);
-        waited++;
-      }
-      expect(existsSync(renderStarted)).toBe(true);
-      child.kill('SIGTERM');
-      const disposition = await new Promise<{
-        code: number | null;
-        signal: string | null;
-      }>((resolve) =>
-        child.once('exit', (code, signal) => resolve({ code, signal })),
-      );
-      // Death BY the signal — not a swallowed exit 0 with success JSON.
-      expect(disposition.signal ?? `code:${disposition.code}`).toBe('SIGTERM');
-    },
-  );
+    }
+    const slowFreeze = join(dir, 'slow-freeze');
+    writeFileSync(slowFreeze, '#!/bin/sh\n/bin/sleep 4\nprintf x > "$5"\n', {
+      mode: 0o755,
+    });
+    const renderStarted = join(dir, 'render-started');
+    writeFileSync(
+      slowFreeze,
+      `#!/bin/sh\n: > "${renderStarted}"\n/bin/sleep 4\nprintf x > "$5"\n`,
+      { mode: 0o755 },
+    );
+    const driver = join(dir, 'driver-render.mts');
+    writeFileSync(
+      driver,
+      [
+        `const mod = await import(${JSON.stringify(captureTuiTs)});`,
+        `mod.probes.freeze = () => ({ status: 'ok', out: '' });`,
+        `mod.freezeRender.bin = ${JSON.stringify(slowFreeze)};`,
+        `await mod.runCaptureTui({ command: 'printf "RSIG\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'RSIG', keys: undefined, out: ${JSON.stringify(join(dir, 'rsig'))}, timeoutMs: 30_000 } as never);`,
+      ].join('\n'),
+    );
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['--import', 'tsx', driver], {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let waited = 0;
+    while (!existsSync(renderStarted) && waited < 200) {
+      await sleep(50);
+      waited++;
+    }
+    expect(existsSync(renderStarted)).toBe(true);
+    child.kill('SIGTERM');
+    const disposition = await new Promise<{
+      code: number | null;
+      signal: string | null;
+    }>((resolve) =>
+      child.once('exit', (code, signal) => resolve({ code, signal })),
+    );
+    // Death BY the signal — not a swallowed exit 0 with success JSON.
+    expect(disposition.signal ?? `code:${disposition.code}`).toBe('SIGTERM');
+  });
 
   it('renders through a stdin-IGNORING spawn — a pipe stdin breaks freeze', async () => {
     // The production spawn sets stdio ignore because freeze treats a

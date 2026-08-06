@@ -148,8 +148,10 @@ export function tmuxPlan(opts: {
   // destroys pane → window → session the moment the command exits, so a
   // one-shot command (render and exit — exactly what a verify fixture looks
   // like) would be uncapturable (measured: 0/10 without the holder).
-  // `kill-server` reaps the holder along with everything else. Two hours
-  // outlasts the longest legal capture (1h --until + settle + freeze).
+  // `kill-server` reaps the holder along with everything else; for an
+  // UNREAPED holder the bounded hold loop below is the only other reaper —
+  // three sleep periods cap the orphan at three hours, and a legal capture
+  // never outlives its reap.
   //
   // TWO nested shells, not one: in a single shell, a command ending in
   // `exit N` (or opening with `exec`, or running under its own `set -e`)
@@ -181,7 +183,10 @@ export function tmuxPlan(opts: {
   // not one sleep: after a one-shot command exits, a --keys C-c kills the
   // running sleep; the trap runs and a single-sleep script would simply
   // end — pane, session and server gone (measured 5/5). The loop re-enters
-  // sleep and the pane survives.
+  // sleep and the pane survives. The loop is BOUNDED — three sleep
+  // periods: each post-exit signal consumes one period while the pane
+  // survives the others, and an unreaped holder (SIGKILL'd harness, OOM)
+  // self-terminates once they run out instead of living indefinitely.
   // NO outer `sh -c` wrapper: the same invocation pins default-shell to
   // /bin/sh, so tmux's direct child — the pane's session leader — runs this
   // script ITSELF, and the trap lives at layer 0. Wrapped, the trap sat one
@@ -189,7 +194,7 @@ export function tmuxPlan(opts: {
   // semantics, but a --keys C-\ (SIGQUIT) killed the untrapped layer 0 —
   // pane, session, server gone (measured end-to-end). QUIT is trapped for
   // the same reason INT is; both reset to default in the children.
-  const held = `trap : INT QUIT\n: > '${esc(opts.readyFile)}'\n${inner}\nwhile :; do sleep 3600; done`;
+  const held = `trap : INT QUIT\n: > '${esc(opts.readyFile)}'\n${inner}\ni=0; while [ $i -lt 3 ]; do sleep 3600; i=$((i+1)); done`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the
