@@ -6,6 +6,8 @@
 
 import ansiEscapes from 'ansi-escapes';
 
+import { isWsl } from './terminal-env.js';
+
 const ESC = '\u001B[';
 const ERASE_LINE = `${ESC}2K`;
 const CURSOR_UP_ONE = `${ESC}1A`;
@@ -139,10 +141,7 @@ export function installTerminalRedrawOptimizer(
   // user explicitly force-enables it. WT_SESSION is deliberately NOT included:
   // it is set on the Windows side and is not propagated into WSL shells
   // without WSLENV, so it can never be the variable that fires for #7634.
-  if (
-    env['QWEN_CODE_LEGACY_ERASE_LINES'] !== '0' &&
-    (env['WSL_DISTRO_NAME'] || env['WSL_INTEROP'])
-  ) {
+  if (env['QWEN_CODE_LEGACY_ERASE_LINES'] !== '0' && isWsl(env)) {
     return () => {};
   }
 

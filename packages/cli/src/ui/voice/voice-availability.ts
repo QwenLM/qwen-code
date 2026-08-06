@@ -7,6 +7,7 @@
 import { existsSync } from 'node:fs';
 import process from 'node:process';
 import { t } from '../../i18n/index.js';
+import { isWsl } from '../utils/terminal-env.js';
 
 // Pre-flight environment check so users get a clear message at /voice-enable
 // time, instead of a cryptic recorder failure when no microphone can work
@@ -23,10 +24,6 @@ const SUPPORTED_PLATFORMS: readonly NodeJS.Platform[] = [
   'linux',
   'win32',
 ];
-
-function isWsl(env: NodeJS.ProcessEnv): boolean {
-  return Boolean(env['WSL_DISTRO_NAME'] || env['WSL_INTEROP']);
-}
 
 /**
  * Returns a human-readable reason if voice dictation cannot work in this
