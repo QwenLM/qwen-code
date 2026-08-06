@@ -293,13 +293,23 @@ describe('GlobTool', () => {
     });
 
     it('should allow path outside workspace (external path support)', async () => {
-      const params: GlobToolParams = { pattern: '*.txt', path: '/tmp' };
-      const invocation = globTool.build(params);
-      // External path is now allowed - it should not return a workspace error
-      const result = await invocation.execute(abortSignal);
-      expect(result.returnDisplay).not.toContain(
-        'Path is not within workspace',
+      // Shared /tmp made this walk time out on loaded runners — keep this
+      // dir dedicated and empty.
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-external-'),
       );
+      try {
+        const params: GlobToolParams = { pattern: '*.txt', path: outside };
+        const invocation = globTool.build(params);
+        // External path is now allowed - it should not return a workspace error
+        const result = await invocation.execute(abortSignal);
+        expect(result.error).toBeUndefined();
+        expect(result.returnDisplay).not.toContain(
+          'Path is not within workspace',
+        );
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
     });
 
     it('should return a GLOB_EXECUTION_ERROR on glob failure', async () => {
