@@ -1953,6 +1953,66 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     },
   );
 
+  it.skipIf(!hasPgrep)(
+    'dies OF the signal even when it lands during the render window',
+    async () => {
+      // The tail after reap is synchronous (freeze render up to its belt);
+      // a queued signal must drain to the handler before the listeners go
+      // away — without the drain the process exited 0 with the success JSON
+      // as if the harness's kill never landed.
+      let captureTuiTs = join(
+        process.cwd(),
+        'src/commands/review/capture-tui.ts',
+      );
+      if (!existsSync(captureTuiTs)) {
+        captureTuiTs = join(
+          process.cwd(),
+          'packages/cli/src/commands/review/capture-tui.ts',
+        );
+      }
+      const slowFreeze = join(dir, 'slow-freeze');
+      writeFileSync(slowFreeze, '#!/bin/sh\n/bin/sleep 4\nprintf x > "$5"\n', {
+        mode: 0o755,
+      });
+      const renderStarted = join(dir, 'render-started');
+      writeFileSync(
+        slowFreeze,
+        `#!/bin/sh\n: > "${renderStarted}"\n/bin/sleep 4\nprintf x > "$5"\n`,
+        { mode: 0o755 },
+      );
+      const driver = join(dir, 'driver-render.mts');
+      writeFileSync(
+        driver,
+        [
+          `const mod = await import(${JSON.stringify(captureTuiTs)});`,
+          `mod.probes.freeze = () => ({ status: 'ok', out: '' });`,
+          `mod.freezeRender.bin = ${JSON.stringify(slowFreeze)};`,
+          `await mod.runCaptureTui({ command: 'printf "RSIG\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'RSIG', keys: undefined, out: ${JSON.stringify(join(dir, 'rsig'))}, timeoutMs: 30_000 } as never);`,
+        ].join('\n'),
+      );
+      const { spawn } = await import('node:child_process');
+      const child = spawn(process.execPath, ['--import', 'tsx', driver], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let waited = 0;
+      while (!existsSync(renderStarted) && waited < 200) {
+        await sleep(50);
+        waited++;
+      }
+      expect(existsSync(renderStarted)).toBe(true);
+      child.kill('SIGTERM');
+      const disposition = await new Promise<{
+        code: number | null;
+        signal: string | null;
+      }>((resolve) =>
+        child.once('exit', (code, signal) => resolve({ code, signal })),
+      );
+      // Death BY the signal — not a swallowed exit 0 with success JSON.
+      expect(disposition.signal ?? `code:${disposition.code}`).toBe('SIGTERM');
+    },
+  );
+
   it('renders through a stdin-IGNORING spawn — a pipe stdin breaks freeze', async () => {
     // The production spawn sets stdio ignore because freeze treats a
     // non-/dev/null stdin as "the input is stdin" (measured: EOF'd pipe →
