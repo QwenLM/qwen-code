@@ -373,6 +373,87 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(2);
   });
 
+  it('stops continuations when completion evidence exceeds the catalog', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [
+      verifierEvidenceRecords(permit, cursorId)[0]!,
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...verifierEvidenceRecords(
+          permit,
+          cursorId,
+          `assistant-evidence-${index}`,
+        )[1]!,
+        message: {
+          role: 'model',
+          parts: [{ text: `Delivered result ${index}` }],
+        },
+      })),
+    ];
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['assistant-evidence-100'],
+    });
+    const causes: Array<GoalStateCause | undefined> = [];
+    runtime.subscribe((_snapshot, cause) => causes.push(cause));
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        lastReason: expect.stringContaining('bounded evidence catalog'),
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'usage_limited',
+    ]);
+    expect(causes).toEqual(['turn_finished', 'usage_limited']);
+    expect(host.started).toHaveLength(1);
+
+    await expect(
+      runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      }),
+    ).rejects.toThrow('edit or replace');
+    expect(host.started).toHaveLength(1);
+
+    const edited = await runtime.dispatch({
+      action: 'edit',
+      objective: 'deliver result',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+    });
+    expect(edited.snapshot.goal).toMatchObject({
+      status: 'usage_limited',
+      revision: 2,
+      lastReason: undefined,
+    });
+    expect(edited.snapshot.goal?.evidenceCursor.recordId).not.toBe(cursorId);
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: permit.goalId,
+      expectedRevision: 2,
+    });
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(host.started).toHaveLength(2);
+  });
+
   it.each([
     ['flush', new Error('flush failed')],
     ['read', new Error('read failed')],

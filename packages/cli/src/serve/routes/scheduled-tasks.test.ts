@@ -1795,6 +1795,7 @@ interface QualifiedRuntime {
   workspaceCwd: string;
   sessionRuntimeBaseDir: string;
   trusted: boolean;
+  provenance?: 'existing' | 'live-conversation';
   bridge: StubBridge;
 }
 
@@ -1994,5 +1995,20 @@ describe('workspace-qualified scheduled-tasks routes', () => {
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('untrusted_workspace');
     expect(h.untrusted.bridge.spawned).toHaveLength(0);
+  });
+
+  it('rejects generic task creation in the Conversations workspace', async () => {
+    h.secondary.provenance = 'live-conversation';
+
+    const res = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'must not create a root session' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('live_session_creation_reserved');
+    expect(h.secondary.bridge.spawned).toHaveLength(0);
+    await expect(
+      fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
+    ).rejects.toThrow();
   });
 });

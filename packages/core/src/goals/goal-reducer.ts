@@ -5,6 +5,7 @@
  */
 
 import {
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
   type GoalControlRequest,
   type GoalRecord,
@@ -119,6 +120,15 @@ export function reduceGoalControl(
   if (current.status === 'active') {
     throw new GoalInvalidTransitionError(
       'An active Goal cannot be resumed',
+      snapshotOf(current),
+    );
+  }
+  if (
+    current.status === 'usage_limited' &&
+    current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON
+  ) {
+    throw new GoalInvalidTransitionError(
+      'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
       snapshotOf(current),
     );
   }
