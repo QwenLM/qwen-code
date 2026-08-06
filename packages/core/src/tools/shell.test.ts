@@ -6191,6 +6191,14 @@ describe('ShellTool', () => {
           2,
         );
 
+        // node-pty can preserve exitCode 0 alongside a non-zero signal.
+        onSettle({ exitCode: 0, signal: 15, endTime: 2.5 });
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Terminated by signal 15',
+          2.5,
+        );
+
         // Spawn-side error → fail with err.message.
         onSettle({
           exitCode: null,
