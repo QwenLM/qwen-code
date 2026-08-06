@@ -60,6 +60,17 @@ describe('BoundedOutputRing', () => {
     expect(ring.toString()).not.toContain('\uFFFD');
     expect(ring.retainedBytes).toBeLessThanOrEqual(5);
   });
+
+  it('does not retain partial UTF-8 characters across chunks', () => {
+    const ring = new BoundedOutputRing(4);
+
+    ring.append(Buffer.from([0x41, 0xe2, 0x82]));
+    ring.append(Buffer.from([0xac, 0x42, 0x43]));
+
+    expect(ring.toString()).toBe('BC');
+    expect(ring.toString()).not.toContain('\uFFFD');
+    expect(ring.retainedBytes).toBeLessThanOrEqual(4);
+  });
 });
 
 describe('PTY availability', () => {
@@ -122,7 +133,7 @@ describe('launchAgentViewPtyHost', () => {
         file: 'fake-worker',
         args: ['--script', 'ready'],
         options: expect.objectContaining({
-          cwd: '/repo',
+          cwd: '/repo/work',
           cols: 100,
           rows: 30,
           handleFlowControl: true,
@@ -154,15 +165,49 @@ describe('launchAgentViewPtyHost', () => {
     const data: string[] = [];
     const disposable = handle.onData((chunk) => data.push(chunk));
 
-    handle.write(Buffer.from('hello'));
+    handle.write(Buffer.from('hello '));
+    handle.write(Buffer.from([0xe4, 0xbd]));
+    handle.write(Buffer.from([0xa0, 0xe5, 0xa5, 0xbd]));
     handle.resize({ columns: 120, rows: 40 });
     pty.process.emitData('output');
     disposable?.dispose();
     pty.process.emitData('ignored');
 
-    expect(pty.process.input).toBe('hello');
+    expect(pty.process.input).toBe('hello 你好');
     expect(pty.process.resizes).toEqual([{ columns: 120, rows: 40 }]);
     expect(data).toEqual(['output']);
+  });
+
+  it('passes worker env while stripping host-only secrets', async () => {
+    const pty = createFakePty();
+    const previousToken = process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'];
+    const previousTerm = process.env['TERM'];
+    process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'] = 'host-secret';
+    process.env['TERM'] = 'ambient-term';
+    try {
+      await launchAgentViewPtyHost(createLaunch(), { pty });
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'];
+      } else {
+        process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'] = previousToken;
+      }
+      if (previousTerm === undefined) {
+        delete process.env['TERM'];
+      } else {
+        process.env['TERM'] = previousTerm;
+      }
+    }
+
+    expect(pty.spawnCalls[0]?.options.env).toEqual(
+      expect.objectContaining({
+        QWEN_AGENT_VIEW_WORKER: '1',
+        TERM: 'xterm-256color',
+      }),
+    );
+    expect(
+      pty.spawnCalls[0]?.options.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'],
+    ).toBeUndefined();
   });
 
   it('kills the PTY process when disposed', async () => {
@@ -196,7 +241,7 @@ function createLaunch(): AgentViewLaunchFile {
     env: { QWEN_AGENT_VIEW_WORKER: '1' },
     entrypoint: 'qwen',
     projectCwd: '/repo',
-    activeCwd: '/repo',
+    activeCwd: '/repo/work',
     includeDirectories: [],
     terminal: {
       columns: 100,

@@ -258,6 +258,26 @@ describe('worker sideband env', () => {
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
   });
 
+  it('deduplicates worker state reports per session', async () => {
+    const firstEnv = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    const secondEnv = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-2',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-2',
+      activeCwd: '/repo',
+    });
+
+    await reportAgentViewWorkerState({ sessionState: 'working' }, firstEnv);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, secondEnv);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
   it('retries identical worker state reports after a send failure', async () => {
     const env = createAgentViewWorkerSidebandEnv({
       sessionId: 'session-1',
@@ -271,6 +291,32 @@ describe('worker sideband env', () => {
 
     await reportAgentViewWorkerState({ sessionState: 'working' }, env);
     await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not deduplicate concurrent state reports before send succeeds', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    let rejectFirst: (error: Error) => void = () => {};
+    mockCallAgentViewSupervisor
+      .mockImplementationOnce(
+        () =>
+          new Promise<unknown>((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValueOnce({ accepted: true });
+
+    const first = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    const second = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    rejectFirst(new Error('supervisor unavailable'));
+
+    await Promise.all([first, second]);
 
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
   });
