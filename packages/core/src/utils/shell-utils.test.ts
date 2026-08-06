@@ -1335,7 +1335,7 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
   });
 
   it.each(['echo $\\\n{PWD@P}', 'echo "$\\\n{PWD@P}"', 'cat <<< $\\\n{PWD@P}'])(
-    'detects @P expansion split across a line continuation: %j',
+    'detects risky parameter expansion split across a line continuation: %j',
     (command) => {
       expect(detectCommandSubstitution(command)).toBe(true);
     },
@@ -1350,6 +1350,26 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
   it('detects process substitution split across a line continuation', () => {
     expect(detectCommandSubstitution('diff <\\\n(ls)')).toBe(true);
     expect(detectCommandSubstitution('diff >\\\n(ls)')).toBe(true);
+  });
+
+  it('detects command substitution in a here-string', () => {
+    expect(detectCommandSubstitution('cat <<< $(ls)')).toBe(true);
+  });
+
+  it.each([
+    'echo "${!ref}"',
+    'OUT="${value@P}" bash -c \'echo ok\'',
+    ['cat <<EOF', '${!ref}', 'EOF'].join('\n'),
+  ])('detects risky parameter expansion: %j', (command) => {
+    expect(detectCommandSubstitution(command)).toBe(true);
+  });
+
+  it.each([
+    'echo "${arr[@]}"',
+    'echo "${EMAIL:-user@example.com}"',
+    'echo "${EMAIL:-user@P}"',
+  ])('allows safe parameter expansion: %j', (command) => {
+    expect(detectCommandSubstitution(command)).toBe(false);
   });
 
   it('does not flag an escaped dollar before the continuation', () => {
@@ -1382,6 +1402,7 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
     expect(detectCommandSubstitution('grep pattern\\\nfile')).toBe(false);
     expect(detectCommandSubstitution('echo a \\\n&& echo b')).toBe(false);
     expect(detectCommandSubstitution('echo $\\\nHOME')).toBe(false);
+    expect(detectCommandSubstitution('echo $\\\n{HOME}')).toBe(false);
   });
 
   it('does not let a post-continuation comment hide a later substitution', () => {

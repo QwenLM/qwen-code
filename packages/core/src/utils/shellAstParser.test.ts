@@ -406,9 +406,15 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await isShellCommandReadOnlyAST('echo "${var:-default}"')).toBe(
         true,
       );
-      expect(await isShellCommandReadOnlyAST('echo "${!var}"')).toBe(true);
       expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
       expect(await isShellCommandReadOnlyAST('echo "${#arr[@]}"')).toBe(true);
+    });
+
+    it('rejects indirect expansion that can evaluate an array subscript', async () => {
+      expect(await isShellCommandReadOnlyAST('echo "${!ref}"')).toBe(false);
+      expect(await classifyShellCommandSafety('echo "${!ref}"')).toBe(
+        'unknown',
+      );
     });
 
     it('allows complex pipeline of read-only commands', async () => {
@@ -1065,15 +1071,6 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     _setParserFailedForTesting();
     // Both implementations agree: ls is read-only
     expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
-  });
-
-  it('fails closed for @ transformations when the parser is unavailable', async () => {
-    _setParserFailedForTesting();
-    expect(await isShellCommandReadOnlyAST('echo "${two@P}"')).toBe(false);
-    expect(
-      await isShellCommandReadOnlyAST('echo "${two@\\\nP}"'),
-    ).toBe(false);
-    expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
   });
 
   it('maps parser unavailability to unknown in the classification API', async () => {

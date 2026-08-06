@@ -521,17 +521,6 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('asks for ${var@P} prompt expansion when the AST flags it (issue #8582)', async () => {
-      // The real AST downgrades `@`-transformed expansions to unknown
-      // (not read-only); simulate that verdict here.
-      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(false);
-      const invocation = createInvocation({
-        command: 'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
-      });
-
-      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
-    });
-
     it('allows read-only monitor commands by default', async () => {
       mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
       const invocation = createInvocation({

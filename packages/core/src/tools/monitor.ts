@@ -191,9 +191,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       return 'ask';
     }
 
-    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
-    // it falls through to 'ask' along with every other non-read-only
-    // command, so the user (or YOLO mode) can decide. The user-facing
+    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
+    // returns 'ask' above so the user (or YOLO mode) can decide. The user-facing
     // warning is surfaced by getConfirmationDetails below so the
     // confirmation prompt still flags the substitution clearly. This
     // mirrors the same reasoning applied to ShellToolInvocation and

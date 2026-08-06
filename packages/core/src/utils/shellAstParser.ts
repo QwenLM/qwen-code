@@ -1142,6 +1142,7 @@ export async function classifyShellCommandSafety(
   const classification = await classifyInternal(command).catch(
     (): ShellCommandSafety => 'unknown',
   );
+  // Preserve `write`: plan mode distinguishes it from `unknown`.
   return classification === 'read-only' && hasShellSubstitution(command)
     ? 'unknown'
     : classification;

