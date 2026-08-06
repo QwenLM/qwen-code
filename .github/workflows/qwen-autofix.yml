@@ -790,7 +790,7 @@ jobs:
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.
-          git gc --auto --prune=now --quiet 2>/dev/null || true
+          git -c gc.autoDetach=false gc --auto --prune=now --quiet 2>/dev/null || true
 
       # Self-hosted runners keep the workspace's .git across runs, so a
       # failed earlier attempt's local branch survives here: the agent's
@@ -3147,7 +3147,7 @@ jobs:
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.
-          git gc --auto --prune=now --quiet 2>/dev/null || true
+          git -c gc.autoDetach=false gc --auto --prune=now --quiet 2>/dev/null || true
 
       # Stage the schema gate script from the TRUSTED BASE checkout before
       # "Prepare branch and feedback" switches the working tree to the PR

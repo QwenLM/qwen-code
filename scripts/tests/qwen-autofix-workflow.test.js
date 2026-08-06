@@ -2241,8 +2241,11 @@ describe('qwen-autofix workflow', () => {
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
     // gracefully instead of 403ing at the report step.
-    expect(workflow).toContain(
-      'push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+    // Require the git -c form, not a bare `git push` (which a plain
+    // `push --no-verify …` match would still satisfy): the host-scoped
+    // credential prefix must immediately precede the push.
+    expect(workflow).toMatch(
+      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
     );
     expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
@@ -6565,8 +6568,10 @@ describe('qwen-autofix workflow', () => {
     // force flag; long options (--no-verify) start with -- and are exempt.
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* -[a-zA-Z]*f\b/);
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
-    expect(publishPrStep).toContain(
-      'push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"',
+    // Same anchor as the dry-run: the publish push must carry the
+    // host-scoped `git -c credential…` prefix, not a bare `git push`.
+    expect(publishPrStep).toMatch(
+      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
     );
     // Neither PAT push may expose the token — not persisted to .git/config
     // (a `git remote set-url`) and not in the process argv (a token-bearing
