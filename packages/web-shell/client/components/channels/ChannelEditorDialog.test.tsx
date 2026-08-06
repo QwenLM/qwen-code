@@ -43,6 +43,24 @@ const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ),
 };
 
+const GITHUB_LOCAL_GH: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+    },
+    {
+      key: 'useLocalGh',
+      label: 'Use Local GitHub CLI Authentication',
+      kind: 'boolean',
+    },
+  ],
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -254,6 +272,40 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('Configured allowlist');
     expect(document.body.textContent).toContain('configured-user');
+  });
+
+  it('saves the local GitHub CLI opt-in when the switch is toggled', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_LOCAL_GH, onSave });
+
+    const name = inputByLabel('Instance name');
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    expect(name).not.toBeNull();
+    expect(toggle).not.toBeNull();
+
+    await act(async () => {
+      setInputValue(name!, 'github-bot');
+      toggle!.click();
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('github-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        senderPolicy: 'pairing',
+      },
+      secrets: { token: { operation: 'clear' } },
+    });
   });
 
   it('does not show the allowlist alert when no users are configured', async () => {
