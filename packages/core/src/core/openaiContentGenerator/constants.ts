@@ -48,11 +48,15 @@ export const MAX_STREAM_GUARD_TIMEOUT_MS = 2_147_483_647;
 // resetting it while the message never completes (issue #8597: CI review runs
 // burned 2.5–4.5 h on such a stream and died by the outer kill). 15 minutes
 // gives even a slow, oversized single response ample room, and a false trip
-// is cheap: the error rides the transport-continuation recovery, which
-// resumes a healthy generation where the cap cut it. Note the cap bounds ONE
-// attempt — each replay/continuation the recovery earns gets a fresh stream
-// (TRANSPORT_STREAM_RETRY_CONFIG), so a pathological upstream's wall-clock
-// bound per request is a small multiple of this value, not this value alone.
+// is bounded and visible: a text-only generation cut by the cap resumes via
+// the transport-continuation recovery, while a turn that already streamed a
+// functionCall (the tool-heavy common case, where continuation is excluded
+// and replay needs no prior content) ends in a classified ETIMEDOUT the
+// caller sees and can retry — never hours of silence. Note the cap bounds
+// ONE attempt — each replay/continuation the recovery earns gets a fresh
+// stream (TRANSPORT_STREAM_RETRY_CONFIG), so a pathological upstream's
+// wall-clock bound per request is a small multiple of this value, not this
+// value alone.
 export const DEFAULT_STREAM_MAX_LIFETIME_MS = 900000;
 // Env override (deployment knob) for the stream lifetime cap — same
 // conventions as QWEN_STREAM_IDLE_TIMEOUT_MS: an explicit

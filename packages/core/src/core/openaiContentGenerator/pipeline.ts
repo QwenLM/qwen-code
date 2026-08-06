@@ -310,16 +310,28 @@ async function* withStreamGuards(
   }
   const it = source[Symbol.asyncIterator]();
   const streamStartedAt = Date.now();
-  const deadline = streamStartedAt + maxLifetimeMs;
+  // The lifetime cap is on ACCUMULATED UPSTREAM-WAIT — the wall-clock time
+  // this loop spends blocked in `await it.next()`. It is deliberately NOT
+  // end-to-end delivery time: an upstream that finished and buffered its
+  // chunks owes nothing, however slowly the consumer drains (a paused IDE
+  // client, a big TUI render), and a stream whose terminal `done` resolves
+  // at the boundary completes rather than becoming a retry. The cap only
+  // bites while the consumer is actually waiting on the model — which is
+  // exactly where #8597's drip-fed, never-completing stream spends its time.
+  // (`Date.now()` is used for consistency with the idle watchdog's
+  // setTimeout-based accounting; a monotonic `performance.now()` is not
+  // fake-able by the test suite's timers, so it is deferred, not dropped.)
+  let upstreamMs = 0;
   let chunksReceived = 0;
   try {
     while (true) {
-      // Consult the deadline before arming the race, not only when the timer
-      // wins it: a chunk that is already buffered resolves `it.next()` as a
-      // microtask, which beats `setTimeout(…, 0)` every time, so a source
-      // with pre-buffered chunks (or a slow consumer resuming long after the
-      // deadline passed at `yield`) would otherwise sail past the cap.
-      if (maxLifetimeMs > 0 && Date.now() >= deadline) {
+      const remainingMs =
+        maxLifetimeMs > 0
+          ? maxLifetimeMs - upstreamMs
+          : Number.POSITIVE_INFINITY;
+      // The upstream-wait budget is already spent; a further wait can only
+      // lose, so fail it here (the lifetime timer below normally wins first).
+      if (remainingMs <= 0) {
         // Same precedence as the timer below: a user cancellation wins over
         // the cap's retryable ETIMEDOUT.
         if (parentSignal?.aborted) {
@@ -335,14 +347,13 @@ async function* withStreamGuards(
         );
       }
       const nextPromise = it.next();
+      const awaitedAt = Date.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {
         // The caller wraps only when at least one guard is positive, so at
         // least one of these is finite.
         const idleIn = idleMs > 0 ? idleMs : Number.POSITIVE_INFINITY;
-        const lifetimeIn =
-          maxLifetimeMs > 0 ? deadline - Date.now() : Number.POSITIVE_INFINITY;
-        const wait = Math.min(idleIn, lifetimeIn);
+        const wait = Math.min(idleIn, remainingMs);
         timer = setTimeout(
           () => {
             if (parentSignal?.aborted) {
@@ -351,7 +362,7 @@ async function* withStreamGuards(
               const abortErr = new Error('Aborted');
               abortErr.name = 'AbortError';
               reject(abortErr);
-            } else if (lifetimeIn <= idleIn) {
+            } else if (remainingMs <= idleIn) {
               abortRequest();
               reject(
                 new StreamLifetimeExceededError(
@@ -387,6 +398,9 @@ async function* withStreamGuards(
         if (timer !== undefined) clearTimeout(timer);
       }
       if (result.done) return;
+      // Charge only the time this chunk took to arrive — the upstream
+      // latency — never the time the consumer spent after the previous yield.
+      upstreamMs += Date.now() - awaitedAt;
       chunksReceived += 1;
       yield result.value;
     }
@@ -796,6 +810,36 @@ export class ContentGenerationPipeline {
         throw redactProxyError(error);
       }
 
+      // Bypass handleError: it strips `code` from timeout errors, which would
+      // prevent classifyRetryError from recognizing retryable ETIMEDOUT. Both
+      // stream guards share that code and the same retry path (issue #8597).
+      // Hoisted above the thinking-tag check: a drip-fed gateway cutting the
+      // model mid-`<think>` would otherwise surface the guard's ETIMEDOUT as a
+      // PROTOCOL_TAG_LEAK and burn the tag-leak retry budget instead of the
+      // transport replay/continuation one the guard error is meant to ride.
+      if (
+        error instanceof StreamInactivityTimeoutError ||
+        error instanceof StreamLifetimeExceededError
+      ) {
+        const isLifetime = error instanceof StreamLifetimeExceededError;
+        debugLogger.warn(
+          isLifetime
+            ? 'OpenAI stream lifetime cap exceeded'
+            : 'OpenAI stream inactivity timeout',
+          {
+            chunksReceived: error.chunksReceived,
+            streamLifetimeMs: error.streamLifetimeMs,
+            ...(isLifetime
+              ? {
+                  maxLifetimeMs: (error as StreamLifetimeExceededError)
+                    .maxLifetimeMs,
+                }
+              : { idleMs: (error as StreamInactivityTimeoutError).idleMs }),
+          },
+        );
+        throw redactProxyError(error);
+      }
+
       if (
         context.pendingThinkingTagCandidate?.closingTagName &&
         request.config?.abortSignal?.aborted !== true
@@ -806,32 +850,6 @@ export class ContentGenerationPipeline {
           'Model response leaked thinking tags.',
           'PROTOCOL_TAG_LEAK',
         );
-      }
-
-      // Bypass handleError: it strips `code` from timeout errors, which would
-      // prevent classifyRetryError from recognizing retryable ETIMEDOUT. Both
-      // stream guards share that code and the same retry path (issue #8597).
-      if (
-        error instanceof StreamInactivityTimeoutError ||
-        error instanceof StreamLifetimeExceededError
-      ) {
-        debugLogger.warn(
-          error instanceof StreamLifetimeExceededError
-            ? 'OpenAI stream lifetime cap exceeded'
-            : 'OpenAI stream inactivity timeout',
-          error instanceof StreamLifetimeExceededError
-            ? {
-                maxLifetimeMs: error.maxLifetimeMs,
-                chunksReceived: error.chunksReceived,
-                streamLifetimeMs: error.streamLifetimeMs,
-              }
-            : {
-                idleMs: error.idleMs,
-                chunksReceived: error.chunksReceived,
-                streamLifetimeMs: error.streamLifetimeMs,
-              },
-        );
-        throw redactProxyError(error);
       }
 
       // Use shared error handling logic

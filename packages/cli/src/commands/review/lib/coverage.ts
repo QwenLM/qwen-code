@@ -923,7 +923,7 @@ type Delivery =
  * command (`agent-prompt --findings …` is not something an author can run, and on
  * #7012 fourteen lines of exactly that register WERE the public review). `fix` is
  * the per-shape remediation, printed to stderr where the orchestrator reads — the
- * four shapes exist because the four fixes differ, and that precision belongs to
+ * shapes exist because the fixes differ, and that precision belongs to
  * the reader who relaunches agents, not the one who reads the verdict.
  */
 interface GapEntry {
@@ -1242,7 +1242,7 @@ export function verificationGaps(
   // (Step 4) still runs at medium, so its floor below is untouched.
   const balancedMedium = (plan as { effort?: unknown }).effort === 'medium';
 
-  // How a step's agents actually got their prompt. The floor needs the four shapes
+  // How a step's agents actually got their prompt. The floor needs the shapes
   // apart, not one boolean, because the fix for each is different — and a refusal
   // that names the wrong one is a refusal that gets argued with.
   //

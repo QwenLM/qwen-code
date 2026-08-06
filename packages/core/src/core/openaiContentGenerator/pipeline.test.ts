@@ -5925,12 +5925,14 @@ describe('ContentGenerationPipeline', () => {
     });
 
     it('disables both guards when both are 0 — no wrap, no cap, no idle abort', async () => {
-      // Pins BOTH the config-`0` lifetime disable and the wrap condition's
-      // false branch (`guarded = stream`): with neither guard positive the
-      // stream must not be wrapped at all. An always-wrap refactor arms a
-      // timer this deployment never asked for — on real Node
-      // `setTimeout(cb, Infinity)` clamps to ~1ms and aborts the stream
-      // almost immediately (TimeoutOverflowWarning).
+      // Pins the both-guards-off OUTCOME: with neither guard positive the
+      // stream passes through untouched and is never aborted — however far the
+      // fake clock runs past both defaults. That outcome is now doubly
+      // provided (the caller's `idleMs > 0 || maxLifetimeMs > 0` skip, plus the
+      // in-function both-off early return), so this test pins the behaviour,
+      // not which mechanism supplies it — an always-wrap refactor of the CALLER
+      // is caught by the function's early return, which is exactly why this
+      // stream does not die to `setTimeout(Infinity)` clamping to ~1ms.
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -5985,12 +5987,15 @@ describe('ContentGenerationPipeline', () => {
       await consume;
     });
 
-    it('caps a stream whose chunks are already buffered and never await I/O', async () => {
-      // The deadline is consulted at the top of the loop, not only enforced
-      // by the timer race: an already-buffered chunk resolves `it.next()` as
-      // a microtask, which beats `setTimeout(…, 0)` every time, so a
-      // race-only cap would deliver every buffered chunk however far past
-      // the deadline the wall clock sat.
+    it('does not cap a buffered, already-complete stream for a slow consumer — consumer time is not upstream wait', async () => {
+      // The lifetime cap charges only the time the loop is BLOCKED on
+      // `it.next()` (upstream latency), never the time the consumer spends
+      // after a yield. An upstream that already finished and buffered
+      // everything owes nothing, however slowly the consumer drains — so all
+      // ten pre-buffered chunks are delivered and the stream completes, even
+      // with the wall clock racing 2s per chunk past the 3s cap. (The prior
+      // shape — charging the deadline check at the top of the loop — cut this
+      // healthy stream at 2 chunks for the consumer's slowness.)
       const gated = gatedStream();
       for (let i = 0; i < 10; i++) gated.push(chunk('x')); // all pre-buffered
       gated.end();
@@ -6007,19 +6012,17 @@ describe('ContentGenerationPipeline', () => {
       const consume = (async () => {
         for await (const r of gen) {
           received.push(r);
-          // A slow consumer: the wall clock jumps 2s per chunk, so the
-          // deadline passes mid-stream while every next() stays a microtask.
+          // A slow consumer: the wall clock jumps 2s per chunk (20s total,
+          // far past the cap) while every next() stays a microtask — no
+          // upstream wait is charged, so nothing fires.
           await vi.advanceTimersByTimeAsync(2000);
         }
       })().catch((e: unknown) => {
         error = e;
       });
       await consume;
-      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
-      // Two chunks land before the resumed loop sees the deadline pass
-      // (t=0 and t=2000); the remaining eight must NOT be delivered.
-      expect(received).toHaveLength(2);
-      expect(gated.wasReturned()).toBe(true);
+      expect(error).toBeUndefined();
+      expect(received).toHaveLength(10); // all delivered, none discarded
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
   });

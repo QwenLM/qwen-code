@@ -220,9 +220,9 @@ Settings are organized into categories. Most settings should be placed within th
 Two guards bound a streaming response, each accepting `0` to disable. Neither is implemented by the Anthropic/Gemini generators, which leave the drip-fed shape below unbounded.
 
 - `QWEN_STREAM_IDLE_TIMEOUT_MS` (default `240000`) bounds inactivity _between_ streamed chunks: a stream that goes silent for this long is aborted as a retryable `ETIMEDOUT`.
-- `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`) caps the _total_ lifetime of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset.
+- `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`) caps the _total_ upstream-wait time of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset.
 
-Two upgrade notes: a deployment that previously set `QWEN_STREAM_IDLE_TIMEOUT_MS=0` to opt out of stream aborts now also needs `QWEN_STREAM_MAX_LIFETIME_MS=0` to keep that; and the 15-minute lifetime cap bounds even a stream whose idle timeout you raised above it (e.g. `QWEN_STREAM_IDLE_TIMEOUT_MS=1800000`) — raise the cap likewise, or set it to `0`, if you rely on a longer window.
+These are **environment variables (or, for embedders, `ContentGeneratorConfig.streamIdleTimeoutMs` / `streamMaxLifetimeMs`) only — there is no settings.json key**; writing `"streamMaxLifetimeMs"` into settings.json has no effect. Upgrade notes: a deployment that previously set `QWEN_STREAM_IDLE_TIMEOUT_MS=0` — or passed `streamIdleTimeoutMs: 0` in `ContentGeneratorConfig` — to opt out of stream aborts now also needs `QWEN_STREAM_MAX_LIFETIME_MS=0` (or `streamMaxLifetimeMs: 0`) to keep that; and the 15-minute lifetime cap bounds even a stream whose idle timeout you raised above it (e.g. `QWEN_STREAM_IDLE_TIMEOUT_MS=1800000`) — raise the cap likewise, or set it to `0`, if you rely on a longer window.
 
 **max_tokens (output token limit):**
 
