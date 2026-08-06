@@ -266,6 +266,49 @@ describe('useProviderUpdates', () => {
     );
   });
 
+  it('preserves custom models colliding with sibling endpoint defaults', async () => {
+    const baseUrl = 'https://api.kimi.com/coding/v1';
+    const customModel = {
+      id: 'kimi-k3',
+      baseUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+      name: '[Kimi Code] kimi-k3',
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'kimi'
+    ] = { baseUrl, version: 'old-version-hash' };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...buildProviderTemplate(kimiProvider, baseUrl),
+        customModel,
+      ],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    expect(reloaded[AuthType.USE_OPENAI]).toEqual(
+      expect.arrayContaining([expect.objectContaining(customModel)]),
+    );
+  });
+
   it('updates only the models for the installed endpoint', async () => {
     const baseUrl = 'https://api.moonshot.ai/v1';
     const apiTemplate = buildProviderTemplate(kimiProvider, baseUrl);
