@@ -618,6 +618,17 @@ describe('voice-transcriber', () => {
     '64:ff9b::a9fe:a9fe',
     '64:ff9b::a00:1',
     '64:ff9b::169.254.169.254',
+    // RFC 6052 section 2.2 layouts under the RFC 8215 local-use prefix.
+    '64:ff9b:1:a9fe:a9:fe00::',
+    '64:ff9b:1:c0a8:0:100::',
+    '64:ff9b:1:ac10:0:100::',
+    '64:ff9b:1:6440:0:100::',
+    '64:ff9b:1:7f01:2:300::',
+    '64:ff9b:1:a9:fe:a9fe::',
+    '64:ff9b:1:0:a9:fea9:fe00::',
+    // Ambiguous prefix lengths fail closed when any valid window is private.
+    '64:ff9b:1:80a:0:100::',
+    '64:ff9b:1:8:a:1::',
     '64:ff9b:1:a9:fea9:fe00::',
     '64:ff9b:1:a00:0:100::',
     '64:ff9b:1:a9fe:a9:fe01::',
@@ -645,7 +656,8 @@ describe('voice-transcriber', () => {
     '64:ff9b::808:808',
     '64:ff9b::8.8.8.8',
     '64:ff9b:1:808:8:800::',
-    '64:ff9b:1:8:8:800::',
+    '64:ff9b:1:8:8:808::',
+    '64:ff9b:1:0:8:808:800::',
   ])('allows public IPv4 embedded in NAT64 address %s', async (address) => {
     await expect(
       assertVoiceBaseUrlNetworkAllowed(

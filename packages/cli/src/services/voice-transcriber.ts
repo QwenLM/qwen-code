@@ -179,7 +179,7 @@ function readIpv4TranslatedIpv6(host: string): string | undefined {
 // embedding the guard cannot decode cannot prove its destination public.
 function readNat64Ipv6(
   host: string,
-): { embedded: string | undefined } | undefined {
+): { embedded: string[] | undefined } | undefined {
   let normalized = host;
   const lastColon = host.lastIndexOf(':');
   if (lastColon >= 0) {
@@ -223,45 +223,51 @@ function readNat64Ipv6(
       ? left
       : [...left, ...Array<number>(missing).fill(0), ...right];
   if (groups[0] !== 0x0064 || groups[1] !== 0xff9b) return undefined;
-  let high: number;
-  let low: number;
+  const embedded: Array<[number, number]> = [];
   if (groups[2] === 0x0001) {
-    // 64:ff9b:1::/48 (RFC 8215) embeds the IPv4 in one of RFC 6052's
-    // contiguous windows; the suffix after the window is zero on generation.
-    if (groups[5] === 0 && groups[6] === 0 && groups[7] === 0) {
-      // PL=48: IPv4 at bits 48-79.
-      high = groups[3]!;
-      low = groups[4]!;
-    } else if (
-      (groups[5]! & 0xff) === 0 &&
-      groups[6] === 0 &&
-      groups[7] === 0
-    ) {
-      // PL=56: IPv4 at bits 56-87.
-      high = ((groups[3]! & 0xff) << 8) | (groups[4]! >>> 8);
-      low = ((groups[4]! & 0xff) << 8) | (groups[5]! >>> 8);
-    } else if (groups[6] === 0 && groups[7] === 0) {
-      // PL=64: IPv4 at bits 64-95.
-      high = groups[4]!;
-      low = groups[5]!;
-    } else {
+    // RFC 6052 reserves bits 64-71 as the zero-valued "u" octet. The IPv4
+    // bits are split around it for prefix lengths shorter than 64.
+    if (groups[4]! >>> 8 !== 0) {
       return { embedded: undefined };
     }
+    if ((groups[5]! & 0xff) === 0 && groups[6] === 0 && groups[7] === 0) {
+      // PL=48: bits 48-63 + 72-87.
+      embedded.push([
+        groups[3]!,
+        ((groups[4]! & 0xff) << 8) | (groups[5]! >>> 8),
+      ]);
+    }
+    if (groups[6] === 0 && groups[7] === 0) {
+      // PL=56: bits 56-63 + 72-95.
+      embedded.push([
+        ((groups[3]! & 0xff) << 8) | (groups[4]! & 0xff),
+        groups[5]!,
+      ]);
+    }
+    if ((groups[6]! & 0xff) === 0 && groups[7] === 0) {
+      // PL=64: bits 72-103.
+      embedded.push([
+        ((groups[4]! & 0xff) << 8) | (groups[5]! >>> 8),
+        ((groups[5]! & 0xff) << 8) | (groups[6]! >>> 8),
+      ]);
+    }
+    if (embedded.length === 0) return { embedded: undefined };
   } else if (groups.slice(2, 6).every((group) => group === 0)) {
     // 64:ff9b::/96 well-known prefix: IPv4 at bits 96-127.
-    high = groups[6]!;
-    low = groups[7]!;
+    embedded.push([groups[6]!, groups[7]!]);
   } else {
     return { embedded: undefined };
   }
-  const value = (high << 16) | low;
   return {
-    embedded: [
-      (value >>> 24) & 0xff,
-      (value >>> 16) & 0xff,
-      (value >>> 8) & 0xff,
-      value & 0xff,
-    ].join('.'),
+    embedded: embedded.map(([high, low]) => {
+      const value = (high << 16) | low;
+      return [
+        (value >>> 24) & 0xff,
+        (value >>> 16) & 0xff,
+        (value >>> 8) & 0xff,
+        value & 0xff,
+      ].join('.');
+    }),
   };
 }
 
@@ -293,7 +299,10 @@ function isPrivateNetworkIp(hostname: string): boolean {
     // Fail closed for unrecognized translation-prefix layouts: DNS64
     // synthesizes these from whatever IPv4 the name serves, so an
     // undecoded embedding may hide a private target.
-    return nat64.embedded === undefined || isPrivateNetworkIp(nat64.embedded);
+    return (
+      nat64.embedded === undefined ||
+      nat64.embedded.some((embedded) => isPrivateNetworkIp(embedded))
+    );
   }
   if (host.startsWith('::ffff:')) {
     return true;
