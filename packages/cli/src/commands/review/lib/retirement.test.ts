@@ -807,6 +807,41 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a missing findings file is not cross-contaminated between chunks of a round', () => {
+    // Every chunk of a round points at the SAME (chunk-free) findings file.
+    // When it is missing, each record must fall back to its OWN prompt as the
+    // echo-guard corpus — not to a sibling chunk's prompt cached under the
+    // shared pointer. Here chunk 13's prompt carries a `**File:**` line that
+    // chunk 14 quotes; if chunk 14 were handed chunk 13's prompt, the quote
+    // would match and chunk 14 would wrongly skip-to-dry.
+    const missing = join(promptRecordDir(plan), 'gone.findings.md');
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const b13 = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n**File:** src/pay.ts:42\n` +
+          `read_file(file_path="${missing}")`,
+      );
+      const b14 = record(
+        r,
+        14,
+        `chunk 14 round ${r} territory\n` + `read_file(file_path="${missing}")`,
+      );
+      transcript(b13, DRY);
+      transcript(b14, quoted);
+    }
+
+    const r3 = schedule(3, [13, 14]);
+    // Chunk 13 (clean DRY) may retire; chunk 14 must stay hot — its quotation
+    // matches nothing in its OWN prompt, so it reads as a yield, not an echo.
+    expect(r3.due).toContain(14);
+  });
+
   it('a cold check nobody certified puts the chunk back on the every-round schedule', () => {
     dryTwice([13]);
     // Round 4 is the cold check — built, but the launch left no certified

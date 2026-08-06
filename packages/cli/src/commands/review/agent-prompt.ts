@@ -1125,9 +1125,9 @@ export function buildRoleLaunchPrompt(
  * completed (issue #8597). The pointer keeps the guarantee — a launch that drops
  * it matches no record, and the delivery floor counts the read it instructs
  * exactly as it counts the brief's — at a size the orchestrator will actually
- * carry. The section's
- * closing line restates that the brief is authoritative — the exact sentence the
- * orchestrator truncated when it used to build this by hand.
+ * carry. Each branch also restates, above the pointer, that the brief is
+ * authoritative ("this list does not replace the brief; read it first") — the
+ * exact sentence the orchestrator truncated when it used to build this by hand.
  *
  * Each `acceptsFindings` role has its own framing, and the branches are explicit: a
  * future role that opts into `--findings` but has no framing here throws, rather than
@@ -1151,8 +1151,12 @@ export function findingsSection(
   const listRef =
     body.length > 0
       ? [
-          'The list is a file. Read ALL of it, right after your brief — page ' +
-            'with a larger `offset` if a read comes back `isTruncated`:',
+          // The line count makes under-reading visible: `read_file` truncates,
+          // so an agent told only "read ALL of it" can stop after the first
+          // page and never know it saw a fraction of the list.
+          `The list is a file (${body.split('\n').length} lines). Read ALL of ` +
+            'it, right after your brief — page with a larger `offset` if a ' +
+            'read comes back `isTruncated`:',
           '',
           '```',
           `read_file(file_path="${findingsFile}")`,

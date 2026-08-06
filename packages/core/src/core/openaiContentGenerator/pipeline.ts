@@ -292,7 +292,7 @@ function resolveStreamMaxLifetimeMs(config: ContentGeneratorConfig): number {
  * same way — the bound a drip-fed stream cannot reset (issue #8597).
  * `<= 0` disables each guard independently.
  */
-async function* withStreamInactivityTimeout(
+async function* withStreamGuards(
   source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   idleMs: number,
   maxLifetimeMs: number,
@@ -551,18 +551,18 @@ export class ContentGenerationPipeline {
           throw e;
         }
 
-        // Inactivity watchdog: the SDK `timeout` only bounds connect + first
-        // response, so a stream that returns 200 then goes silent is otherwise
-        // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
-        // chunks. The lifetime cap covers what the watchdog cannot: a drip-fed
-        // stream resets the idle timer forever while never completing
-        // (issue #8597), so it aborts at `maxLifetimeMs` from stream start
-        // regardless of chunk flow. `<= 0` disables each guard.
+        // Two guards wrap the stream (the SDK `timeout` only bounds connect +
+        // first response). The inactivity watchdog aborts + surfaces a
+        // retryable ETIMEDOUT after `idleMs` of no chunks; the lifetime cap
+        // covers what the watchdog cannot — a drip-fed stream resets the idle
+        // timer forever while never completing (issue #8597), so it aborts at
+        // `maxLifetimeMs` from stream start regardless of chunk flow. `<= 0`
+        // disables each guard.
         const idleMs = this.streamIdleTimeoutMs;
         const maxLifetimeMs = this.streamMaxLifetimeMs;
         const guarded =
           idleMs > 0 || maxLifetimeMs > 0
-            ? withStreamInactivityTimeout(
+            ? withStreamGuards(
                 stream,
                 idleMs,
                 maxLifetimeMs,

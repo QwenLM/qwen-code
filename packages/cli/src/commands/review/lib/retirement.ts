@@ -262,16 +262,20 @@ function findingsListFor(
   const root = resolve(recordDir);
   const target = resolve(pointer);
   if (target !== root && !target.startsWith(root + sep)) return prompt;
-  let cached = memo.get(pointer);
-  if (cached === undefined) {
-    try {
-      cached = readFileSync(target, 'utf8');
-    } catch {
-      cached = prompt; // Fall back to the prompt.
-    }
-    memo.set(pointer, cached);
+  const cached = memo.get(pointer);
+  if (cached !== undefined) return cached;
+  try {
+    const content = readFileSync(target, 'utf8');
+    // Memoize ONLY a successful read: the pointer is shared by every chunk of
+    // the round (the file key is chunk-free), so caching a failure's fallback
+    // — THIS record's prompt — would serve one chunk's launch text as every
+    // other chunk's findings list. On a miss each record falls back to its
+    // OWN prompt (no entry matches there → stays hot), uncached.
+    memo.set(pointer, content);
+    return content;
+  } catch {
+    return prompt; // Fall back to this record's own prompt.
   }
-  return cached;
 }
 
 /**

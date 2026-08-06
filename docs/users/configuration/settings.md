@@ -213,7 +213,16 @@ Settings are organized into categories. Most settings should be placed within th
 
 **timeout (request timeout):**
 
-`timeout` is the per-request timeout in milliseconds (default `120000`). Set it to `0` to disable the request timeout — matching the `QWEN_STREAM_IDLE_TIMEOUT_MS=0` convention — rather than aborting the request. It can also be set via the `QWEN_CODE_API_TIMEOUT_MS` environment variable. This is distinct from `QWEN_STREAM_IDLE_TIMEOUT_MS`, which bounds inactivity _between_ streamed chunks, and from `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`), which caps the _total_ lifetime of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset. Both stream guards accept `0` to disable, and both apply only to OpenAI-compatible providers (the Anthropic/Gemini generators do not implement them). Two upgrade notes: a deployment that previously set `QWEN_STREAM_IDLE_TIMEOUT_MS=0` to opt out of stream aborts now also needs `QWEN_STREAM_MAX_LIFETIME_MS=0` to keep that; and the 15-minute lifetime cap bounds even a stream whose idle timeout you raised above it (e.g. `QWEN_STREAM_IDLE_TIMEOUT_MS=1800000`) — raise the cap likewise, or set it to `0`, if you rely on a longer window.
+`timeout` is the per-request timeout in milliseconds (default `120000`). Set it to `0` to disable the request timeout — matching the `QWEN_STREAM_IDLE_TIMEOUT_MS=0` convention — rather than aborting the request. It can also be set via the `QWEN_CODE_API_TIMEOUT_MS` environment variable. This is distinct from the two stream guards below.
+
+**stream guards (OpenAI-compatible providers only):**
+
+Two guards bound a streaming response, each accepting `0` to disable. Neither is implemented by the Anthropic/Gemini generators, which leave the drip-fed shape below unbounded.
+
+- `QWEN_STREAM_IDLE_TIMEOUT_MS` (default `240000`) bounds inactivity _between_ streamed chunks: a stream that goes silent for this long is aborted as a retryable `ETIMEDOUT`.
+- `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`) caps the _total_ lifetime of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset.
+
+Two upgrade notes: a deployment that previously set `QWEN_STREAM_IDLE_TIMEOUT_MS=0` to opt out of stream aborts now also needs `QWEN_STREAM_MAX_LIFETIME_MS=0` to keep that; and the 15-minute lifetime cap bounds even a stream whose idle timeout you raised above it (e.g. `QWEN_STREAM_IDLE_TIMEOUT_MS=1800000`) — raise the cap likewise, or set it to `0`, if you rely on a longer window.
 
 **max_tokens (output token limit):**
 

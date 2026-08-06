@@ -41,8 +41,9 @@ export const QWEN_STREAM_IDLE_TIMEOUT_MS_ENV = 'QWEN_STREAM_IDLE_TIMEOUT_MS';
 // stream-guard timeout above this is treated as invalid.
 export const MAX_STREAM_GUARD_TIMEOUT_MS = 2_147_483_647;
 
-// Total-lifetime cap for a single streaming response, measured from the first
-// byte and NOT refreshed by chunk arrival. The idle watchdog above cannot see
+// Total-lifetime cap for a single streaming response, measured from the
+// stream's first iteration (when the response wrapper starts consuming it)
+// and NOT refreshed by chunk arrival. The idle watchdog above cannot see
 // a drip-fed stream — an upstream delivering one tiny chunk per window keeps
 // resetting it while the message never completes (issue #8597: CI review runs
 // burned 2.5–4.5 h on such a stream and died by the outer kill). 15 minutes
