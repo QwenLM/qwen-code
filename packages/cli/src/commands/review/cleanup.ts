@@ -394,7 +394,10 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   // TMUX_TMPDIR pointing at an unusable path means the real sockets live
   // under /tmp while a single-base sweep scans the wrong directory forever
   // (measured end-to-end: 'Nothing to clean' with a live orphan).
-  const envBase = process.env['TMUX_TMPDIR']?.trim();
+  // UNTRIMMED, matching tmux: a whitespace-padded TMUX_TMPDIR is used
+  // verbatim by tmux (measured: socket under '/tmp/x /tmux-<uid>'), so a
+  // trimming sweep scanned a directory tmux never used.
+  const envBase = process.env['TMUX_TMPDIR'];
   const bases = [...new Set([envBase || '/tmp', '/tmp'])];
   let reapedAny = false;
   let failedAny = false;

@@ -38,6 +38,7 @@ const tmuxVersionProbe = spawnSync('tmux', ['-V'], {
   // Same belt as production probeOutput: a hanging shimmed binary here
   // blocks the whole file at import time with no red test naming the cause.
   timeout: 10_000,
+  killSignal: 'SIGKILL',
 });
 // The suite needs capture-pane -N (tmux 3.1+); on an older tmux every
 // capture would refuse with "too old", which is a skip-shaped outcome, not
@@ -48,13 +49,16 @@ const hasTmux =
 // --help, not --version: freeze <=0.1.6 has no --version flag and would be
 // misdiagnosed as absent (mirrors the production probe).
 const hasFreeze =
-  spawnSync('freeze', ['--help'], { timeout: 10_000 }).status === 0;
+  spawnSync('freeze', ['--help'], { timeout: 10_000, killSignal: 'SIGKILL' }).status === 0;
 // The server-death and signal probes need pgrep; without it they would parse
 // pid 0 and fail red on healthy code. error === undefined distinguishes
 // "binary absent" from "no match" (a --version gate would misfire on BSD
 // pgrep, which has none).
 const hasPgrep =
-  spawnSync('pgrep', ['-f', 'no-such-process-anywhere'], { timeout: 10_000 })
+  spawnSync('pgrep', ['-f', 'no-such-process-anywhere'], {
+    timeout: 10_000,
+    killSignal: 'SIGKILL',
+  })
     .error === undefined;
 
 function sleep(ms: number): Promise<void> {
@@ -383,7 +387,10 @@ describe('capture-tui without tmux (probe seam)', () => {
       // /bin/sleep by absolute path: PATH is binDir alone below, so a bare
       // `sleep` would ENOENT and the shim would EXIT instantly instead of
       // hanging — the test then never exercised the belt at all.
-      writeFileSync(join(binDir, 'tmux'), '#!/bin/sh\n/bin/sleep 30\n', {
+      // TERM-immune, like the measured wedge: without killSignal SIGKILL
+      // the belt only SENDS a TERM this shim ignores, and the spawn blocks
+      // past any deadline — the SIGKILL half of the belt is what this pins.
+      writeFileSync(join(binDir, 'tmux'), "#!/bin/sh\ntrap '' TERM\n/bin/sleep 30\n", {
         mode: 0o755,
       });
       const realPath = process.env['PATH'];
@@ -610,6 +617,80 @@ describe('capture-tui without tmux (probe seam)', () => {
       }
     },
   );
+
+  it('holds the exit-3 contract when the stdout reader is GONE — EPIPE-proof', async () => {
+    // withStdio mocks the streams, so no in-process test can raise a real
+    // EPIPE; a child whose stdout pipe closes early can. Without the guard
+    // the refusal crashed on the async 'error' event and exited 1.
+    let captureTuiTs = join(process.cwd(), 'src/commands/review/capture-tui.ts');
+    if (!existsSync(captureTuiTs)) {
+      captureTuiTs = join(
+        process.cwd(),
+        'packages/cli/src/commands/review/capture-tui.ts',
+      );
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-epipe-'));
+    try {
+      const driver = join(dir, 'driver-epipe.mts');
+      writeFileSync(
+        driver,
+        [
+          `const mod = await import(${JSON.stringify(captureTuiTs)});`,
+          `mod.probes.tmux = () => ({ status: 'absent' }) as never;`,
+          `// Give the pipe a beat to be closed by the parent first.`,
+          `await new Promise((r) => setTimeout(r, 300));`,
+          `await mod.runCaptureTui({ command: 'printf hi', cwd: undefined, cols: 80, rows: 24, settleMs: 0, until: undefined, keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 1000 } as never);`,
+        ].join('\n'),
+      );
+      const { spawn } = await import('node:child_process');
+      const child = spawn(process.execPath, ['--import', 'tsx', driver], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      // Kill the reader immediately: the child's refusal write hits EPIPE.
+      child.stdout.destroy();
+      const code = await new Promise<number | null>((resolve) =>
+        child.once('exit', (c) => resolve(c)),
+      );
+      expect(code).toBe(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('clears stale artifacts before the directory-shaped --out refusal too', async () => {
+    // The last nameable gate without an ordering pin: a mutant hoisting the
+    // isDirectory check above the clears left the previous run's manifest
+    // beside the refusal.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-dirout-'));
+    try {
+      writeFileSync(join(dir, 'adir.ans'), 'old');
+      writeFileSync(join(dir, 'adir.png'), 'old');
+      writeFileSync(join(dir, 'adir.json'), '{"evidence":"png"}');
+      mkdirSync(join(dir, 'adir'));
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'adir'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('existing directory');
+      expect(existsSync(join(dir, 'adir.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'adir.json'))).toBe(false);
+      expect(existsSync(join(dir, 'adir'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('registers the full REAP set — a pure pin, gated on nothing', () => {
     // The set check needs neither tmux nor pgrep; buried in a skipIf test
@@ -1169,6 +1250,26 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBeUndefined();
     expect(stderr).not.toContain('WARNING');
     expect(existsSync(marker)).toBe(true);
+  });
+
+  it('unlinks the socket from /tmp when TMUX_TMPDIR points somewhere unusable', async () => {
+    // tmux takes the first USABLE base, so the socket really lives under
+    // /tmp; the env-base-only unlink mutant left dead sockets littering it.
+    const realEnv = process.env['TMUX_TMPDIR'];
+    process.env['TMUX_TMPDIR'] = join(dir, 'no-such-base');
+    try {
+      await run({ until: undefined, settleMs: 0, out: join(dir, 'tt') });
+    } finally {
+      if (realEnv === undefined) delete process.env['TMUX_TMPDIR'];
+      else process.env['TMUX_TMPDIR'] = realEnv;
+    }
+    expect(process.exitCode).toBeUndefined();
+    const probe = spawnSync('bash', [
+      '-c',
+      `ls "/tmp/tmux-$(id -u)" 2>/dev/null | grep "^qwen-review-capture-${process.pid}-" || true`,
+    ]);
+    expect(probe.error).toBeUndefined();
+    expect((probe.stdout ?? Buffer.from('')).toString().trim()).toBe('');
   });
 
   it('settles by regex when --until matches, and says so', async () => {
@@ -2081,7 +2182,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       }
       expect(existsSync(captureTuiTs)).toBe(true);
       const { spawn } = await import('node:child_process');
-      for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      // The FULL registration set, behaviorally: a registration mutant
+      // dropping SIGHUP/SIGQUIT shipped green while the membership pin
+      // still saw all four members.
+      for (const signal of REAP_SIGNALS) {
         const outBase = join(dir, `sig-${signal}`);
         const driver = join(dir, `driver-${signal}.mts`);
         writeFileSync(

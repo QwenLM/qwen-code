@@ -15,6 +15,41 @@ import { parse } from 'yaml';
 // refusal contracts — silently skip inside the required Test check with
 // zero red signal. Pin the step's existence, its condition, and its
 // load-bearing properties.
+// Logical lines the way BASH builds them: join continuations FIRST (any
+// following line — bash splices even a #-leading one, whose # then comments
+// out the spliced tail), THEN strip comment tails and drop empties. This is
+// the domain every pin runs in: raw-text pins were satisfied by comments,
+// and a comment-line splice hid a swallowed guard.
+function logicalLinesOf(run) {
+  const joined = [];
+  for (const line of run.split('\n')) {
+    const prev = joined[joined.length - 1];
+    if (joined.length > 0 && prev.endsWith('\\')) {
+      joined[joined.length - 1] = prev.slice(0, -1) + line.trim();
+    } else {
+      joined.push(line.trim());
+    }
+  }
+  return joined
+    .map((l) => l.replace(/(^|\s)#.*$/, '').trim())
+    .filter(Boolean);
+}
+
+// Strip wrappers the shell resolves before the real command: env
+// assignments, sudo, env/nice/timeout(+arg) — an apt-get behind any of
+// them is still an apt-get.
+function unwrapCommand(stmt) {
+  let out = stmt.trim();
+  for (;;) {
+    const next = out
+      .replace(/^(\w+=\S+\s+)+/, '')
+      .replace(/^(sudo|env|nice)\s+/, '')
+      .replace(/^timeout\s+\S+\s+/, '');
+    if (next === out) return out;
+    out = next;
+  }
+}
+
 describe('ci.yml capture tooling', () => {
   const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
   const doc = parse(ci);
@@ -31,13 +66,17 @@ describe('ci.yml capture tooling', () => {
     expect(install).toBeGreaterThan(-1);
     expect(runTests).toBeGreaterThan(-1);
     expect(install).toBeLessThan(runTests);
-    expect(steps[install].run).toMatch(
-      /sudo apt-get install -y -qq[^\n]* tmux/,
-    );
-    // The install-script packaging suite needs zip/unzip the same way
-    // (and throws on a CI host missing them): the tooling rides this same
-    // advisory step so the Linux lane actually runs those tests.
-    expect(steps[install].run).toMatch(/apt-get install[^\n]* zip unzip/);
+    // Over LOGICAL lines (comments cannot satisfy these) and with the
+    // package name word-anchored (tmuxinator must not count as tmux).
+    const installLines = logicalLinesOf(steps[install].run);
+    expect(
+      installLines.some((l) =>
+        /apt-get install[^\n]*\btmux(\s|$)/.test(l),
+      ),
+    ).toBe(true);
+    expect(
+      installLines.some((l) => /apt-get install[^\n]*\bzip unzip\b/.test(l)),
+    ).toBe(true);
   });
 
   it('pins the if-condition — it decides whether the step runs on the Linux lane at all', () => {
@@ -56,57 +95,33 @@ describe('ci.yml capture tooling', () => {
 
   it('keeps the step advisory — no branch may fail the required check', () => {
     const run = steps[nameIndex(INSTALL)].run;
-    // Logical lines the way BASH builds them: continuations join FIRST (a
-    // comment line terminates a chain — a backslash at the end of comment
-    // TEXT is not a continuation), and comment lines are dropped AFTER, so
-    // a statement following a comment-capped chain stands alone here
-    // exactly as it executes.
-    const raw = run.split('\n');
-    const joined = [];
-    for (const line of raw) {
-      const prev = joined[joined.length - 1];
-      if (
-        joined.length > 0 &&
-        prev.endsWith('\\') &&
-        !prev.trim().startsWith('#')
-      ) {
-        joined[joined.length - 1] = prev.slice(0, -1) + line.trim();
-      } else {
-        joined.push(line.trim());
-      }
-    }
-    const logicalLines = joined.filter((l) => l && !l.startsWith('#'));
-    // Branch 1 pinned on LOGICAL lines, not raw text — a commented-out
-    // advisory satisfied the raw-text regex while executing nothing.
-    expect(
-      logicalLines.some((l) => /tmux -V \|\| echo/.test(l)),
-      'tmux -V advisory line missing',
-    ).toBe(true);
+    const logicalLines = logicalLinesOf(run);
     for (const line of logicalLines) {
-      // NOTHING may hard-fail the step: an exit/false/set -e in any branch
-      // turns the advisory step into a gate that reds the required check
-      // before a single test has run.
+      // EVERY tmux -V invocation carries its own advisory guard — a bare
+      // one in the already-installed branch reds the check on a broken-
+      // but-installed tmux.
+      if (/\btmux -V\b/.test(line)) {
+        expect(line, line).toMatch(/tmux -V[^;&|]*\|\| echo/);
+      }
+      // NOTHING may hard-fail the step — including clustered set flags
+      // (set -euo pipefail), set -o errexit, and keyword-inlined exits.
       expect(line, line).not.toMatch(
-        /(^|[;&|]\s*)(exit(\s+\d+)?|false|set\s+-e)(\s|;|$)/,
+        /(^|[;&|]\s*|\bthen\s+|\belse\s+|\bdo\s+)(exit(\s+\d+)?|false|set\s+-\w*e\w*|set\s+-o\s+errexit)(\s|;|$)/,
       );
-      // Statement boundaries include the shell keywords: an echo or
-      // apt-get inlined after then/else/do escaped the position-anchored
-      // alternation entirely.
+      // Each apt-get invocation — behind any wrapper — must have a guard
+      // AFTER it on its chain: one || echo before an unguarded trailing
+      // apt-get must not launder it.
       const stmts = line
         .split(/;|&&|\|\||\bthen\b|\belse\b|\bdo\b/)
-        .map((x) => x.trim())
+        .map((x) => unwrapCommand(x))
         .filter(Boolean);
       for (const stmt of stmts) {
-        // Env-assignment prefixes are transparent to the shell and to us.
-        const norm = stmt.replace(/^(\w+=\S+\s+)+/, '');
-        if (/^(sudo\s+)?apt-get\b/.test(norm) && !/^command\b/.test(norm)) {
-          // Each apt-get invocation carries its own guard on its line.
-          expect(line, stmt).toMatch(/\|\| echo/);
+        if (/^apt-get\b/.test(stmt) && !/^command\b/.test(stmt)) {
+          const at = line.indexOf('apt-get', 0);
+          expect(line.indexOf('|| echo', at), `${stmt} :: ${line}`).toBeGreaterThan(-1);
         }
       }
-      // Pin the ANNOTATION, not the emitter verb: any line that announces
-      // a degradation must announce it as a ::warning:: — an emitter swap
-      // (printf) or a plain-log demotion must turn red.
+      // The ANNOTATION, not the emitter verb.
       if (/skipped|unavailable|install failed|not answering/.test(line)) {
         expect(line, line).toContain('::warning::');
       }

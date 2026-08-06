@@ -587,7 +587,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     try {
       const uid = process.getuid?.();
       if (uid !== undefined) {
-        const envBase = process.env['TMUX_TMPDIR']?.trim();
+        // Untrimmed, matching tmux (a padded value is used verbatim).
+        const envBase = process.env['TMUX_TMPDIR'];
         for (const base of new Set([envBase || '/tmp', '/tmp'])) {
           rmSync(join(base, `tmux-${uid}`, server), { force: true });
         }

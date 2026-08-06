@@ -444,6 +444,11 @@ jobs:
       # (qwen-autofix.yml does the same for tmux).
       - name: 'Install tmux and zip tooling'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        # Bounded AND advisory: a stalled mirror or dpkg lock must neither
+        # hang the job toward its 60-minute cap nor red the required check —
+        # continue-on-error absorbs the step-level timeout.
+        timeout-minutes: 5
+        continue-on-error: true
         run: |-
           if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
             # Advisory here too: a broken-but-installed tmux (dangling

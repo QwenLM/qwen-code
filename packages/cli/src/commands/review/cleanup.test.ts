@@ -213,6 +213,11 @@ describe('runCleanup', () => {
         expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
           `Reaped orphaned capture server: ${orphan}`,
         );
+        // BOTH orphans: a break-after-first-reap mutant left every later
+        // orphan alive on multi-review hosts and shipped green.
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
         // The foreign socket stands in for the USER's own tmux server: the
         // regex gate keeps the sweep off it entirely — a deleted `continue`
         // on non-match kill-server'd the user's default server in probe (the
