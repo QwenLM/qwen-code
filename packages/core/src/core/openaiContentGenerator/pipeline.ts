@@ -95,12 +95,16 @@ export class StreamInactivityTimeoutError extends Error {
 }
 
 /**
- * Thrown when a streaming response exceeds its total lifetime cap without
- * completing — however many chunks arrived meanwhile. The inactivity watchdog
- * cannot see this shape: a drip-fed stream (a gateway trickling keep-alive
- * chunks, or a model crawling through an oversized response) resets it
- * forever (issue #8597). Same retryable `ETIMEDOUT` code, so the
- * transport-continuation recovery resumes a healthy generation the cap cut.
+ * Thrown when a streaming response exceeds its upstream-wait budget without
+ * completing. The cap charges accumulated time blocked in `await it.next()`
+ * (upstream latency), never the consumer's processing, so a buffered,
+ * already-complete stream never trips it — the shape it catches is a
+ * never-completing stream the inactivity watchdog cannot see: a drip-fed
+ * gateway or a model crawling through an oversized response resets that
+ * watchdog forever (issue #8597). Same retryable `ETIMEDOUT` code, so a
+ * text-only generation resumes via the transport-continuation recovery; a
+ * turn that already streamed a functionCall surfaces as a visible,
+ * classified error instead.
  */
 export class StreamLifetimeExceededError extends Error {
   readonly code = 'ETIMEDOUT' as const;
@@ -111,8 +115,9 @@ export class StreamLifetimeExceededError extends Error {
     readonly streamLifetimeMs: number,
   ) {
     super(
-      `Stream exceeded its ${maxLifetimeMs}ms total lifetime cap after ` +
-        `${chunksReceived} chunks without completing. Set ` +
+      `Stream exceeded its ${maxLifetimeMs}ms upstream-wait cap after ` +
+        `${chunksReceived} chunks without completing (wall clock: ` +
+        `${streamLifetimeMs}ms). Set ` +
         `${QWEN_STREAM_MAX_LIFETIME_MS_ENV} to increase this cap ` +
         `(or 0 to disable it).`,
     );
@@ -573,9 +578,9 @@ export class ContentGenerationPipeline {
         // first response). The inactivity watchdog aborts + surfaces a
         // retryable ETIMEDOUT after `idleMs` of no chunks; the lifetime cap
         // covers what the watchdog cannot — a drip-fed stream resets the idle
-        // timer forever while never completing (issue #8597), so it aborts at
-        // `maxLifetimeMs` from stream start regardless of chunk flow. `<= 0`
-        // disables each guard.
+        // timer forever while never completing (issue #8597), so it aborts
+        // once `maxLifetimeMs` of accumulated upstream-wait has passed.
+        // `<= 0` disables each guard.
         const idleMs = this.streamIdleTimeoutMs;
         const maxLifetimeMs = this.streamMaxLifetimeMs;
         const guarded =

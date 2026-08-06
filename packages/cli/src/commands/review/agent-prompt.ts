@@ -1328,6 +1328,18 @@ function foldFindings(
  * gets no file: the inline "nothing is confirmed yet" note carries it. Null
  * on a failed write: findingsSection then inlines the list instead.
  */
+
+/**
+ * The round suffix baked into every findings-role record key and findings
+ * file name. Spelled once here and shared by `runAllChunks`, the single
+ * build, and `findingsFileFor` — three sites deriving it independently
+ * means a change to how a round is spelled updates two of three, and the
+ * findings file and the record stop describing the same launch, silently.
+ */
+function roundPartOf(round: number | undefined): string {
+  return round !== undefined ? `--round-${round}` : '';
+}
+
 function findingsFileFor(
   planPath: string,
   role: RoleId,
@@ -1336,8 +1348,11 @@ function findingsFileFor(
   content: string,
 ): string | null {
   if (content.trim().length === 0) return null;
-  const roundPart = round !== undefined ? `--round-${round}` : '';
-  return writeFindingsFile(planPath, `${role}${roundPart}--${digest}`, content);
+  return writeFindingsFile(
+    planPath,
+    `${role}${roundPartOf(round)}--${digest}`,
+    content,
+  );
 }
 
 /**
@@ -1598,7 +1613,7 @@ function runAllChunks(
   const skipped = schedule?.skipped ?? [];
 
   const digest = findingsDigest(findingsContent, rules);
-  const roundPart = round !== undefined ? `--round-${round}` : '';
+  const roundPart = roundPartOf(round);
   // One findings file per round, shared by every block below — the list
   // itself never crosses the orchestrator's context.
   const findingsFile = findingsFileFor(
@@ -2090,7 +2105,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       // the digest: two rounds are two launches, two briefs, two receipts —
       // sharing one record is what pushed the orchestrator to hand-label the
       // identity line in the first place.
-      const roundPart = args.round !== undefined ? `--round-${args.round}` : '';
+      const roundPart = roundPartOf(args.round);
       const digest = findingsDigest(findingsContent, rules);
       keyOverride = `${base}${roundPart}--${digest}`;
       findingsFile = findingsFileFor(

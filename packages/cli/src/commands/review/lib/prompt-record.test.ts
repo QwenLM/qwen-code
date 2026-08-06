@@ -30,7 +30,8 @@ import {
 } from './prompt-record.js';
 import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
-vi.mock('../../../utils/stdioHelpers.js', () => ({
+vi.mock('../../../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../utils/stdioHelpers.js')>()),
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
   writeStderrLineSafe: vi.fn(),
@@ -160,6 +161,9 @@ describe('findingsPointerOf — the list file a recorded launch points at', () =
 });
 
 describe('writeFindingsFile — a failed write must not be silent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
   it('reports the failure on stderr and returns null so the caller inlines', () => {
     // The build must not die on an unwritable record dir — and it must not
     // point the round at a file that does not exist either: null is what
@@ -175,12 +179,15 @@ describe('writeFindingsFile — a failed write must not be silent', () => {
       const planPath = join(blocker, 'plan.json');
       const p = writeFindingsFile(planPath, 'verify--abc', 'the list');
       expect(p).toBeNull();
+      const calls = (writeStderrLineSafe as unknown as Mock).mock.calls.map(
+        (c) => c[0] as string,
+      );
       expect(
-        (writeStderrLineSafe as unknown as Mock).mock.calls[0][0],
-      ).toContain('failed to write findings file');
-      expect(
-        (writeStderrLineSafe as unknown as Mock).mock.calls[0][0],
-      ).toContain('inlining the list instead');
+        calls.some((m) => m.includes('failed to write findings file')),
+      ).toBe(true);
+      expect(calls.some((m) => m.includes('inlining the list instead'))).toBe(
+        true,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
