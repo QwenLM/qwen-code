@@ -385,18 +385,38 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   const uid = process.getuid?.();
   // tmux is POSIX-only, and so is the socket dir layout below.
   if (uid === undefined) return { reaped: false, failed: false };
-  const base = process.env['TMUX_TMPDIR']?.trim() || '/tmp';
-  const dir = join(base, `tmux-${uid}`);
-  let entries: string[] = [];
-  try {
-    entries = existsSync(dir) ? readdirSync(dir) : [];
-  } catch {
-    return { reaped: false, failed: false };
-  }
+  // BOTH candidate socket dirs, not one: tmux's own resolution takes the
+  // first USABLE base (TMUX_TMPDIR, else /tmp) — a stale profile-exported
+  // TMUX_TMPDIR pointing at an unusable path means the real sockets live
+  // under /tmp while a single-base sweep scans the wrong directory forever
+  // (measured end-to-end: 'Nothing to clean' with a live orphan).
+  const envBase = process.env['TMUX_TMPDIR']?.trim();
+  const bases = [...new Set([envBase || '/tmp', '/tmp'])];
   let reapedAny = false;
   let failedAny = false;
+  let entries: Array<{ dir: string; name: string }> = [];
+  for (const base of bases) {
+    const dir = join(base, `tmux-${uid}`);
+    try {
+      if (existsSync(dir)) {
+        entries = entries.concat(
+          readdirSync(dir).map((name) => ({ dir, name })),
+        );
+      }
+    } catch (e) {
+      // A directory we cannot READ can be hiding an orphan — that is a
+      // failure to surface, not a silent nothing (the doc contract above:
+      // noted on stderr AND surfaced as failed).
+      failedAny = true;
+      writeStderrLine(
+        `note: could not scan ${dir} for orphaned capture servers: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
   const orphanRe = new RegExp(`^${CAPTURE_SERVER_PREFIX}(\\d+)-`);
-  for (const name of entries) {
+  for (const { dir, name } of entries) {
     const m = orphanRe.exec(name);
     if (!m) continue;
     let alive = true;
@@ -420,8 +440,10 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
         execFileSync('tmux', ['-L', name, 'kill-server'], {
           stdio: 'pipe',
           // Same belt as capture-tui's own control calls: a wedged server
-          // must not hang the whole cleanup behind one socket.
+          // must not hang the whole cleanup behind one socket — SIGKILL,
+          // because a TERM-immune child blocks the sync call past any belt.
           timeout: 15_000,
+          killSignal: 'SIGKILL',
         });
         serverDead = true;
       } catch (e) {

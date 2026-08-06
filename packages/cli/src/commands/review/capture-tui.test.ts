@@ -351,7 +351,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       const realBudget = probeBudget.timeoutMs;
       process.env['PATH'] = binDir;
       probeBudget.timeoutMs = 500;
-      const started = Date.now();
+      const started = performance.now();
       let stderr = '';
       try {
         ({ stderr } = await withStdio(() =>
@@ -378,13 +378,88 @@ describe('capture-tui without tmux (probe seam)', () => {
       // send an operator to reinstall a binary that exists.
       expect(stderr).toContain('present but wedged');
       expect(stderr).not.toContain('not installed');
-      const elapsed = Date.now() - started;
+      const elapsed = performance.now() - started;
       // Floor proves the shim actually hung to the belt; the tight ceiling
       // kills a hardcoded 10s mutant.
       expect(elapsed).toBeGreaterThanOrEqual(450);
       expect(elapsed).toBeLessThan(2_500);
     },
   );
+
+  it('clears a DIRECTORY squatting at an artifact path — the EISDIR fallback', async () => {
+    // Plain unlink throws EISDIR on a directory; without the recursive
+    // fallback the clear aborted mid-way and the refusal misdiagnosed as
+    // '--out is not writable: … EISDIR' with the stale manifest surviving.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-eisdir-'));
+    try {
+      mkdirSync(join(dir, 'cap.ans'));
+      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: '[',
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('not a valid regex');
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('starts NO process before the marker gates refuse — pinned by call log', async () => {
+    // Location-invariant assertions could not see a mutant that moved the
+    // --until compile below plan.start: the refusal looked identical while
+    // a real private server ran the user's command. The call log can.
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-order-'));
+    try {
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const callLog = join(dir, 'tmux-calls');
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const realTmuxProbe = probes.tmux;
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: '[',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+      } finally {
+        probes.tmux = realTmuxProbe;
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+      }
+      expect(process.exitCode).toBe(3);
+      const calls = existsSync(callLog) ? readFileSync(callLog, 'utf8') : '';
+      expect(calls).not.toContain('new-session');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('refuses non-string argv shapes before anything else', async () => {
     // yargs parses duplicated options into arrays and --no-X into booleans;
@@ -819,7 +894,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // out both 5s hangs and blows the wall bound.
     const realBelt = tmuxControl.timeoutMs;
     tmuxControl.timeoutMs = 500;
-    const started = Date.now();
+    const started = performance.now();
     const realPath = process.env['PATH'];
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
     let stdout = '';
@@ -833,7 +908,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       else process.env['PATH'] = realPath;
       tmuxControl.timeoutMs = realBelt;
     }
-    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(performance.now() - started).toBeLessThan(8_000);
     expect(stderr).toContain('WARNING');
     expect(stderr).toContain('kill-server failed twice');
     // The other half of "never an unqualified success": a wedged reap is a
@@ -866,7 +941,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     );
     const realHolder = holderInit.timeoutMs;
     holderInit.timeoutMs = 600;
-    const started = Date.now();
+    const started = performance.now();
     const realPath = process.env['PATH'];
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
     let stderr = '';
@@ -882,7 +957,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBe(3);
     // The deadline actually elapsed (floor) and is seam-driven (ceiling —
     // the hardcoded-10s mutant blows it).
-    const waited = Date.now() - started;
+    const waited = performance.now() - started;
     expect(waited).toBeGreaterThanOrEqual(550);
     expect(waited).toBeLessThan(5_000);
     expect(stderr).toContain('never initialized');
@@ -1229,6 +1304,18 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(ans.indexOf('LINE2')).toBeGreaterThan(ans.indexOf('LINE1'));
   });
 
+  it('registers the full REAP set — a pure pin, gated on nothing', () => {
+    // The set check needs neither tmux nor pgrep; buried in a skipIf test
+    // it vanished on slim hosts — where dropping SIGHUP/SIGQUIT (a
+    // regression that shipped green once before) would ship green again.
+    expect([...REAP_SIGNALS].sort()).toEqual([
+      'SIGHUP',
+      'SIGINT',
+      'SIGQUIT',
+      'SIGTERM',
+    ]);
+  });
+
   it('refuses degenerate geometry with the refusal contract', async () => {
     await run({ cols: 3 });
     expect(process.exitCode).toBe(3);
@@ -1460,6 +1547,22 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       if (realPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = realPath;
     }
+  });
+
+  it('degrades to ans-only when freeze is WEDGED — and says wedged, not absent', async () => {
+    // The hung branch's message had no pin: a collapse to "not installed"
+    // sends an operator to reinstall a binary that exists but hangs.
+    const realFreeze = probes.freeze;
+    probes.freeze = () => ({ status: 'hung' }) as const;
+    try {
+      await run();
+    } finally {
+      probes.freeze = realFreeze;
+    }
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.degradedBecause).toContain('wedged');
+    expect(manifest.degradedBecause).not.toContain('not installed');
   });
 
   it('degrades to ans-only when freeze is unavailable, and says why', async () => {
@@ -1891,14 +1994,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       }
       expect(existsSync(captureTuiTs)).toBe(true);
       const { spawn } = await import('node:child_process');
-      // The REAL list, pinned as a set: dropping SIGHUP/SIGQUIT from the
-      // production registration shipped green when this loop hardcoded two.
-      expect([...REAP_SIGNALS].sort()).toEqual([
-        'SIGHUP',
-        'SIGINT',
-        'SIGQUIT',
-        'SIGTERM',
-      ]);
       for (const signal of ['SIGTERM', 'SIGINT'] as const) {
         const outBase = join(dir, `sig-${signal}`);
         const driver = join(dir, `driver-${signal}.mts`);
@@ -1953,7 +2048,8 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     },
   );
 
-  it.skipIf(!hasPgrep)(
+  it(
+    // No pgrep needed: sentinel + child disposition only.
     'dies OF the signal even when it lands during the render window',
     async () => {
       // The tail after reap is synchronous (freeze render up to its belt);

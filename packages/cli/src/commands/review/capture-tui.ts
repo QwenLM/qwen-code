@@ -99,6 +99,10 @@ function probeOutput(bin: string, flag: string): ProbeResult {
   const r = spawnSync(bin, [flag], {
     encoding: 'utf8',
     timeout: probeBudget.timeoutMs,
+    // SIGKILL, not the default SIGTERM: a TERM-immune child (trap '' TERM)
+    // blocks the sync spawn past any belt — measured unkillable except by
+    // external SIGKILL.
+    killSignal: 'SIGKILL',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (r.status === 0) return { status: 'ok', out: (r.stdout ?? '').trim() };
@@ -157,6 +161,7 @@ function tmux(argv: string[]): string {
     // enough to sit on one this long should turn into a refusal, not hang
     // the whole review agent behind it.
     timeout: tmuxControl.timeoutMs,
+    killSignal: 'SIGKILL',
   }) as string;
 }
 
@@ -203,16 +208,39 @@ function testWithBudget(
   }
 }
 
+let brokenPipeGuarded = false;
+/** The contract writes (refusal/success JSON, stderr summary, the reap
+ * WARNING) must never flip the exit disposition: a gone reader raises an
+ * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
+ * trace where the machine-read contract promised exit 3 (or 0). Swallow
+ * EPIPE only; anything else stays loud. */
+function guardBrokenPipes(): void {
+  if (brokenPipeGuarded) return;
+  brokenPipeGuarded = true;
+  const swallow = (err: NodeJS.ErrnoException): void => {
+    if (err.code !== 'EPIPE') throw err;
+  };
+  process.stdout.on('error', swallow);
+  process.stderr.on('error', swallow);
+}
+
 export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
+  guardBrokenPipes();
   const refuse = (reason: string): void => {
-    writeStderrLine(`capture-tui: refused — ${reason}`);
+    // Exit code FIRST: it is the disposition a harness reads, and the
+    // writes below can throw synchronously on a closed fd.
+    process.exitCode = 3;
+    try {
+      writeStderrLine(`capture-tui: refused — ${reason}`);
     // The reason rides on stdout too: the consumer is an agent that must
     // tell an environment refusal from a caller mistake without scraping
     // stderr, and `evidence: 'none'` names the ladder's bottom rung.
-    writeStdoutLine(
-      JSON.stringify({ captured: false, evidence: 'none', reason }),
-    );
-    process.exitCode = 3;
+      writeStdoutLine(
+        JSON.stringify({ captured: false, evidence: 'none', reason }),
+      );
+    } catch {
+      // A gone reader cannot un-refuse: the exit code already carries it.
+    }
   };
 
   // --out's shape FIRST, then the stale-artifact clear, then every other
@@ -709,6 +737,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // contract is that a manifest reader learns WHY the ladder stopped where it
   // did, and a late frame and a failed render can both be true at once.
   const degradations: string[] = [];
+  // Probed ONCE and reused: each probe is a fresh 10s-belted spawn, and a
+  // wedged freeze paid the belt twice — worse, a stateful binary could
+  // answer differently between condition and message.
+  let freezeProbe: ReturnType<typeof probes.freeze>;
   if (readyFailed) {
     degradations.push(
       `--ready never matched within ${args.timeoutMs}ms — ${
@@ -735,9 +767,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
     );
-  } else if (probes.freeze().status !== 'ok') {
+  } else if ((freezeProbe = probes.freeze()).status !== 'ok') {
     degradations.push(
-      probes.freeze().status === 'hung'
+      freezeProbe.status === 'hung'
         ? `freeze did not answer --help within ${probeBudget.timeoutMs}ms — present but wedged; .ans text captured, no image rendered`
         : 'freeze is not installed — .ans text captured, no image rendered',
     );
@@ -752,6 +784,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     const r = spawnSync(freezeRender.bin, freezePlan(ansPath, pngPath), {
       encoding: 'utf8',
       timeout: freezeRender.timeoutMs,
+      killSignal: 'SIGKILL',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (r.status === 0 && existsSync(pngPath) && statSync(pngPath).size > 0) {
