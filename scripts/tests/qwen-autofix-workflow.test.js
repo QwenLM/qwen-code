@@ -5444,11 +5444,20 @@ describe('qwen-autofix workflow', () => {
       reviewAddressJob.indexOf("- name: 'Validate bundle SHA'"),
     ).toBeLessThan(reviewAddressJob.indexOf("- name: 'Checkout trusted base'"));
 
-    // The artifact is the repo-root dist/ only — copy_bundle_assets.js
-    // already gathers every runtime asset under it; packages/*/dist would
-    // triple the size and is rebuilt from branch sources by the verify gate.
-    expect(buildCliJob).toContain(
-      'tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" dist',
+    // The artifact is the repo-root dist/ plus packages/core/dist —
+    // copy_bundle_assets.js already gathers every runtime asset under the
+    // root dist/, and the remaining packages/*/dist would triple the size
+    // and are rebuilt from branch sources by the verify gate. core's dist
+    // is the exception: the settings-schema check runs BEFORE any build
+    // (on every path, including no-action) and its generator — tsx run
+    // from the repo root, whose tsconfig has NO `paths` — imports cli
+    // sources that resolve '@qwen-code/qwen-code-core' through the
+    // workspace symlink to core's dist entry point (the i18n check
+    // instead resolves core to sources via the packages/cli `paths` map).
+    // The regex anchors the line end, so appending another path to the
+    // tarball fails here — a substring pin would let additive drift pass.
+    expect(buildCliJob).toMatch(
+      /tar -czf "\$\{RUNNER_TEMP\}\/qwen-cli-dist\.tar\.gz" dist packages\/core\/dist\n/,
     );
     expect(buildCliJob).toContain("name: 'qwen-autofix-cli-dist'");
     expect(buildCliJob).toContain('retention-days: 1');
@@ -5459,6 +5468,10 @@ describe('qwen-autofix workflow', () => {
       'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
     );
     expect(restoreStep).toContain('test -f dist/cli.js');
+    // A bundle without core's dist entry point makes the pre-build
+    // settings-schema generator crash with ERR_MODULE_NOT_FOUND — pin the
+    // restore-side assertion.
+    expect(restoreStep).toContain('test -f packages/core/dist/index.js');
     const downloadStep = stepOf(reviewAddressJob, 'Download CLI bundle');
     expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
     // Download directory and restore extract path are one contract — pin
@@ -6918,6 +6931,9 @@ describe('qwen-autofix workflow', () => {
     const contractCheck = reviewVerificationRunner.indexOf(
       "run_check 'cross-package contract verification failed'",
     );
+    const coreRebuild = reviewVerificationRunner.indexOf(
+      "run_check 'core rebuild failed on the agent-committed fix'",
+    );
     const noOpCheck = reviewVerificationRunner.indexOf(
       'if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then',
     );
@@ -6936,6 +6952,19 @@ describe('qwen-autofix workflow', () => {
     expect(verificationHeadCapture).toBeGreaterThan(-1);
     expect(schemaCheck).toBeGreaterThan(verificationHeadCapture);
     expect(contractCheck).toBeGreaterThan(schemaCheck);
+    // The conditional core rebuild sits between the HEAD capture and the
+    // schema check: the generator must read a branch-built core dist when
+    // the branch itself changed core sources (base-restored dist would
+    // disagree with the branch's committed schema or crash the generator),
+    // and it only fires when the branch diff touches core's sources.
+    expect(coreRebuild).toBeGreaterThan(verificationHeadCapture);
+    expect(schemaCheck).toBeGreaterThan(coreRebuild);
+    expect(reviewVerificationRunner).toContain(
+      'npm run build --workspace packages/core',
+    );
+    expect(reviewVerificationRunner).toContain(
+      "grep -Eq '^packages/core/(src/|index\\.ts$)'",
+    );
     expect(assertions).toHaveLength(2);
     expect(assertions[0]).toBeGreaterThan(contractCheck);
     expect(noOpCheck).toBeGreaterThan(assertions[0]);
@@ -8003,6 +8032,7 @@ describe('qwen-autofix workflow', () => {
     // calls reject_fix on failure - so the verdict is declared AND the reason
     // is captured for the retry.
     for (const check of [
+      "run_check 'core rebuild failed on the agent-committed fix'",
       "run_check 'settings schema is stale on the agent-committed fix'",
       "run_check 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
