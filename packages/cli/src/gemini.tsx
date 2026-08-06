@@ -21,6 +21,11 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
+import {
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -366,6 +371,12 @@ export async function main() {
 
   const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  const privateExternalToolGuard =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
+    EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -377,12 +388,24 @@ export async function main() {
 
   markAcpStartup('argsParseStart');
   let argv = await parseArguments();
+  // The full yargs `serve` handler captures and deletes this credential while
+  // parsing the subcommand. Other CLI/ACP paths do not use it, so scrub any
+  // ambient value immediately after argument parsing and before Config,
+  // hooks, MCP servers, or tools can initialize.
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
-      ? { [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability }
+      ? {
+          [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability,
+          ...(privateExternalToolGuard
+            ? {
+                [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
+              }
+            : {}),
+        }
       : undefined;
 
   if (
@@ -1030,6 +1053,10 @@ export async function main() {
         privateParentCapability: isAcpMode
           ? privateAcpParentCapability
           : undefined,
+        externalToolGuardRequired:
+          isAcpMode &&
+          privateAcpParentCapability !== undefined &&
+          privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
       });
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();

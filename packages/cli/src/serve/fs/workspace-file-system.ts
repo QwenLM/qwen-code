@@ -1494,7 +1494,12 @@ async function readTextSnapshotFromResolvedFile(
   const meta: TextSnapshot['meta'] = {
     encoding: decoded.encoding,
     bom: decoded.bom,
-    lineEnding: detectLineEnding(content),
+    // Detected across the whole decoded file, not the returned slice. A slice
+    // holding one CRLF line arrives as text ending in '\r' with the '\n'
+    // consumed as its terminator, so testing the slice reports 'lf' — and one
+    // page of a cursor sequence would then disagree with the next about the
+    // same file.
+    lineEnding: detectLineEnding(decoded.content),
     sizeBytes: raw.length,
     originalLineCount: sliced.originalLineCount,
     hash: hashBuffer(raw),
@@ -1503,7 +1508,6 @@ async function readTextSnapshotFromResolvedFile(
   const output = Buffer.from(content, 'utf-8');
   if (output.length > maxOutputBytes) {
     content = safeUtf8Truncate(output, maxOutputBytes).toString('utf-8');
-    meta.lineEnding = detectLineEnding(content);
     meta.truncated = true;
     byteTruncated = true;
   }
