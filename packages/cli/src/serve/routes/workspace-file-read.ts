@@ -10,6 +10,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   FsError,
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
   canonicalizeWorkspace,
   isFsError,
   type WorkspaceFileSystemFactory,
@@ -17,6 +18,7 @@ import {
 import {
   getWorkspaceRouteContext,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
   setWorkspaceRouteContext,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -91,6 +93,7 @@ export function applyReadHeaders(res: Response): void {
  */
 export function sendFsError(res: Response, err: unknown, route: string): void {
   applyReadHeaders(res);
+  if (sendGenerationClosedError(res, err)) return;
   if (isFsError(err)) {
     const fs: FsError = err;
     res.status(fs.status).json({
@@ -254,13 +257,34 @@ async function handleGetFile(
     });
     return;
   }
+  const rawCursor = req.query['cursor'];
+  if (
+    rawCursor !== undefined &&
+    (typeof rawCursor !== 'string' ||
+      rawCursor.length === 0 ||
+      rawCursor.length > MAX_TEXT_CURSOR_CHARS)
+  ) {
+    applyReadHeaders(res);
+    res.status(400).json({
+      errorKind: 'parse_error',
+      error: `\`cursor\` must be a non-empty string of at most ${MAX_TEXT_CURSOR_CHARS} characters`,
+      status: 400,
+    });
+    return;
+  }
+  const cursor = rawCursor as string | undefined;
   const fs = factory.forRequest({
     originatorClientId: clientId ?? undefined,
     route: ROUTE,
   });
   try {
     const resolved = await fs.resolve(queryPath, 'read');
-    const out = await fs.readText(resolved, { maxBytes, line, limit });
+    const out = await fs.readText(resolved, {
+      maxBytes,
+      line,
+      limit,
+      cursor,
+    });
     const returnedBytes = Buffer.byteLength(out.content, 'utf-8');
     applyReadHeaders(res);
     res.status(200).json({
@@ -276,6 +300,8 @@ async function handleGetFile(
       hash: out.meta.hash,
       matchedIgnore: out.meta.matchedIgnore ?? null,
       originalLineCount: out.meta.originalLineCount ?? null,
+      nextCursor: out.meta.nextCursor ?? null,
+      hasMore: out.meta.hasMore === true,
     });
   } catch (err) {
     sendFsError(res, err, ROUTE);

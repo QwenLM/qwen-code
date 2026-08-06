@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Argv, CommandModule } from 'yargs';
-import { fetchPrCommand } from './fetch-pr.js';
+import {
+  fetchPrCommand,
+  countDiffChangedLines,
+  isEmptyDiff,
+  isCollapsedFromUpstream,
+} from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
+import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -190,5 +196,427 @@ describe('fetchPrCommand builder', () => {
     } as unknown as Argv;
     ((fetchPrCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
     expect(opts).toContain('host');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Producer half of the cleanup bypass-audit contract.
+//
+// `cleanup` reads `fetchedAt` / `host` back out of this report; if either is
+// dropped in a refactor, `readAuditWindow` returns a skip and the audit turns
+// off with output identical to a clean window. A tripwire whose off state is
+// indistinguishable from its all-clear state is the one property worth a test.
+// The run is steered down the lightest real path: merge-base unresolvable, so
+// no diff capture, an empty plan, and the report write is the observable.
+// ---------------------------------------------------------------------------
+
+const producerMocks = vi.hoisted(() => ({
+  writeFileSync: vi.fn(),
+  readFileSync: vi.fn((_path?: unknown): string => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
+  gh: vi.fn(),
+  git: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      mkdirSync: vi.fn(),
+      readFileSync: producerMocks.readFileSync,
+      writeFileSync: producerMocks.writeFileSync,
+    },
+    mkdirSync: vi.fn(),
+    readFileSync: producerMocks.readFileSync,
+    writeFileSync: producerMocks.writeFileSync,
+  };
+});
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    default: { ...actual, execFileSync: vi.fn() },
+    execFileSync: vi.fn(),
+  };
+});
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: producerMocks.writeStderrLine,
+}));
+
+vi.mock('../../services/review-worktree-lease.js', () => ({
+  createReviewWorktreeLease: vi.fn(),
+}));
+
+vi.mock('./lib/gh.js', () => ({
+  ensureAuthenticated: vi.fn(),
+  gh: producerMocks.gh,
+  setGhHost: vi.fn(),
+}));
+
+vi.mock('./lib/git.js', () => ({
+  git: producerMocks.git,
+  gitOpt: vi.fn(() => null),
+  gitRaw: vi.fn(() => Buffer.from('')),
+  refExists: vi.fn(() => false),
+  releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
+}));
+
+vi.mock('./lib/merge-base.js', () => ({
+  resolveMergeBase: vi.fn(() => ({ sha: null, baseFetchFailed: false })),
+}));
+
+describe('fetch-pr report assembly', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // clearAllMocks resets call history but NOT implementations, so a
+    // mockReturnValue a prior test set on readFileSync would leak into a test
+    // that relies on the default. Re-assert the default (no prior report →
+    // ENOENT) here so every test starts from a known state regardless of
+    // order.
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+  });
+
+  async function reportFor(extraArgs: Record<string, unknown>) {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: '/tmp/fetch-report.json',
+      maxChunkLines: 400,
+      ...extraArgs,
+    } as unknown as Parameters<typeof handler>[0]);
+    const call = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    if (!call) throw new Error('report was not written');
+    return JSON.parse(String(call[1]));
+  }
+
+  it('stamps fetchedAt as a real timestamp and host as null off-Enterprise', async () => {
+    const before = Date.now();
+    const report = await reportFor({});
+    expect(report.host).toBeNull();
+    const stamped = Date.parse(report.fetchedAt);
+    expect(Number.isNaN(stamped)).toBe(false);
+    expect(stamped).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it('carries --host into the report for the cleanup audit to reuse', async () => {
+    const report = await reportFor({ host: 'ghe.example.com' });
+    expect(report.host).toBe('ghe.example.com');
+  });
+
+  it('preserves the earliest window opening across drift restarts of the same PR', async () => {
+    // A drift restart reruns fetch-pr and overwrites this report; the audit
+    // boundary must keep reaching back to the abandoned attempt's opening.
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '42',
+        fetchedAt: '2020-01-01T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe('2020-01-01T00:00:00.000Z');
+    expect(report.fetchedAt).not.toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('prefers a prior auditSince over its fetchedAt (the third-restart case)', async () => {
+    // On a third restart the prior report already carries an auditSince
+    // EARLIER than its own fetchedAt; that earliest opening must win, not the
+    // prior fetchedAt. Seeds both so the auditSince-preference branch runs.
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '42',
+        auditSince: '2020-01-01T00:00:00.000Z',
+        fetchedAt: '2022-06-01T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('does not inherit a window from a DIFFERENT PR left at the same path', async () => {
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '999',
+        fetchedAt: '2020-01-01T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe(report.fetchedAt);
+  });
+
+  it('warns (not silently resets) when a prior report exists but is corrupt', async () => {
+    // A crash mid-write leaves truncated JSON. Silently resetting auditSince
+    // would let a bypass write from the abandoned attempt escape the window.
+    producerMocks.readFileSync.mockReturnValue('{"prNumber":"42","audit');
+    const report = await reportFor({});
+    expect(report.auditSince).toBe(report.fetchedAt); // best available
+    const warned = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .some((l) => l.includes('not valid JSON'));
+    expect(warned).toBe(true);
+  });
+
+  it('stays silent on ENOENT (a genuine first attempt)', async () => {
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await reportFor({});
+    const warnedAboutReport = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .some((l) => l.includes('previous fetch report'));
+    expect(warnedAboutReport).toBe(false);
+  });
+
+  it('names a non-ENOENT read failure of the prior report', async () => {
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+    await reportFor({});
+    const warned = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .some((l) => l.includes('could not read the previous fetch report'));
+    expect(warned).toBe(true);
+  });
+
+  describe('effort threading', () => {
+    // The PR path spreads `planEffortField(args.effort)` into the report exactly
+    // as capture-local and plan-diff do, but a refactor of this result assembly
+    // (dropping the import, or a later property shadowing `effort`) would silently
+    // lose it — safe-expanding the roster to the full set even with `--effort
+    // medium` while the sibling tests still pass. These trip that wire.
+    function seedReport(effort: unknown): void {
+      producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+        if (path === PARSE_ARGS_REPORT) {
+          return JSON.stringify({ effort, effortSource: 'flag' });
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+    }
+
+    it('records an explicit --effort in the report', async () => {
+      const report = await reportFor({ effort: 'medium' });
+      expect(report.effort).toBe('medium');
+    });
+
+    it('recovers the effort parse-args resolved when --effort is not re-threaded', async () => {
+      seedReport('medium');
+      const report = await reportFor({});
+      expect(report.effort).toBe('medium');
+      // And the resolution is disclosed on stderr, not silent.
+      const traced = producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .some(
+          (l) =>
+            l.includes('effort: medium') && l.includes('parse-args report'),
+        );
+      expect(traced).toBe(true);
+    });
+
+    it('omits effort when neither flag nor report is present', async () => {
+      const report = await reportFor({});
+      expect(report.effort).toBeUndefined();
+    });
+
+    it('ignores a malformed effort in the report rather than trusting it', async () => {
+      seedReport('turbo');
+      const report = await reportFor({});
+      expect(report.effort).toBeUndefined();
+    });
+  });
+});
+
+describe('isEmptyDiff', () => {
+  // The SKILL acts on this by recommending the PR be closed as superseded, so
+  // each guard is tested for the live PR it would otherwise close.
+  const base = {
+    diffPath: '/tmp/d.patch',
+    baseFetchFailed: false,
+    diffText: '',
+  };
+
+  it('is true only when a SUCCESSFUL capture found nothing', () => {
+    expect(isEmptyDiff(base)).toBe(true);
+    expect(isEmptyDiff({ ...base, diffText: '   \n  ' })).toBe(true);
+  });
+
+  it('is false when the capture never succeeded', () => {
+    // A capture that threw leaves diffText empty too. Reading that as "no
+    // changes" closes a live PR on an infrastructure error.
+    expect(isEmptyDiff({ ...base, diffPath: null })).toBe(false);
+  });
+
+  it('is false when the merge base came from a possibly stale local ref', () => {
+    // A stale base that already contains the head commits diffs to empty —
+    // same wrong recommendation, one cause further out.
+    expect(isEmptyDiff({ ...base, baseFetchFailed: true })).toBe(false);
+  });
+
+  it('is false whenever there is any diff at all', () => {
+    expect(isEmptyDiff({ ...base, diffText: '+a\n' })).toBe(false);
+  });
+});
+
+describe('isCollapsedFromUpstream', () => {
+  /** A diff with `n` changed lines. */
+  const diff = (n: number) =>
+    `diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n${'+x\n'.repeat(n)}`;
+
+  it('fires when the recomputed diff is 4x smaller past the 200-line floor', () => {
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(50),
+        additions: 200,
+        deletions: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it('holds the 4x boundary exactly', () => {
+    // 51 * 4 = 204 > 200: one line the other side of the ratio and the
+    // signature is gone. Pinned so the comparison cannot drift to `<`.
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(51),
+        additions: 200,
+        deletions: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it('holds the 200-line floor exactly', () => {
+    // Below it one file IS the ratio, which is what the floor exists to keep
+    // out — a rename-threshold disagreement, not an upstream collapse.
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(40),
+        additions: 199,
+        deletions: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(40),
+        additions: 100,
+        deletions: 100,
+      }),
+    ).toBe(true);
+  });
+
+  it('does not fire off a base the fetch could not confirm', () => {
+    // The sibling guard, for the sibling reason. `isEmptyDiff` refuses to rule
+    // on a possibly stale local base ref because such a base can already hold
+    // the head commits; the PARTIAL form of that lands here, shrinking the
+    // recomputed diff past the ratio. The flag then tells Agent 0 to read the
+    // body as description-of-history when the body may be perfectly current
+    // and the real cause is an infrastructure failure.
+    const collapsing = { diffText: diff(50), additions: 200, deletions: 0 };
+    expect(
+      isCollapsedFromUpstream({ ...collapsing, baseFetchFailed: false }),
+    ).toBe(true);
+    expect(
+      isCollapsedFromUpstream({ ...collapsing, baseFetchFailed: true }),
+    ).toBe(false);
+  });
+
+  it('never fires on an empty diff — that is emptyDiff, a different claim', () => {
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: '',
+        additions: 5000,
+        deletions: 0,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('countDiffChangedLines', () => {
+  it('counts +/- body lines and excludes file headers', () => {
+    const d = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1,2 +1,2 @@',
+      '-old',
+      '+new',
+      ' ctx',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(2);
+    expect(countDiffChangedLines('')).toBe(0);
+  });
+
+  it('counts body lines whose own content starts with -- or ++', () => {
+    // A DELETED markdown rule / YAML marker / SQL comment arrives as `--- …`,
+    // and an ADDED `++x` as `+++x`. A prefix-shape rule has to drop both, and
+    // every dropped line pushes the ratio toward a false collapse disclosure
+    // (the flag fires when the recomputed count comes in LOW).
+    const d = [
+      'diff --git a/x.md b/x.md',
+      '--- a/x.md',
+      '+++ b/x.md',
+      '@@ -1,4 +1,4 @@',
+      '----',
+      '--- a title underline',
+      '+++ replacement',
+      '++i;',
+      ' ctx',
+      '\\ No newline at end of file',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(4);
+  });
+
+  it('does not count the file headers of a SECOND file in the diff', () => {
+    // `diff --git` closes the previous hunk: without that, the next file's
+    // `---`/`+++` headers would be read as body lines of the hunk above.
+    const d = [
+      'diff --git a/a b/a',
+      '--- a/a',
+      '+++ b/a',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+      'diff --git a/b b/b',
+      'index 111..222 100644',
+      '--- a/b',
+      '+++ b/b',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(4);
   });
 });

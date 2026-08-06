@@ -108,6 +108,12 @@ describe('Session.pendingWorktreeNotice', () => {
       switchModel: vi.fn(),
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      setActiveTodoReminder: vi.fn(),
+      startActiveTodoWorkChain: vi.fn(),
+      startAutomaticActiveTodoWorkChain: vi.fn(),
+      endAutomaticActiveTodoWorkChain: vi.fn(),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/tmp'),
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
@@ -129,8 +135,15 @@ describe('Session.pendingWorktreeNotice', () => {
         shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
       }),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // The prompt turn's finally sweeps review-worktree leases against the
+      // project root (see Session.review-lease.test.ts).
+      getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       isCronEnabled: vi.fn().mockReturnValue(false),

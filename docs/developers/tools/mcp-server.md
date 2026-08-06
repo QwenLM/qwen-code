@@ -37,6 +37,8 @@ Each discovered MCP tool is wrapped in a `DiscoveredMCPTool` instance that:
 - **Processes responses** for both the LLM context and user display
 - **Maintains connection state** and handles timeouts
 
+After a connection loss, the current invocation is replayed only for a trusted server in a trusted workspace when the tool explicitly declares `idempotentHint: true`, or declares `readOnlyHint: true` without a conflicting `destructiveHint: true` or `idempotentHint: false`. Missing or conflicting annotations, and annotations from an untrusted server or workspace, are treated as unsafe because the server may have completed a side effect before the response was lost. Tool authors should publish accurate MCP annotations; administrators should still verify them before enabling server trust.
+
 ### Transport Mechanisms
 
 The CLI supports three MCP transport types:
@@ -114,7 +116,7 @@ Each server configuration supports the following properties:
 - **`env`** (object): Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax
 - **`cwd`** (string): Working directory for Stdio transport
 - **`timeout`** (number): Request timeout in milliseconds (default: 600,000ms = 10 minutes)
-- **`trust`** (boolean): When `true`, bypasses all tool call confirmations for this server (default: `false`)
+- **`trust`** (boolean): When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)
 - **`includeTools`** (string[]): List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.
 - **`excludeTools`** (string[]): List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server. **Note:** `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded.
 - **`targetAudience`** (string): The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.
@@ -161,13 +163,13 @@ When connecting to an OAuth-enabled server:
 **Important:** OAuth authentication requires that the redirect URI is accessible:
 
 - **Default behavior**: Redirects to `http://localhost:7777/oauth/callback` (works for local setups)
-- **Custom redirect URI**: Use `--oauth-redirect-uri` or configure `redirectUri` in settings.json to specify a different URL
+- **Custom redirect URI**: Use `--oauth-redirect-uri` or configure `redirectUri` in settings.json to specify a public URL ending in `/oauth/callback`. Reverse-proxy that path to `http://127.0.0.1:7777/oauth/callback` on the machine running Qwen Code.
 
 For **remote/cloud server deployments** (e.g., web terminals, SSH sessions, cloud IDEs):
 
 - The default `localhost` redirect will NOT work
-- You MUST configure a custom `redirectUri` pointing to a publicly accessible URL
-- The user's browser must be able to reach this URL and redirect back to the server
+- You MUST configure a custom `redirectUri` pointing to a publicly accessible URL ending in `/oauth/callback`
+- Terminate TLS at a reverse proxy and forward only that path to `http://127.0.0.1:7777/oauth/callback`
 
 Example for remote servers:
 
@@ -194,7 +196,7 @@ servers and manage OAuth authentication.
 - **`authorizationUrl`** (string): OAuth authorization endpoint (auto-discovered if omitted)
 - **`tokenUrl`** (string): OAuth token endpoint (auto-discovered if omitted)
 - **`scopes`** (string[]): Required OAuth scopes
-- **`redirectUri`** (string): Custom redirect URI. **Critical for remote deployments**: Defaults to `http://localhost:7777/oauth/callback`. When running Qwen Code on remote/cloud servers, set this to a publicly accessible URL (e.g., `https://your-server.com/oauth/callback`). Can be configured via `qwen mcp add --oauth-redirect-uri` or directly in settings.json.
+- **`redirectUri`** (string): Custom redirect URI. **Critical for remote deployments**: Defaults to `http://localhost:7777/oauth/callback`. For remote use, set a public URL ending in `/oauth/callback` and reverse-proxy it to the local callback listener. Can be configured via `qwen mcp add --oauth-redirect-uri` or directly in settings.json.
 - **`tokenParamName`** (string): Query parameter name for tokens in SSE URLs
 - **`audiences`** (string[]): Audiences the token is valid for
 
@@ -446,9 +448,10 @@ Each `DiscoveredMCPTool` implements sophisticated confirmation logic:
 #### Trust-based Bypass
 
 ```typescript
-if (this.trust) {
-  return false; // No confirmation needed
+if (this.trust === true && this.cliConfig?.isTrustedFolder()) {
+  return 'allow';
 }
+return 'ask';
 ```
 
 #### Dynamic Allow-listing
@@ -618,7 +621,7 @@ The MCP integration tracks several states:
 
 ### Security Considerations
 
-- **Trust settings:** The `trust` option bypasses all confirmation dialogs. Use cautiously and only for servers you completely control
+- **Trust settings:** The `trust` option bypasses tool confirmation dialogs only in a trusted workspace. Use cautiously and only for servers you completely control
 - **Access tokens:** Be security-aware when configuring environment variables containing API keys or tokens
 - **Sandbox compatibility:** When using sandboxing, ensure MCP servers are available within the sandbox environment
 - **Private data:** Using broadly scoped personal access tokens can lead to information leakage between repositories
@@ -789,13 +792,13 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 - `-e, --env`: Set environment variables (e.g. -e KEY=value).
 - `-H, --header`: Set HTTP headers for SSE and HTTP transports (e.g. -H "X-Api-Key: abc123" -H "Authorization: Bearer abc123").
 - `--timeout`: Set connection timeout in milliseconds.
-- `--trust`: Trust the server (bypass all tool call confirmation prompts).
+- `--trust`: Trust the server (bypass its tool call confirmations in a trusted workspace).
 - `--description`: Set the description for the server.
 - `--include-tools`: A comma-separated list of tools to include.
 - `--exclude-tools`: A comma-separated list of tools to exclude.
 - `--oauth-client-id`: OAuth client ID for MCP server authentication.
 - `--oauth-client-secret`: OAuth client secret for MCP server authentication.
-- `--oauth-redirect-uri`: OAuth redirect URI (e.g., `https://your-server.com/oauth/callback`). Defaults to `http://localhost:7777/oauth/callback` for local setups. **Important for remote deployments**: When running Qwen Code on remote/cloud servers, set this to a publicly accessible URL.
+- `--oauth-redirect-uri`: OAuth redirect URI (e.g., `https://your-server.com/oauth/callback`). Defaults to `http://localhost:7777/oauth/callback` for local setups. **Important for remote deployments**: Use a public URL ending in `/oauth/callback` and reverse-proxy it to `http://127.0.0.1:7777/oauth/callback`.
 - `--oauth-authorization-url`: OAuth authorization URL.
 - `--oauth-token-url`: OAuth token URL.
 - `--oauth-scopes`: OAuth scopes (comma-separated).

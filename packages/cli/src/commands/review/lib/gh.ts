@@ -94,6 +94,16 @@ export function setGhHost(host: string | undefined): void {
 }
 
 /**
+ * The host `gh` calls are currently routed at, or `undefined` for the
+ * default (github.com / an operator-exported GH_HOST). Lets a caller that
+ * overrides the host for a scoped block save and restore the prior value
+ * instead of leaking the override into module state.
+ */
+export function getGhHost(): string | undefined {
+  return ghHost;
+}
+
+/**
  * Environment for `gh` child processes. `undefined` means "inherit the
  * parent env untouched"; with a host set, the inherited env is extended
  * with GH_HOST, which `gh` honours on every command.
@@ -117,12 +127,24 @@ export function gh(...args: string[]): string {
 }
 
 /**
+ * Run `gh` with `input` on its stdin, WITH the same transient-error retry as
+ * `gh()` — for callers whose input-carrying writes are idempotent
+ * (publish-assets: content-hashed PUTs, a ref create whose duplicate is
+ * caught). Non-idempotent writes use `ghWithInput` below.
+ */
+export function ghWithInputRetried(input: string, ...args: string[]): string {
+  return execGhWithRetry(args, { input });
+}
+
+/**
  * Run `gh` with `input` on its stdin. Returns stdout, trimmed.
  *
- * Unlike `gh()`, this does NOT retry on transient errors: the only caller
- * (`submit.ts`) POSTs a review, which is not idempotent — a retry after a
- * proxy-level 502/503 could duplicate the review if GitHub already processed
- * the original request.
+ * Unlike `gh()`, this does NOT retry on transient errors: `submit.ts` POSTs
+ * a review, which is not idempotent — a retry after a proxy-level 502/503
+ * could duplicate the review if GitHub already processed the original
+ * request. A caller whose input-carrying write IS idempotent (publish-assets:
+ * content-hashed PUTs, a ref create whose duplicate is caught) uses
+ * `ghWithInputRetried` above, which shares `gh()`'s transient-error retry.
  *
  * Exists so a caller can send bytes it already holds in memory instead of a
  * pathname `gh` would re-open. Passing `--input <file>` re-reads the file at
@@ -160,9 +182,18 @@ export function ghApi(path: string, jq?: string): unknown {
  *
  * Use this for endpoints that return arrays and may have more than 30
  * (the default `per_page`) entries — PR `/comments`, `/issues/{n}/comments`,
- * `/reviews`, etc. `gh --paginate` walks every `next` link and concatenates
- * each page's array into a single top-level array, so a single
- * `JSON.parse` recovers the full set.
+ * `/reviews`, etc.
+ *
+ * **Why a single `JSON.parse` is correct on multi-page output (a recurring
+ * review question):** for a TOP-LEVEL JSON array `gh --paginate` MERGES the
+ * pages into one array — it does NOT emit one array per page. So the output
+ * is a single well-formed array and `JSON.parse` recovers the full set. The
+ * per-page-concatenation failure mode (`}{` / `][` between pages that would
+ * throw) only happens for endpoints whose array is NESTED under a key (e.g.
+ * `check-runs`), and those go through {@link ghApiAllNested} with
+ * `--jq '.<key>[]'` + NDJSON parsing precisely because `--paginate` can't
+ * merge them. Verified empirically on a 4-page (`per_page=30`, 97-comment)
+ * `pulls/{n}/comments` response: zero `][` markers, one array, clean parse.
  *
  * Returns `[]` for empty responses or non-array payloads (defensive — the
  * endpoint may legitimately return an object on a 4xx-style 200, e.g. an

@@ -13,6 +13,10 @@ const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
 const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
 const mockRecordChannelMemoryRecallMetrics = vi.hoisted(() => vi.fn());
+const mockNextFireTime = vi.hoisted(() =>
+  vi.fn(() => new Date('2026-01-01T00:01:00.000Z')),
+);
+const mockParseCron = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
 const mockRegisterBackgroundResponseRelay = vi.hoisted(() => vi.fn());
 const mockRegisterPermissionRelay = vi.hoisted(() => vi.fn());
@@ -21,9 +25,18 @@ const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
 const mockDaemonSessionRoutesPath = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen/channels/daemon/workspace-hash/routes.json'),
 );
+const mockDaemonChannelLoopPath = vi.hoisted(() =>
+  vi.fn(() => '/tmp/qwen/channels/daemon/workspace-hash/cron.json'),
+);
 const mockDaemonObservedContactsPath = vi.hoisted(() =>
   vi.fn(
     () => '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
+  ),
+);
+const mockDaemonChannelStateDir = vi.hoisted(() =>
+  vi.fn(
+    (workspace: string, channelName: string) =>
+      `/tmp/qwen/channels/daemon/${workspace === '/workspace' ? 'workspace-hash' : 'other-hash'}/instances/${channelName}-hash`,
   ),
 );
 const mockObserveContact = vi.hoisted(() => vi.fn());
@@ -33,9 +46,19 @@ const mockObservedContactStore = vi.hoisted(() =>
   })),
 );
 const mockLoadSettings = vi.hoisted(() =>
-  vi.fn((_cwd?: string, _opts?: unknown) => ({
-    merged: { proxy: 'http://settings-proxy:8080' as string | undefined },
-  })),
+  vi.fn(
+    (
+      _cwd?: string,
+      _opts?: unknown,
+    ): {
+      merged: {
+        proxy?: string;
+        experimental?: { cron?: boolean };
+      };
+    } => ({
+      merged: { proxy: 'http://settings-proxy:8080' },
+    }),
+  ),
 );
 const mockResolveProxyUrl = vi.hoisted(() =>
   vi.fn((_cliProxy?: string, settingsProxy?: string) => settingsProxy),
@@ -110,6 +133,27 @@ const mockBridgeDiscardSession = vi.hoisted(() => vi.fn());
 const mockBridgeRespondToPermission = vi.hoisted(() => vi.fn());
 const mockBridgeShellCommand = vi.hoisted(() => vi.fn());
 const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
+const mockBridgeRegisterChannelLoopToolHandler = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreCreate = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreCreateForTarget = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreListForTarget = vi.hoisted(() => vi.fn());
+const mockChannelLoopStoreDisable = vi.hoisted(() => vi.fn());
+const mockChannelLoopStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    create: mockChannelLoopStoreCreate,
+    createForTarget: mockChannelLoopStoreCreateForTarget,
+    listForTarget: mockChannelLoopStoreListForTarget,
+    disable: mockChannelLoopStoreDisable,
+  })),
+);
+const mockChannelLoopSchedulerStart = vi.hoisted(() => vi.fn());
+const mockChannelLoopSchedulerStop = vi.hoisted(() => vi.fn());
+const mockChannelLoopScheduler = vi.hoisted(() =>
+  vi.fn((_options?: unknown) => ({
+    start: mockChannelLoopSchedulerStart,
+    stop: mockChannelLoopSchedulerStop,
+  })),
+);
 const mockDaemonChannelBridge = vi.hoisted(() =>
   vi.fn(() => ({
     get availableCommands() {
@@ -125,6 +169,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
     discardSession: mockBridgeDiscardSession,
     respondToPermission: mockBridgeRespondToPermission,
     shellCommand: mockBridgeShellCommand,
+    registerChannelLoopToolHandler: mockBridgeRegisterChannelLoopToolHandler,
     start: mockBridgeStart,
     stop: mockBridgeStop,
   })),
@@ -162,6 +207,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   clearChannelMemory: mockClearChannelMemory,
   getChannelMemoryRevision: mockGetChannelMemoryRevision,
   listChannelMemoryEntries: mockListChannelMemoryEntries,
+  nextFireTime: mockNextFireTime,
+  parseCron: mockParseCron,
   readChannelMemory: mockReadChannelMemory,
   recordChannelMemoryRecallMetrics: mockRecordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
@@ -183,6 +230,8 @@ vi.mock('./proxy.js', () => ({
 
 vi.mock('./runtime.js', () => ({
   createChannel: mockCreateChannel,
+  daemonChannelLoopPath: mockDaemonChannelLoopPath,
+  daemonChannelStateDir: mockDaemonChannelStateDir,
   daemonObservedContactsPath: mockDaemonObservedContactsPath,
   daemonSessionRoutesPath: mockDaemonSessionRoutesPath,
   loadChannelsConfig: mockLoadChannelsConfig,
@@ -201,6 +250,8 @@ vi.mock('./observed-contact-store.js', () => ({
 }));
 
 vi.mock('@qwen-code/channel-base', () => ({
+  ChannelLoopScheduler: mockChannelLoopScheduler,
+  ChannelLoopStore: mockChannelLoopStore,
   DaemonChannelBridge: mockDaemonChannelBridge,
   isChannelProactiveDeliveryError: mockIsChannelProactiveDeliveryError,
   sanitizeLogText: mockSanitizeLogText,
@@ -302,6 +353,7 @@ beforeEach(() => {
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn(),
     name,
+    runLoopPrompt: vi.fn().mockResolvedValue('done'),
     validateWebhookTask: vi.fn(),
   }));
   mockLoadChannelsConfig.mockReturnValue({
@@ -310,6 +362,10 @@ beforeEach(() => {
   });
   mockLoadChannelsFromExtensions.mockResolvedValue(0);
   mockParseConfiguredChannels.mockResolvedValue([parsedTelegram]);
+  mockChannelLoopStoreCreate.mockResolvedValue({ id: 'job-1' });
+  mockChannelLoopStoreCreateForTarget.mockResolvedValue({ id: 'job-1' });
+  mockChannelLoopStoreListForTarget.mockResolvedValue([]);
+  mockChannelLoopStoreDisable.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -626,7 +682,8 @@ describe('createDaemonChannelBridgeFacade', () => {
     expect('listSessions' in facade).toBe(false);
   });
 
-  it('does not expose channel loop MCP registration through the daemon facade', () => {
+  it('forwards channel loop MCP registration through the daemon facade', () => {
+    const registerChannelLoopToolHandler = vi.fn();
     const bridge = {
       availableCommands: [],
       on: mockBridgeOn,
@@ -635,14 +692,21 @@ describe('createDaemonChannelBridgeFacade', () => {
       loadSession: mockBridgeLoadSession,
       prompt: mockBridgePrompt,
       cancelSession: mockBridgeCancelSession,
-      registerChannelLoopToolHandler: vi.fn(),
+      registerChannelLoopToolHandler,
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
       exposeShellCommand: false,
     });
 
-    expect('registerChannelLoopToolHandler' in facade).toBe(false);
+    const handler = {
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    };
+    facade.registerChannelLoopToolHandler?.(handler);
+
+    expect(registerChannelLoopToolHandler).toHaveBeenCalledWith(handler);
   });
 });
 
@@ -735,7 +799,13 @@ describe('runChannelDaemonWorker', () => {
         observedContacts: {
           observe: expect.any(Function),
         },
+        stateDir:
+          '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
       }),
+    );
+    expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(
+      '/workspace',
+      'telegram',
     );
     expect(mockDaemonObservedContactsPath).toHaveBeenCalledWith('/workspace');
     expect(mockObservedContactStore).toHaveBeenCalledWith(
@@ -799,6 +869,211 @@ describe('runChannelDaemonWorker', () => {
       mockRouterDispose.mock.invocationCallOrder[0]!,
     );
     expect(mockRouterClearAll).not.toHaveBeenCalled();
+  });
+
+  it('starts a workspace-scoped loop runtime for connected channels', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(mockDaemonChannelLoopPath).toHaveBeenCalledWith('/workspace');
+    expect(mockChannelLoopStore).toHaveBeenCalledWith({
+      filePath: '/tmp/qwen/channels/daemon/workspace-hash/cron.json',
+    });
+    const channelOptions = mockCreateChannel.mock.calls[0]![3] as {
+      loopController?: {
+        create: unknown;
+        createForTarget: unknown;
+        listForTarget: unknown;
+        disable: unknown;
+        validateCron: unknown;
+        nextFireTime: unknown;
+      };
+    };
+    expect(channelOptions.loopController).toEqual({
+      create: expect.any(Function),
+      createForTarget: expect.any(Function),
+      listForTarget: expect.any(Function),
+      disable: expect.any(Function),
+      validateCron: expect.any(Function),
+      nextFireTime: expect.any(Function),
+    });
+    const schedulerOptions = mockChannelLoopScheduler.mock.calls[0]![0] as {
+      store: unknown;
+      channels: Map<string, unknown>;
+      nextFireTime: unknown;
+    };
+    expect(schedulerOptions.store).toBe(
+      mockChannelLoopStore.mock.results[0]!.value,
+    );
+    expect([...schedulerOptions.channels.keys()]).toEqual(['telegram']);
+    expect(schedulerOptions.nextFireTime).toBe(mockNextFireTime);
+    expect(mockChannelLoopSchedulerStart).toHaveBeenCalledOnce();
+    const channel = mockCreateChannel.mock.results[0]!.value as {
+      connect: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    expect(channel.connect.mock.invocationCallOrder[0]).toBeLessThan(
+      mockChannelLoopSchedulerStart.mock.invocationCallOrder[0]!,
+    );
+    expect(
+      mockChannelLoopSchedulerStart.mock.invocationCallOrder[0],
+    ).toBeLessThan(ready.mock.invocationCallOrder[0]!);
+
+    await handle.close();
+
+    expect(mockChannelLoopSchedulerStop).toHaveBeenCalledOnce();
+    expect(
+      mockChannelLoopSchedulerStop.mock.invocationCallOrder[0],
+    ).toBeLessThan(channel.disconnect.mock.invocationCallOrder[0]!);
+    expect(channel.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      mockBridgeStop.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('keeps disconnected channels out of the loop scheduler', async () => {
+    const sdk = createSdk();
+    const firstChannel = {
+      connect: vi.fn().mockRejectedValue(new Error('first down')),
+      disconnect: vi.fn(),
+      name: 'first',
+      runLoopPrompt: vi.fn(),
+      validateWebhookTask: vi.fn(),
+    };
+    const secondChannel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'second',
+      runLoopPrompt: vi.fn(),
+      validateWebhookTask: vi.fn(),
+    };
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      { ...parsedTelegram, name: 'first' },
+      { ...parsedTelegram, name: 'second' },
+    ]);
+    mockCreateChannel.mockImplementation((name: string) =>
+      name === 'first' ? firstChannel : secondChannel,
+    );
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const schedulerOptions = mockChannelLoopScheduler.mock.calls[0]![0] as {
+      channels: Map<string, unknown>;
+    };
+    expect([...schedulerOptions.channels.keys()]).toEqual(['second']);
+
+    await handle.close();
+  });
+
+  it('disables daemon loop jobs owned by another workspace', async () => {
+    const sdk = createSdk();
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const schedulerOptions = mockChannelLoopScheduler.mock.calls[0]![0] as {
+      channels: Map<
+        string,
+        {
+          runLoopPrompt(job: unknown): Promise<string | undefined>;
+        }
+      >;
+    };
+    const runner = schedulerOptions.channels.get('telegram')!;
+    const channel = mockCreateChannel.mock.results[0]!.value as {
+      runLoopPrompt: ReturnType<typeof vi.fn>;
+    };
+
+    await expect(
+      runner.runLoopPrompt({ id: 'foreign-loop', cwd: '/other' }),
+    ).rejects.toThrow('outside daemon workspace');
+    expect(mockChannelLoopStoreDisable).toHaveBeenCalledWith('foreign-loop');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] Disabled loop "foreign-loop": its workspace does not match this daemon worker.',
+    );
+    expect(channel.runLoopPrompt).not.toHaveBeenCalled();
+
+    mockChannelLoopStoreDisable.mockRejectedValueOnce(new Error('disk full'));
+    await expect(
+      runner.runLoopPrompt({ id: 'unwritable-loop', cwd: '/other' }),
+    ).rejects.toThrow('outside daemon workspace');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] Disabled loop "unwritable-loop": its workspace does not match this daemon worker.',
+    );
+    expect(channel.runLoopPrompt).not.toHaveBeenCalled();
+
+    await expect(
+      runner.runLoopPrompt({ id: 'local-loop', cwd: '/workspace' }),
+    ).resolves.toBe('done');
+    expect(channel.runLoopPrompt).toHaveBeenCalledWith(
+      { id: 'local-loop', cwd: '/workspace' },
+      undefined,
+    );
+
+    await handle.close();
+  });
+
+  it('does not create loop runtime when cron is disabled in settings', async () => {
+    const sdk = createSdk();
+    mockLoadSettings.mockReturnValueOnce({
+      merged: { experimental: { cron: false } },
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelLoopPath).not.toHaveBeenCalled();
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
+    expect(mockCreateChannel.mock.calls[0]![3]).not.toHaveProperty(
+      'loopController',
+    );
+
+    await handle.close();
+  });
+
+  it('stops the loop scheduler when startup rolls back after connection', async () => {
+    const sdk = createSdk();
+    const sendReady = vi.fn(() => {
+      throw new Error('ready failed');
+    });
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+        sendReady,
+      }),
+    ).rejects.toThrow('ready failed');
+
+    expect(mockChannelLoopSchedulerStart).toHaveBeenCalledOnce();
+    expect(mockChannelLoopSchedulerStop).toHaveBeenCalledOnce();
+    const channel = mockCreateChannel.mock.results[0]!.value as {
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    expect(
+      mockChannelLoopSchedulerStop.mock.invocationCallOrder[0],
+    ).toBeLessThan(channel.disconnect.mock.invocationCallOrder[0]!);
   });
 
   it('selects all configured channels in one shared router', async () => {
@@ -1698,6 +1973,7 @@ describe('daemonWorkerCommand', () => {
     vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
     vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 
@@ -1711,6 +1987,7 @@ describe('daemonWorkerCommand', () => {
 
     expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_URL']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
     expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();

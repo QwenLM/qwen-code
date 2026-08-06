@@ -53,6 +53,7 @@ import type {
   ChannelAgentBridge,
   ChannelConfig,
   Envelope,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 export class MyChannel extends ChannelBase {
@@ -105,6 +106,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `senderId`       | string       | Yes      | Must be stable across messages (used for session routing + access control) |
 | `senderName`     | string       | Yes      | Display name                                                               |
 | `chatId`         | string       | Yes      | Must distinguish DMs from groups                                           |
+| `chatName`       | string       | No       | Group/conversation name when supplied by the platform                      |
 | `text`           | string       | Yes      | Strip bot @mentions                                                        |
 | `threadId`       | string       | No       | For `sessionScope: "thread"`                                               |
 | `messageId`      | string       | No       | Platform message ID — useful for response correlation                      |
@@ -200,6 +202,27 @@ protected override onPromptEnd(chatId: string, sessionId: string, messageId?: st
 **Streaming hooks** — override `onResponseChunk(chatId, chunk, sessionId)` for per-chunk progressive display (e.g., editing a message in-place). Override `onResponseComplete(chatId, fullText, sessionId)` to customize final delivery.
 
 **Block streaming** — set `blockStreaming: "on"` in the channel config. The base class automatically splits responses into multiple messages at paragraph boundaries. No plugin code needed — it works alongside `onResponseChunk`.
+
+**Proactive delivery** — override `supportsProactiveSend()` to return `true` when the adapter can send without an active inbound request. `ChannelBase` uses this capability for persistent channel loops, webhook tasks, background-agent results, and daemon delivery. The default target policy rejects threaded targets; override the protected target checks only for target shapes your platform can deliver safely:
+
+```typescript
+override supportsProactiveSend(): boolean {
+  return true;
+}
+
+protected override supportsProactiveTarget(target: SessionTarget): boolean {
+  return target.threadId === undefined;
+}
+
+protected override async pushProactive(
+  target: SessionTarget,
+  text: string,
+): Promise<void> {
+  await this.platformClient.send(target.chatId, text);
+}
+```
+
+Use `supportsProactiveDeliveryTarget()` when generic daemon delivery accepts a different target shape, and `supportsProactiveWebhookTarget()` when webhook delivery differs from loops and background results. Keep unsupported targets rejected rather than falling back to another conversation.
 
 **Media** — populate `envelope.attachments` with images/files. See [Attachments](#attachments) above.
 

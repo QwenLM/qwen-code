@@ -88,20 +88,35 @@ export async function truncateAndSaveToFile(
   // Collect head lines within budget. If a single line exceeds the
   // remaining budget, include a truncated slice of it.
   const previewBudget = Math.max(0, previewChars);
+
+  // The separator sits between (or beside) the head and tail, so it has to
+  // come out of the budget rather than be added on top of it. It was emitted
+  // unconditionally while the head budget ignored it entirely, so a small
+  // previewChars came back over budget every time: 0 produced 39 characters,
+  // 10 produced 42, 40 produced 47. Below the separator's own length there is
+  // no room to say anything and still show content -- and the wrapper message
+  // above already states the output was truncated -- so drop it there.
+  const sep = previewBudget > separator.length ? separator : '';
+  const contentBudget = previewBudget - sep.length;
   const headBudget =
     keep === 'head'
-      ? previewBudget
+      ? contentBudget
       : keep === 'tail'
         ? 0
-        : Math.floor(previewBudget / 5);
+        : Math.floor(contentBudget / 5);
   const beginning: string[] = [];
   let headChars = 0;
   for (let i = 0; i < Math.min(headCount, lines.length); i++) {
     const remaining = headBudget - headChars;
     if (remaining <= 0) break;
     if (lines[i].length + 1 > remaining) {
-      const sliceLen = Math.max(remaining - ellipsis.length, 0);
-      beginning.push(lines[i].slice(0, sliceLen) + ellipsis);
+      // The ellipsis has to fit inside `remaining` too. Emitting it when
+      // fewer than three characters were left put the preview over budget by
+      // the difference, on top of the separator overrun above.
+      if (remaining >= ellipsis.length) {
+        const sliceLen = remaining - ellipsis.length;
+        beginning.push(lines[i].slice(0, sliceLen) + ellipsis);
+      }
       headChars = headBudget;
       break;
     }
@@ -112,9 +127,7 @@ export async function truncateAndSaveToFile(
   // Collect tail lines within remaining budget. If a single line exceeds
   // the remaining budget, include a truncated slice of it.
   const tailBudget =
-    keep === 'head'
-      ? 0
-      : Math.max(previewBudget - headChars - separator.length, 0);
+    keep === 'head' ? 0 : Math.max(contentBudget - headChars, 0);
   const end: string[] = [];
   let tailChars = 0;
   const tailStart = Math.max(lines.length - tailCount, beginning.length);
@@ -122,11 +135,15 @@ export async function truncateAndSaveToFile(
     const remaining = tailBudget - tailChars;
     if (remaining <= 0) break;
     if (lines[i].length + 1 > remaining) {
-      const sliceLen = Math.max(remaining - ellipsis.length, 0);
-      // slice(-0) === slice(0) returns the WHOLE line, so guard the zero case
-      // explicitly: sliceLen === 0 means no budget for any tail chars (the head
-      // branch's slice(0, 0) already yields '' correctly).
-      end.unshift(ellipsis + (sliceLen > 0 ? lines[i].slice(-sliceLen) : ''));
+      // As above: below the ellipsis's own length there is no room to mark the
+      // cut without overshooting, so mark nothing.
+      if (remaining >= ellipsis.length) {
+        const sliceLen = remaining - ellipsis.length;
+        // slice(-0) === slice(0) returns the WHOLE line, so guard the zero
+        // case explicitly: sliceLen === 0 means no budget for any tail chars
+        // (the head branch's slice(0, 0) already yields '' correctly).
+        end.unshift(ellipsis + (sliceLen > 0 ? lines[i].slice(-sliceLen) : ''));
+      }
       tailChars = tailBudget;
       break;
     }
@@ -139,10 +156,10 @@ export async function truncateAndSaveToFile(
   // both keeps the existing head+separator+tail shape.
   const truncatedContent =
     keep === 'head'
-      ? beginning.join('\n') + separator
+      ? beginning.join('\n') + sep
       : keep === 'tail'
-        ? separator + end.join('\n')
-        : beginning.join('\n') + separator + end.join('\n');
+        ? sep + end.join('\n')
+        : beginning.join('\n') + sep + end.join('\n');
 
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;

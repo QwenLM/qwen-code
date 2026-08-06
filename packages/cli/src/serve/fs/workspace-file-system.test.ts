@@ -9,7 +9,8 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { Ignore } from '@qwen-code/qwen-code-core';
+import { Ignore, StandardFileSystemService } from '@qwen-code/qwen-code-core';
+import { encodeTextCursor } from './text-cursor.js';
 import {
   FS_ACCESS_EVENT_TYPE,
   FS_DENIED_EVENT_TYPE,
@@ -34,6 +35,7 @@ async function makeHarness(opts?: {
   trusted?: boolean;
   ignore?: Ignore;
   includeRawPaths?: boolean;
+  generationGuard?: { assertOpen(): void };
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -48,6 +50,7 @@ async function makeHarness(opts?: {
     emit: (e) => events.push(e),
     ignore: opts?.ignore,
     includeRawPaths: opts?.includeRawPaths,
+    generationGuard: opts?.generationGuard,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -165,10 +168,39 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(out.content.length).toBeLessThanOrEqual(1024);
   });
 
-  it('throws file_too_large when file exceeds MAX_READ_BYTES regardless of opts.maxBytes', async () => {
-    // Write a file larger than the soft cap and assert the boundary
-    // refuses BEFORE delegating to lowFs (which would slurp the
-    // whole file into memory).
+  it('caps decoded UTF-8 bytes when a smaller source encoding expands', async () => {
+    const smallTarget = path.join(h.workspace, 'expanded-small.txt');
+    const smallRaw = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中'.repeat(40), 'utf16le'),
+    ]);
+    expect(smallRaw.length).toBe(82);
+    await fsp.writeFile(smallTarget, smallRaw);
+    const smallResolved = await h.fs.resolve('expanded-small.txt', 'read');
+    const small = await h.fs.readText(smallResolved, { maxBytes: 100 });
+    expect(Buffer.byteLength(small.content)).toBe(99);
+    expect(small.content).not.toContain('\uFFFD');
+    expect(small.meta.encoding).toBe('utf-16le');
+    expect(small.meta.truncated).toBe(true);
+
+    const defaultTarget = path.join(h.workspace, 'expanded-default.txt');
+    const defaultRaw = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中'.repeat(100_000), 'utf16le'),
+    ]);
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    expect(defaultRaw.length).toBeLessThan(maxReadBytes);
+    await fsp.writeFile(defaultTarget, defaultRaw);
+    const defaultResolved = await h.fs.resolve('expanded-default.txt', 'read');
+    const expanded = await h.fs.readText(defaultResolved);
+    expect(Buffer.byteLength(expanded.content)).toBeLessThanOrEqual(
+      maxReadBytes,
+    );
+    expect(expanded.content).not.toContain('\uFFFD');
+    expect(expanded.meta.truncated).toBe(true);
+  });
+
+  it('throws file_too_large for an oversized read with no window argument', async () => {
     const big = path.join(h.workspace, 'huge.txt');
     const bytes = (await import('./policy.js')).MAX_READ_BYTES + 1;
     await fsp.writeFile(big, 'a'.repeat(bytes));
@@ -182,6 +214,658 @@ describe('WorkspaceFileSystem - readText', () => {
     expect((denied!.data as { errorKind: string }).errorKind).toBe(
       'file_too_large',
     );
+  });
+
+  it('serves oversized text for any explicit window argument, not just limit', async () => {
+    // `maxBytes` and `line` bound the response just as much as `limit` does;
+    // refusing them while admitting a deep `line` had the cost model backwards.
+    const big = path.join(h.workspace, 'huge-window.txt');
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    const line = `${'a'.repeat(99)}\n`;
+    await fsp.writeFile(big, line.repeat(Math.ceil(maxReadBytes / 100) + 10));
+    const r = await h.fs.resolve('huge-window.txt', 'read');
+
+    const capped = await h.fs.readText(r, { maxBytes: 1024 });
+    expect(Buffer.byteLength(capped.content)).toBeLessThanOrEqual(1024);
+    expect(capped.meta.truncated).toBe(true);
+    expect(capped.meta.hasMore).toBe(true);
+    expect(capped.meta.nextCursor).toBeUndefined();
+    expect(capped.meta.hash).toBeUndefined();
+
+    const fromLine = await h.fs.readText(r, { line: 2 });
+    expect(fromLine.content.startsWith('a'.repeat(99))).toBe(true);
+    expect(Buffer.byteLength(fromLine.content)).toBeLessThanOrEqual(
+      maxReadBytes,
+    );
+    expect(fromLine.meta.truncated).toBe(true);
+  });
+
+  it('refuses a line offset beyond MAX_TEXT_SCAN_BYTES', async () => {
+    const { MAX_TEXT_SCAN_BYTES } = await import('./policy.js');
+    const big = path.join(h.workspace, 'deep-offset.txt');
+    const line = `${'a'.repeat(99)}\n`;
+    const lineCount = Math.ceil((MAX_TEXT_SCAN_BYTES / 100) * 1.5);
+    await fsp.writeFile(big, line.repeat(lineCount));
+    const r = await h.fs.resolve('deep-offset.txt', 'read');
+
+    // A shallow window on the same file is still cheap and still works.
+    const head = await h.fs.readText(r, { limit: 2 });
+    expect(head.content.split('\n')).toHaveLength(2);
+
+    // The deep one is refused rather than silently costing a full scan.
+    const err = await h.fs
+      .readText(r, { line: lineCount - 5, limit: 2 })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+    expect((err as { hint?: string }).hint).toMatch(/readBytes/);
+  });
+
+  it('reports the same lineEnding on every page of a CRLF file', async () => {
+    // A one-line slice arrives as text ending in '\r' — the '\n' was consumed
+    // as its terminator — so detecting on the slice would call page 1 'lf'
+    // while the cursor path called page 2 'crlf', for one file.
+    const target = path.join(h.workspace, 'crlf-pages.txt');
+    await fsp.writeFile(target, 'aa\r\nbb\r\ncc\r\n');
+    const r = await h.fs.resolve('crlf-pages.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const second = await h.fs.readText(r, {
+      cursor: first.meta.nextCursor!,
+      limit: 1,
+    });
+    expect(second.content).toBe('bb\r');
+    expect(second.meta.lineEnding).toBe('crlf');
+
+    const trunc = await h.fs.readText(r, { maxBytes: 3 });
+    expect(trunc.content).toBe('aa\r');
+    expect(trunc.meta.truncated).toBe(true);
+    expect(trunc.meta.lineEnding).toBe('crlf');
+  });
+
+  it('keeps an unterminated CRLF tail page consistent with page one', async () => {
+    // The tail page holds only `bb` — no terminator to test — so detection
+    // must come from the CRLF pair the cursor resumed after, or the two pages
+    // of one file disagree, the exact symptom fixed above.
+    const target = path.join(h.workspace, 'crlf-no-final.txt');
+    await fsp.writeFile(target, 'aa\r\nbb');
+    const r = await h.fs.resolve('crlf-no-final.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const tail = await h.fs.readText(r, { cursor: first.meta.nextCursor! });
+    expect(tail.content).toBe('bb');
+    expect(tail.meta.lineEnding).toBe('crlf');
+  });
+
+  it('pages a large log by cursor and reassembles it exactly', async () => {
+    const target = path.join(h.workspace, 'cursor-page.log');
+    const lines = Array.from(
+      { length: 6_000 },
+      (_, index) => `row-${index + 1} ${'x'.repeat(60)}`,
+    );
+    const body = lines.join('\n');
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    expect(Buffer.byteLength(body)).toBeGreaterThan(maxReadBytes);
+    await fsp.writeFile(target, body);
+    const r = await h.fs.resolve('cursor-page.log', 'read');
+
+    const pages: string[] = [];
+    let out = await h.fs.readText(r, { limit: 500 });
+    pages.push(out.content);
+    expect(out.meta.hasMore).toBe(true);
+    expect(out.meta.nextCursor).toBeDefined();
+
+    let guard = 0;
+    while (out.meta.nextCursor !== undefined) {
+      if (guard++ > 100) throw new Error('paging did not terminate');
+      out = await h.fs.readText(r, {
+        cursor: out.meta.nextCursor,
+        limit: 500,
+      });
+      pages.push(out.content);
+    }
+    expect(out.meta.hasMore).toBe(false);
+    expect(pages.join('\n')).toBe(body);
+  });
+
+  it('serves a cursor read of a file below MAX_READ_BYTES', async () => {
+    // The dispatch must branch on `cursor` before the size check; otherwise a
+    // small file lands on the snapshot path and silently returns line 0.
+    const target = path.join(h.workspace, 'small-cursor.txt');
+    await fsp.writeFile(target, 'one\ntwo\nthree\nfour\n');
+    const r = await h.fs.resolve('small-cursor.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 2 });
+    expect(first.content).toBe('one\ntwo');
+    expect(first.meta.nextCursor).toBeDefined();
+
+    const second = await h.fs.readText(r, {
+      cursor: first.meta.nextCursor!,
+      limit: 2,
+    });
+    expect(second.content).toBe('three\nfour');
+    expect(second.meta.hasMore).toBe(false);
+    expect(second.meta.nextCursor).toBeUndefined();
+
+    const completeSnapshot = await h.fs.readText(r, { limit: 4 });
+    expect(completeSnapshot.content).toBe('one\ntwo\nthree\nfour');
+    expect(completeSnapshot.meta.hasMore).toBe(false);
+    expect(completeSnapshot.meta.nextCursor).toBeUndefined();
+  });
+
+  it('reports remaining content when a cursor page truncates its final line', async () => {
+    const target = path.join(h.workspace, 'cursor-long-final-line.txt');
+    await fsp.writeFile(target, 'x'.repeat(5_000));
+    const stats = await fsp.stat(target);
+    const r = await h.fs.resolve('cursor-long-final-line.txt', 'read');
+
+    const page = await h.fs.readText(r, {
+      cursor: encodeTextCursor({
+        off: 0,
+        size: stats.size,
+        dev: String(stats.dev),
+        ino: String(stats.ino),
+      }),
+      maxBytes: 100,
+    });
+    expect(page.content).toBe('x'.repeat(100));
+    expect(page.meta.hasMore).toBe(true);
+    expect(page.meta.nextCursor).toBeUndefined();
+  });
+
+  it('keeps an outstanding cursor valid across an append', async () => {
+    const target = path.join(h.workspace, 'cursor-append.log');
+    await fsp.writeFile(target, 'a\nb\nc\nd\n');
+    const r = await h.fs.resolve('cursor-append.log', 'read');
+
+    const first = await h.fs.readText(r, { limit: 2 });
+    await fsp.appendFile(target, 'e\nf\n');
+
+    const second = await h.fs.readText(r, {
+      cursor: first.meta.nextCursor!,
+      limit: 2,
+    });
+    expect(second.content).toBe('c\nd');
+  });
+
+  it('rejects a cursor after the file is replaced or truncated', async () => {
+    const target = path.join(h.workspace, 'cursor-stale.log');
+    await fsp.writeFile(target, 'a\nb\nc\nd\n');
+    const r = await h.fs.resolve('cursor-stale.log', 'read');
+    const first = await h.fs.readText(r, { limit: 2 });
+
+    // Replace via write-new + rename so the inode genuinely changes.
+    const replacement = path.join(h.workspace, 'cursor-stale.new');
+    await fsp.writeFile(replacement, 'z\ny\nx\nw\n');
+    await fsp.rename(replacement, target);
+
+    const err = await h.fs
+      .readText(r, { cursor: first.meta.nextCursor! })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('hash_mismatch');
+
+    // And a shrink on a stable inode is rejected too.
+    await fsp.writeFile(target, 'a\nb\nc\nd\n');
+    const fresh = await h.fs.readText(r, { limit: 2 });
+    await fsp.truncate(target, 2);
+    const shrunk = await h.fs
+      .readText(r, { cursor: fresh.meta.nextCursor! })
+      .catch((e: unknown) => e);
+    expect(isFsError(shrunk)).toBe(true);
+    expect((shrunk as { kind: string }).kind).toBe('hash_mismatch');
+  });
+
+  it('rejects malformed cursors and cursor+line together', async () => {
+    const target = path.join(h.workspace, 'cursor-bad.txt');
+    await fsp.writeFile(target, 'a\nb\n');
+    const r = await h.fs.resolve('cursor-bad.txt', 'read');
+
+    for (const cursor of ['', 'not-base64url!!', 'x'.repeat(2_000)]) {
+      const err = await h.fs.readText(r, { cursor }).catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('parse_error');
+    }
+
+    const good = await h.fs.readText(r, { limit: 1 });
+    const conflict = await h.fs
+      .readText(r, { cursor: good.meta.nextCursor!, line: 2 })
+      .catch((e: unknown) => e);
+    expect(isFsError(conflict)).toBe(true);
+    expect((conflict as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('maps a cursor that points inside a line to parse_error', async () => {
+    const target = path.join(h.workspace, 'cursor-mid-line.txt');
+    await fsp.writeFile(target, 'alpha');
+    const stats = await fsp.stat(target);
+    const r = await h.fs.resolve('cursor-mid-line.txt', 'read');
+
+    const err = await h.fs
+      .readText(r, {
+        cursor: encodeTextCursor({
+          off: 1,
+          size: stats.size,
+          dev: String(stats.dev),
+          ino: String(stats.ino),
+        }),
+      })
+      .catch((e: unknown) => e);
+
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('refuses a cursor read of oversized non-UTF-8 text', async () => {
+    const target = path.join(h.workspace, 'cursor-utf16.txt');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    await fsp.writeFile(target, body);
+    const r = await h.fs.resolve('cursor-utf16.txt', 'read');
+
+    const err = await h.fs
+      .readText(r, {
+        cursor: encodeTextCursor({
+          off: 0,
+          size: body.length,
+          dev: '0',
+          ino: '0',
+        }),
+      })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    // dev/ino are placeholders, so the staleness gate fires before decoding.
+    expect((err as { kind: string }).kind).toBe('hash_mismatch');
+  });
+
+  it('maps a cursor read of oversized non-UTF-8 text to binary_file', async () => {
+    const target = path.join(h.workspace, 'cursor-utf16-real.txt');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    await fsp.writeFile(target, body);
+    const stats = await fsp.stat(target);
+    const r = await h.fs.resolve('cursor-utf16-real.txt', 'read');
+
+    const err = await h.fs
+      .readText(r, {
+        cursor: encodeTextCursor({
+          off: 0,
+          size: stats.size,
+          dev: String(stats.dev),
+          ino: String(stats.ino),
+        }),
+      })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    // Real dev/ino clear the staleness gate, so decoding starts and the
+    // non-UTF-8 content is reclassified — not `file_too_large`, which a
+    // client would retry forever on.
+    expect((err as { kind: string }).kind).toBe('binary_file');
+    expect((err as { hint?: string }).hint).toMatch(/convert.*UTF-8/i);
+  });
+
+  it('streams bounded line windows from text above MAX_READ_BYTES', async () => {
+    const target = path.join(h.workspace, 'large-window.txt');
+    const lines = Array.from(
+      { length: 100 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    const prefix = lines.join('\n');
+    const filler = 'z'.repeat(maxReadBytes + 1 - Buffer.byteLength(prefix) - 1);
+    const allLines = [...lines, filler];
+    const content = allLines.join('\n');
+    expect(Buffer.byteLength(content)).toBe(maxReadBytes + 1);
+    await fsp.writeFile(target, content);
+    const r = await h.fs.resolve('large-window.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 20 });
+    expect(first.content).toBe(lines.slice(0, 20).join('\n'));
+    expect(first.meta.sizeBytes).toBe(Buffer.byteLength(content));
+    expect(first.meta.truncated).toBe(true);
+    expect(first.meta.hash).toBeUndefined();
+    expect(first.meta.originalLineCount).toBeUndefined();
+
+    const offset = await h.fs.readText(r, { line: 3, limit: 20 });
+    expect(offset.content).toBe(lines.slice(2, 22).join('\n'));
+    expect(offset.meta.sizeBytes).toBe(Buffer.byteLength(content));
+    expect(offset.meta.truncated).toBe(true);
+    expect(offset.meta.hash).toBeUndefined();
+
+    const beyondEof = await h.fs.readText(r, {
+      line: allLines.length + 10,
+      limit: 20,
+    });
+    expect(beyondEof.content).toBe('');
+    expect(beyondEof.meta.originalLineCount).toBe(allLines.length);
+    expect(beyondEof.meta.truncated).toBe(true);
+    expect(beyondEof.meta.hash).toBeUndefined();
+  });
+
+  it('rejects oversized binary content even with a finite line limit', async () => {
+    const target = path.join(h.workspace, 'large-binary.dat');
+    const bytes = (await import('./policy.js')).MAX_READ_BYTES + 1;
+    await fsp.writeFile(target, Buffer.alloc(bytes));
+    const r = await h.fs.resolve('large-binary.dat', 'read');
+
+    const err = await h.fs.readText(r, { limit: 20 }).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('binary_file');
+  });
+
+  it('maps oversized non-UTF-8 text windows to binary_file', async () => {
+    const target = path.join(h.workspace, 'large-utf16.txt');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    expect(body.length).toBeGreaterThan(maxReadBytes);
+    await fsp.writeFile(target, body);
+    const r = await h.fs.resolve('large-utf16.txt', 'read');
+
+    const err = await h.fs.readText(r, { limit: 20 }).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    // Not `file_too_large`: shrinking the window can never make a GBK file
+    // decodable, so a client retrying on 413 would loop forever. 422 with the
+    // readBytes hint is the same remedy that already works for binary.
+    expect((err as { kind: string }).kind).toBe('binary_file');
+    expect((err as { hint?: string }).hint).toMatch(/convert.*UTF-8/i);
+  });
+
+  it('byte-truncates an oversized multibyte line without replacement characters', async () => {
+    const target = path.join(h.workspace, 'large-unicode.txt');
+    const content = '中文🙂'.repeat(40_000);
+    await fsp.writeFile(target, content, 'utf8');
+    const r = await h.fs.resolve('large-unicode.txt', 'read');
+
+    const out = await h.fs.readText(r, { limit: 1, maxBytes: 7 });
+    expect(out.content).toBe('中文');
+    expect(out.content).not.toContain('\uFFFD');
+    expect(out.meta.truncated).toBe(true);
+    expect(out.meta.hash).toBeUndefined();
+  });
+
+  it('preserves BOM and CRLF metadata for an oversized bounded window', async () => {
+    const target = path.join(h.workspace, 'large-crlf.txt');
+    const lines = Array.from(
+      { length: 8_000 },
+      (_, index) => `row-${index + 1} ${'x'.repeat(30)}`,
+    );
+    const body = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(lines.join('\r\n')),
+    ]);
+    await fsp.writeFile(target, body);
+    const r = await h.fs.resolve('large-crlf.txt', 'read');
+
+    const out = await h.fs.readText(r, { line: 2, limit: 2 });
+    // Splitting on LF preserves the selected line's CR terminator, matching
+    // the existing full-snapshot range behavior.
+    expect(out.content).toBe(`${lines[1]}\r\n${lines[2]}\r`);
+    expect(out.meta.bom).toBe(true);
+    expect(out.meta.encoding).toBe('utf-8');
+    expect(out.meta.lineEnding).toBe('crlf');
+    expect(out.meta.hash).toBeUndefined();
+  });
+
+  it('reports line endings from the selected large-file window', async () => {
+    const target = path.join(h.workspace, 'large-mixed-endings.txt');
+    const lines = Array.from(
+      { length: 8_000 },
+      (_, index) => `row-${index + 1} ${'x'.repeat(30)}`,
+    );
+    const content = `header\r\n${lines.join('\n')}`;
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    expect(Buffer.byteLength(content)).toBeGreaterThan(maxReadBytes);
+    await fsp.writeFile(target, content);
+    const resolved = await h.fs.resolve('large-mixed-endings.txt', 'read');
+
+    const out = await h.fs.readText(resolved, { line: 2, limit: 2 });
+    expect(out.content).toBe(lines.slice(0, 2).join('\n'));
+    expect(out.content).not.toContain('\r\n');
+    expect(out.meta.lineEnding).toBe('lf');
+  });
+
+  it('rejects a symlink swap while a large range is being read', async () => {
+    const target = path.join(h.workspace, 'large-swap.txt');
+    const moved = path.join(h.workspace, 'large-swap.original.txt');
+    const outside = path.join(h.scratch, 'outside.txt');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    await fsp.writeFile(target, lines.join('\n'));
+    await fsp.writeFile(outside, 'replacement\n');
+    const resolved = await h.fs.resolve('large-swap.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const result = await original.call(this, params);
+        await fsp.rename(target, moved);
+        await fsp.symlink(outside, target, 'file');
+        return result;
+      });
+
+    try {
+      const err = await h.fs
+        .readText(resolved, { limit: 20 })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('symlink_escape');
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('rejects a truncation while a large range is being read', async () => {
+    const target = path.join(h.workspace, 'large-change.txt');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    await fsp.writeFile(target, lines.join('\n'));
+    const resolved = await h.fs.resolve('large-change.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const result = await original.call(this, params);
+        await fsp.truncate(target, 1_000);
+        return result;
+      });
+
+    try {
+      const err = await h.fs
+        .readText(resolved, { limit: 20 })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('serves a prefix window from a file being appended to during the read', async () => {
+    // The whole point of the feature: tailing a live log. A prefix window
+    // does not depend on the tail, so an append must not fail the read.
+    const target = path.join(h.workspace, 'large-append.txt');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    await fsp.writeFile(target, lines.join('\n'));
+    const resolved = await h.fs.resolve('large-append.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    const sizeBefore = (await fsp.stat(target)).size;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const result = await original.call(this, params);
+        await fsp.appendFile(target, `\n${'appended '.repeat(50)}`);
+        return result;
+      });
+
+    try {
+      const out = await h.fs.readText(resolved, { limit: 20 });
+      expect(out.content).toBe(lines.slice(0, 20).join('\n'));
+      // sizeBytes describes the snapshot the window was cut from, not the
+      // file as it stands after the concurrent append.
+      expect(out.meta.sizeBytes).toBe(sizeBefore);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('rejects same-size in-place overwrites during a large range read', async () => {
+    const target = path.join(h.workspace, 'large-overwrite.txt');
+    const lines = Array.from(
+      { length: 8_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    await fsp.writeFile(target, lines.join('\n'));
+    const fixedTime = new Date('2026-01-01T00:00:00.000Z');
+    await fsp.utimes(target, fixedTime, fixedTime);
+    const before = await fsp.stat(target);
+    const resolved = await h.fs.resolve('large-overwrite.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    let changedAfterFirstChunk = false;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const originalRead = params.fileHandle.read.bind(params.fileHandle);
+        params.fileHandle.read = (async (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          const result = await originalRead(buffer, offset, length, position);
+          if (
+            !changedAfterFirstChunk &&
+            length === 512 * 1024 &&
+            position === 0
+          ) {
+            changedAfterFirstChunk = true;
+            const writer = await fsp.open(target, 'r+');
+            try {
+              await writer.write(Buffer.from('X'), 0, 1, 600_000);
+            } finally {
+              await writer.close();
+            }
+            // Restore mtime after ctime has advanced so the stability check
+            // proves that ctime alone detects the same-size overwrite.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            await fsp.utimes(target, before.atime, before.mtime);
+          }
+          return result;
+        }) as typeof params.fileHandle.read;
+        return original.call(this, params);
+      });
+
+    try {
+      const err = await h.fs
+        .readText(resolved, { line: 7_000, limit: 20 })
+        .catch((e: unknown) => e);
+      expect(changedAfterFirstChunk).toBe(true);
+      const after = await fsp.stat(target);
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect(after.ctimeMs).not.toBe(before.ctimeMs);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('prioritizes a read-time mutation over the resulting decode error', async () => {
+    const target = path.join(h.workspace, 'large-invalidated.txt');
+    await fsp.writeFile(
+      target,
+      `${'a'.repeat(500_000)}\n${'b'.repeat(200_000)}`,
+    );
+    const fixedTime = new Date('2026-01-01T00:00:00.000Z');
+    await fsp.utimes(target, fixedTime, fixedTime);
+    const before = await fsp.stat(target);
+    const resolved = await h.fs.resolve('large-invalidated.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    let changedAfterFirstChunk = false;
+    let capturedHandle: import('node:fs/promises').FileHandle | undefined;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        capturedHandle = params.fileHandle;
+        const originalRead = params.fileHandle.read.bind(params.fileHandle);
+        params.fileHandle.read = (async (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          const result = await originalRead(buffer, offset, length, position);
+          if (
+            !changedAfterFirstChunk &&
+            length === 512 * 1024 &&
+            position === 0
+          ) {
+            changedAfterFirstChunk = true;
+            const writer = await fsp.open(target, 'r+');
+            try {
+              await writer.write(Buffer.from([0xff]), 0, 1, 550_000);
+            } finally {
+              await writer.close();
+            }
+            // Restore mtime after ctime has advanced so the stability check
+            // proves that ctime alone detects the same-size overwrite.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            await fsp.utimes(target, before.atime, before.mtime);
+          }
+          return result;
+        }) as typeof params.fileHandle.read;
+        return original.call(this, params);
+      });
+
+    try {
+      const err = await h.fs
+        .readText(resolved, { line: 2, limit: 1 })
+        .catch((e: unknown) => e);
+      expect(changedAfterFirstChunk).toBe(true);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('hash_mismatch');
+      expect(capturedHandle).toBeDefined();
+      await expect(capturedHandle!.stat()).rejects.toMatchObject({
+        code: 'EBADF',
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('throws binary_file when reading binary content', async () => {
@@ -204,6 +888,30 @@ describe('WorkspaceFileSystem - readText', () => {
     const r = await h.fs.resolve('app.log', 'read');
     const out = await h.fs.readText(r);
     expect(out.meta.matchedIgnore).toBe('file');
+  });
+
+  it('rejects a read result when its runtime generation closes in flight', async () => {
+    let checks = 0;
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          if (checks === 2) {
+            throw Object.assign(new Error('generation closed'), {
+              code: 'workspace_generation_closed',
+            });
+          }
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'stale.txt');
+    await fsp.writeFile(target, 'must not be returned');
+
+    await expect(h.fs.readText(target as ResolvedPath)).rejects.toMatchObject({
+      code: 'workspace_generation_closed',
+    });
+    expect(checks).toBe(2);
   });
 });
 
@@ -478,6 +1186,27 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(await fsp.readFile(r as string, 'utf-8')).toBe('hello\n');
   });
 
+  it('rechecks the runtime generation immediately before an atomic write', async () => {
+    let checks = 0;
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          if (checks === 5) throw new Error('generation closed');
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'generation-closed.txt');
+    const r = await h.fs.resolve(target, 'write');
+
+    await expect(
+      h.fs.writeTextAtomic(r, 'must not be written', { mode: 'create' }),
+    ).rejects.toThrow('generation closed');
+    expect(checks).toBe(5);
+    await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('writeTextAtomic create rejects existing files', async () => {
     const target = path.join(h.workspace, 'exists.txt');
     await fsp.writeFile(target, 'old');
@@ -735,6 +1464,28 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(after).toBe('foo=42\nbar=2\n');
   });
 
+  it('rechecks the runtime generation immediately before an edit commit', async () => {
+    let checks = 0;
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          if (checks === 5) throw new Error('generation closed');
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'stale-edit.txt');
+    await fsp.writeFile(target, 'foo=1\n');
+    const r = await h.fs.resolve('stale-edit.txt', 'edit');
+
+    await expect(h.fs.edit(r, 'foo=1', 'foo=2')).rejects.toThrow(
+      'generation closed',
+    );
+    expect(checks).toBe(5);
+    expect(await fsp.readFile(target, 'utf-8')).toBe('foo=1\n');
+  });
+
   it('edit() preserves the tail of files larger than the default range cap', async () => {
     const target = path.join(h.workspace, 'large-edit.txt');
     const tail = 'tail-marker\n';
@@ -877,6 +1628,20 @@ describe('WorkspaceFileSystem - write/edit', () => {
     ]) {
       const err = await h.fs
         .readText(r, { limit: bad })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('parse_error');
+    }
+  });
+
+  it('rejects opts.maxBytes outside the text boundary cap', async () => {
+    const target = path.join(h.workspace, 'max-bytes.txt');
+    await fsp.writeFile(target, 'a\nb\n');
+    const r = await h.fs.resolve('max-bytes.txt', 'read');
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    for (const bad of [0, -1, 1.5, NaN, maxReadBytes + 1]) {
+      const err = await h.fs
+        .readText(r, { maxBytes: bad })
         .catch((e: unknown) => e);
       expect(isFsError(err)).toBe(true);
       expect((err as { kind: string }).kind).toBe('parse_error');
@@ -1422,33 +2187,39 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits).toHaveLength(3);
   });
 
-  it('returns healthy root glob results when one workspace root fails', async () => {
-    await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      await expect(h.fs.glob('*.ts')).resolves.toEqual([
-        path.join(h.workspace, 'primary.ts'),
-      ]);
-    } finally {
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+  it.skipIf(process.platform === 'win32')(
+    'returns healthy root glob results when one workspace root fails',
+    async () => {
+      await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        await expect(h.fs.glob('*.ts')).resolves.toEqual([
+          path.join(h.workspace, 'primary.ts'),
+        ]);
+      } finally {
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
-  it('throws AggregateError when every workspace root glob fails', async () => {
-    await fsp.chmod(h.workspace, 0o000);
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
-      const cause = (err as Error & { cause?: unknown }).cause;
+  it.skipIf(process.platform === 'win32')(
+    'throws AggregateError when every workspace root glob fails',
+    async () => {
+      await fsp.chmod(h.workspace, 0o000);
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
+        const cause = (err as Error & { cause?: unknown }).cause;
 
-      expect(isFsError(err)).toBe(true);
-      expect(cause).toBeInstanceOf(AggregateError);
-      expect((cause as AggregateError).errors).toHaveLength(2);
-    } finally {
-      await fsp.chmod(h.workspace, 0o700);
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+        expect(isFsError(err)).toBe(true);
+        expect(cause).toBeInstanceOf(AggregateError);
+        expect((cause as AggregateError).errors).toHaveLength(2);
+      } finally {
+        await fsp.chmod(h.workspace, 0o700);
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
   it('glob with cwd searches only that resolved root', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');

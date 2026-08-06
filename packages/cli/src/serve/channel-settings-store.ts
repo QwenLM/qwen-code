@@ -230,7 +230,13 @@ function assertDescriptorValue(
       Number.isFinite(value)) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
-      field.options?.some((option) => option.value === value) === true);
+      field.options?.some((option) => option.value === value) === true) ||
+    (field.kind === 'string-list' &&
+      Array.isArray(value) &&
+      value.every((item) => typeof item === 'string')) ||
+    (field.kind === 'record' &&
+      isRecord(value) &&
+      Object.values(value).every((v) => typeof v === 'string'));
   if (!valid) {
     throw invalidConfig(`Channel field "${field.key}" has an invalid value.`);
   }
@@ -380,6 +386,10 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    const crossFieldError = plugin.management.validateConfig?.(nextConfig);
+    if (crossFieldError !== undefined) {
+      throw invalidConfig(crossFieldError);
+    }
 
     const channels = { ...current.channels, [name]: nextConfig };
     const workspaceFile = loadSettings(this.workspaceCwd, {

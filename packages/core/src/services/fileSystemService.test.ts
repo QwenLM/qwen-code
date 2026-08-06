@@ -8,12 +8,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import {
   StandardFileSystemService,
-  encodeTextFileContent,
   needsUtf8Bom,
   resetUtf8BomCache,
   detectLineEnding,
   ensureCrlfLineEndings,
 } from './fileSystemService.js';
+import { encodeTextFileContent } from '../utils/sync-file-encoding.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
 const mockGetSystemEncoding = vi.hoisted(() =>
@@ -80,6 +80,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
@@ -99,6 +101,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({
@@ -121,6 +125,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       await fileSystem.readTextFile({
@@ -141,6 +147,7 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
         truncatedByBytes: true,
       });
 
@@ -167,6 +174,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       await fileSystem.readTextFile({
@@ -183,12 +192,137 @@ describe('StandardFileSystemService', () => {
       });
     });
 
+    // Handle-bound reads no longer route through `readFileWithLineAndLimit`,
+    // so asserting the arguments it was called with would test nothing. The
+    // behaviour is covered against real files in `read-text-range.test.ts`
+    // and at the real boundary in `workspace-file-system.test.ts`; only the
+    // argument validation below needs a unit test, and it needs no mock.
+    it.each([
+      ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
+      ['maxScanBytes', { maxScanBytes: Number.POSITIVE_INFINITY }],
+      ['maxOutputBytes', { maxOutputBytes: 0 }],
+      ['maxScanBytes', { maxScanBytes: -1 }],
+    ])('should reject a handle read with unbounded %s', async (bound, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          fileHandle,
+          fileSize: 300_000,
+          limit: 20,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
+    });
+
+    it.each([
+      ['a fractional limit', 2.5],
+      ['a zero limit', 0],
+      ['a negative limit', -1],
+    ])('should reject %s on a handle read', async (_label, limit) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          fileHandle,
+          fileSize: 300_000,
+          limit,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+        }),
+      ).rejects.toThrow(/positive integer limit or Infinity/);
+    });
+
+    it.each([
+      ['fileSize', { fileSize: -1 }],
+      ['fileSize', { fileSize: 1.5 }],
+      ['line', { line: -1 }],
+      ['line', { line: 1.5 }],
+    ])('should reject invalid handle-bound %s', async (field, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          fileHandle,
+          fileSize: 300_000,
+          limit: 1,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(field));
+    });
+
+    it.each([
+      ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
+      ['maxOutputBytes', { maxOutputBytes: 0 }],
+      ['maxSnapBytes', { maxSnapBytes: Number.POSITIVE_INFINITY }],
+      ['maxSnapBytes', { maxSnapBytes: 0 }],
+    ])('should reject invalid cursor-bound %s', async (bound, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextCursorFromHandle({
+          fileHandle,
+          startOffset: 0,
+          fileSize: 300_000,
+          limit: 20,
+          maxOutputBytes: 262_144,
+          maxSnapBytes: 8 * 1024 * 1024,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
+    });
+
+    it.each([
+      ['startOffset', { startOffset: -1 }],
+      ['startOffset', { startOffset: 1.5 }],
+      ['fileSize', { fileSize: -1 }],
+      ['fileSize', { fileSize: 1.5 }],
+    ])('should reject invalid cursor-bound %s', async (field, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextCursorFromHandle({
+          fileHandle,
+          startOffset: 0,
+          fileSize: 300_000,
+          limit: 20,
+          maxOutputBytes: 262_144,
+          maxSnapBytes: 8 * 1024 * 1024,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(field));
+    });
+
+    it.each([2.5, 0, -1])(
+      'should reject invalid cursor-bound limit %s',
+      async (limit) => {
+        const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+        await expect(
+          fileSystem.readTextCursorFromHandle({
+            fileHandle,
+            startOffset: 0,
+            fileSize: 300_000,
+            limit,
+            maxOutputBytes: 262_144,
+            maxSnapBytes: 8 * 1024 * 1024,
+          }),
+        ).rejects.toThrow(/positive integer limit/);
+      },
+    );
+
     it('should return encoding info for GBK file', async () => {
       vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
         content: '你好世界',
         bom: false,
         encoding: 'gb18030',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/gbk.txt' });
@@ -670,6 +804,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 3,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
@@ -683,6 +819,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 3,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });

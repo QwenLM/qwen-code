@@ -27,7 +27,13 @@
 // agent's actual launch prompt. The two artifacts have different authors, and
 // neither is the orchestrator.
 
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, basename, resolve } from 'node:path';
 
 /**
@@ -128,8 +134,24 @@ export function recordPrompt(
   }
 }
 
-/** Every prompt this plan's builder emitted, keyed as it was recorded. */
-export function readRecordedPrompts(planPath: string): Map<string, string> {
+/**
+ * Every prompt this plan's builder emitted, keyed as it was recorded.
+ *
+ * `sinceMs` is the same fence every other reader of this directory applies —
+ * the plan's mtime. Nothing clears the record dir, and a run that dies
+ * mid-review leaves its records beside the retry's (the CI retry re-runs the
+ * review at the SAME plan path, under a freshly-captured plan): a record file
+ * older than the plan belongs to that dead attempt. A caller that reads
+ * records as OBLIGATIONS (coverage: "an agent was owed for this key") passes
+ * nothing — an obligation is not less owed for being stale, and dropping one
+ * would excuse the agent it demands. A caller that reads them as HISTORY
+ * (retirement) must pass the fence, or the dead attempt's records shadow the
+ * live ones.
+ */
+export function readRecordedPrompts(
+  planPath: string,
+  sinceMs?: number,
+): Map<string, string> {
   const out = new Map<string, string>();
   const dir = promptRecordDir(planPath);
   let names: string[];
@@ -150,7 +172,9 @@ export function readRecordedPrompts(planPath: string): Map<string, string> {
       } catch {
         continue; // Not a name this module wrote.
       }
-      out.set(key, readFileSync(join(dir, name), 'utf8'));
+      const file = join(dir, name);
+      if (sinceMs !== undefined && statSync(file).mtimeMs < sinceMs) continue;
+      out.set(key, readFileSync(file, 'utf8'));
     } catch {
       /* raced with a cleanup */
     }
@@ -187,32 +211,66 @@ export function wasDeliveredVerbatim(
   launchPrompt: string,
   built: string,
 ): boolean {
-  // A zero-byte record is not a prompt, and the loop below would be vacuously true
-  // for it — the check would pass every agent, and the roster would credit a role
-  // to whichever transcript it happened to look at first. `recordPrompt` swallows
-  // its write errors by design (a read-only tmp dir must not stop a review being
-  // *built*), so an empty file is exactly what a partial write leaves behind. It is
-  // the one input that must fail closed.
+  return deliveredVerbatim(flattenPrompt(launchPrompt), built);
+}
+
+/**
+ * `wasDeliveredVerbatim` with the launch prompt already put through
+ * `flattenPrompt`. The family exists for the one caller that pairs MANY
+ * records against MANY transcripts (the retirement scheduler): flattening is
+ * the expensive half of the check, and a caller that flattens each launch
+ * once pays it per transcript instead of per (record, transcript) pair — a
+ * few thousand full-prompt passes on the run the scheduler was built for,
+ * all before the round is admitted. Same contract, same failure modes.
+ */
+export function deliveredVerbatim(
+  flattenedLaunch: string,
+  built: string,
+): boolean {
   if (built.trim().length === 0) return false;
-  const delivered = flatten(launchPrompt);
+  return deliveredVerbatimLines(flattenedLaunch, promptLines(built));
+}
+
+/**
+ * `deliveredVerbatim` with BOTH halves pre-flattened: the launch through
+ * `flattenPrompt`, the built prompt through `promptLines`. The scheduler
+ * hoists each record's `promptLines` alongside each transcript's flatten, so
+ * the pairing walk re-splits neither side — on the 6-chunk x 4-prior-round
+ * shape the old per-pair record flatten re-split every record's whole folded
+ * prompt (cumulative findings list included) once per candidate.
+ */
+export function deliveredVerbatimLines(
+  flattenedLaunch: string,
+  builtLines: string[],
+): boolean {
+  // A zero-byte record is not a prompt, and the loop below would be vacuously
+  // true for it (no lines) — the check would pass every agent, and the roster
+  // would credit a role to whichever transcript it happened to look at first.
+  // `recordPrompt` swallows its write errors by design (a read-only tmp dir
+  // must not stop a review being *built*), so an empty file is exactly what a
+  // partial write leaves behind. It is the one input that must fail closed.
+  if (builtLines.length === 0) return false;
   let at = 0;
-  for (const line of lines(built)) {
-    const i = delivered.indexOf(line, at);
+  for (const line of builtLines) {
+    const i = flattenedLaunch.indexOf(line, at);
     if (i === -1) return false;
     at = i + line.length;
   }
   return true;
 }
 
-/** Whitespace collapsed to single spaces: a re-wrap is not an edit. */
-function flatten(s: string): string {
+/**
+ * Whitespace collapsed to single spaces: a re-wrap is not an edit. What
+ * `deliveredVerbatim` expects its launch side to have been put through.
+ */
+export function flattenPrompt(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
 /** The built prompt's lines, whitespace-normalized, blanks dropped. */
-function lines(built: string): string[] {
+export function promptLines(built: string): string[] {
   return built
     .split('\n')
-    .map((l) => flatten(l))
+    .map((l) => flattenPrompt(l))
     .filter((l) => l.length > 0);
 }

@@ -5,6 +5,7 @@ import {
   clearChannelMemory,
   getChannelMemoryRevision,
   listChannelMemoryEntries,
+  nextFireTime,
   readChannelMemory,
   recordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries,
@@ -12,6 +13,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
+  ChannelLoopScheduler,
+  ChannelLoopStore,
   DaemonChannelBridge,
   isChannelProactiveDeliveryError,
   sanitizeLogText,
@@ -20,8 +23,10 @@ import {
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelLoopRunner,
   ChannelWebhookRunOptions,
   ChannelWebhookTask,
+  DaemonChannelLoopMcpHost,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
@@ -36,6 +41,7 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
@@ -47,7 +53,7 @@ import {
   MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryErrorCode,
   type ChannelDeliveryRequest,
-} from '../../serve/channel-delivery-ipc.js';
+} from '../../runtime/channel-delivery-ipc.js';
 import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
 import {
   isChannelStartupReportAckMessage,
@@ -58,10 +64,13 @@ import {
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
+import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonChannelLoopPath,
+  daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
   loadChannelsConfig,
@@ -76,6 +85,10 @@ import {
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 import { ObservedChannelContactStore } from './observed-contact-store.js';
+import {
+  createChannelLoopController,
+  isChannelCronEnabled,
+} from './loop-runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
@@ -160,6 +173,7 @@ export interface RunChannelDaemonWorkerOptions {
   sendReady?: (ready: ChannelDaemonWorkerReady) => void;
   reportStartup?: (message: ChannelStartupReportMessage) => Promise<void>;
   startupSignal?: AbortSignal;
+  channelLoopMcpHost?: DaemonChannelLoopMcpHost;
 }
 
 export function createDaemonSessionFactory({
@@ -242,6 +256,11 @@ export function createDaemonChannelBridgeFacade(
 
   if (bridge.listSessions) {
     facade.listSessions = bridge.listSessions.bind(bridge);
+  }
+
+  if (bridge.registerChannelLoopToolHandler) {
+    facade.registerChannelLoopToolHandler =
+      bridge.registerChannelLoopToolHandler.bind(bridge);
   }
 
   return facade;
@@ -438,6 +457,14 @@ export async function runChannelDaemonWorker(
   const observedContacts = new ObservedChannelContactStore(
     daemonObservedContactsPath(daemonWorkspace),
   );
+  const loopStore = isChannelCronEnabled(settings)
+    ? new ChannelLoopStore({
+        filePath: daemonChannelLoopPath(daemonWorkspace),
+      })
+    : undefined;
+  const loopController = loopStore
+    ? createChannelLoopController(loopStore)
+    : undefined;
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -447,10 +474,14 @@ export async function runChannelDaemonWorker(
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
     ...(modelServiceId ? { modelServiceId } : {}),
+    ...(opts.channelLoopMcpHost
+      ? { channelLoopMcpHost: opts.channelLoopMcpHost }
+      : {}),
   });
 
   const channels = new Map<string, ChannelBase>();
   const connected: string[] = [];
+  let scheduler: ChannelLoopScheduler | undefined;
   let connectFailureCount = 0;
   const diagnosticRedaction = {
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
@@ -504,6 +535,7 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
+            stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
               readChannelMemory,
               getChannelMemoryRevision,
@@ -523,6 +555,7 @@ export async function runChannelDaemonWorker(
                 observedContacts.observe(channelName, observation);
               },
             },
+            ...(loopController ? { loopController } : {}),
           }),
           startupSignal,
         ),
@@ -603,6 +636,39 @@ export async function runChannelDaemonWorker(
       throw new Error('No channels connected.');
     }
 
+    if (loopStore) {
+      const schedulerChannels = new Map<string, ChannelLoopRunner>();
+      for (const name of connected) {
+        const channel = channels.get(name)!;
+        schedulerChannels.set(name, {
+          runLoopPrompt: async (job, options) => {
+            let jobWorkspace: string | undefined;
+            try {
+              jobWorkspace = canonicalizeWorkspace(job.cwd);
+            } catch {
+              jobWorkspace = undefined;
+            }
+            if (jobWorkspace !== daemonWorkspace) {
+              await loopStore.disable(job.id).catch(() => false);
+              writeStderrLine(
+                `[Channel] Disabled loop "${sanitizeLogText(job.id, 128)}": its workspace does not match this daemon worker.`,
+              );
+              throw new Error(
+                `Loop ${sanitizeLogText(job.id, 128)} is outside daemon workspace and was disabled.`,
+              );
+            }
+            return channel.runLoopPrompt(job, options);
+          },
+        });
+      }
+      scheduler = new ChannelLoopScheduler({
+        store: loopStore,
+        channels: schedulerChannels,
+        nextFireTime,
+      });
+      scheduler.start();
+    }
+
     opts.sendReady?.({
       channels: connected,
       requestedChannels: parsed.map((p) => p.name),
@@ -646,6 +712,7 @@ export async function runChannelDaemonWorker(
         }
       },
       async close() {
+        scheduler?.stop();
         disconnectAll();
         try {
           bridge.stop();
@@ -655,6 +722,7 @@ export async function runChannelDaemonWorker(
       },
     };
   } catch (err) {
+    scheduler?.stop();
     disconnectAll();
     try {
       bridge.stop();
@@ -685,6 +753,7 @@ function scrubDaemonWorkerEnv(): void {
   delete process.env[QWEN_DAEMON_URL_ENV];
   delete process.env[QWEN_DAEMON_WORKSPACE_ENV];
   delete process.env[QWEN_SERVER_TOKEN_ENV];
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
 }
 
 function readDaemonWorkerEnv(): {
@@ -715,6 +784,12 @@ function assertInternalDaemonWorkerInvocation(): void {
 function reportStartupToSupervisor(
   message: ChannelStartupReportMessage,
   signal: AbortSignal,
+  subscribeMessage: (listener: (message: unknown) => void) => () => void = (
+    listener,
+  ) => {
+    process.on('message', listener);
+    return () => process.removeListener('message', listener);
+  },
 ): Promise<void> {
   if (signal.aborted) {
     return Promise.reject(startupAbortError());
@@ -725,8 +800,9 @@ function reportStartupToSupervisor(
   }
   return new Promise<void>((resolve, reject) => {
     let settled = false;
+    let unsubscribeMessage = () => {};
     const cleanup = () => {
-      process.removeListener('message', onMessage);
+      unsubscribeMessage();
       process.removeListener('disconnect', onDisconnect);
       signal.removeEventListener('abort', onAbort);
     };
@@ -748,7 +824,7 @@ function reportStartupToSupervisor(
     const onAbort = () => {
       finish(startupAbortError());
     };
-    process.on('message', onMessage);
+    unsubscribeMessage = subscribeMessage(onMessage);
     process.once('disconnect', onDisconnect);
     signal.addEventListener('abort', onAbort, { once: true });
     try {
@@ -774,6 +850,22 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     }),
   handler: async (argv) => {
     const startupAbortController = new AbortController();
+    let channelLoopMcpHost: ChannelLoopMcpWorkerHost | undefined;
+    const messageSubscribers = new Set<(message: unknown) => void>();
+    let onWorkerMessage: ((message: unknown) => void) | undefined;
+    const subscribeMessage = (listener: (message: unknown) => void) => {
+      messageSubscribers.add(listener);
+      return () => messageSubscribers.delete(listener);
+    };
+    const disposeChannelLoopMcpHost = () => {
+      if (onWorkerMessage) {
+        process.removeListener('message', onWorkerMessage);
+        onWorkerMessage = undefined;
+      }
+      messageSubscribers.clear();
+      channelLoopMcpHost?.dispose();
+      channelLoopMcpHost = undefined;
+    };
     let pendingShutdownReason: NodeJS.Signals | 'disconnect' | undefined;
     const onEarlyShutdown = (reason: NodeJS.Signals | 'disconnect') => {
       if (pendingShutdownReason) {
@@ -803,6 +895,17 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     try {
       assertInternalDaemonWorkerInvocation();
       const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
+      const send = process.send!;
+      channelLoopMcpHost = new ChannelLoopMcpWorkerHost((message, callback) =>
+        send.call(process, message, callback ?? (() => {})),
+      );
+      onWorkerMessage = (message: unknown) => {
+        if (channelLoopMcpHost?.handleMessage(message)) return;
+        for (const subscriber of [...messageSubscribers]) {
+          subscriber(message);
+        }
+      };
+      process.on('message', onWorkerMessage);
       const selection = normalizeServeChannelSelection(argv.channel);
       if (!selection) {
         throw new Error('--channel is required.');
@@ -814,7 +917,12 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         selection,
         startupSignal: startupAbortController.signal,
         reportStartup: (message) =>
-          reportStartupToSupervisor(message, startupAbortController.signal),
+          reportStartupToSupervisor(
+            message,
+            startupAbortController.signal,
+            subscribeMessage,
+          ),
+        channelLoopMcpHost,
         sendReady: (ready) => {
           process.send?.({ type: 'ready', ...ready });
         },
@@ -981,7 +1089,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         }
       }, CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref();
-      process.on('message', onMessage);
+      const unsubscribeMessage = subscribeMessage(onMessage);
 
       let shuttingDown = false;
       let exitCode = 0;
@@ -995,7 +1103,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         } else {
           shuttingDown = true;
           clearHeartbeat();
-          process.removeListener('message', onMessage);
+          unsubscribeMessage();
           try {
             const deliveryCount = activeChannelDeliveries.size;
             const webhookCount = activeWebhookTasks.size;
@@ -1034,6 +1142,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
             );
           } finally {
             clearHeartbeat();
+            disposeChannelLoopMcpHost();
             finish();
           }
         }
@@ -1049,13 +1158,14 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       }
       await finished;
       clearHeartbeat();
-      process.removeListener('message', onMessage);
+      unsubscribeMessage();
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);
       process.exit(exitCode);
     } catch (err) {
       removeEarlyShutdownHandlers();
+      disposeChannelLoopMcpHost();
       const safeMessage = sanitizeLogText(
         err instanceof Error ? err.message : String(err),
         512,

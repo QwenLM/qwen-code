@@ -69,6 +69,11 @@ const originalRateLimit = process.env['QWEN_SERVE_RATE_LIMIT'];
 const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
+const originalNodeCompileCache = process.env['NODE_COMPILE_CACHE'];
+const originalNodeDisableCompileCache =
+  process.env['NODE_DISABLE_COMPILE_CACHE'];
+const originalPendingCompileCache =
+  process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
 const originalCwd = process.cwd();
 const cliPackageRoot = process.cwd();
 
@@ -334,6 +339,22 @@ afterEach(() => {
   } else {
     process.env['GOOGLE_CLOUD_PROJECT'] = originalGoogleCloudProject;
   }
+  if (originalNodeCompileCache === undefined) {
+    delete process.env['NODE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_COMPILE_CACHE'] = originalNodeCompileCache;
+  }
+  if (originalNodeDisableCompileCache === undefined) {
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_DISABLE_COMPILE_CACHE'] = originalNodeDisableCompileCache;
+  }
+  if (originalPendingCompileCache === undefined) {
+    delete process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
+  } else {
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] =
+      originalPendingCompileCache;
+  }
   if (originalQwenRuntimeDir === undefined) {
     delete process.env['QWEN_RUNTIME_DIR'];
   } else {
@@ -539,6 +560,28 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('parses valid memory project scopes and falls back for invalid values', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-project-scope', 'workspace']),
+    ).toMatchObject({
+      kind: 'serve',
+      options: { memoryProjectScope: 'workspace' },
+    });
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-project-scope=git-root']),
+    ).toMatchObject({
+      kind: 'serve',
+      options: { memoryProjectScope: 'git-root' },
+    });
+    expect(
+      parseServeFastPathArgs([
+        'serve',
+        '--memory-project-scope',
+        'unsupported',
+      ]),
+    ).toEqual({ kind: 'fallback' });
+  });
+
   it('parses bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       '/repo/dist/cli.js',
@@ -631,7 +674,10 @@ describe('serve fast path argument parsing', () => {
         'compacted-replay-max-bytes',
         ['--compacted-replay-max-bytes', '4194304'],
       ],
+      ['max-journal-events', ['--max-journal-events', '10000']],
+      ['max-journal-bytes', ['--max-journal-bytes', '8388608']],
       ['workspace', ['--workspace', process.cwd()]],
+      ['memory-project-scope', ['--memory-project-scope', 'workspace']],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
       ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
@@ -639,6 +685,7 @@ describe('serve fast path argument parsing', () => {
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
+      ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['mcp-client-budget', ['--mcp-client-budget', '10']],
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
@@ -659,11 +706,27 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
+      [
+        'external-tool-guard-endpoint',
+        ['--external-tool-guard-endpoint', 'http://127.0.0.1:3001/v1'],
+      ],
+      [
+        'external-tool-guard-timeout-ms',
+        ['--external-tool-guard-timeout-ms', '3000'],
+      ],
       ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
-    const expectedFallbackOptions = new Set(['channel', 'help', 'version']);
+    const expectedFallbackOptions = new Set([
+      'channel',
+      'external-tool-guard-endpoint',
+      'external-tool-guard-mode',
+      'external-tool-guard-timeout-ms',
+      'help',
+      'version',
+    ]);
 
     expect(longOptionNames.sort()).toEqual(
       [...sampleArgvByOption.keys()].sort(),
@@ -700,6 +763,19 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --memory-budget-mb on the fast path in both spellings', () => {
+    for (const argv of [
+      ['serve', '--memory-budget-mb', '8192'],
+      ['serve', '--memory-budget-mb=8192'],
+    ]) {
+      const parsed = parseServeFastPathArgs(argv);
+      expect(parsed).toMatchObject({
+        kind: 'serve',
+        options: { memoryBudgetMb: 8192 },
+      });
+    }
   });
 
   it('parses --compacted-replay-max-bytes on the fast path', () => {
@@ -770,6 +846,10 @@ describe('serve fast path argument parsing', () => {
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],
       'qwen serve: --rate-limit-prompt must be a positive integer.',
     ],
+    [
+      ['serve', '--memory-budget-mb', '512'],
+      'qwen serve: --memory-budget-mb must be an integer in [1024, 1048576].',
+    ],
   ])(
     'validates %s before bootstrapping settings and environment',
     async (argv, message) => {
@@ -792,6 +872,32 @@ describe('serve fast path argument parsing', () => {
       expect(stderrWrites.join('')).toContain(message);
     },
   );
+
+  it.each([
+    [['serve', '--memory-budget-mb', '8192'], 'valid --memory-budget-mb'],
+    [['serve'], 'absent --memory-budget-mb'],
+  ])('accepts %s without a range error', async (argv, _label) => {
+    const qwenHome = useTempQwenHome();
+    writeFileSync(join(qwenHome, 'settings.json'), '{');
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('unexpected process.exit');
+    }) as typeof process.exit);
+
+    // Bootstrap fails (broken settings.json), but validation must pass
+    // first — a spurious range error would exit(1) before reaching it.
+    const result = await tryRunServeFastPath(argv);
+
+    expect(result).toBe(false);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).not.toContain(
+      'must be an integer in [1024, 1048576]',
+    );
+  });
 
   it('does not enable rate limiting just because tuning flags are present', () => {
     const parsed = parseServeFastPathArgs([
@@ -1131,6 +1237,26 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-workspace-env');
+  });
+
+  it('preserves workspace .env compile cache over the pending default', async () => {
+    delete process.env['NODE_COMPILE_CACHE'];
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = '/tmp/generated-cache';
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-compile-cache-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', '.env'),
+      'NODE_COMPILE_CACHE=/tmp/operator-cache\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['NODE_COMPILE_CACHE']).toBe('/tmp/operator-cache');
+    expect(process.env['QWEN_CODE_PENDING_COMPILE_CACHE']).toBeUndefined();
   });
 
   it('loads .env from --workspace even when launched from another directory', async () => {

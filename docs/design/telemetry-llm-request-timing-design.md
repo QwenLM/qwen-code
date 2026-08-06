@@ -7,7 +7,10 @@
 > `gen_ai.usage.reasoning_tokens` aliases, and replaces the LLM Span's
 > `qwen-code.model`, `input_tokens`, `output_tokens`, and
 > `cached_input_tokens` aliases with standard GenAI attributes. The private
-> timing and reasoning attributes described here remain valid.
+> `ttft_ms` Span attribute, `ApiResponseEvent.ttft_ms`, `sampling_ms`,
+> throughput, `/stats`, and API request breakdown metrics described here remain
+> valid. The alignment doc adds the independent standard
+> `gen_ai.response.time_to_first_chunk` attribute alongside `ttft_ms`.
 
 > Issue #3731 — Phase 4 of hierarchical session tracing. Adds time-to-first-token, request-setup duration, sampling duration, and per-attempt retry telemetry to the `qwen-code.llm_request` span so operators can answer "why was this LLM call slow?" without guessing.
 >
@@ -542,7 +545,9 @@ Rollback path: revert the single PR (or each of 4a/4b/4c independently). All new
 
 - **After Phase 3 (#4410, in review)**: not a hard dependency. Phase 4 attributes attach to `qwen-code.llm_request` spans regardless of whether they're under a `qwen-code.subagent` (Phase 3) or `qwen-code.interaction` (Phase 1) parent. Recommend Phase 3 land first so per-attempt aggregation under subagent subtrees works naturally.
 - **Independent of #4384** (`traceparent` + `X-Qwen-Code-Session-Id` outbound propagation). They touch the HTTP layer; Phase 4 touches the stream/retry/metric layer.
-- **Independent of `clearDetailedSpanState` chat-compression follow-up** (#4097 follow-up). Different surface.
+- **Independent of GenAI content capture**. Chat compression no longer resets
+  process-global sensitive-attribute hash state because that state was removed;
+  request timing remains a separate surface.
 
 ## Open questions
 

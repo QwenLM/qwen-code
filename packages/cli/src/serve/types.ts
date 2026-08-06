@@ -13,7 +13,12 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
-import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
+import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type {
+  AuthType,
+  InputModalities,
+  MemoryProjectScope,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
@@ -60,10 +65,15 @@ export interface ServeOptions {
    * this, new `POST /session` requests that would spawn fresh sessions
    * return 503. Attaching to an existing session (same workspace under
    * `sessionScope: 'single'`) still works — so an idle daemon doesn't
-   * block reconnects from existing users. Defaults to 20: comfortably
+   * block reconnects from existing users. Defaults to 32: comfortably
    * above single-user usage, well below the design's N≈50 cliff where
    * per-session RSS (~30–50 MB) and FD pressure start to bite. Set to
    * `0` or `Infinity` to disable.
+   *
+   * This is a fairness and FD lever rather than a memory lever. Sessions
+   * multiplex onto their workspace's single ACP child, so per-session RSS is
+   * spent inside that child's heap, which nothing currently bounds beyond
+   * V8's own ceiling.
    */
   maxSessions?: number;
   /**
@@ -110,6 +120,18 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
+   * Per-session cap on the number of raw events retained in the in-flight
+   * live journal. Threaded into `BridgeOptions.maxJournalEvents`. Defaults
+   * to 10 000. Must be a positive safe integer.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session byte cap on the in-flight live journal. Threaded into
+   * `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a positive
+   * safe integer.
+   */
+  maxJournalBytes?: number;
+  /**
    * Absolute workspace path this daemon binds as its primary workspace.
    * The CLI parser accepts repeated `--workspace` values to register isolated
    * runtimes, but this public option remains the primary workspace string so
@@ -123,6 +145,14 @@ export interface ServeOptions {
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
+  /**
+   * Project-memory partitioning for every runtime owned by this daemon.
+   * `workspace` keys memory by the exact registered workspace; `git-root`
+   * preserves the legacy behavior that shares memory among workspaces
+   * resolved to the same Git root. When omitted,
+   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment.
+   */
+  memoryProjectScope?: MemoryProjectScope;
   /**
    * When true, refuses to boot without a bearer
    * token — even on loopback. Loopback's no-token developer default
@@ -194,6 +224,31 @@ export interface ServeOptions {
    * `mcp_workspace_pool` + `mcp_pool_restart` capability tags.
    */
   mcpPoolActive?: boolean;
+  /**
+   * Total memory budget in MB for the whole daemon process tree — the root
+   * plus every `qwen --acp` child it spawns. When unset, derived as half of
+   * the cgroup-constrained or host memory. Currently observed and reported
+   * only; it does not yet size any child.
+   */
+  memoryBudgetMb?: number;
+  /**
+   * Resolved at boot by `runQwenServe`. Not an operator input, and not
+   * consumed by any spawn path — it is reported under `limits.memory` on
+   * `GET /daemon/status` so the daemon's memory denominator is observable
+   * before a child-capacity policy is designed against it.
+   */
+  daemonMemoryBudget?: DaemonMemoryBudget;
+  /**
+   * Required external pre-execution policy for managed ACP tools. Omitted
+   * means fully off. The token remains daemon-local and is never forwarded to
+   * the ACP child or any executor environment.
+   */
+  externalToolGuard?: {
+    mode: 'required';
+    endpoint: string;
+    token: string;
+    timeoutMs?: number;
+  };
   /**
    * Cross-origin allowlist for browser webui
    * deployments.
@@ -326,6 +381,7 @@ export interface CapabilitiesEnvelope {
     primary: boolean;
     trusted: boolean;
     removable?: boolean;
+    kind?: 'live';
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;

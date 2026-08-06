@@ -28,6 +28,7 @@ import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
+import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
@@ -41,6 +42,10 @@ import {
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 // Mock dependencies
+const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
+const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
+const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+
 vi.mock('./converter.js', () => ({
   OpenAIContentConverter: {
     convertGeminiRequestToOpenAI: vi.fn(),
@@ -52,6 +57,11 @@ vi.mock('./converter.js', () => ({
 vi.mock('openai');
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
+}));
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportOpenAiRequest: mockReportOpenAiRequest,
+  reportOpenAiResponse: mockReportOpenAiResponse,
+  reportOpenAiChunk: mockReportOpenAiChunk,
 }));
 
 describe('ContentGenerationPipeline', () => {
@@ -157,6 +167,8 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
       );
+      const telemetryAttempt = {};
+      mockReportOpenAiRequest.mockReturnValueOnce(telemetryAttempt);
 
       // Act
       const result = await pipeline.execute(request, userPromptId);
@@ -182,6 +194,13 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: undefined,
         }),
+      );
+      expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
+        vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
+      );
+      expect(mockReportOpenAiResponse).toHaveBeenCalledWith(
+        telemetryAttempt,
+        mockOpenAIResponse,
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
         mockOpenAIResponse,
@@ -705,6 +724,86 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: undefined,
       },
       {
+        name: 'remove required tool selection when thinking is enabled on the wire',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.7-max',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: true,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'remove required tool selection when reasoning effort enables thinking',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'preserve required tool selection when reasoning effort is none',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'none' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'preserve required tool selection for a non-qwen model with a user reasoning_effort',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5.2',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'preserve required tool selection when thinking is not enabled',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.7-max',
+        extraBody: undefined,
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'emit the tier-native disable shape under the config-level reasoning opt-out',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: false,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedReasoningEffort: 'none',
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'emit the tier-native disable shape under the per-request thinking opt-out',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: undefined,
+        expectedReasoningEffort: 'none',
+        expectedToolChoice: 'required',
+      },
+      {
         name: 'never emit the disable even under the reasoning opt-out',
         baseUrl:
           'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
@@ -829,6 +928,85 @@ describe('ContentGenerationPipeline', () => {
         .calls[0][0];
       expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
       expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
+      if ('expectedReasoningEffort' in testCase) {
+        expect(apiCall.reasoning_effort).toBe(testCase.expectedReasoningEffort);
+      }
+    });
+
+    it('keeps forced tool selection for a non-qwen preset shape end to end', async () => {
+      // The table above mocks buildRequest as a plain extra_body merge, so
+      // the real provider never executes there. Run the actual DashScope
+      // provider instead: its family-gated drop keeps the glm preset's
+      // enable_thinking, and the pipeline's enable_thinking clause is
+      // family-gated too — on glm the field is an opaque no-op (GLM reads
+      // thinking.enabled), not a thinking switch, so tool_choice=required
+      // must survive for its forced-tool side queries.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5.2',
+        authType: AuthType.QWEN_OAUTH,
+        extra_body: { enable_thinking: true, reasoning_effort: 'high' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation((req) =>
+        realProvider.buildRequest(req, 'side-query:combined-shape'),
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5.2',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: {
+          thinkingConfig: { includeThoughts: true },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+          toolConfig: {
+            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'side-query:combined-shape');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(true);
+      expect(apiCall.reasoning_effort).toBe('high');
+      expect(apiCall.tool_choice).toBe('required');
     });
 
     it('learns required thinking from a provider error and retries once', async () => {
@@ -898,10 +1076,14 @@ describe('ContentGenerationPipeline', () => {
 
       const calls = (mockClient.chat.completions.create as Mock).mock.calls;
       expect(calls).toHaveLength(3);
+      // The tier-native disable shape is reasoning_effort: 'none' (the
+      // boolean is not a knob this family reads), and the retry trigger
+      // must recognise it.
       expect(calls[0][0]).toMatchObject({
-        enable_thinking: false,
+        reasoning_effort: 'none',
         tool_choice: 'required',
       });
+      expect(calls[0][0].enable_thinking).toBeUndefined();
       expect(calls[1][0].enable_thinking).toBe(true);
       expect(calls[1][0].tool_choice).toBeUndefined();
       expect(calls[2][0].enable_thinking).toBe(true);
@@ -2076,8 +2258,11 @@ describe('ContentGenerationPipeline', () => {
 
       const calls = (mockClient.chat.completions.create as Mock).mock.calls;
       expect(calls).toHaveLength(2);
-      expect(calls[0][0].enable_thinking).toBe(false);
+      expect(calls[0][0].reasoning_effort).toBe('none');
+      expect(calls[0][0].enable_thinking).toBeUndefined();
       expect(calls[1][0].enable_thinking).toBe(true);
+      expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(1, calls[0][0]);
+      expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(2, calls[1][0]);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
@@ -2124,6 +2309,8 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
+      const telemetryAttempt = {};
+      mockReportOpenAiRequest.mockReturnValueOnce(telemetryAttempt);
 
       // Act
       const resultGenerator = await pipeline.executeStream(
@@ -2165,6 +2352,19 @@ describe('ContentGenerationPipeline', () => {
           signal: expect.any(AbortSignal),
         }),
       );
+      expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
+        vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
+      );
+      expect(mockReportOpenAiChunk).toHaveBeenNthCalledWith(
+        1,
+        telemetryAttempt,
+        mockChunk1,
+      );
+      expect(mockReportOpenAiChunk).toHaveBeenNthCalledWith(
+        2,
+        telemetryAttempt,
+        mockChunk2,
+      );
     });
 
     it('should filter empty responses', async () => {
@@ -2181,6 +2381,14 @@ describe('ContentGenerationPipeline', () => {
       } as OpenAI.Chat.ChatCompletionChunk;
       const mockChunk2 = {
         id: 'chunk-2',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk3 = {
+        id: 'chunk-3',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk4 = {
+        id: 'chunk-4',
         choices: [
           { delta: { content: 'Hello response' }, finish_reason: 'stop' },
         ],
@@ -2190,13 +2398,18 @@ describe('ContentGenerationPipeline', () => {
         async *[Symbol.asyncIterator]() {
           yield mockChunk1;
           yield mockChunk2;
+          yield mockChunk3;
+          yield mockChunk4;
         },
       };
 
-      const mockEmptyResponse = new GenerateContentResponse();
-      mockEmptyResponse.candidates = [
+      const mockEmptyCandidateResponse = new GenerateContentResponse();
+      mockEmptyCandidateResponse.candidates = [
         { content: { parts: [], role: 'model' } },
       ];
+      const mockEmptyChoicesResponse = new GenerateContentResponse();
+      mockEmptyChoicesResponse.candidates = [];
+      const mockMissingCandidatesResponse = new GenerateContentResponse();
 
       const mockValidResponse = new GenerateContentResponse();
       mockValidResponse.candidates = [
@@ -2205,7 +2418,9 @@ describe('ContentGenerationPipeline', () => {
 
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
       (mockConverter.convertOpenAIChunkToGemini as Mock)
-        .mockReturnValueOnce(mockEmptyResponse)
+        .mockReturnValueOnce(mockEmptyCandidateResponse)
+        .mockReturnValueOnce(mockEmptyChoicesResponse)
+        .mockReturnValueOnce(mockMissingCandidatesResponse)
         .mockReturnValueOnce(mockValidResponse);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
@@ -3446,7 +3661,7 @@ describe('ContentGenerationPipeline', () => {
       expect(capturedSignal!.aborted).toBe(true);
     });
 
-    it('should merge finishReason and usageMetadata from separate chunks', async () => {
+    it('should ignore empty choices while merging finishReason and usageMetadata', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'test-model',
@@ -3468,9 +3683,15 @@ describe('ContentGenerationPipeline', () => {
         choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
       } as OpenAI.Chat.ChatCompletionChunk;
 
-      // Usage metadata chunk (empty candidates, has usage)
+      // Empty choices chunk between finish and usage
       const mockChunk3 = {
         id: 'chunk-3',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      // Usage metadata chunk (empty candidates, has usage)
+      const mockChunk4 = {
+        id: 'chunk-4',
         object: 'chat.completion.chunk',
         created: Date.now(),
         model: 'test-model',
@@ -3483,6 +3704,7 @@ describe('ContentGenerationPipeline', () => {
           yield mockChunk1;
           yield mockChunk2;
           yield mockChunk3;
+          yield mockChunk4;
         },
       };
 
@@ -3501,6 +3723,9 @@ describe('ContentGenerationPipeline', () => {
         },
       ];
 
+      const mockEmptyResponse = new GenerateContentResponse();
+      mockEmptyResponse.candidates = [];
+
       const mockUsageResponse = new GenerateContentResponse();
       mockUsageResponse.candidates = [];
       mockUsageResponse.usageMetadata = {
@@ -3512,24 +3737,11 @@ describe('ContentGenerationPipeline', () => {
         cachedInputTokensReported: false,
       });
 
-      // Expected merged response (finishReason + usageMetadata combined)
-      const mockMergedResponse = new GenerateContentResponse();
-      mockMergedResponse.candidates = [
-        {
-          content: { parts: [], role: 'model' },
-          finishReason: FinishReason.STOP,
-        },
-      ];
-      mockMergedResponse.usageMetadata = {
-        promptTokenCount: 10,
-        candidatesTokenCount: 20,
-        totalTokenCount: 30,
-      };
-
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
       (mockConverter.convertOpenAIChunkToGemini as Mock)
         .mockReturnValueOnce(mockContentResponse)
         .mockReturnValueOnce(mockFinishResponse)
+        .mockReturnValueOnce(mockEmptyResponse)
         .mockReturnValueOnce(mockUsageResponse);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
@@ -3540,27 +3752,42 @@ describe('ContentGenerationPipeline', () => {
         request,
         userPromptId,
       );
-      const results = [];
-      for await (const result of resultGenerator) {
-        results.push(result);
-      }
+      const iterator = resultGenerator[Symbol.asyncIterator]();
 
       // Assert
-      expect(results).toHaveLength(2); // Content chunk + merged finish/usage chunk
-      expect(results[0]).toBe(mockContentResponse);
+      try {
+        const contentResult = await iterator.next();
+        if (contentResult.done) throw new Error('Expected a content response.');
+        expect(contentResult.value).toBe(mockContentResponse);
 
-      // The last result should have both finishReason and usageMetadata
-      const lastResult = results[1];
-      expect(lastResult.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
-      expect(lastResult.usageMetadata).toEqual({
-        promptTokenCount: 10,
-        candidatesTokenCount: 20,
-        totalTokenCount: 30,
-      });
-      expect(lastResult.modelVersion).toBe('actual-provider-model');
-      expect(getGenAiUsageProvenance(lastResult.usageMetadata)).toEqual({
-        cachedInputTokensReported: false,
-      });
+        const finishResult = await iterator.next();
+        if (finishResult.done) throw new Error('Expected a finish response.');
+        // Check before resuming: a later chunk can mutate the yielded object.
+        expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
+          FinishReason.STOP,
+        );
+        expect(finishResult.value.usageMetadata).toEqual({
+          promptTokenCount: 10,
+          candidatesTokenCount: 20,
+          totalTokenCount: 30,
+        });
+        expect(finishResult.value.modelVersion).toBe('actual-provider-model');
+        expect(
+          getGenAiUsageProvenance(finishResult.value.usageMetadata),
+        ).toEqual({
+          cachedInputTokensReported: false,
+        });
+
+        await expect(iterator.next()).resolves.toEqual({
+          value: undefined,
+          done: true,
+        });
+      } finally {
+        let result = await iterator.next();
+        while (!result.done) {
+          result = await iterator.next();
+        }
+      }
     });
 
     it('should handle ideal case where last chunk has both finishReason and usageMetadata', async () => {

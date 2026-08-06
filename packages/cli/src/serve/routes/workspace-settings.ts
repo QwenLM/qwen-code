@@ -26,6 +26,7 @@ import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js'
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
@@ -39,6 +40,8 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.showLineNumbers',
   'ui.renderMode',
   'ui.useTerminalBuffer',
+  'ui.mouseTracking',
+  'ui.showScrollbar',
   'ui.hideBanner',
   'ui.accessibility.enableLoadingPhrases',
   'ui.enableWelcomeBack',
@@ -52,6 +55,13 @@ const WEB_SHELL_SETTINGS = new Set([
   'voiceModel',
   'mcpServers',
 ]);
+
+const LIVE_WEB_SHELL_SETTINGS = [
+  'experimental.liveVoice.enabled',
+  'experimental.liveVoice.shortcut',
+] as const;
+
+const LIVE_MANAGED_SETTINGS = new Set<string>(LIVE_WEB_SHELL_SETTINGS);
 
 // The primary /workspace/settings route may write the global user scope
 // (~/.qwen/settings.json). The trust-gated workspace-qualified route stays
@@ -92,7 +102,7 @@ interface SettingsResponse {
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
 
-function getAllowedKeys(): Set<string> {
+function getAllowedKeys(includeLiveVoice = false): Set<string> {
   const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
@@ -101,21 +111,28 @@ function getAllowedKeys(): Set<string> {
   for (const key of WEB_SHELL_SETTINGS) {
     keys.add(key);
   }
+  if (includeLiveVoice) {
+    for (const key of LIVE_WEB_SHELL_SETTINGS) keys.add(key);
+  }
   return keys;
 }
 
 function buildSettingsResponse(
   boundWorkspace: string,
   keys: ReadonlySet<string>,
+  workspaceTrusted = true,
 ): SettingsResponse {
-  const loaded = loadSettings(boundWorkspace);
-
+  const loaded = loadSettings(boundWorkspace, {
+    skipLoadEnvironment: true,
+    skipWorkspaceSettings: !workspaceTrusted,
+    workspaceTrusted,
+  });
   const settings: SettingDescriptor[] = [];
   for (const key of keys) {
     const def = getSettingDefinition(key);
     if (!def) continue;
 
-    const effective = getNestedProperty(
+    const mergedEffective = getNestedProperty(
       loaded.merged as Record<string, unknown>,
       key,
     );
@@ -130,11 +147,16 @@ function buildSettingsResponse(
 
     const publicValue = (value: unknown) =>
       key === 'mcpServers' ? redactMcpServersSetting(value) : value;
+    const effective = LIVE_MANAGED_SETTINGS.has(key)
+      ? (userVal ?? def.default)
+      : (mergedEffective ?? def.default);
     const values: SettingDescriptor['values'] = {
-      effective: publicValue(effective !== undefined ? effective : def.default),
+      effective: publicValue(effective),
     };
     if (userVal !== undefined) values.user = publicValue(userVal);
-    if (wsVal !== undefined) values.workspace = publicValue(wsVal);
+    if (wsVal !== undefined && !LIVE_MANAGED_SETTINGS.has(key)) {
+      values.workspace = publicValue(wsVal);
+    }
 
     settings.push({
       key,
@@ -175,12 +197,17 @@ function prepareSettingWrite(
   key: string,
   value: unknown,
   mcpServerMutation?: McpServerSettingMutation,
+  workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
     return { persistedValue: value, publicValue: value };
   }
   const existing =
-    loadSettings(workspace).forScope(scope).settings.mcpServers ?? {};
+    loadSettings(workspace, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !workspaceTrusted,
+      workspaceTrusted,
+    }).forScope(scope).settings.mcpServers ?? {};
   let nextValue = value;
   if (mcpServerMutation) {
     const servers = { ...existing };
@@ -242,6 +269,8 @@ async function withMcpServerMutationLock<T>(
 
 export interface WorkspaceSettingsRouteDeps {
   boundWorkspace: string;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   persistSetting: (
@@ -249,6 +278,7 @@ export interface WorkspaceSettingsRouteDeps {
     scope: SettingScope,
     key: string,
     value: unknown,
+    assertGenerationOpen?: () => void,
   ) => Promise<void>;
   broadcastSettingsChanged: (
     key: string,
@@ -260,6 +290,7 @@ export interface WorkspaceSettingsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  includeLiveVoice?: boolean;
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -275,13 +306,21 @@ export function registerWorkspaceSettingsRoutes(
     parseAndValidateClientId,
   } = deps;
 
-  const allowedKeys = getAllowedKeys();
+  const allowedKeys = getAllowedKeys(deps.includeLiveVoice === true);
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
-      const response = buildSettingsResponse(boundWorkspace, allowedKeys);
+      const assertGenerationOpen =
+        deps.captureGenerationAssertion?.() ?? (() => {});
+      assertGenerationOpen();
+      const response = buildSettingsResponse(
+        boundWorkspace,
+        allowedKeys,
+        deps.isWorkspaceTrusted?.() ?? true,
+      );
       res.status(200).json(response);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspace/settings error: ${
           err instanceof Error ? err.message : String(err)
@@ -298,6 +337,8 @@ export function registerWorkspaceSettingsRoutes(
     '/workspace/settings',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
+      const assertGenerationOpen =
+        deps.captureGenerationAssertion?.() ?? (() => {});
       const body = safeBody(req);
       const scope = body['scope'];
       const key = body['key'];
@@ -324,6 +365,14 @@ export function registerWorkspaceSettingsRoutes(
         return;
       }
 
+      if (scope === 'workspace' && deps.isWorkspaceTrusted?.() === false) {
+        res.status(403).json({
+          error: 'Workspace is not trusted.',
+          code: 'untrusted_workspace',
+        });
+        return;
+      }
+
       if (typeof key !== 'string' || !key) {
         res.status(400).json({
           error: 'key is required and must be a string',
@@ -336,6 +385,14 @@ export function registerWorkspaceSettingsRoutes(
         res.status(400).json({
           error: `Setting "${key}" is not modifiable via this API`,
           code: 'disallowed_key',
+        });
+        return;
+      }
+
+      if (LIVE_MANAGED_SETTINGS.has(key)) {
+        res.status(400).json({
+          error: `Setting "${key}" must be changed through the Live setup API`,
+          code: 'live_managed_setting',
         });
         return;
       }
@@ -386,14 +443,25 @@ export function registerWorkspaceSettingsRoutes(
             key,
             value,
             mcpServerMutation,
+            deps.isWorkspaceTrusted?.() ?? true,
           );
           publicValue = prepared.publicValue;
-          await persistSetting(
-            boundWorkspace,
-            settingScope,
-            key,
-            prepared.persistedValue,
-          );
+          if (deps.captureGenerationAssertion) {
+            await persistSetting(
+              boundWorkspace,
+              settingScope,
+              key,
+              prepared.persistedValue,
+              assertGenerationOpen,
+            );
+          } else {
+            await persistSetting(
+              boundWorkspace,
+              settingScope,
+              key,
+              prepared.persistedValue,
+            );
+          }
         };
         if (mcpServerMutation) {
           await withMcpServerMutationLock(
@@ -405,6 +473,7 @@ export function registerWorkspaceSettingsRoutes(
           await persist();
         }
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
           `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
             err instanceof Error ? err.message : String(err)
@@ -417,6 +486,12 @@ export function registerWorkspaceSettingsRoutes(
         return;
       }
 
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
+        throw err;
+      }
       try {
         broadcastSettingsChanged(key, publicValue, scope, clientId);
       } catch (err) {
@@ -447,7 +522,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     invalidateServeFeaturesCache: () => void;
   },
 ): void {
-  const allowedKeys = getAllowedKeys();
+  const allowedKeys = getAllowedKeys(false);
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
     const runtime = resolveWorkspaceRuntimeFromParam(
@@ -524,6 +599,13 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         });
         return;
       }
+      if (LIVE_MANAGED_SETTINGS.has(key)) {
+        res.status(400).json({
+          error: `Setting "${key}" must be changed through the Live setup API`,
+          code: 'live_managed_setting',
+        });
+        return;
+      }
       if (value === undefined || value === null) {
         res.status(400).json({
           error: 'value is required',
@@ -553,6 +635,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         runtime.bridge,
       );
       if (clientId === null) return;
+      const assertGenerationOpen = () => runtime.generationGuard?.assertOpen();
 
       // The guard above already rejected any scope outside QUALIFIED_WRITE_SCOPES.
       const settingScope = SCOPE_MAP[scope];
@@ -572,6 +655,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             key,
             value,
             mcpServerMutation,
+            true,
           );
           publicValue = prepared.publicValue;
           await deps.persistSetting(
@@ -579,6 +663,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             settingScope,
             key,
             prepared.persistedValue,
+            assertGenerationOpen,
           );
         };
         if (mcpServerMutation) {
@@ -591,6 +676,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
           await persist();
         }
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
           `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${
             err instanceof Error ? err.message : String(err)
@@ -603,6 +689,12 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         return;
       }
 
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
+        throw err;
+      }
       deps.invalidateServeFeaturesCache();
       runtime.bridge.publishWorkspaceEvent({
         type: 'settings_changed',

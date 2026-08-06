@@ -27,11 +27,12 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
+import type { ReviewEffort } from './parse-args.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
@@ -40,6 +41,7 @@ import {
   tmpFile,
   worktreePath,
 } from './lib/paths.js';
+import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -70,21 +72,55 @@ interface FetchPrArgs {
   owner_repo: string;
   remote: string;
   out: string;
+  host?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
+  effort?: ReviewEffort;
 }
 
 type FetchPrResult = PlanReport & {
+  /** The review's effort, recorded so the roster reads one value everywhere. */
+  effort?: ReviewEffort;
   prNumber: string;
   ownerRepo: string;
   remote: string;
   ref: string;
   fetchedSha: string;
+  /**
+   * When this review window opened (ISO-8601). `cleanup` audits the PR for
+   * writes by the current user inside [fetchedAt, cleanup) that did not go
+   * through `qwen review submit` — the submit-only contract's tripwire.
+   */
+  fetchedAt: string;
+  /**
+   * Earliest `fetchedAt` across drift restarts of the SAME PR (the head-drift
+   * rule reruns fetch-pr, overwriting this report). Cleanup audits from here,
+   * so a write made during an abandoned attempt stays inside the window.
+   */
+  auditSince: string;
+  /** GitHub host this PR lives on (Enterprise), null for github.com — so the
+   * cleanup audit queries the same host the review did. */
+  host: string | null;
   worktreePath: string;
   baseRefName: string;
   headRefName: string;
   isCrossRepository: boolean;
   diffStat: { files: number; additions: number; deletions: number };
+  /**
+   * The merge-base diff is EMPTY: the branch tree is byte-identical to its
+   * base — the work already landed (a merge resolved everything away, or the
+   * PR was superseded). Reviewing it would review nothing; the skill stops and
+   * says so instead of fanning out agents over zero hunks.
+   */
+  emptyDiff?: boolean;
+  /**
+   * The recomputed merge-base diff is far smaller than the PR's advertised
+   * GitHub stat — overlapping PRs merged since the author's last rebase have
+   * collapsed this one to a residual, and the description likely narrates work
+   * that is already on the base branch. The review scope is the RECOMPUTED
+   * diff; the body's claims about the rest are description-of-history.
+   */
+  collapsedFromUpstream?: boolean;
   /** Merge-base of the PR head and its base branch — the diff's left side. */
   mergeBaseSha: string | null;
   /** True when the base branch could not be fetched; `mergeBaseSha` may be stale. */
@@ -276,17 +312,110 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     plan = buildDiffPlan('', args.maxChunkLines);
   }
 
-  // 6. Emit the report.
+  // 6. Emit the report. The window opening survives drift restarts: this
+  // command overwrites its own report, and a reset boundary would hide any
+  // bypass write made during the abandoned attempt from cleanup's audit.
+  const fetchedAt = new Date().toISOString();
+  let auditSince = fetchedAt;
+  let prevRaw: string | null = null;
+  try {
+    prevRaw = readFileSync(out, 'utf8');
+  } catch (err) {
+    // ENOENT is the normal first attempt for this target — silent. Any other
+    // read failure (EACCES, EISDIR, I/O) is NOT "no previous report"; name it
+    // so an operator is not sent toward the wrong cause.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      writeStderrLine(
+        `WARNING: could not read the previous fetch report at ${out} (${code ?? (err as Error).message}); ` +
+          `the audit window starts at this fetch and may not reach an earlier abandoned attempt.`,
+      );
+    }
+  }
+  if (prevRaw !== null) {
+    try {
+      const prev = JSON.parse(prevRaw) as {
+        prNumber?: unknown;
+        fetchedAt?: unknown;
+        auditSince?: unknown;
+      };
+      const prevSince =
+        typeof prev.auditSince === 'string'
+          ? prev.auditSince
+          : typeof prev.fetchedAt === 'string'
+            ? prev.fetchedAt
+            : null;
+      if (
+        prev.prNumber === prNumber &&
+        prevSince !== null &&
+        !Number.isNaN(Date.parse(prevSince)) &&
+        // `< auditSince` (which is `fetchedAt`, i.e. now) is also the upper
+        // bound: the window opening only ever moves BACKWARD to an earlier
+        // attempt, never forward. A corrupted far-future `auditSince`
+        // (`"2099-…"`) is therefore rejected here — it would push the window
+        // ahead of every real comment and silently report a clean audit.
+        // (ISO-8601 strings from `toISOString()` compare chronologically.)
+        prevSince < auditSince
+      ) {
+        auditSince = prevSince;
+      }
+    } catch {
+      // The file exists but is unparseable — a crash mid-write leaves
+      // truncated JSON. Silently resetting the window to this fetch would let
+      // a bypass write from the abandoned attempt escape the audit, so warn:
+      // the window may not reach it.
+      writeStderrLine(
+        `WARNING: the previous fetch report at ${out} is not valid JSON (a crash mid-write?); ` +
+          `the audit window starts at this fetch and may not reach an earlier abandoned attempt.`,
+      );
+    }
+  }
   const result: FetchPrResult = {
     prNumber,
     ownerRepo,
     remote,
     ref,
     fetchedSha,
+    fetchedAt,
+    auditSince,
+    host: args.host ?? null,
     worktreePath: wt,
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
     isCrossRepository: meta.isCrossRepository,
+    // Two gates, because the SKILL acts on this by recommending the PR be
+    // closed as superseded — the one ruling here that is expensive to get
+    // wrong. `diffPath` (set only on a SUCCESSFUL capture): a capture that
+    // threw also leaves diffText empty, and closing off that would close a
+    // live PR on an infrastructure error. `baseFetchFailed`: the merge base is
+    // then "resolved from a possibly stale local ref" (the warning above says
+    // so), and a stale base ref that already contains the head commits diffs
+    // to empty — the same wrong recommendation, one cause further out.
+    ...(isEmptyDiff({ diffPath, baseFetchFailed, diffText })
+      ? { emptyDiff: true }
+      : {}),
+    // Collapse detection compares recomputed reality against GitHub's
+    // advertised stat: a 4x shrink past a 200-line floor is a rebase-lag
+    // signature, not rounding. Both thresholds are deliberately coarse — this
+    // is a disclosure, never a gate.
+    //
+    // The two sides are produced by different tools, so the ratio has floors
+    // under it for a reason. Rename detection is the divergence that matters:
+    // `--find-renames` is pinned here and GitHub applies its own, and a move
+    // whose similarity lands on opposite sides of the two thresholds shrinks
+    // one side and not the other. That is what the 4x buys — a threshold
+    // disagreement moves the ratio by the size of one file, a genuine
+    // upstream collapse moves it by the size of the PR. Kept as a disclosure
+    // precisely because the ratio is not a measurement of the same quantity
+    // twice.
+    ...(isCollapsedFromUpstream({
+      diffText,
+      baseFetchFailed,
+      additions: meta.additions,
+      deletions: meta.deletions,
+    })
+      ? { collapsedFromUpstream: true }
+      : {}),
     diffStat: {
       files: meta.changedFiles,
       additions: meta.additions,
@@ -298,6 +427,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
+    ...planEffortField(args.effort),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
@@ -323,6 +453,95 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         .join(', ')}`,
     );
   }
+}
+
+/**
+ * Whether the capture found nothing to review.
+ *
+ * Extracted and pure because the SKILL ACTS on it — it recommends the PR be
+ * closed as superseded — which makes it the one disclosure here that is
+ * expensive to get wrong, and it was the one with no test. Both guards are
+ * load-bearing and neither is about the diff: a capture that THREW also leaves
+ * `diffText` empty (`diffPath` is set only on success), and a merge base
+ * resolved from a stale local ref can already contain the head commits and so
+ * diff to empty. Either would close a live PR on an infrastructure error.
+ */
+export function isEmptyDiff(i: {
+  diffPath: string | null;
+  baseFetchFailed: boolean;
+  diffText: string;
+}): boolean {
+  return i.diffPath !== null && !i.baseFetchFailed && i.diffText.trim() === '';
+}
+
+/**
+ * Whether the recomputed diff has collapsed against GitHub's advertised stat —
+ * the rebase-lag signature.
+ *
+ * Both thresholds are coarse on purpose, and the reason is that the two sides
+ * are produced by DIFFERENT tools: `--find-renames` is pinned locally while
+ * GitHub applies its own, so a move whose similarity lands on opposite sides of
+ * the two thresholds shrinks one side and not the other. The 4x is what buys
+ * past that — a threshold disagreement moves the ratio by one file, a genuine
+ * upstream collapse moves it by the size of the PR — and the 200-line floor
+ * keeps small PRs, where one file IS the ratio, out of it entirely. A
+ * disclosure, never a gate, precisely because it is not the same quantity
+ * measured twice.
+ */
+export function isCollapsedFromUpstream(i: {
+  diffText: string;
+  baseFetchFailed: boolean;
+  additions: number;
+  deletions: number;
+}): boolean {
+  // The sibling guard, for the sibling reason — and it is the guard, not the
+  // ratio, that was missing here. `isEmptyDiff` refuses to rule when the merge
+  // base came from a possibly stale local ref because such a base can already
+  // contain the head commits and diff to empty. The PARTIAL form of the same
+  // cause lands here instead: a stale ref holding most of the head commits
+  // shrinks the recomputed diff past the 4x ratio, and this flag then tells
+  // Agent 0 a story — "overlapping merged PRs collapsed this one, read the
+  // body as description-of-history" — that is wrong in the way that matters,
+  // because the body's claims may be perfectly current and the real cause is
+  // an infrastructure failure. A disclosure that steers how the body is read
+  // has to be as sure of its base as a gate does.
+  const advertised = i.additions + i.deletions;
+  return (
+    !i.baseFetchFailed &&
+    i.diffText.trim() !== '' &&
+    advertised >= 200 &&
+    countDiffChangedLines(i.diffText) * 4 <= advertised
+  );
+}
+
+/** Changed (+/-) lines in a unified diff — headers excluded. */
+export function countDiffChangedLines(diffText: string): number {
+  // POSITION, not prefix shape. Guessing by prefix (`^-(?!--)`) has to exclude
+  // every line starting `--`, and a DELETED line whose own content starts `--`
+  // arrives as `--- …`: markdown rules and YAML document markers, SQL and Lua
+  // comments, a `--flag` in a script. Each one silently dropped a real changed
+  // line, and every drop pushes the ratio toward a false `collapsedFromUpstream`
+  // (the disclosure fires when the recomputed count comes in LOW).
+  //
+  // Inside a hunk the position is unambiguous — `---`/`+++` cannot be file
+  // headers there — so track hunk state and count every `+`/`-` line in it.
+  let n = 0;
+  let inHunk = false;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('@@')) {
+      inHunk = true;
+      continue;
+    }
+    // `diff --git` opens the next file's header block; `\ No newline at end of
+    // file` is a marker, not content, and git emits it inside the hunk.
+    if (line.startsWith('diff --git')) {
+      inHunk = false;
+      continue;
+    }
+    if (!inHunk || line.startsWith('\\')) continue;
+    if (line.startsWith('+') || line.startsWith('-')) n++;
+  }
+  return n;
 }
 
 export const fetchPrCommand: CommandModule = {
@@ -362,6 +581,15 @@ export const fetchPrCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('effort', {
+        type: 'string',
+        choices: ['low', 'medium', 'high'],
+        describe:
+          'The review effort. `medium` (balanced) drops the adversarial ' +
+          'personas from the required roster; recorded in the plan so ' +
+          'check-coverage, agent-prompt --roster and compose-review all read ' +
+          'one value. Omit for the full (high) roster.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);

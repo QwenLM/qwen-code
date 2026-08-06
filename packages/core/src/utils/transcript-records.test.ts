@@ -155,6 +155,38 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts Realtime dialogue as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('realtime-user', null, {
+        subtype: 'realtime_message',
+        message: { role: 'user', parts: [{ text: 'voice question' }] },
+      }),
+    ]);
+
+    expect(prepared.records).toHaveLength(1);
+    expect(prepared.diagnostics).toEqual([]);
+  });
+
+  it('accepts Goal state and runtime records as known subtypes', () => {
+    const prepared = prepareTranscriptRecords([
+      record('goal-state', null, {
+        type: 'system',
+        subtype: 'goal_state',
+        message: undefined,
+      }),
+      record('goal-runtime', 'goal-state', {
+        subtype: 'goal_runtime',
+      }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('rejects mixed sessions and an explicit artifact leaf', () => {
     expect(() =>
       prepareTranscriptRecords([

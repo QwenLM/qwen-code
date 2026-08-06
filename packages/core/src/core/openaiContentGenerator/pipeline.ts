@@ -22,6 +22,10 @@ import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from '../modalityDefaults.js';
+import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
@@ -33,6 +37,12 @@ import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import {
+  reportOpenAiChunk,
+  reportOpenAiRequest,
+  reportOpenAiResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -314,7 +324,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       false,
-      async (openaiRequest, context) => {
+      async (openaiRequest, context, telemetryAttempt) => {
         // Wrap in a per-request child so the OpenAI SDK's leaked abort
         // listener (client.mjs fetchWithTimeout — no {once:true}, no
         // removeEventListener) stays on a short-lived signal instead of
@@ -330,6 +340,7 @@ export class ContentGenerationPipeline {
               signal: perRequestAc?.signal,
             },
           )) as OpenAI.Chat.ChatCompletion;
+          reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
           const geminiResponse =
             OpenAIContentConverter.convertOpenAIResponseToGemini(
@@ -353,7 +364,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       true,
-      async (openaiRequest, context) => {
+      async (openaiRequest, context, telemetryAttempt) => {
         // Always use a per-request controller so the inactivity watchdog can
         // abort the SDK request even when the caller did not provide a signal.
         const parentSignal = request.config?.abortSignal;
@@ -458,6 +469,7 @@ export class ContentGenerationPipeline {
           context,
           request,
           userPromptId,
+          telemetryAttempt,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -484,6 +496,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     request: GenerateContentParameters,
     userPromptId: string,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
@@ -524,6 +537,7 @@ export class ContentGenerationPipeline {
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        reportOpenAiChunk(telemetryAttempt, chunk);
         // Detect API errors returned as stream content.
         // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
         // with finish_reason="error_finish" and the error in delta.content,
@@ -547,7 +561,7 @@ export class ContentGenerationPipeline {
 
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
-          response.candidates?.[0]?.content?.parts?.length === 0 &&
+          (response.candidates?.[0]?.content?.parts?.length ?? 0) === 0 &&
           !response.candidates?.[0]?.finishReason &&
           !response.usageMetadata &&
           // Preparation-only responses must reach ACP before arguments complete.
@@ -867,17 +881,20 @@ export class ContentGenerationPipeline {
       // what actually ships: a qwen config with a non-qwen request model
       // would leak the field, and a non-qwen config with a qwen request
       // model would miss the disable signal (the regression).
-      //
-      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
-      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
-      // start with `qwen` but is the most common hybrid-thinking model
-      // for first-time users, so it must be covered.
-      if (
-        !thinkingMandatory &&
-        (model.startsWith('qwen') || model === 'coder-model')
-      ) {
+      if (!thinkingMandatory && isQwenFamilyWireModel(model)) {
         if (isDashScope) {
-          typed['enable_thinking'] = false;
+          if (isTieredEffortWireModel(model)) {
+            // The tier-native family reads reasoning_effort, not the
+            // boolean: emit the canonical disable in the knob it reads
+            // (the strip below preserves 'none'). Drop a user-supplied
+            // thinking_budget too — DashScope rejects it alongside
+            // reasoning_effort.
+            delete typed['enable_thinking'];
+            delete typed['thinking_budget'];
+            typed['reasoning_effort'] = 'none';
+          } else {
+            typed['enable_thinking'] = false;
+          }
         } else {
           // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
           // the model's chat template server-side and read the thinking switch
@@ -945,10 +962,34 @@ export class ContentGenerationPipeline {
           delete typed['chat_template_kwargs'];
         }
       }
-      // DashScope rejects forced tool selection while thinking is enabled.
-      if (isDashScope && typed['tool_choice'] === 'required') {
-        delete typed['tool_choice'];
-      }
+    }
+
+    const typed = providerRequest as unknown as Record<string, unknown>;
+    const reasoningEffort = typed['reasoning_effort'];
+    // DashScope rejects forced tool selection while thinking is enabled
+    // ("The tool_choice parameter does not support being set to required or
+    // object in thinking mode"). Both field clauses are family-gated like
+    // the disable path above: `enable_thinking` and `reasoning_effort` are
+    // qwen thinking switches, but on non-qwen models sharing the endpoint
+    // they are opaque parameters that do not put the request in thinking
+    // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
+    // dropping `required` there only degrades their forced-tool side
+    // queries. `thinkingMandatory` stays ungated: it is explicit
+    // "thinking is on" knowledge, model-agnostic by design.
+    if (
+      isDashScope &&
+      typed['tool_choice'] === 'required' &&
+      (thinkingMandatory ||
+        (isQwenFamilyWireModel(model) &&
+          (typed['enable_thinking'] === true ||
+            (typeof reasoningEffort === 'string' &&
+              reasoningEffort !== 'none'))))
+    ) {
+      debugLogger.debug(
+        'DashScope: dropping tool_choice=required while thinking is enabled',
+        { model, reasoningEffort, thinkingMandatory },
+      );
+      delete typed['tool_choice'];
     }
 
     return providerRequest;
@@ -1102,6 +1143,7 @@ export class ContentGenerationPipeline {
     executor: (
       openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
       context: RequestContext,
+      telemetryAttempt: GenAiAttemptHandle | undefined,
     ) => Promise<T>,
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
@@ -1119,8 +1161,9 @@ export class ContentGenerationPipeline {
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+      const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
-      return executor(openaiRequest, context);
+      return executor(openaiRequest, context, telemetryAttempt);
     };
 
     try {
@@ -1133,7 +1176,11 @@ export class ContentGenerationPipeline {
         | undefined;
       if (
         (wireRequest?.['enable_thinking'] === false ||
-          chatTemplateKwargs?.['enable_thinking'] === false) &&
+          chatTemplateKwargs?.['enable_thinking'] === false ||
+          // The tier-native family's disable shape (reasoning_effort:
+          // 'none') replaces enable_thinking: false on the wire; recognise
+          // it so runtime learning still fires there.
+          wireRequest?.['reasoning_effort'] === 'none') &&
         request.config?.abortSignal?.aborted !== true &&
         isRequiredThinkingError(error)
       ) {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Storage } from '@qwen-code/qwen-code-core';
+import { Storage, createDebugLogger } from '@qwen-code/qwen-code-core';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -16,6 +16,7 @@ import semver from 'semver';
 import { getNpmCliPath } from './installationInfo.js';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
+const debugLogger = createDebugLogger('MANAGED_NPM_UPDATE');
 const execFileAsync = promisify(execFile);
 
 interface ManagedNpmUpdate {
@@ -46,6 +47,68 @@ function resolveBootstrapPath(bootstrapPath?: string): string {
 
 function launcherId(bootstrapPath: string): string {
   return createHash('sha256').update(bootstrapPath).digest('hex').slice(0, 16);
+}
+
+function processDoesNotExist(pidText: string): boolean {
+  const pid = Number(pidText);
+  if (!Number.isSafeInteger(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
+function readDirectoryEntries(directory: string): fs.Dirent[] {
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function cleanupOrphanedManagedNpmUpdateArtifacts(
+  launcherRoot: string,
+  versionsDir: string,
+): void {
+  for (const entry of readDirectoryEntries(versionsDir)) {
+    const match = /^\.(.+)-([1-9]\d*)-[A-Za-z0-9]{6}$/.exec(entry.name);
+    if (
+      !entry.isDirectory() ||
+      entry.isSymbolicLink() ||
+      !match ||
+      semver.valid(match[1]) !== match[1] ||
+      !processDoesNotExist(match[2])
+    ) {
+      continue;
+    }
+    try {
+      fs.rmSync(path.join(versionsDir, entry.name), {
+        recursive: true,
+        force: true,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  for (const entry of readDirectoryEntries(launcherRoot)) {
+    const match = /^active\.json\.([1-9]\d*)$/.exec(entry.name);
+    if (
+      !entry.isFile() ||
+      entry.isSymbolicLink() ||
+      !match ||
+      !processDoesNotExist(match[1])
+    ) {
+      continue;
+    }
+    try {
+      fs.rmSync(path.join(launcherRoot, entry.name), { force: true });
+    } catch {
+      continue;
+    }
+  }
 }
 
 function resolveNpmGlobalConfigPath(): string {
@@ -156,6 +219,7 @@ export function prepareManagedNpmUpdate(
   const launcherRoot = path.join(updateRoot, launcherId(resolvedBootstrapPath));
   const versionsDir = path.join(launcherRoot, 'versions');
   fs.mkdirSync(versionsDir, { recursive: true });
+  cleanupOrphanedManagedNpmUpdateArtifacts(launcherRoot, versionsDir);
   const stagingDir = fs.mkdtempSync(
     path.join(versionsDir, `.${version}-${process.pid}-`),
   );
@@ -247,6 +311,9 @@ export async function activateManagedNpmUpdate(
     realpath: false,
     stale: 30_000,
     retries: { retries: 50, minTimeout: 20, maxTimeout: 100 },
+    onCompromised: (err) => {
+      debugLogger.warn('managed npm update lock compromised:', err);
+    },
   });
   try {
     const base = readBaseInstallation(resolvedBootstrapPath);
@@ -302,7 +369,11 @@ export async function activateManagedNpmUpdate(
       await fsPromises.rm(temporaryActivePath, { force: true });
     }
   } finally {
-    await release();
+    try {
+      await release();
+    } catch (error) {
+      debugLogger.warn('Failed to release managed npm update lock:', error);
+    }
   }
 }
 

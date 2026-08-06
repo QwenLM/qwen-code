@@ -38,6 +38,10 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from '../managed-scratch-workspace.js';
+import {
+  NativeDirectoryPickerUnavailableError,
+  pickNativeDirectory,
+} from '../native-directory-picker.js';
 
 // Upper bound on total registered workspaces (startup + dynamic). Each
 // registration allocates a full runtime (bridge, channel factory, sub-session
@@ -59,9 +63,16 @@ export interface WorkspaceManagementRouteDeps {
     options: { provenance: WorkspaceRuntimeProvenance },
   ) => Promise<WorkspaceRuntime>;
   managedScratchRoot?: ManagedScratchRoot;
+  validateWorkspaceRuntimeForPublication?: (
+    runtime: WorkspaceRuntime,
+  ) => Promise<WorkspaceRuntime>;
+  runWorkspaceTrustOperation?: <T>(operation: () => Promise<T>) => Promise<T>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
+  pickWorkspaceDirectory?: (
+    signal?: AbortSignal,
+  ) => Promise<string | undefined>;
 }
 
 export interface WorkspaceRemovalActivity {
@@ -86,12 +97,17 @@ export interface WorkspaceRuntimeRemovalController {
   };
   disposeRuntime(
     runtime: WorkspaceRuntime,
-    reason?: 'daemon_shutdown' | 'workspace_removed',
+    reason?: 'daemon_shutdown' | 'workspace_removed' | 'trust_reconfigured',
   ): Promise<void>;
 }
 
 export interface WorkspaceManagementHandle {
   sealAndWait(): Promise<void>;
+  publishOwnedRuntime(
+    canonicalCwd: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+  ): Promise<WorkspaceRuntime>;
 }
 
 export function registerWorkspaceManagementRoutes(
@@ -104,10 +120,15 @@ export function registerWorkspaceManagementRoutes(
     safeBody,
     createWorkspaceRuntime,
     managedScratchRoot,
+    validateWorkspaceRuntimeForPublication,
+    runWorkspaceTrustOperation,
     workspaceRegistrationStore,
     getAcpHandle,
     runtimeRemoval,
+    pickWorkspaceDirectory: pickWorkspaceDirectoryOverride,
   } = deps;
+  const pickWorkspaceDirectory =
+    pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
   // Serialize runtime addition, persistence promotion/forget, updates, and
   // removal by canonical cwd so conflicting management mutations cannot cross
   // their validation and persistence commit points concurrently.
@@ -179,6 +200,124 @@ export function registerWorkspaceManagementRoutes(
       if (operation === 'addition') cwdSet.add(cwd);
     }
     return cwdSet.size + pendingScratchCreations;
+  };
+
+  const conflictsWithRegisteredWorkspace = (canonical: string): boolean =>
+    workspaceRegistry.listManaged().some((runtime) => {
+      if (runtime.workspaceCwd === canonical) return false;
+      if (isWithinRoot(canonical, runtime.workspaceCwd)) return true;
+      return (
+        runtime.provenance !== 'live-conversation' &&
+        isWithinRoot(runtime.workspaceCwd, canonical)
+      );
+    });
+
+  const assertOwnedRuntimeAdmission = (
+    canonical: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+  ): void => {
+    if (sealed) throw new Error('Daemon is shutting down');
+    if (inFlight.has(canonical)) {
+      throw new Error('Workspace registration is already in progress');
+    }
+    if (workspaceRegistry.getManagedByWorkspaceCwd(canonical)) {
+      throw new Error('Workspace is already registered');
+    }
+    const nestingConflict = [
+      ...workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+      ...[...inFlight].flatMap(([cwd, operation]) =>
+        operation === 'addition' ? [cwd] : [],
+      ),
+    ].some((cwd) => {
+      if (cwd === canonical) return false;
+      if (isWithinRoot(cwd, canonical)) return true;
+      return provenance !== 'live-conversation' && isWithinRoot(canonical, cwd);
+    });
+    // Live uses one fixed, daemon-owned root and every request resolves its
+    // runtime exactly; user-selected and scratch runtimes keep the strict
+    // no-nesting boundary.
+    if (nestingConflict) {
+      throw new Error('Workspace path nests with an existing workspace');
+    }
+    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      throw new Error('Workspace registration limit reached');
+    }
+  };
+
+  const publishOwnedRuntime = async (
+    canonicalCwd: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+  ): Promise<WorkspaceRuntime> => {
+    if (!createWorkspaceRuntime || !runtimeRemoval) {
+      throw new Error('Managed workspace runtime publication is unavailable');
+    }
+    assertOwnedRuntimeAdmission(canonicalCwd, provenance);
+    inFlight.set(canonicalCwd, 'addition');
+    operationStarted();
+    let runtime: WorkspaceRuntime | undefined;
+    let registered = false;
+    try {
+      runtime = await createWorkspaceRuntime(canonicalCwd, { provenance });
+      await validate(runtime);
+      const publish = async () => {
+        if (sealed) throw new Error('Daemon is shutting down');
+        if (workspaceRegistry.getManagedByWorkspaceCwd(canonicalCwd)) {
+          throw new Error('Workspace is already registered');
+        }
+        const nestingConflict = workspaceRegistry
+          .listManaged()
+          .some((entry) => {
+            if (entry.workspaceCwd === canonicalCwd) return false;
+            if (isWithinRoot(entry.workspaceCwd, canonicalCwd)) return true;
+            return (
+              provenance !== 'live-conversation' &&
+              isWithinRoot(canonicalCwd, entry.workspaceCwd)
+            );
+          });
+        if (nestingConflict) {
+          throw new Error('Workspace path nests with an existing workspace');
+        }
+        if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+          throw new Error('Workspace registration limit reached');
+        }
+        workspaceRegistry.add(runtime!);
+        registered = true;
+        try {
+          await runtimeRemoval.runtimeAdded?.(runtime!);
+        } catch (error) {
+          try {
+            writeStderrLine(
+              `qwen serve: workspace runtime adapter notification failed after registry add: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          } catch {
+            // The runtime is registered; diagnostics are best-effort.
+          }
+        }
+      };
+      if (runWorkspaceTrustOperation) {
+        await runWorkspaceTrustOperation(publish);
+      } else {
+        await publish();
+      }
+      return runtime;
+    } finally {
+      if (runtime && !registered) {
+        await runtimeRemoval
+          .disposeRuntime(runtime, 'workspace_removed')
+          .catch(() => {
+            try {
+              runtime?.bridge.killAllSync();
+            } catch {
+              // Preserve the publication failure.
+            }
+          });
+      }
+      inFlight.delete(canonicalCwd);
+      operationFinished();
+    }
   };
 
   /** Creates and registers one trusted, process-local daemon-owned workspace. */
@@ -427,8 +566,53 @@ export function registerWorkspaceManagementRoutes(
   );
 
   app.post(
+    '/workspace-directory-picker',
+    mutate(),
+    async (req: Request, res: Response) => {
+      const controller = new AbortController();
+      res.on('close', () => controller.abort());
+      try {
+        const path = await pickWorkspaceDirectory(controller.signal);
+        res.status(200).json({
+          kind: 'workspace-directory-picker',
+          selected: path !== undefined,
+          ...(path === undefined ? {} : { path }),
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (error instanceof NativeDirectoryPickerUnavailableError) {
+          writeStderrLine(
+            `qwen serve: native directory picker unavailable: ${detail}`,
+          );
+          res.status(501).json({
+            error: 'Native directory picker is unavailable',
+            code: 'directory_picker_unavailable',
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: native directory picker failed: ${detail}`,
+        );
+        res.status(500).json({
+          error: 'Failed to open native directory picker',
+          code: 'directory_picker_failed',
+        });
+      }
+    },
+  );
+
+  const protectExistingWorkspaceRegistration = mutate({ strict: true });
+  app.post(
     '/workspaces',
-    mutate({ strict: true }),
+    mutate(),
+    (req, res, next) => {
+      const body = safeBody(req);
+      if (body['kind'] === 'scratch') {
+        next();
+        return;
+      }
+      protectExistingWorkspaceRegistration(req, res, next);
+    },
     async (req: Request, res: Response) => {
       const body = safeBody(req);
       if ('kind' in body) {
@@ -602,19 +786,14 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
-        const nested = [
-          ...workspaceRegistry
-            .listManaged()
-            .map((runtime) => runtime.workspaceCwd),
-          ...[...inFlight].flatMap(([cwd, operation]) =>
-            operation === 'addition' || operation === 'promotion' ? [cwd] : [],
-          ),
-        ].some(
-          (boundCwd) =>
-            boundCwd !== canonical &&
-            (isWithinRoot(canonical, boundCwd) ||
-              isWithinRoot(boundCwd, canonical)),
-        );
+        const nested =
+          conflictsWithRegisteredWorkspace(canonical) ||
+          [...inFlight].some(
+            ([cwd, operation]) =>
+              cwd !== canonical &&
+              (operation === 'addition' || operation === 'promotion') &&
+              (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
+          );
         if (nested) {
           res.status(409).json({
             error: 'Workspace path nests with an existing workspace',
@@ -701,6 +880,7 @@ export function registerWorkspaceManagementRoutes(
               await restorePersistedDisplayName(existingRuntime, canonical);
             }
           }
+          workspaceRegistry.syncRuntimeMetadata(existingRuntime);
           res.status(200).json({
             id: existingRuntime.workspaceId,
             cwd: existingRuntime.workspaceCwd,
@@ -752,24 +932,20 @@ export function registerWorkspaceManagementRoutes(
       // Nesting guard checks registered workspaces AND in-flight registrations,
       // so two concurrent POSTs for parent/child paths (e.g. /project and
       // /project/sub) can't both pass while neither is in the registry yet.
-      const boundCwds = [
-        ...workspaceRegistry.listManaged().map((r) => r.workspaceCwd),
-        ...[...inFlight].flatMap(([cwd, operation]) =>
-          operation === 'addition' ? [cwd] : [],
-        ),
-      ];
-      for (const existing of boundCwds) {
-        if (
-          existing !== canonical &&
-          (isWithinRoot(canonical, existing) ||
-            isWithinRoot(existing, canonical))
-        ) {
-          res.status(409).json({
-            error: 'Workspace path nests with an existing workspace',
-            code: 'workspace_nested',
-          });
-          return;
-        }
+      const nested =
+        conflictsWithRegisteredWorkspace(canonical) ||
+        [...inFlight].some(
+          ([cwd, operation]) =>
+            cwd !== canonical &&
+            operation === 'addition' &&
+            (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
+        );
+      if (nested) {
+        res.status(409).json({
+          error: 'Workspace path nests with an existing workspace',
+          code: 'workspace_nested',
+        });
+        return;
       }
 
       if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
@@ -784,7 +960,7 @@ export function registerWorkspaceManagementRoutes(
       operationStarted();
       let persistenceFailed = false;
       try {
-        const runtime = await createWorkspaceRuntime(canonical, {
+        let runtime = await createWorkspaceRuntime(canonical, {
           provenance: 'existing',
         });
         if (!persist && displayName !== undefined) {
@@ -830,19 +1006,39 @@ export function registerWorkspaceManagementRoutes(
               throw err;
             }
           }
-          workspaceRegistry.add(runtime);
-          try {
-            await runtimeRemoval?.runtimeAdded?.(runtime);
-          } catch (err) {
-            try {
-              writeStderrLine(
-                `qwen serve: workspace runtime adapter notification failed after registry add: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-            } catch {
-              // The runtime is registered; diagnostics are best-effort.
+          const publishRuntime = async () => {
+            if (validateWorkspaceRuntimeForPublication) {
+              runtime = await validateWorkspaceRuntimeForPublication(runtime);
             }
+            workspaceRegistry.add(runtime);
+            try {
+              await runtimeRemoval?.runtimeAdded?.(runtime);
+            } catch (err) {
+              try {
+                writeStderrLine(
+                  `qwen serve: workspace runtime adapter notification failed after registry add: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              } catch {
+                // The runtime is registered; diagnostics are best-effort.
+              }
+            }
+          };
+          if (runWorkspaceTrustOperation) {
+            await runWorkspaceTrustOperation(publishRuntime);
+          } else {
+            await publishRuntime();
+          }
+          const requestTrustReconcile = (
+            req.app.locals as {
+              requestTrustReconcile?: () => Promise<void>;
+            }
+          ).requestTrustReconcile;
+          if (requestTrustReconcile) {
+            void requestTrustReconcile().catch(() => {
+              // The policy monitor reports reconciliation failures separately.
+            });
           }
         } catch (err) {
           if (persistedRecordAdded) {
@@ -1040,6 +1236,7 @@ export function registerWorkspaceManagementRoutes(
         } else {
           runtime.displayName = displayName;
         }
+        workspaceRegistry.syncRuntimeMetadata(runtime);
         res.status(200).json({
           id: runtime.workspaceId,
           cwd: runtime.workspaceCwd,
@@ -1138,7 +1335,9 @@ export function registerWorkspaceManagementRoutes(
       let registryDraining = false;
       let controllerDraining = false;
       let acpDraining = false;
+      let removalCommitted = false;
       const rollbackDrain = (): void => {
+        if (removalCommitted) return;
         if (acpDraining) {
           try {
             getAcpHandle?.()?.cancelWorkspaceDrain(runtime.workspaceId);
@@ -1163,15 +1362,25 @@ export function registerWorkspaceManagementRoutes(
           }
           registryDraining = false;
         }
+        const requestTrustReconcile = (
+          req.app.locals as {
+            requestTrustReconcile?: () => Promise<void>;
+          }
+        ).requestTrustReconcile;
+        if (requestTrustReconcile) {
+          void requestTrustReconcile().catch(() => {
+            // The policy monitor reports reconciliation failures separately.
+          });
+        }
+      };
+      const logCleanupFailure = (message: string): void => {
+        try {
+          writeStderrLine(message);
+        } catch {
+          // Cleanup must continue after the persistence commit point.
+        }
       };
       const convergeCommittedRemoval = async (): Promise<void> => {
-        const logCleanupFailure = (message: string): void => {
-          try {
-            writeStderrLine(message);
-          } catch {
-            // Cleanup must continue after the persistence commit point.
-          }
-        };
         try {
           getAcpHandle?.()?.commitWorkspaceRemoval(runtime.workspaceId);
         } catch (err) {
@@ -1292,6 +1501,16 @@ export function registerWorkspaceManagementRoutes(
 
         // Persistence is the commit point. Every cleanup step after it is
         // best-effort and logical removal must never roll back to active.
+        removalCommitted = true;
+        try {
+          workspaceRegistry.commitDrain(runtime);
+        } catch (err) {
+          logCleanupFailure(
+            `qwen serve: failed to commit workspace registry drain: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
         await convergeCommittedRemoval();
 
         res.status(200).json({
@@ -1476,6 +1695,7 @@ export function registerWorkspaceManagementRoutes(
           runtime.registrationIds = runtime.registrationIds.filter(
             (id) => id !== registrationId,
           );
+          workspaceRegistry.syncRuntimeMetadata(runtime);
         }
         res.json({
           removed: true,
@@ -1500,6 +1720,7 @@ export function registerWorkspaceManagementRoutes(
   );
 
   return {
+    publishOwnedRuntime,
     async sealAndWait() {
       sealed = true;
       if (activeOperations === 0) return;

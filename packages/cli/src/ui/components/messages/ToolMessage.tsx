@@ -23,9 +23,11 @@ import type {
   Config,
   McpToolProgressData,
   FileDiff,
+  TerminalImageDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
+  isTerminalImageDisplay,
   isVisionBridgeNoticeDisplay,
   ToolNames,
   ToolNamesMigration,
@@ -33,7 +35,7 @@ import {
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { SHELL_COMMAND_NAME, SHELL_NAME, ICON } from '../../constants.js';
 import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -55,6 +57,7 @@ import {
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { TerminalImage } from '../TerminalImage.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -172,6 +175,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
+  | { type: 'image'; data: TerminalImageDisplay }
   | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
@@ -183,6 +187,10 @@ const useResultDisplayRenderer = (
   React.useMemo(() => {
     if (!resultDisplay) {
       return { type: 'none' };
+    }
+
+    if (isTerminalImageDisplay(resultDisplay)) {
+      return { type: 'image', data: resultDisplay };
     }
 
     // Check for TodoResultDisplay
@@ -343,7 +351,7 @@ const SubagentApprovalContext: React.FC<{
             ? '✖'
             : call.status === 'success'
               ? '✔'
-              : '○';
+              : ICON.CIRCLE_EMPTY;
         const displayName = localizeToolDisplayName(
           TOOL_DISPLAY_BY_NAME[call.name] ?? call.name,
         );
@@ -686,6 +694,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  visionBridgeNotice,
   detailedDisplay,
   status,
   availableTerminalHeight,
@@ -802,7 +811,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  // §4.9: in transcript full-detail mode, collapsible tools (read/search/list)
+  // §4.9: in full-detail mode, collapsible tools (read/search/list)
   // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
   // from the persisted functionResponse. Only a non-empty string detail
   // qualifies; everything else (and all main-view rendering) keeps the summary.
@@ -827,11 +836,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
     ? resultDisplay
     : undefined;
-  const visionBridgeNoticeText = visionBridgeNoticeDisplay
-    ? sanitizeTerminalText(
-        formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay),
-      )
-    : undefined;
+  const visionBridgeNoticeText = [
+    visionBridgeNoticeDisplay
+      ? formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay)
+      : undefined,
+    visionBridgeNotice,
+  ]
+    .filter((notice): notice is string => notice !== undefined)
+    .map((notice) => sanitizeTerminalText(notice))
+    .join('\n');
   const effectiveResultDisplay = usingDetailedDisplay
     ? sanitizedDetailedDisplay
     : visionBridgeNoticeDisplay
@@ -863,7 +876,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
       effectiveDisplayRenderer.type === 'ansi');
 
   return (
-    <Box paddingX={1} paddingY={0} flexDirection="column">
+    <Box paddingY={0} flexDirection="column">
       <Box minHeight={1}>
         <ToolStatusIndicator status={status} name={name} />
         <ToolInfo
@@ -940,6 +953,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                   />
                 )}
               </>
+            )}
+            {effectiveDisplayRenderer.type === 'image' && config && (
+              <TerminalImage
+                data={effectiveDisplayRenderer.data}
+                config={config}
+                contentWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+              />
             )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
