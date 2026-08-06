@@ -1,5 +1,54 @@
-import { describe, expect, it } from 'bun:test'
-import { createVoiceConnectionHandler, toStreamConfig } from './voice-ws-handler'
+import { describe, expect, it, mock } from 'bun:test'
+import type { SocketLike } from './voice-stream-session'
+
+// The default streaming transport dials the upstream ASR gateway through the
+// `ws` package; swap it for a handshaking fake so the production default
+// (defaultOpenStreamFor, no injected openStream) can be driven end-to-end
+// without network access. Must run before voice-ws-handler is imported below.
+class FakeUpstreamSocket implements SocketLike {
+  static instances: FakeUpstreamSocket[] = []
+  readonly OPEN = 1
+  readyState = this.OPEN
+  bufferedAmount = 0
+  readonly url: string
+  readonly sent: Array<string | Uint8Array> = []
+  private readonly handlers = new Map<string, Array<(...args: unknown[]) => void>>()
+
+  constructor(url: string, _options?: unknown) {
+    this.url = url
+    FakeUpstreamSocket.instances.push(this)
+  }
+
+  send(data: string | Uint8Array) {
+    this.sent.push(data)
+  }
+
+  close() {
+    this.readyState = 3
+  }
+
+  on(event: string, cb: (...args: unknown[]) => void) {
+    const list = this.handlers.get(event) ?? []
+    list.push(cb)
+    this.handlers.set(event, list)
+  }
+
+  emit(event: string, ...args: unknown[]) {
+    for (const handler of this.handlers.get(event) ?? []) {
+      handler(...args)
+    }
+  }
+}
+
+mock.module('ws', () => ({
+  default: FakeUpstreamSocket,
+  WebSocket: FakeUpstreamSocket,
+}))
+
+const { createVoiceConnectionHandler, toStreamConfig } = await import(
+  './voice-ws-handler'
+)
+const { assertVoiceBaseUrlNetworkAllowed } = await import('./net-guard')
 
 class FakeWebSocket {
   readonly OPEN = 1
@@ -40,7 +89,188 @@ async function flush() {
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
+// The default batch transport (`defaultTranscribeBatch`) reaches the network
+// through the global `fetch`; stub it so a test can drive the production
+// default without a real ASR request and observe that the guard let it through.
+function stubFetch(impl: typeof fetch): () => void {
+  const original = globalThis.fetch
+  globalThis.fetch = impl
+  return () => {
+    globalThis.fetch = original
+  }
+}
+
 describe('createVoiceConnectionHandler', () => {
+  it('forwards the private-network opt-in through the shared default guard', async () => {
+    const config = {
+      model: 'qwen3-asr-flash',
+      baseUrl: 'http://10.0.0.8/v1',
+      allowInsecureBaseUrl: true,
+    }
+
+    await expect(assertVoiceBaseUrlNetworkAllowed(config)).resolves.toBeUndefined()
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed({
+        ...config,
+        allowInsecureBaseUrl: undefined,
+      }),
+    ).rejects.toThrow(/private-network/)
+  })
+
+  // These tests drive the production defaults (no injected
+  // openStream/transcribeBatch) so a revert that drops `allowInsecureBaseUrl`
+  // from the default guard wiring fails instead of staying green.
+  it('reaches the default batch transport when the private-network opt-in is set', async () => {
+    const fetchedUrls: string[] = []
+    const restore = stubFetch(
+      (async (input: unknown) => {
+        fetchedUrls.push(String(input))
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'hello gateway' } }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }) as typeof fetch,
+    )
+    try {
+      const ws = new FakeWebSocket()
+      const handler = createVoiceConnectionHandler({
+        resolveConfig: () => ({
+          model: 'qwen3-asr-flash',
+          baseUrl: 'http://10.0.0.8/v1',
+          allowInsecureBaseUrl: true,
+        }),
+      })
+
+      handler(ws as never)
+      ws.emitMessage(JSON.stringify({ type: 'start' }))
+      await flush()
+      ws.emitMessage(Buffer.from([1, 2, 3, 4]), true)
+      await flush()
+      ws.emitMessage(JSON.stringify({ type: 'stop' }))
+      await flush()
+
+      expect(fetchedUrls).toContain('http://10.0.0.8/v1/chat/completions')
+      expect(ws.sentJson()).toContainEqual({
+        type: 'final',
+        text: 'hello gateway',
+      })
+      expect(ws.sentJson().some((message) => message.type === 'error')).toBe(
+        false,
+      )
+    } finally {
+      restore()
+    }
+  })
+
+  it('blocks the default batch transport for a private gateway without the opt-in', async () => {
+    const fetchedUrls: string[] = []
+    const restore = stubFetch(
+      (async (input: unknown) => {
+        fetchedUrls.push(String(input))
+        return new Response('{}', { status: 200 })
+      }) as typeof fetch,
+    )
+    try {
+      const ws = new FakeWebSocket()
+      const handler = createVoiceConnectionHandler({
+        resolveConfig: () => ({
+          model: 'qwen3-asr-flash',
+          baseUrl: 'http://10.0.0.8/v1',
+        }),
+      })
+
+      handler(ws as never)
+      ws.emitMessage(JSON.stringify({ type: 'start' }))
+      await flush()
+      ws.emitMessage(Buffer.from([1, 2, 3, 4]), true)
+      await flush()
+      ws.emitMessage(JSON.stringify({ type: 'stop' }))
+      await flush()
+
+      expect(fetchedUrls).toEqual([])
+      expect(
+        ws.sentJson().some(
+          (message) =>
+            message.type === 'error' && /private-network/.test(message.message),
+        ),
+      ).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  it('blocks the default streaming transport for a private gateway without the opt-in', async () => {
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'http://10.0.0.8/v1',
+      }),
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+
+    expect(
+      ws.sentJson().some(
+        (message) =>
+          message.type === 'error' && /private-network/.test(message.message),
+      ),
+    ).toBe(true)
+  })
+
+  it('reaches the default streaming transport when the private-network opt-in is set', async () => {
+    const ws = new FakeWebSocket()
+    const handler = createVoiceConnectionHandler({
+      resolveConfig: () => ({
+        model: 'qwen3-asr-flash-realtime',
+        baseUrl: 'http://10.0.0.8/v1',
+        allowInsecureBaseUrl: true,
+      }),
+    })
+
+    handler(ws as never)
+    ws.emitMessage(JSON.stringify({ type: 'start' }))
+    await flush()
+
+    // The guard let the allowlisted gateway through: the production default
+    // dialed the upstream realtime socket instead of rejecting.
+    const upstream = FakeUpstreamSocket.instances.at(-1)
+    expect(upstream?.url).toBe(
+      'ws://10.0.0.8/api-ws/v1/realtime?model=qwen3-asr-flash-realtime',
+    )
+
+    upstream?.emit('message', JSON.stringify({ type: 'session.created' }))
+    upstream?.emit('message', JSON.stringify({ type: 'session.updated' }))
+    await flush()
+
+    ws.emitMessage(Buffer.from([1, 2, 3, 4]), true)
+    await flush()
+    ws.emitMessage(JSON.stringify({ type: 'stop' }))
+    await flush()
+
+    upstream?.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'hello gateway',
+      }),
+    )
+    upstream?.emit('message', JSON.stringify({ type: 'session.finished' }))
+    await flush()
+
+    expect(ws.sentJson()).toContainEqual({
+      type: 'final',
+      text: 'hello gateway',
+    })
+    expect(ws.sentJson().some((message) => message.type === 'error')).toBe(
+      false,
+    )
+  })
+
   it('passes configured language to streaming transports', () => {
     expect(
       toStreamConfig({
