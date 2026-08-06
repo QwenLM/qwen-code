@@ -659,11 +659,17 @@ jobs:
         (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true'))
       }}
     # Secret-bearing and executes agent-driven code, but the agent runs inside
-    # the docker sandbox image (which the ECS pool ships) and only ever writes a
-    # new branch as the dev-bot - it never executes a foreign author's code.
-    # Forks of this repo (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to
-    # hosted; PR-family events additionally need a same-repo head or a write+
-    # author, mirroring the fleet's ECS routing guard (ci.yml's classify_pr).
+    # the docker sandbox image and only ever writes a new branch as the
+    # dev-bot — it never executes a foreign author's code. Forks of this repo
+    # (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to hosted. On
+    # pull_request / pull_request_review events the ECS route additionally
+    # needs a same-repo head or a write+ author (ci.yml's pick_runner form);
+    # the other triggers skip that clause and rely on their own gates
+    # instead: issues / schedule require autofix/approved plus
+    # status/ready-for-agent on the issue, and workflow_dispatch rides the
+    # actor's own write access. Docker availability on this pool is proven
+    # in-repo by qwen-triage's container jobs, which run on the same
+    # runner labels.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 180
     concurrency:
@@ -699,25 +705,12 @@ jobs:
       # jobs execute human-authored code as the runner user, so a prior job
       # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
       # diff.external, includeIf, hooks) in the local config that would fire
-      # inside THIS job's PAT-bearing git steps. Keep a known-safe allowlist
-      # and unset everything else — the same pattern qwen-triage uses on
-      # this pool. No-op on a fresh hosted runner.
+      # inside THIS job's PAT-bearing git steps. The composite action keeps
+      # a known-safe allowlist and unsets everything else, hardened against
+      # the worktree-config and global-hooksPath bypasses verified in
+      # qwen-triage on this pool. No-op on a fresh hosted runner.
       - name: 'Sanitize workspace git config'
-        run: |-
-          set -uo pipefail
-          # `.git` is a directory in a normal checkout but a gitlink file in
-          # a worktree; -e covers both, and a missing .git (first run) too.
-          if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
-            exit 0
-          fi
-          git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
-            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
-          HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
-          # Match -type f OR -type l: a symlinked hook survives a bare
-          # `-type f` sweep and still fires on the next checkout.
-          find "$HOOKS_DIR" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+        uses: './.github/actions/sanitize-workspace-git-config'
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -729,6 +722,10 @@ jobs:
         run: |-
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
+          # 0700: the dir holds agent transcripts and decision files; the
+          # sandbox container runs as this same user, so the tighter mode
+          # costs the job nothing.
+          chmod 700 "${WORKDIR}"
 
       # Self-hosted runners keep the workspace's .git across runs, so a
       # failed earlier attempt's local branch survives here: the agent's
@@ -738,7 +735,12 @@ jobs:
       # actions/checkout's untracked-file clean).
       - name: 'Drop stale autofix branches'
         run: |-
-          git for-each-ref --format='%(refname:short)' 'refs/heads/autofix/issue-*' \
+          # Detach first: `git branch -D` refuses the currently checked-out
+          # branch, so a stale autofix branch holding HEAD would otherwise
+          # silently survive the sweep (actions/checkout normally leaves
+          # HEAD on the default branch; this makes the sweep unconditional).
+          git checkout --detach 2>/dev/null || true
+          git for-each-ref --format='%(refname:short)' "refs/heads/${BRANCH_PREFIX}*" \
             | xargs -r -n 1 git branch -D 2>/dev/null || true
 
       # Same staging as the review-address job: the verify gate always runs the
@@ -782,6 +784,16 @@ jobs:
               exit 1
               ;;
           esac
+          # Capability preflight for the persistent pool: this job's agent
+          # runs inside the docker sandbox, and a missing daemon otherwise
+          # surfaces only at 'Resolve sandbox image' — after npm ci/build
+          # has already burned tens of minutes. Fail in seconds instead.
+          # Hosted runners ship docker; the ECS pool's docker is proven by
+          # qwen-triage's container jobs on the same labels.
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
+            exit 1
+          fi
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -795,8 +807,13 @@ jobs:
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq tmux
+            # sudo -n: a host without passwordless sudo must fail fast with a
+            # clear message, not die on a password prompt (the pr-review pool
+            # steps make the same assumption with `sudo -n ... || ::warning`).
+            sudo -n apt-get update -qq && sudo -n apt-get install -y -qq tmux || {
+              echo '::error::tmux is required on the autofix runner and passwordless install failed.'
+              exit 1
+            }
           else
             echo '::error::tmux is required on the autofix runner.'
             exit 1
@@ -1315,7 +1332,7 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'autofix-issue-artifacts'
-          path: '/tmp/autofix-${{ github.run_id }}/'
+          path: '${{ env.WORKDIR }}/'
           if-no-files-found: 'ignore'
 
       - name: 'Publish PR'
@@ -1429,6 +1446,14 @@ jobs:
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
           fi
+
+      # Nothing else removes the per-run WORKDIR; on the persistent pool
+      # every run would leave its transcripts and decision files behind
+      # forever. Last step, after every reader including the artifact
+      # upload; a cancelled run leaves the dir to the next run's reset.
+      - name: 'Clean up autofix workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
 
   # ===========================================================================
   # TAKEOVER COMMAND — the accepted comment command's side effects are the
@@ -2682,6 +2707,13 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
+      # Same sweep as the agent jobs: this checkout runs in a workspace
+      # other pool jobs have written, and a surviving filter.*.smudge or
+      # hook fires during it — in the job that builds the CLI bundle every
+      # review-address leg then executes with a PAT in env.
+      - name: 'Sanitize workspace git config'
+        uses: './.github/actions/sanitize-workspace-git-config'
+
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -2762,11 +2794,20 @@ jobs:
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
     # Secret-bearing and executes PR code, but every target is live-gated to
-    # write+ (internal) authors at scan AND address time, and the ECS pool ships
-    # docker for the sandbox image. Forks of this repo (and
-    # MAINTAINER_ECS_RUNNER_DISABLED) fall back to hosted; PR-family events
-    # additionally need a same-repo head or a write+ author, mirroring the
-    # fleet's ECS routing guard (ci.yml's classify_pr).
+    # write+ (internal) authors at scan AND address time. That is an
+    # author-permission gate by design, not a head-repository gate: takeover
+    # engages maintainer fork PRs, and the pattern matches qwen-code-pr-review,
+    # whose ECS-routed review job also rides its upstream write+ check. The
+    # job therefore runs host-side (no `container:`): the branch code it
+    # executes is collaborator-authored — the same trust class ci.yml's
+    # pick_runner routes onto this pool — and persistent-workspace residue is
+    # scrubbed by the hygiene steps below. On pull_request /
+    # pull_request_review events the ECS route additionally needs a same-repo
+    # head or a write+ author (ci.yml's pick_runner form); issue_comment and
+    # the other triggers skip that clause and rely on the live write+ gates.
+    # Forks of this repo (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to
+    # hosted. Docker availability on this pool is proven in-repo by
+    # qwen-triage's container jobs, which run on the same runner labels.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 300
     permissions:
@@ -2870,25 +2911,12 @@ jobs:
       # jobs execute human-authored code as the runner user, so a prior job
       # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
       # diff.external, includeIf, hooks) in the local config that would fire
-      # inside THIS job's PAT-bearing git steps. Keep a known-safe allowlist
-      # and unset everything else — the same pattern qwen-triage uses on
-      # this pool. No-op on a fresh hosted runner.
+      # inside THIS job's PAT-bearing git steps. The composite action keeps
+      # a known-safe allowlist and unsets everything else, hardened against
+      # the worktree-config and global-hooksPath bypasses verified in
+      # qwen-triage on this pool. No-op on a fresh hosted runner.
       - name: 'Sanitize workspace git config'
-        run: |-
-          set -uo pipefail
-          # `.git` is a directory in a normal checkout but a gitlink file in
-          # a worktree; -e covers both, and a missing .git (first run) too.
-          if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
-            exit 0
-          fi
-          git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
-            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
-          HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
-          # Match -type f OR -type l: a symlinked hook survives a bare
-          # `-type f` sweep and still fires on the next checkout.
-          find "$HOOKS_DIR" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+        uses: './.github/actions/sanitize-workspace-git-config'
 
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -2901,6 +2929,10 @@ jobs:
         run: |-
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
+          # 0700: the dir holds agent transcripts and decision files; the
+          # sandbox container runs as this same user, so the tighter mode
+          # costs the job nothing.
+          chmod 700 "${WORKDIR}"
 
       # Stage the schema gate script from the TRUSTED BASE checkout before
       # "Prepare branch and feedback" switches the working tree to the PR
@@ -2940,6 +2972,16 @@ jobs:
               exit 1
               ;;
           esac
+          # Capability preflight for the persistent pool: this job's agent
+          # runs inside the docker sandbox, and a missing daemon otherwise
+          # surfaces only at 'Resolve sandbox image' — after npm ci/build
+          # has already burned tens of minutes. Fail in seconds instead.
+          # Hosted runners ship docker; the ECS pool's docker is proven by
+          # qwen-triage's container jobs on the same labels.
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
+            exit 1
+          fi
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -2953,8 +2995,13 @@ jobs:
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq tmux
+            # sudo -n: a host without passwordless sudo must fail fast with a
+            # clear message, not die on a password prompt (the pr-review pool
+            # steps make the same assumption with `sudo -n ... || ::warning`).
+            sudo -n apt-get update -qq && sudo -n apt-get install -y -qq tmux || {
+              echo '::error::tmux is required on the autofix runner and passwordless install failed.'
+              exit 1
+            }
           else
             echo '::error::tmux is required on the autofix runner.'
             exit 1
@@ -4897,3 +4944,12 @@ jobs:
           gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
             -f body="${BODY}" > /dev/null ||
             echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
+
+      # Nothing else removes the per-target WORKDIR; PR numbers only
+      # increase, so on the persistent pool every addressed PR would leave
+      # its transcripts and decision files behind forever. Last step, after
+      # every reader including the artifact upload; a cancelled run leaves
+      # the dir to the next run's reset.
+      - name: 'Clean up autofix workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'

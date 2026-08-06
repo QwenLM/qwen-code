@@ -1,0 +1,67 @@
+name: 'Sanitize workspace git config'
+description: 'Neutralizes git exec vectors (hooks, fsmonitor, filters, includeIf, ...) a prior job could have planted in a persistent self-hosted workspace, so they cannot fire inside later secret-bearing git steps. Hardened form of the qwen-triage allowlist sweep: also contains the worktree-scoped config and global core.hooksPath bypasses. No-op on a fresh hosted runner. Keep in sync with qwen-triage.yml''s hardened ''Clean stale agent state'' step.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Sanitize workspace git config'
+      shell: 'bash'
+      run: |-
+        set -uo pipefail
+        # `.git` is a directory in a normal checkout but a gitlink file in
+        # a worktree; -e covers both, and a missing .git (first run) too.
+        if [ ! -e .git ]; then
+          echo "no prior workspace; nothing to sanitize"
+          exit 0
+        fi
+        # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+        # on the allowlist below (it carries no command itself), but it
+        # activates `.git/config.worktree` — a second config file that
+        # `git config --local` neither lists nor unsets, and that CAN carry
+        # core.hooksPath. Verified in qwen-triage: a prior run can set
+        # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+        # make the hooks deletion below walk /. Delete the file outright,
+        # then drop the extension.
+        rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+        git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+        # Rather than denylist each exec-vector family (which kept missing
+        # new ones), KEEP a known-safe allowlist and --unset-all everything
+        # else: this closes the whole class, including knobs not yet
+        # enumerated. The kept set is only plumbing that carries no command
+        # — repo format, remote, branch, fetch/gc/pack/index, safe.directory,
+        # extensions, and submodule url/active/branch (NOT
+        # submodule.*.update, which can be `!cmd`). actions/checkout
+        # re-establishes remote/auth afterward. `|| true` on the grep: no
+        # non-allowlisted keys (the steady state on an already-sanitized
+        # runner) means grep exits 1, which would kill the step exactly
+        # when there is nothing to clean.
+        git config --local --name-only --list 2>/dev/null \
+          | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+          | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+        # Belt and braces after the config scrub: only delete inside the
+        # repository's own git dir. A hooks path resolving anywhere else is
+        # unlinked, never swept — a recursive delete of a planted path is
+        # far worse than a stale hook on a runner the pool re-cleans.
+        # Resolve hooks with global/system config OUT of the way. Verified
+        # in qwen-triage: with a global core.hooksPath set, `git rev-parse
+        # --git-path hooks` returns that path, the guard below sees
+        # "outside the git dir", and a planted `.git/hooks` symlink
+        # survives untouched. Keep this resolution AFTER the sweep above.
+        GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+        HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+        HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+        if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+          # Match -type f OR -type l: a symlinked hook survives a bare
+          # `-type f` sweep and still fires on the next checkout.
+          find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+        else
+          # Resolves outside the git dir (or not at all). Warning and
+          # walking away would leave a live hook directory that the next
+          # git command executes, so unlink the ENTRY without descending
+          # into it and put an empty hooks directory back.
+          RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+          rm -f "$RAW_HOOKS" 2>/dev/null || rm -rf "$RAW_HOOKS" 2>/dev/null || true
+          mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+          git config --local --unset-all core.hooksPath 2>/dev/null || true
+        fi

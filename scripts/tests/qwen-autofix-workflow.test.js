@@ -34,6 +34,9 @@ const reviewVerificationRunner = readFileSync(
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
+const sanitizeActionPath =
+  '.github/actions/sanitize-workspace-git-config/action.yml';
+const sanitizeAction = readFileSync(sanitizeActionPath, 'utf8');
 const checkBotCredentialsStep =
   workflow.match(
     /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js')/,
@@ -50,13 +53,17 @@ const reviewScanJob =
 const issueAutofixJob =
   workflow.match(/\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
+// Both slices bound on the GENERIC next-job shape, not the specific job
+// that happens to follow today: inserting a job after review-address must
+// shrink these slices instead of silently landing the newcomer's `runs-on`
+// inside them. review-address is currently last, so it also allows EOF.
 const buildCliJob =
-  workflow.match(/\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/)?.[0] ??
+  workflow.match(/\n {2}build-cli:[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n)/)?.[0] ??
   '';
-// review-address is the last job in the file, so there is no trailing
-// `# ====` separator to anchor on — match to EOF.
 const reviewAddressJob =
-  workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
+  workflow.match(
+    /\n {2}review-address:[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n|$)/,
+  )?.[0] ?? '';
 const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
@@ -5245,6 +5252,40 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
     );
+    // The widened environment gate doubles as the fail-fast capability
+    // preflight in both agent jobs: their agent runs inside the docker
+    // sandbox, and without the check a missing daemon surfaces only at
+    // 'Resolve sandbox image' — after npm ci/build. tmux likewise fails
+    // fast (and self-installs only via passwordless sudo) before npm ci.
+    const envCheckSteps =
+      workflow.match(
+        /- name: 'Check runner environment'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+      ) ?? [];
+    expect(envCheckSteps).toHaveLength(2);
+    for (const step of envCheckSteps) {
+      expect(step).toContain('docker info');
+      expect(step).toContain('exit 1');
+    }
+    const installTmuxSteps =
+      workflow.match(/- name: 'Install tmux'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
+      [];
+    expect(installTmuxSteps).toHaveLength(2);
+    for (const step of installTmuxSteps) {
+      expect(step).toContain('sudo -n apt-get install');
+      expect(step).not.toContain('sudo apt-get');
+    }
+    // "Short jobs stay hosted" is an explicit design decision — only the
+    // three heavy jobs may route onto the persistent pool.
+    expect(routeJob).toContain("runs-on: 'ubuntu-latest'");
+    expect(reviewScanJob).toContain("runs-on: 'ubuntu-latest'");
+    for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
+      const job =
+        workflow.match(
+          new RegExp(`\\n {2}${name}:[\\s\\S]*?(?=\\n {2}[a-z][a-z0-9-]*:\\n)`),
+        )?.[0] ?? '';
+      expect(job, `job slice missing: ${name}`).toBeTruthy();
+      expect(job).toContain("runs-on: 'ubuntu-latest'");
+    }
     // issue-autofix, build-cli, and review-address each stage the qwen shim
     // against the workspace bundle.
     expect(prepareQwenCliSteps).toHaveLength(3);
@@ -5470,10 +5511,12 @@ describe('qwen-autofix workflow', () => {
   it('clears persistent autofix workdirs before agent steps run', () => {
     expect(resetAutofixWorkspaceSteps).toHaveLength(2);
     // Per-run private dir: pool registrations share one /tmp and issue-phase
-    // runs never serialize against each other. The artifact upload reads the
-    // same per-run path — pin both sides so neither is left behind.
+    // runs never serialize against each other. Both artifact uploads read
+    // ${{ env.WORKDIR }} — one source, nothing to drift.
     expect(workflow).toContain("WORKDIR: '/tmp/autofix-${{ github.run_id }}'");
-    expect(workflow).toContain("path: '/tmp/autofix-${{ github.run_id }}/'");
+    expect(workflow.match(/path: '\$\{\{ env\.WORKDIR \}\}\/'/g)).toHaveLength(
+      2,
+    );
     expect(workflow).toContain(
       "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
     );
@@ -5481,6 +5524,24 @@ describe('qwen-autofix workflow', () => {
     for (const step of resetAutofixWorkspaceSteps) {
       expect(step).toContain('rm -rf "${WORKDIR}"');
       expect(step).toContain('mkdir -p "${WORKDIR}"');
+      // 0700: the dirs hold agent transcripts and decision files.
+      expect(step).toContain('chmod 700 "${WORKDIR}"');
+    }
+    // Per-run/per-target teardown after the artifact upload: nothing else
+    // removes these dirs on the persistent pool (PR numbers only increase).
+    const cleanupSteps =
+      workflow.match(
+        /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/g,
+      ) ?? [];
+    expect(cleanupSteps).toHaveLength(2);
+    for (const step of cleanupSteps) {
+      expect(step).toContain("if: 'always()'");
+      expect(step).toContain('rm -rf "${WORKDIR}"');
+    }
+    for (const job of [issueAutofixJob, reviewAddressJob]) {
+      expect(job.indexOf("- name: 'Upload run artifacts'")).toBeLessThan(
+        job.indexOf("- name: 'Clean up autofix workdir'"),
+      );
     }
     expect(workflow.indexOf("- name: 'Checkout'")).toBeLessThan(
       workflow.indexOf("- name: 'Reset autofix workspace'"),
@@ -5491,6 +5552,83 @@ describe('qwen-autofix workflow', () => {
     expect(
       workflow.lastIndexOf("- name: 'Reset autofix workspace'"),
     ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
+  });
+
+  it('pins the persistent-pool hygiene steps into every heavy job', () => {
+    const stepOf = (job, name) =>
+      job.match(
+        new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n[ ]{6}- name: |$)`),
+      )?.[0] ?? '';
+    const heavyJobs = [
+      ['issue-autofix', issueAutofixJob],
+      ['build-cli', buildCliJob],
+      ['review-address', reviewAddressJob],
+    ];
+    for (const [name, job] of heavyJobs) {
+      expect(job, `job slice missing: ${name}`).toBeTruthy();
+      // Ownership restore and config sanitize must BOTH precede the
+      // checkout they protect: leftover root-owned files break
+      // actions/checkout, and a planted smudge filter or hook fires during
+      // the checkout itself. Deleting either step — or reordering it after
+      // the checkout — must not ship green while the routing assertions
+      // stay green.
+      for (const stepName of [
+        'Restore workspace ownership',
+        'Sanitize workspace git config',
+      ]) {
+        expect(job, `${name} missing '${stepName}'`).toContain(
+          `- name: '${stepName}'`,
+        );
+        expect(
+          job.indexOf(`- name: '${stepName}'`),
+          `${name}: '${stepName}' must precede checkout`,
+        ).toBeLessThan(job.indexOf("- name: 'Checkout"));
+      }
+      expect(job).toContain(
+        "uses: './.github/actions/sanitize-workspace-git-config'",
+      );
+    }
+    // The issue phase treats "the branch exists" as proof the agent ran,
+    // so only it sweeps stale autofix/issue-* branches — detached, so
+    // `git branch -D` can never refuse the checked-out branch, and via
+    // BRANCH_PREFIX, so renaming the prefix renames the sweep.
+    const dropStep = stepOf(issueAutofixJob, 'Drop stale autofix branches');
+    expect(dropStep).toContain('git checkout --detach');
+    expect(dropStep).toContain('"refs/heads/${BRANCH_PREFIX}*"');
+    expect(buildCliJob).not.toContain("- name: 'Drop stale autofix branches'");
+  });
+
+  it('hardens the shared git-config sanitize action against the verified bypasses', () => {
+    // Worktree-scoped config first: extensions.worktreeConfig activates
+    // .git/config.worktree, which `git config --local` neither lists nor
+    // unsets and which CAN carry core.hooksPath — pointing the hook
+    // sweep's recursive delete at /. Then the allowlist sweep, and only
+    // then the hooks resolution: the ordering IS the containment.
+    const rmWorktreeCfg = sanitizeAction.indexOf('--git-path config.worktree');
+    const unsetExt = sanitizeAction.indexOf(
+      '--unset-all extensions.worktreeConfig',
+    );
+    const sweep = sanitizeAction.indexOf('--name-only --list');
+    const hooks = sanitizeAction.indexOf('--git-path hooks');
+    expect(rmWorktreeCfg).toBeGreaterThan(-1);
+    expect(unsetExt).toBeGreaterThan(rmWorktreeCfg);
+    expect(sweep).toBeGreaterThan(unsetExt);
+    expect(hooks).toBeGreaterThan(sweep);
+    // Hooks resolve with global/system config out of the way (a planted
+    // global core.hooksPath must not steer the sweep), deletion stays
+    // inside the repository's own git dir, and an outward-resolving entry
+    // is unlinked, never descended into.
+    expect(sanitizeAction).toContain('GIT_CONFIG_GLOBAL=/dev/null');
+    expect(sanitizeAction).toContain('GIT_CONFIG_SYSTEM=/dev/null');
+    expect(sanitizeAction).toContain('rev-parse --absolute-git-dir');
+    expect(sanitizeAction).toContain('unlinking it');
+    expect(sanitizeAction).toContain('-type f -o -type l');
+    expect(sanitizeAction).toContain(
+      'git config --local --unset-all core.hooksPath',
+    );
+    // Provenance link: the action and qwen-triage's hardened step must be
+    // edited together.
+    expect(sanitizeAction).toContain('qwen-triage');
   });
 
   it('runs qwen headless once in each agent step', () => {
