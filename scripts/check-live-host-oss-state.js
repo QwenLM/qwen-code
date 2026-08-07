@@ -12,6 +12,7 @@ import { fail, isMainModule, parseArgs } from './release-script-utils.js';
 const MANIFEST_NAME = 'Qwen-Live-Host-manifest.json';
 const REQUEST_TIMEOUT_MS = 60 * 1000;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
+const DRY_RUN_VERSION_PATTERN = /^0\.0\.\d+$/;
 
 if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2)).catch((error) => {
@@ -23,6 +24,7 @@ if (isMainModule(import.meta.url)) {
 async function main(argv) {
   const command = argv[0];
   const args = parseArgs(argv.slice(1), {
+    '--allow-hidden-missing': { key: 'allowHiddenMissing', type: 'flag' },
     '--base-url': { key: 'baseUrl', type: 'value' },
     '--manifest': { key: 'manifestPath', type: 'value' },
     '--version': { key: 'version', type: 'value' },
@@ -39,6 +41,7 @@ async function main(argv) {
     console.log(
       await checkImmutablePrefix({
         baseUrl: args.baseUrl,
+        allowHiddenMissing: args.allowHiddenMissing,
         manifestPath: args.manifestPath,
         version: args.version,
       }),
@@ -59,12 +62,12 @@ async function main(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node scripts/check-live-host-oss-state.js prefix --base-url URL --version X.Y.Z --manifest PATH
+  node scripts/check-live-host-oss-state.js prefix --base-url URL --version X.Y.Z --manifest PATH [--allow-hidden-missing]
   node scripts/check-live-host-oss-state.js latest --base-url URL --manifest PATH
 `);
 }
 
-async function fetchManifest(url, fetchImpl) {
+async function fetchManifest(url, fetchImpl, hiddenMissingProbe) {
   let response;
   try {
     response = await fetchImpl(url, {
@@ -75,6 +78,20 @@ async function fetchManifest(url, fetchImpl) {
   }
   if (response.status === 404) {
     await response.body?.cancel().catch(() => {});
+    return undefined;
+  }
+  if (response.status === 403 && hiddenMissingProbe) {
+    await response.body?.cancel().catch(() => {});
+    const probe = await fetchImpl(hiddenMissingProbe, {
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!probe.ok) {
+      await probe.body?.cancel().catch(() => {});
+      throw new Error(
+        `OSS public-read probe failed with HTTP ${probe.status} at ${hiddenMissingProbe}.`,
+      );
+    }
+    await probe.body?.cancel().catch(() => {});
     return undefined;
   }
   if (!response.ok) {
@@ -88,14 +105,25 @@ async function fetchManifest(url, fetchImpl) {
 
 async function checkImmutablePrefix({
   baseUrl,
+  allowHiddenMissing = false,
   version,
   manifestPath,
   fetchImpl = fetch,
 }) {
   if (!VERSION_PATTERN.test(version)) fail(`Invalid version: ${version}`);
+  if (allowHiddenMissing && !DRY_RUN_VERSION_PATTERN.test(version)) {
+    fail('--allow-hidden-missing requires a synthetic 0.0.<PR> version');
+  }
   const localManifest = await readFile(manifestPath);
   const url = `${baseUrl.replace(/\/+$/, '')}/live-host/v${version}/${MANIFEST_NAME}`;
-  const remoteManifest = await fetchManifest(url, fetchImpl);
+  const publicBaseUrl = baseUrl.replace(/\/+$/, '');
+  const remoteManifest = await fetchManifest(
+    url,
+    fetchImpl,
+    allowHiddenMissing
+      ? `${publicBaseUrl}/releases/qwen-code/latest/VERSION`
+      : undefined,
+  );
   if (!remoteManifest) return false;
   if (!localManifest.equals(remoteManifest)) {
     fail('The immutable OSS version manifest has different contents');

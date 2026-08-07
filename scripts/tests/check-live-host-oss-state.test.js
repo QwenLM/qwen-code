@@ -55,6 +55,49 @@ describe('Live Host OSS state checks', () => {
     }
   });
 
+  it('accepts OSS-hidden missing keys only after a public-read probe', async () => {
+    const hidden = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(new Response('v0.21.7'));
+    await expect(
+      checkImmutablePrefix({
+        baseUrl: 'https://assets.example',
+        version: '0.0.123',
+        manifestPath,
+        allowHiddenMissing: true,
+        fetchImpl: hidden,
+      }),
+    ).resolves.toBe(false);
+    expect(hidden.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://assets.example/live-host/v0.0.123/Qwen-Live-Host-manifest.json',
+      'https://assets.example/releases/qwen-code/latest/VERSION',
+    ]);
+
+    await expect(
+      checkImmutablePrefix({
+        baseUrl: 'https://assets.example',
+        version: '0.0.123',
+        manifestPath,
+        allowHiddenMissing: true,
+        fetchImpl: vi
+          .fn()
+          .mockResolvedValueOnce(new Response(null, { status: 403 }))
+          .mockResolvedValueOnce(new Response(null, { status: 503 })),
+      }),
+    ).rejects.toThrow(/public-read probe failed/);
+
+    await expect(
+      checkImmutablePrefix({
+        baseUrl: 'https://assets.example',
+        version: '1.2.3',
+        manifestPath,
+        allowHiddenMissing: true,
+        fetchImpl: hidden,
+      }),
+    ).rejects.toThrow(/synthetic 0[.]0/);
+  });
+
   it('accepts only byte-identical immutable manifests', async () => {
     const bytes = await readFile(manifestPath);
     await expect(

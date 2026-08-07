@@ -51,6 +51,10 @@ describe('Live Host release workflows', () => {
     expect(dryRun).toContain(
       'node scripts/check-live-host-oss-state.js prefix',
     );
+    expect(dryRun).toContain('--allow-hidden-missing');
+    expect(syncWorkflow.slice(syncWorkflow.indexOf('  sync:'))).not.toContain(
+      '--allow-hidden-missing',
+    );
     expect(syncWorkflow).toContain(
       'cp release-assets/Qwen-Live-Host-manifest.json',
     );

@@ -131,7 +131,8 @@ jobs:
           node scripts/check-live-host-oss-state.js prefix \
             --base-url "$ALIYUN_OSS_PUBLIC_BASE_URL" \
             --version "$VERSION" \
-            --manifest release-assets/Qwen-Live-Host-manifest.json
+            --manifest release-assets/Qwen-Live-Host-manifest.json \
+            --allow-hidden-missing
 
       - name: 'Report planned OSS objects'
         env:
