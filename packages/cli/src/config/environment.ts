@@ -15,9 +15,10 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  reportRejectedLoaderKeys,
+  resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { publishPendingCompileCache } from './compile-cache.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
   ENV_CORRUPTED_PATH,
@@ -46,11 +47,6 @@ const RELOAD_EXCLUDED_KEYS = new Set([
 // repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
 // #8653 cross-workspace vector.
 const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(INHERITED_LOADER_ENV_KEYS);
-
-// Loader-key rejections are reported once per file per process: daemon-side
-// loadSettings() re-runs loadEnvironment() for every session, and repeating
-// the same warning per session would be noise, not diagnostics.
-const loaderKeyRejectionWarnedFiles = new Set<string>();
 
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
@@ -145,7 +141,7 @@ export function resetHomeEnvBootstrapForTesting(): void {
 
 /** Test-only: reset environment reload provenance between tests. */
 export function resetEnvironmentTrackingForTesting(): void {
-  loaderKeyRejectionWarnedFiles.clear();
+  resetLoaderKeyRejectionReportingForTesting();
   dotEnvSourcedKeys.clear();
   settingsEnvSourcedKeys.clear();
   lastReloadSnapshot.clear();
@@ -528,20 +524,7 @@ export function loadEnvironment(
         lastReloadSnapshot.set(key, envFile.parsedEnv[key]!);
       }
     }
-    // Before this denylist existed, loader keys in .env files applied on the
-    // initial load. Dropping them silently would send upgrade investigations
-    // everywhere except here, so leave the same class of breadcrumb the
-    // inherited-env scrubs emit.
-    if (
-      rejectedLoaderKeys.length > 0 &&
-      !loaderKeyRejectionWarnedFiles.has(envFile.path)
-    ) {
-      loaderKeyRejectionWarnedFiles.add(envFile.path);
-      writeStderrLine(
-        `qwen: .env file ${envFile.path} cannot set loader-affecting env ` +
-          `vars; ignored: ${rejectedLoaderKeys.join(', ')}`,
-      );
-    }
+    reportRejectedLoaderKeys(`.env file ${envFile.path}`, rejectedLoaderKeys);
   }
 
   // Step 2: settings.env fallback (lowest priority, no-override).
@@ -615,7 +598,12 @@ export function reloadEnvironment(
   for (const envFile of parsedEnvFiles.files) {
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+    const rejectedLoaderKeys: string[] = [];
     for (const key in envFile.parsedEnv) {
+      if (LOADER_ENV_KEYS.has(key)) {
+        rejectedLoaderKeys.push(key);
+        continue;
+      }
       if (!canApplyParsedEnvKey(envFile, key, excludedVars, { reload: true })) {
         continue;
       }
@@ -623,6 +611,7 @@ export function reloadEnvironment(
         newDotEnvKeys.set(key, envFile.parsedEnv[key]!);
       }
     }
+    reportRejectedLoaderKeys(`.env file ${envFile.path}`, rejectedLoaderKeys);
   }
 
   if (settings.env) {

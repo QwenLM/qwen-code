@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeEnvironment,
   loadEnvironment,
+  reloadEnvironment,
   resetEnvironmentTrackingForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
@@ -29,6 +30,7 @@ const TRACKED_ENV = [
   'LD_PRELOAD',
   'NODE_OPTIONS',
   'NODE_PATH',
+  'npm_config_node_options',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'QWEN_HOME',
@@ -255,6 +257,7 @@ describe('loadEnvironment', () => {
       path.join(workspace, '.env'),
       [
         'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+        'npm_config_node_options=--import file:///workspace-a/hook.mjs',
         'NODE_PATH=/workspace-a/node_modules',
         'LD_PRELOAD=/workspace-a/hijack.so',
         'RUNTIME_DOTENV=allowed',
@@ -265,6 +268,7 @@ describe('loadEnvironment', () => {
     loadEnvironment(testSettings({}), workspace);
 
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['npm_config_node_options']).toBeUndefined();
     expect(process.env['NODE_PATH']).toBeUndefined();
     expect(process.env['LD_PRELOAD']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
@@ -295,7 +299,7 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 
-  it('warns once per file when loader-affecting keys are rejected from .env', () => {
+  it('warns once per file+key when loader-affecting keys are rejected from .env', () => {
     resetEnvironmentTrackingForTesting();
     const workspace = makeWorkspace();
     const envPath = path.join(workspace, '.env');
@@ -318,7 +322,7 @@ describe('loadEnvironment', () => {
     try {
       loadEnvironment(testSettings({}), workspace);
       // Daemon-side loadSettings() re-runs loadEnvironment() for every
-      // session; the warning must not repeat for the same file.
+      // session; the warning must not repeat for the same file and key.
       loadEnvironment(testSettings({}), workspace);
     } finally {
       stderrWrite.mockRestore();
@@ -330,6 +334,111 @@ describe('loadEnvironment', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(envPath);
     expect(warnings[0]).toContain('NODE_OPTIONS');
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  it('warns again only for new loader-affecting keys added to an already-warned file', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(
+      envPath,
+      ['NODE_OPTIONS=--max-old-space-size=8192', ''].join('\n'),
+    );
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+
+    try {
+      loadEnvironment(testSettings({}), workspace);
+      fs.writeFileSync(
+        envPath,
+        [
+          'NODE_OPTIONS=--max-old-space-size=8192',
+          'LD_PRELOAD=/workspace-a/hijack.so',
+          '',
+        ].join('\n'),
+      );
+      loadEnvironment(testSettings({}), workspace);
+    } finally {
+      stderrWrite.mockRestore();
+    }
+
+    const warnings = stderrWrites.filter((chunk) =>
+      chunk.includes('cannot set loader-affecting env vars'),
+    );
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain('NODE_OPTIONS');
+    // The second warning must cover only the delta — the already-warned key
+    // stays rejected but is not reported again.
+    expect(warnings[1]).toContain('LD_PRELOAD');
+    expect(warnings[1]).not.toContain('NODE_OPTIONS');
+  });
+
+  it('warns when a mid-session .env edit adds a loader-affecting key', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(envPath, ['RUNTIME_DOTENV=allowed', ''].join('\n'));
+    loadEnvironment(testSettings({}), workspace);
+
+    fs.writeFileSync(
+      envPath,
+      [
+        'RUNTIME_DOTENV=allowed',
+        'NODE_OPTIONS=--max-old-space-size=8192',
+        '',
+      ].join('\n'),
+    );
+
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    try {
+      reloadEnvironment(testSettings({}), workspace);
+    } finally {
+      stderrWrite.mockRestore();
+    }
+
+    const warnings = stderrWrites.filter((chunk) =>
+      chunk.includes('cannot set loader-affecting env vars'),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(envPath);
+    expect(warnings[0]).toContain('NODE_OPTIONS');
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // The loader gate runs before any scope check, and home-scoped files are
+  // already exempt from PROJECT_ENV_HARDCODED_EXCLUSIONS — pin that a
+  // home-scoped exemption mutant for loader keys cannot ship green.
+  it('never applies loader-affecting keys from user-level .env files either', () => {
+    const workspace = makeWorkspace();
+    const qwenHome = makeWorkspace();
+    process.env['QWEN_HOME'] = qwenHome;
+    fs.writeFileSync(
+      path.join(qwenHome, '.env'),
+      [
+        'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+        'npm_config_node_options=--import file:///workspace-a/hook.mjs',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['npm_config_node_options']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 });

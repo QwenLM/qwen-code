@@ -15,6 +15,7 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
   getGlobalQwenDirLite,
@@ -270,9 +271,13 @@ export function loadServeFastPathEnvironment(
         path.basename(path.dirname(normalizedEnvFilePath)) ===
           SETTINGS_DIRECTORY_NAME;
 
+      const rejectedLoaderKeys: string[] = [];
       for (const key in parsedEnv) {
         if (!Object.hasOwn(parsedEnv, key)) continue;
-        if (LOADER_ENV_KEYS.has(key)) continue;
+        if (LOADER_ENV_KEYS.has(key)) {
+          rejectedLoaderKeys.push(key);
+          continue;
+        }
         if (
           !isHomeScopedEnvFile &&
           PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
@@ -286,19 +291,28 @@ export function loadServeFastPathEnvironment(
           process.env[key] = parsedEnv[key];
         }
       }
+      reportRejectedLoaderKeys(
+        `.env file ${normalizedEnvFilePath}`,
+        rejectedLoaderKeys,
+      );
     } catch {
       // Errors are ignored to match dotenv quiet-mode behavior.
     }
   }
 
   if (settings.env) {
+    const rejectedLoaderKeys: string[] = [];
     for (const [key, value] of Object.entries(settings.env)) {
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
-      if (LOADER_ENV_KEYS.has(key)) continue;
+      if (LOADER_ENV_KEYS.has(key)) {
+        rejectedLoaderKeys.push(key);
+        continue;
+      }
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
       }
     }
+    reportRejectedLoaderKeys('settings.env', rejectedLoaderKeys);
   }
   publishPendingCompileCache();
 }

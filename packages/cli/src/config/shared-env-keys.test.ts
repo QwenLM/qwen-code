@@ -36,9 +36,13 @@ describe('scrubInheritedLoaderEnv', () => {
   it('removes every loader-affecting key and keeps the rest', () => {
     const env: NodeJS.ProcessEnv = {
       NODE_OPTIONS: '--import file:///other-checkout/register.mjs',
+      npm_config_node_options: '--import file:///other-checkout/hook.mjs',
       NODE_PATH: '/other-checkout/node_modules',
       LD_PRELOAD: '/evil.so',
+      LD_AUDIT: '/evil-audit.so',
+      LD_LIBRARY_PATH: '/evil-lib',
       DYLD_INSERT_LIBRARIES: '/evil.dylib',
+      DYLD_LIBRARY_PATH: '/evil-lib',
       BASH_ENV: '/tmp/hook.sh',
       ENV: '/tmp/shrc',
       PATH: '/other-checkout/node_modules/.bin:/usr/bin',
@@ -55,9 +59,13 @@ describe('scrubInheritedLoaderEnv', () => {
     // keys that were actually present.
     expect(removedKeys).toEqual([
       'NODE_OPTIONS',
+      'npm_config_node_options',
       'NODE_PATH',
       'LD_PRELOAD',
+      'LD_AUDIT',
+      'LD_LIBRARY_PATH',
       'DYLD_INSERT_LIBRARIES',
+      'DYLD_LIBRARY_PATH',
       'BASH_ENV',
       'ENV',
     ]);
@@ -82,6 +90,7 @@ describe('scrubInheritedLoaderEnv', () => {
       'LD_PRELOAD',
       'NODE_OPTIONS',
       'NODE_PATH',
+      'npm_config_node_options',
     ]);
   });
 });

@@ -33,6 +33,7 @@ import {
   preResolveServeFastPathHomeEnvOverrides,
   resetServeFastPathHomeEnvBootstrapForTesting,
 } from './fast-path-settings.js';
+import { resetLoaderKeyRejectionReportingForTesting } from '../config/shared-env-keys.js';
 import {
   getGlobalQwenDirLite,
   SETTINGS_DIRECTORY_NAME,
@@ -1667,7 +1668,12 @@ describe('serve fast path environment bootstrap', () => {
   // env distributed to every workspace's session subprocesses — the exact
   // cross-workspace vector the daemon-side scrub closes.
   it('never applies loader-affecting keys from .env files or settings.env', () => {
-    const trackedKeys = ['NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD'] as const;
+    const trackedKeys = [
+      'NODE_OPTIONS',
+      'npm_config_node_options',
+      'NODE_PATH',
+      'LD_PRELOAD',
+    ] as const;
     const previous: Record<string, string | undefined> = {};
     for (const key of trackedKeys) {
       previous[key] = process.env[key];
@@ -1682,12 +1688,14 @@ describe('serve fast path environment bootstrap', () => {
         join(tempWorkspace, '.env'),
         [
           'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+          'npm_config_node_options=--import file:///workspace-a/hook.mjs',
           'FASTPATH_DOTENV_ALLOWED=allowed',
           '',
         ].join('\n'),
       );
       loadServeFastPathEnvironment({}, tempWorkspace);
       expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node_options']).toBeUndefined();
       expect(process.env['FASTPATH_DOTENV_ALLOWED']).toBe('allowed');
       rmSync(tempWorkspace, { recursive: true, force: true });
 
@@ -1732,6 +1740,102 @@ describe('serve fast path environment bootstrap', () => {
       delete process.env['FASTPATH_QWEN_ALLOWED'];
       delete process.env['FASTPATH_SETTINGS_ALLOWED'];
     }
+  });
+
+  // The loader gate runs before any scope check, and home-scoped files are
+  // exempt from PROJECT_ENV_HARDCODED_EXCLUSIONS — pin that a home-scoped
+  // exemption mutant for loader keys cannot ship green on the fast path.
+  it('never applies loader-affecting keys from user-level .env files either', () => {
+    const trackedKeys = ['NODE_OPTIONS', 'npm_config_node_options'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-home-')),
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      [
+        'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+        'npm_config_node_options=--import file:///workspace-a/hook.mjs',
+        'FASTPATH_HOME_ALLOWED=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['FASTPATH_HOME_ALLOWED']).toBe('allowed');
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+      delete process.env['FASTPATH_HOME_ALLOWED'];
+    }
+  });
+
+  // Daemon-side loadSettings() never re-runs the full .env load
+  // (skipLoadEnvironment: true everywhere), so a loader key rejected at boot
+  // would vanish without a breadcrumb unless the fast path reports it.
+  it('warns when loader-affecting keys are rejected on the fast path', () => {
+    resetLoaderKeyRejectionReportingForTesting();
+    const trackedKeys = ['NODE_OPTIONS', 'LD_PRELOAD'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-warn-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      ['NODE_OPTIONS=--max-old-space-size=8192', ''].join('\n'),
+    );
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+
+    try {
+      loadServeFastPathEnvironment(
+        { env: { LD_PRELOAD: '/workspace-a/hijack.so' } },
+        tempWorkspace,
+      );
+    } finally {
+      stderrWrite.mockRestore();
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+
+    const warnings = stderrWrites.filter((chunk) =>
+      chunk.includes('cannot set loader-affecting env vars'),
+    );
+    expect(warnings).toHaveLength(2);
+    const combined = warnings.join('');
+    expect(combined).toContain(join(tempWorkspace, '.env'));
+    expect(combined).toContain('NODE_OPTIONS');
+    expect(combined).toContain('settings.env');
+    expect(combined).toContain('LD_PRELOAD');
   });
 
   it('prioritizes trusted parent folders over nested distrust rules', async () => {

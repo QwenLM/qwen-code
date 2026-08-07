@@ -49,6 +49,10 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // .env/settings.env application — not the inherited launch environment.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
+  // npm maps its `node-options` config onto npm_config_node_options in the
+  // environment, and `npm run` lifecycle scripts apply it like NODE_OPTIONS —
+  // the same hijack through an adjacent key.
+  'npm_config_node_options',
   'NODE_PATH',
   'LD_PRELOAD',
   'LD_AUDIT',
@@ -88,4 +92,35 @@ export function scrubAndReportInheritedLoaderEnv(
     );
   }
   return removedKeys;
+}
+
+// Loader keys rejected from .env/settings.env used to apply on some
+// application paths before the denylist existed; dropping them silently
+// would send upgrade investigations everywhere except here. Report once per
+// source+key per process: daemon-side loadSettings() re-runs the .env load
+// for every session, and repeating the same warning per session would be
+// noise, not diagnostics. A fresh process (one ACP child per session)
+// starts with an empty map and warns once for itself.
+const reportedLoaderKeyRejections = new Map<string, Set<string>>();
+
+export function reportRejectedLoaderKeys(
+  source: string,
+  rejectedKeys: readonly string[],
+): void {
+  if (rejectedKeys.length === 0) return;
+  const warnedKeys =
+    reportedLoaderKeyRejections.get(source) ?? new Set<string>();
+  const freshKeys = rejectedKeys.filter((key) => !warnedKeys.has(key));
+  if (freshKeys.length === 0) return;
+  for (const key of freshKeys) warnedKeys.add(key);
+  reportedLoaderKeyRejections.set(source, warnedKeys);
+  writeStderrLine(
+    `qwen: ${source} cannot set loader-affecting env vars; ignored: ` +
+      freshKeys.join(', '),
+  );
+}
+
+/** Test-only: forget already-reported loader-key rejections. */
+export function resetLoaderKeyRejectionReportingForTesting(): void {
+  reportedLoaderKeyRejections.clear();
 }
