@@ -720,6 +720,15 @@ describe('extension tests', () => {
         path.join(skillPath, 'SKILL.md'),
         '---\nname: sample-skill\ndescription: Synthetic skill\n---\n',
       );
+      const commandsPath = path.join(sourcePath, 'commands');
+      fs.mkdirSync(commandsPath, { recursive: true });
+      fs.writeFileSync(
+        path.join(commandsPath, 'sample.md'),
+        '# Command\n${CLAUDE_PLUGIN_ROOT}/scripts/run.sh',
+      );
+      const hooksPath = path.join(sourcePath, 'hooks');
+      fs.mkdirSync(hooksPath, { recursive: true });
+      fs.writeFileSync(path.join(hooksPath, 'hooks.json'), '{}');
       const requestConsent = vi.fn(async () => {});
       const manager = createExtensionManager();
       await manager.refreshCache();
@@ -740,6 +749,12 @@ describe('extension tests', () => {
       expect(extension.skills?.map((skill) => skill.name)).toEqual([
         'sample-skill',
       ]);
+      expect(
+        fs.readFileSync(
+          path.join(extension.path, 'commands', 'sample.md'),
+          'utf-8',
+        ),
+      ).toContain(`${extension.path}/scripts/run.sh`);
       expect(requestConsent).toHaveBeenCalledWith(
         expect.objectContaining({ originSource: 'Qoder' }),
       );
@@ -827,6 +842,40 @@ describe('extension tests', () => {
 
       expect(extension.name).toBe('sample-qoder-plugin');
       expect(extension.installMetadata?.originSource).toBe('Qoder');
+      expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
+    });
+
+    it('should retain the recorded commit for a converted Claude Git plugin', async () => {
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(sourcePath, '.claude-plugin', 'plugin.json'),
+          JSON.stringify({ name: 'sample-claude-plugin', version: '1.0.0' }),
+        );
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-claude-plugin' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-claude-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.installMetadata?.originSource).toBe('Claude');
       expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
     });
 

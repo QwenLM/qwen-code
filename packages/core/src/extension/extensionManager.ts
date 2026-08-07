@@ -1823,9 +1823,6 @@ export class ExtensionManager {
         }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
-        if (originSource !== 'Qoder') {
-          delete installMetadata.gitCommit;
-        }
 
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
@@ -1956,11 +1953,12 @@ export class ExtensionManager {
               : path.join(stagingPath, newExtensionConfig.hooks)
             : null;
 
+        const usesPluginVariables =
+          originSource === 'Claude' || originSource === 'Qoder';
         if (
-          (originSource === 'Claude' && fs.existsSync(hooksDir)) ||
-          (originSource === 'Claude' &&
-            configHooksPath &&
-            fs.existsSync(configHooksPath))
+          usesPluginVariables &&
+          (fs.existsSync(hooksDir) ||
+            (configHooksPath && fs.existsSync(configHooksPath)))
         ) {
           try {
             await performVariableReplacement(stagingPath, destinationPath);

@@ -51,6 +51,9 @@ export async function convertCompatibleExtension(
     newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
       .convertedDir;
     originSource = 'Gemini';
+  } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
+    newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
+    originSource = 'Qoder';
   } else if (pluginName) {
     newExtensionDir = (
       await convertClaudePluginPackage(
@@ -67,9 +70,6 @@ export async function convertCompatibleExtension(
     newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
       .convertedDir;
     originSource = 'Claude';
-  } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
-    newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
-    originSource = 'Qoder';
   }
   signal?.throwIfAborted();
   return { extensionDir: newExtensionDir, originSource };

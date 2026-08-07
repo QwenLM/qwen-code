@@ -569,29 +569,32 @@ describe('git extension helpers', () => {
       expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
     });
 
-    it('checks a converted Qoder Git extension using its recorded commit', async () => {
-      const extension = createExtension({
-        installMetadata: {
-          type: 'git',
-          source: 'https://github.com/example/sample-qoder-plugin',
-          originSource: 'Qoder',
-          gitCommit: 'local-hash',
-        },
-      });
-      mockGit.listRemote.mockResolvedValue('remote-hash\tHEAD');
+    it.each(['Qoder', 'Claude'] as const)(
+      'checks a converted %s Git extension using its recorded commit',
+      async (originSource) => {
+        const extension = createExtension({
+          installMetadata: {
+            type: 'git',
+            source: 'https://github.com/example/sample-qoder-plugin',
+            originSource,
+            gitCommit: 'local-hash',
+          },
+        });
+        mockGit.listRemote.mockResolvedValue('remote-hash\tHEAD');
 
-      const result = await checkForExtensionUpdate(
-        extension,
-        mockExtensionManager,
-      );
+        const result = await checkForExtensionUpdate(
+          extension,
+          mockExtensionManager,
+        );
 
-      expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
-      expect(mockGit.getRemotes).not.toHaveBeenCalled();
-      expect(mockGit.listRemote).toHaveBeenCalledWith([
-        'https://github.com/example/sample-qoder-plugin',
-        'HEAD',
-      ]);
-    });
+        expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(mockGit.getRemotes).not.toHaveBeenCalled();
+        expect(mockGit.listRemote).toHaveBeenCalledWith([
+          'https://github.com/example/sample-qoder-plugin',
+          'HEAD',
+        ]);
+      },
+    );
 
     it('does not update-check legacy Qoder Git installs without a recorded commit', async () => {
       const extension = createExtension({
@@ -785,6 +788,39 @@ describe('git extension helpers', () => {
         const result = await checkForExtensionUpdate(extension, mockManager);
 
         expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not convert a local marketplace checkout during update checks', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-marketplace-update-test-'),
+      );
+      try {
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: tempDir,
+            originSource: 'Claude',
+            pluginName: 'sample-plugin',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn().mockReturnValue({
+            name: 'sample-plugin',
+            version: '1.0.0',
+          }),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+        expect(mockManager.loadExtensionConfig).toHaveBeenCalledWith({
+          extensionDir: tempDir,
+        });
+        expect(await fs.readdir(tempDir)).toEqual([]);
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }

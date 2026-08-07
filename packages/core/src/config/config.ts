@@ -680,7 +680,7 @@ export interface ExtensionInstallMetadata {
   type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
-  gitCommit?: string; // Only present when a converted Git install cannot retain .git.
+  gitCommit?: string; // Commit recorded when the installation source was cloned.
   registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;

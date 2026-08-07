@@ -121,7 +121,10 @@ describe('convertQoderPlugin', () => {
       'utf-8',
     );
 
-    const result = await convertCompatibleExtension(root);
+    const result = await convertCompatibleExtension(
+      root,
+      'ignored-plugin-name',
+    );
 
     expect(result.originSource).toBe('Qoder');
     const converted = JSON.parse(
@@ -139,8 +142,9 @@ describe('convertQoderPlugin', () => {
   it('merges explicit context with system-prompt.md without duplicates', async () => {
     writeManifest({
       name: 'sample-qoder-plugin',
-      contextFileName: ['custom.md', 'custom.md', 'system-prompt.md'],
+      contextFileName: ['custom.md', 'custom.md', './system-prompt.md'],
     });
+    fs.writeFileSync(path.join(root, 'QWEN.md'), '# Qwen context', 'utf-8');
     fs.writeFileSync(path.join(root, 'custom.md'), '# Custom', 'utf-8');
     fs.writeFileSync(
       path.join(root, 'system-prompt.md'),
@@ -151,10 +155,60 @@ describe('convertQoderPlugin', () => {
     const result = await convertQoderPlugin(root);
 
     expect(result.config.contextFileName).toEqual([
+      'QWEN.md',
       'custom.md',
       'system-prompt.md',
     ]);
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('loads path-valued MCP config from the standard wrapper', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      mcpServers: '.mcp.json',
+    });
+    fs.writeFileSync(
+      path.join(root, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          sample: { type: 'http', url: 'https://example.com/mcp' },
+        },
+      }),
+      'utf-8',
+    );
+
+    const result = await convertQoderPlugin(root);
+
+    expect(Object.keys(result.config.mcpServers ?? {})).toEqual(['sample']);
+    expect(result.config.mcpServers?.['sample']).toMatchObject({
+      httpUrl: 'https://example.com/mcp',
+    });
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('rejects malformed root MCP config', async () => {
+    writeManifest({ name: 'sample-qoder-plugin' });
+    fs.writeFileSync(path.join(root, '.mcp.json'), '{', 'utf-8');
+
+    await expect(convertQoderPlugin(root)).rejects.toThrow(
+      /Invalid Qoder MCP configuration/,
+    );
+  });
+
+  it('rejects an invalid MCP wrapper from a configured path', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      mcpServers: '.mcp.json',
+    });
+    fs.writeFileSync(
+      path.join(root, '.mcp.json'),
+      JSON.stringify({ mcpServers: null }),
+      'utf-8',
+    );
+
+    await expect(convertQoderPlugin(root)).rejects.toThrow(
+      /expected an "mcpServers" object/,
+    );
   });
 
   it('loads QWEN.md with system-prompt.md when context is not configured', async () => {

@@ -554,7 +554,7 @@ export async function convertClaudePluginPackage(
  * could otherwise make the converter read sensitive files outside the plugin.
  * Returns the confined absolute path, or null when the reference is unsafe.
  */
-function resolvePluginRelativeFile(
+export function resolvePluginRelativeFile(
   pluginSource: string,
   relativePath: string,
 ): string | null {

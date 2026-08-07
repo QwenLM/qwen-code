@@ -329,16 +329,18 @@ export async function checkForExtensionUpdate(
         signal?.throwIfAborted();
         extensionDir = tempDir;
       }
-      const sourceBeforeConversion = extensionDir;
-      const converted = await convertCompatibleExtension(
-        sourceBeforeConversion,
-        installMetadata.pluginName,
-        installMetadata.networkPolicy,
-        signal,
-      );
-      extensionDir = converted.extensionDir;
-      if (extensionDir !== sourceBeforeConversion) {
-        convertedDir = extensionDir;
+      if (tempDir !== undefined || installMetadata.originSource === 'Qoder') {
+        const sourceBeforeConversion = extensionDir;
+        const converted = await convertCompatibleExtension(
+          sourceBeforeConversion,
+          installMetadata.pluginName,
+          installMetadata.networkPolicy,
+          signal,
+        );
+        extensionDir = converted.extensionDir;
+        if (extensionDir !== sourceBeforeConversion) {
+          convertedDir = extensionDir;
+        }
       }
       signal?.throwIfAborted();
       latestConfig = extensionManager.loadExtensionConfig({
@@ -421,7 +423,6 @@ export async function checkForExtensionUpdate(
   }
   if (
     !installMetadata ||
-    installMetadata.originSource === 'Claude' ||
     (installMetadata.type !== 'git' &&
       installMetadata.type !== 'github-release')
   ) {
@@ -435,13 +436,16 @@ export async function checkForExtensionUpdate(
       }
       let remoteUrl: string;
       let localHash: string;
-      if (installMetadata.originSource === 'Qoder') {
-        if (!installMetadata.gitCommit) {
-          return ExtensionUpdateState.NOT_UPDATABLE;
-        }
+      if (installMetadata.gitCommit) {
         remoteUrl = addGitHubToken(installMetadata.source);
         localHash = installMetadata.gitCommit;
       } else {
+        if (
+          installMetadata.originSource === 'Claude' ||
+          installMetadata.originSource === 'Qoder'
+        ) {
+          return ExtensionUpdateState.NOT_UPDATABLE;
+        }
         const localGit = simpleGit(
           extension.path,
           signal ? { abort: signal } : undefined,

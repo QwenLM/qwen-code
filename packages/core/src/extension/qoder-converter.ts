@@ -11,14 +11,13 @@ import type { ExtensionConfig } from './extensionManager.js';
 import {
   buildQwenExtensionFromPlugin,
   normalizeClaudeMcpServer,
+  resolvePluginRelativeFile,
   type ClaudePluginConfig,
 } from './claude-converter.js';
-import { isPathWithin, realPathWithin } from './gemini-converter.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
+import { realPathWithin } from './gemini-converter.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 
 export const QODER_PLUGIN_MANIFEST = '.qoder-plugin/plugin.json';
-const debugLogger = createDebugLogger('QODER_CONVERTER');
 
 type QoderPluginConfig = Omit<ClaudePluginConfig, 'version'> & {
   version?: string;
@@ -57,11 +56,13 @@ function loadQoderConfig(extensionDir: string): QoderPluginConfig {
   };
 }
 
-function loadRootMcpServers(
+function loadMcpServersFile(
   extensionDir: string,
+  relativePath: string,
+  requireWrapper: boolean,
 ): Record<string, MCPServerConfig> | undefined {
-  const mcpPath = path.join(extensionDir, '.mcp.json');
-  if (!fs.existsSync(mcpPath) || !realPathWithin(mcpPath, extensionDir)) {
+  const mcpPath = resolvePluginRelativeFile(extensionDir, relativePath);
+  if (!mcpPath || !fs.existsSync(mcpPath)) {
     return undefined;
   }
 
@@ -69,21 +70,29 @@ function loadRootMcpServers(
   try {
     parsed = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
   } catch (error) {
-    debugLogger.warn(
-      `Failed to parse .mcp.json at ${mcpPath}: ${error instanceof Error ? error.message : String(error)}`,
+    throw new Error(
+      `Invalid Qoder MCP configuration at ${mcpPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return undefined;
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return undefined;
+    throw new Error(
+      `Invalid Qoder MCP configuration at ${mcpPath}: expected a JSON object`,
+    );
   }
-  const servers = (parsed as { mcpServers?: unknown }).mcpServers;
+  const hasWrapper = Object.prototype.hasOwnProperty.call(parsed, 'mcpServers');
+  const servers = hasWrapper
+    ? (parsed as { mcpServers?: unknown }).mcpServers
+    : requireWrapper
+      ? undefined
+      : parsed;
   if (
     typeof servers !== 'object' ||
     servers === null ||
     Array.isArray(servers)
   ) {
-    return undefined;
+    throw new Error(
+      `Invalid Qoder MCP configuration at ${mcpPath}: expected an "mcpServers" object`,
+    );
   }
 
   return Object.fromEntries(
@@ -92,6 +101,19 @@ function loadRootMcpServers(
       normalizeClaudeMcpServer(server as MCPServerConfig),
     ]),
   );
+}
+
+function resolveMcpServers(
+  extensionDir: string,
+  configured: QoderPluginConfig['mcpServers'],
+): Record<string, MCPServerConfig> | undefined {
+  if (typeof configured === 'string') {
+    return loadMcpServersFile(extensionDir, configured, false);
+  }
+  if (configured) {
+    return configured;
+  }
+  return loadMcpServersFile(extensionDir, '.mcp.json', true);
 }
 
 function resolveContextFiles(
@@ -103,33 +125,30 @@ function resolveContextFiles(
       ? configured
       : [configured]
     : [];
-  const hasConfiguredFiles = configuredFiles.length > 0;
-  const root = path.resolve(extensionDir);
-  const contextFiles = hasConfiguredFiles
-    ? [
-        ...new Set(
-          configuredFiles.filter((file) => {
-            if (typeof file !== 'string' || path.isAbsolute(file)) return false;
-            const resolved = path.resolve(extensionDir, file);
-            return (
-              isPathWithin(resolved, root) &&
-              fs.existsSync(resolved) &&
-              realPathWithin(resolved, extensionDir)
-            );
-          }),
-        ),
-      ]
-    : fs.existsSync(path.join(extensionDir, 'QWEN.md')) &&
-        realPathWithin(path.join(extensionDir, 'QWEN.md'), extensionDir)
-      ? ['QWEN.md']
-      : [];
-  const systemPromptPath = path.join(extensionDir, 'system-prompt.md');
-  if (
-    fs.existsSync(systemPromptPath) &&
-    realPathWithin(systemPromptPath, extensionDir) &&
-    !contextFiles.includes('system-prompt.md')
-  ) {
-    contextFiles.push('system-prompt.md');
+  const contextFiles: string[] = [];
+  const seen = new Set<string>();
+  const addContextFile = (relativePath: string): void => {
+    const resolved = resolvePluginRelativeFile(extensionDir, relativePath);
+    if (!resolved || !fs.existsSync(resolved)) return;
+    const normalized = path.relative(path.resolve(extensionDir), resolved);
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      contextFiles.push(normalized);
+    }
+  };
+
+  for (const file of configuredFiles) {
+    if (typeof file === 'string') addContextFile(file);
+  }
+  addContextFile('system-prompt.md');
+  if (contextFiles.length > 0) {
+    const qwenPath = resolvePluginRelativeFile(extensionDir, 'QWEN.md');
+    if (qwenPath && fs.existsSync(qwenPath)) {
+      const normalized = path.relative(path.resolve(extensionDir), qwenPath);
+      if (normalized && !seen.has(normalized)) {
+        contextFiles.unshift(normalized);
+      }
+    }
   }
   return contextFiles.length > 0 ? contextFiles : undefined;
 }
@@ -138,9 +157,7 @@ export async function convertQoderPlugin(
   extensionDir: string,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   const config = loadQoderConfig(extensionDir);
-  if (!config.mcpServers) {
-    config.mcpServers = loadRootMcpServers(extensionDir);
-  }
+  config.mcpServers = resolveMcpServers(extensionDir, config.mcpServers);
   const contextFileName = resolveContextFiles(
     extensionDir,
     config.contextFileName,

@@ -6,7 +6,7 @@ Qwen Code installs extensions from directories, archives, Git repositories, arch
 
 ## Design
 
-The existing compatible-extension conversion step recognizes the Qoder manifest after native Qwen, Gemini, and Claude manifests. It copies the plugin into a temporary extension directory, writes a generated `qwen-extension.json`, and records `Qoder` as the install origin. Converted Git installs record the checked-out commit in install metadata so update checks remain available after Git metadata is removed.
+The existing compatible-extension conversion step recognizes the Qoder manifest alongside native Qwen, Gemini, and Claude manifests. It copies the plugin into a temporary extension directory, writes a generated `qwen-extension.json`, and records `Qoder` as the install origin. Converted Git installs record the checked-out commit in install metadata so update checks remain available after Git metadata is removed.
 
 The generated manifest preserves `name`, `version`, `displayName`, and `description`. A missing version defaults to `1.0.0`. Standard resource directories remain in place, while existing resource path declarations use the same confined collection logic as other compatible plugin formats. Root `.mcp.json` servers are normalized to Qwen transports unless the manifest already defines MCP servers.
 
