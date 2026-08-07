@@ -158,15 +158,34 @@ describe('installTerminalRedrawOptimizer', () => {
   it('reads process.env at call time by default (#7634)', () => {
     // Pins the production default-parameter seam: the sole caller omits the
     // env argument and the optimizer must honor the WSL marker from
-    // process.env, not a hardcoded empty set. The stub is cleaned up in the
-    // describe-level afterEach so it cannot leak into later tests.
+    // process.env, not a hardcoded empty set. The flag is also stubbed so the
+    // assertion depends only on the WSL marker, not on a host-set escape hatch.
+    // The stubs are cleaned up in the describe-level afterEach.
     vi.stubEnv('WSL_DISTRO_NAME', 'Ubuntu');
+    vi.stubEnv('QWEN_CODE_LEGACY_ERASE_LINES', '');
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
     const restore = installTerminalRedrawOptimizer(stdout);
 
     expect(stdout.write).toBe(write);
     restore();
+  });
+
+  it('treats a non-standard flag value as unset (platform default)', () => {
+    // The tri-state flag: only '1' (force-off) and '0' (force-on) are
+    // recognized; anything else falls through to the platform default, so with
+    // a WSL marker present the optimizer is still skipped.
+    const env = {
+      WSL_DISTRO_NAME: 'Ubuntu',
+      QWEN_CODE_LEGACY_ERASE_LINES: 'garbage',
+    };
+    const write = vi.fn(() => true);
+    const stdout = { write } as unknown as NodeJS.WriteStream;
+    const restore = installTerminalRedrawOptimizer(stdout, env);
+
+    expect(stdout.write).toBe(write);
+    restore();
+    expect(stdout.write).toBe(write);
   });
 
   it('can be force-enabled on WSL via QWEN_CODE_LEGACY_ERASE_LINES=0 (#7634)', () => {
