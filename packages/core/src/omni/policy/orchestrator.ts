@@ -31,7 +31,12 @@ import {
   computePolicyFingerprint,
   OmniDegradationCache,
 } from './degradation-cache.js';
-import type { FixedPolicyOrigin, NormalizedFixedPolicy } from './types.js';
+import { DEFAULT_OMNI_PROCESSING_LIMITS } from './config.js';
+import type {
+  FixedPolicyOrigin,
+  NormalizedFixedPolicy,
+  NormalizedOmniProcessingLimits,
+} from './types.js';
 
 const debugLogger = createDebugLogger('omni:policy');
 
@@ -62,7 +67,8 @@ export interface PolicyRunRecord {
     | 'cache_hit'
     | 'no_op'
     | 'failed'
-    | 'condition_unavailable';
+    | 'condition_unavailable'
+    | 'budget_exhausted';
   /** Display label of the resource the policy ran against. */
   resource: string;
   /** Fields that made a `when` condition undecidable. */
@@ -79,6 +85,9 @@ export interface RunFixedPoliciesOptions {
   conditionContext?: Pick<FixedPolicyConditionContext, 'request' | 'session'>;
   /** Injectable for tests; defaults to the store-rooted cache. */
   degradationCache?: OmniDegradationCache;
+  /** Per-root derivation budgets (decision D11); the system defaults
+   * apply when the caller has no normalized processing config. */
+  limits?: NormalizedOmniProcessingLimits;
 }
 
 /** Root resource entering the orchestrator. */
@@ -115,6 +124,8 @@ interface WorkItem {
   /** Per-derivation-chain run counts (policy id → runs). Copied — never
    * shared — on derivation, so sibling branches cap independently. */
   lineageRuns: Map<string, number>;
+  /** Derivation-chain length from the root (root = 0). */
+  depth: number;
   deliver: boolean;
   /** Whether the item enters policy matching (`output.reprocessMedia`). */
   process: boolean;
@@ -183,15 +194,23 @@ function sortPolicies(
  * descriptor, promote them into the content-addressed store, and return
  * the final delivery set plus records of the work performed.
  *
- * Termination is structural: each policy runs at most `maxRunsPerLineage`
- * times per derivation chain and the policy set is finite, so the derived
- * tree is finite (global budgets are the next commit's backstop).
+ * Termination is structural AND budgeted: each policy runs at most
+ * `maxRunsPerLineage` times per derivation chain and the policy set is
+ * finite, so the derived tree is finite; on top of that the per-root
+ * budgets (decision D11 — `maxPolicyRunsPerRoot`, `maxArtifactsPerRoot`,
+ * `maxDerivedBytesPerRoot`, `maxLineageDepth`) stop further derivation
+ * when exceeded. A budget stop is not a failure: already-committed
+ * delivery decisions stand (no rollback), the stop is recorded with the
+ * exhausted budget as its reason, and the transport guard still judges
+ * the final set.
  *
  * Failure semantics (decision D10): a failed invocation never leaves
- * partial state (its staging dir is removed); `onFailure: 'continue'`
- * keeps the source in the delivery set (the transport guard remains the
- * backstop), while `'abort'` — and any transport-guard-stage failure —
- * throws {@link OmniPolicyExecutionError}.
+ * partial state in staging/ — its staging directory is moved to
+ * quarantine/ with a `reason.json` for postmortem (Stage B; sweeps apply
+ * retention). `onFailure: 'continue'` keeps the source in the delivery
+ * set (the transport guard remains the backstop), while `'abort'` — and
+ * any transport-guard-stage failure — throws
+ * {@link OmniPolicyExecutionError}.
  */
 export async function runFixedPolicies(
   config: Config,
@@ -202,6 +221,7 @@ export async function runFixedPolicies(
   records: PolicyRunRecord[];
 }> {
   const policies = sortPolicies(options.policies);
+  const limits = options.limits ?? DEFAULT_OMNI_PROCESSING_LIMITS;
   const cache =
     options.degradationCache ??
     new OmniDegradationCache(options.store.getOmniRootDir());
@@ -213,13 +233,39 @@ export async function runFixedPolicies(
       label: source.displayName,
       origin: source.origin,
       lineageRuns: new Map(),
+      depth: 0,
       deliver: true,
       process: true,
     },
   ];
 
+  // Per-root budget counters (decision D11). One runFixedPolicies call
+  // processes exactly one root, so the counters live here.
+  let runsUsed = 0;
+  let artifactsProduced = 0;
+  let derivedBytesProduced = 0;
+  let budgetExhausted = false;
+  const stopOnBudget = (
+    policy: NormalizedFixedPolicy,
+    item: WorkItem,
+    reason: string,
+  ): void => {
+    budgetExhausted = true;
+    records.push({
+      policyId: policy.id,
+      toolName: policy.toolName,
+      outcome: 'budget_exhausted',
+      resource: item.label,
+      error: reason,
+    });
+    debugLogger.debug(
+      `per-root policy budget exhausted on ${item.label}: ${reason}; ` +
+        `no further derivation for this root (committed deliveries stand)`,
+    );
+  };
+
   // Index-based: executions append derived items behind the cursor.
-  for (let i = 0; i < items.length; i++) {
+  for (let i = 0; i < items.length && !budgetExhausted; i++) {
     const item = items[i];
     if (!item.process) continue;
     for (const policy of policies) {
@@ -248,6 +294,15 @@ export async function runFixedPolicies(
         }
         // 'unavailable' + onConditionUnavailable 'run' falls through.
       }
+      if (runsUsed >= limits.maxPolicyRunsPerRoot) {
+        stopOnBudget(
+          policy,
+          item,
+          `maxPolicyRunsPerRoot (${limits.maxPolicyRunsPerRoot}) reached`,
+        );
+        break;
+      }
+      runsUsed++;
       item.lineageRuns.set(policy.id, runs + 1);
       try {
         const execution = await executePolicy(
@@ -266,15 +321,42 @@ export async function runFixedPolicies(
         });
         if (execution.outcome === 'no_op') continue;
         if (policy.output.source === 'omit') item.deliver = false;
+        const childDepth = item.depth + 1;
+        const depthAllowsReprocess = childDepth < limits.maxLineageDepth;
+        if (policy.output.reprocessMedia && !depthAllowsReprocess) {
+          debugLogger.debug(
+            `maxLineageDepth (${limits.maxLineageDepth}) reached under ${item.label}; ` +
+              `derivatives deliver but do not re-enter policy matching`,
+          );
+        }
         for (const derived of execution.derived) {
+          artifactsProduced++;
+          derivedBytesProduced += derived.recognized.sizeBytes;
           items.push({
             ...derived,
             label: `${item.label} → ${policy.id}`,
             origin: 'policy',
             lineageRuns: new Map(item.lineageRuns),
+            depth: childDepth,
             deliver: true,
-            process: policy.output.reprocessMedia,
+            process: policy.output.reprocessMedia && depthAllowsReprocess,
           });
+        }
+        if (artifactsProduced > limits.maxArtifactsPerRoot) {
+          stopOnBudget(
+            policy,
+            item,
+            `maxArtifactsPerRoot (${limits.maxArtifactsPerRoot}) exceeded`,
+          );
+          break;
+        }
+        if (derivedBytesProduced > limits.maxDerivedBytesPerRoot) {
+          stopOnBudget(
+            policy,
+            item,
+            `maxDerivedBytesPerRoot (${limits.maxDerivedBytesPerRoot}) exceeded`,
+          );
+          break;
         }
       } catch (err) {
         if (options.signal?.aborted) throw err;
@@ -386,6 +468,7 @@ async function executePolicy(
 
   const invocationId = randomBytes(8).toString('hex');
   const stagingDir = await store.createStagingDir(invocationId);
+  let failure: unknown;
   try {
     const request: ToolCallRequestInfo = {
       callId: invocationId,
@@ -471,10 +554,30 @@ async function executePolicy(
       });
     }
     return { outcome: 'succeeded', derived };
+  } catch (err) {
+    failure = err;
+    throw err;
   } finally {
-    // Success and failure both end without a staging dir (this commit's
-    // Stage A behavior; quarantine-on-failure is the Stage B follow-up).
-    await store.removeStagingDir(invocationId).catch(() => {});
+    if (failure === undefined || signal?.aborted) {
+      // Success, no_op, and user aborts end without a staging dir — there
+      // is nothing to diagnose.
+      await store.removeStagingDir(invocationId).catch(() => {});
+    } else {
+      // Failure (decision D10 Stage B): move the staging dir — partial
+      // outputs included — into quarantine/ with a reason.json for
+      // postmortem; the startup sweeps apply retention/size budgets. If
+      // quarantining itself fails, fall back to plain removal so a failed
+      // invocation still never leaves live staging state behind.
+      try {
+        await store.quarantineInvocation(invocationId, {
+          policyId: policy.id,
+          toolName: policy.toolName,
+          reason: failure instanceof Error ? failure.message : String(failure),
+        });
+      } catch {
+        await store.removeStagingDir(invocationId).catch(() => {});
+      }
+    }
   }
 }
 

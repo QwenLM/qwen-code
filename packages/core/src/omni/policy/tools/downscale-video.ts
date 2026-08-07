@@ -236,6 +236,7 @@ export class OmniDownscaleVideoTool extends BaseMediaPolicyTool<DownscaleVideoPa
         required: ['inputPath', 'outputDir'],
         additionalProperties: false,
       },
+      config,
     );
   }
 

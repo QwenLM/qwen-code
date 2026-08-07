@@ -6,15 +6,18 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { FunctionDeclaration } from '@google/genai';
 import type {
   MediaPolicyToolDescriptor,
   ToolArtifact,
   ToolArtifactKind,
   ToolResult,
 } from '../../../tools/tools.js';
+import type { Kind } from '../../../tools/tools.js';
 import { BaseDeclarativeTool } from '../../../tools/tools.js';
 import { ToolErrorType } from '../../../tools/tool-error.js';
 import { SchemaValidator } from '../../../utils/schemaValidator.js';
+import { projectMediaPolicyToolDeclaration } from '../model-access.js';
 import type { OmniPolicyToolsSettings } from '../types.js';
 
 /** Default transcode timeout when `policyTools.<tool>.runtime.timeoutMs`
@@ -84,7 +87,37 @@ export function resolvePolicyToolTimeoutMs(
 export abstract class BaseMediaPolicyTool<
   TParams extends object,
 > extends BaseDeclarativeTool<TParams, ToolResult> {
+  constructor(
+    name: string,
+    displayName: string,
+    description: string,
+    kind: Kind,
+    parameterSchema: unknown,
+    /** Config view feeding the modelAccess declaration projection; tools
+     * constructed without one (tests, embedders) declare their native
+     * schema unchanged. */
+    private readonly modelAccessView: MediaPolicyToolConfigView = {},
+  ) {
+    super(name, displayName, description, kind, parameterSchema);
+  }
+
   abstract override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor;
+
+  /**
+   * Model-visible declaration (decision D6): the single projection point
+   * every declaration surface reads — the native schema minus
+   * `modelAccess.lockedArguments` keys, narrowed to
+   * `modelAccess.parameterSchema` when configured, with the optional
+   * description override applied. Validation deliberately does NOT use
+   * this projection (see {@link validateToolParams}).
+   */
+  override get schema(): FunctionDeclaration {
+    return projectMediaPolicyToolDeclaration(this.modelAccessView, {
+      name: this.name,
+      description: this.description,
+      parametersJsonSchema: this.parameterSchema,
+    });
+  }
 
   /**
    * Validate against the tool's NATIVE parameter schema, never the

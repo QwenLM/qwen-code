@@ -17,6 +17,7 @@ import {
   formatBytesShort,
   resolvePolicyToolTimeoutMs,
   validateMediaPolicyIoParams,
+  type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 import { BaseToolInvocation } from '../../../tools/tools.js';
 
@@ -169,17 +170,24 @@ describe('BaseMediaPolicyTool validation', () => {
   }
 
   class TestPolicyTool extends BaseMediaPolicyTool<TestParams> {
-    constructor() {
-      super('test_policy_tool', 'TestPolicyTool', 'test', Kind.Other, {
-        type: 'object',
-        properties: {
-          inputPath: { type: 'string' },
-          outputDir: { type: 'string' },
-          level: { type: 'number', minimum: 1 },
+    constructor(view: MediaPolicyToolConfigView = {}) {
+      super(
+        'test_policy_tool',
+        'TestPolicyTool',
+        'test',
+        Kind.Other,
+        {
+          type: 'object',
+          properties: {
+            inputPath: { type: 'string' },
+            outputDir: { type: 'string' },
+            level: { type: 'number', minimum: 1 },
+          },
+          required: ['inputPath', 'outputDir'],
+          additionalProperties: false,
         },
-        required: ['inputPath', 'outputDir'],
-        additionalProperties: false,
-      });
+        view,
+      );
     }
     override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
       return {
@@ -233,5 +241,59 @@ describe('BaseMediaPolicyTool validation', () => {
     expect(() => tool.build({ inputPath: 'rel.png', outputDir: '/b' })).toThrow(
       /absolute/,
     );
+  });
+
+  describe('model-visible schema projection (decision D6)', () => {
+    it('declares the native schema unchanged without modelAccess settings', () => {
+      expect(tool.schema).toEqual({
+        name: 'test_policy_tool',
+        description: 'test',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: {
+            inputPath: { type: 'string' },
+            outputDir: { type: 'string' },
+            level: { type: 'number', minimum: 1 },
+          },
+          required: ['inputPath', 'outputDir'],
+          additionalProperties: false,
+        },
+      });
+    });
+
+    it('projects the declaration while validation keeps the native schema', () => {
+      const configured = new TestPolicyTool({
+        getOmniPolicyToolsSettings: () => ({
+          test_policy_tool: {
+            modelAccess: {
+              enabled: true,
+              description: 'Model-facing description.',
+              lockedArguments: { inputPath: '/x', outputDir: '/y' },
+              parameterSchema: { properties: { level: { maximum: 9 } } },
+            },
+          },
+        }),
+      });
+      // The model sees ONLY the tunable, with the override merged in.
+      expect(configured.schema).toEqual({
+        name: 'test_policy_tool',
+        description: 'Model-facing description.',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: { level: { type: 'number', minimum: 1, maximum: 9 } },
+          required: [],
+          additionalProperties: false,
+        },
+      });
+      // …but the harness-injected io arguments the projection hides must
+      // remain valid: validation runs on the NATIVE schema (§9.4).
+      expect(
+        configured.validateToolParams({
+          inputPath: '/a/in.png',
+          outputDir: '/b/staging',
+          level: 3,
+        }),
+      ).toBeNull();
+    });
   });
 });

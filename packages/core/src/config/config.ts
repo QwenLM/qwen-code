@@ -8125,7 +8125,7 @@ export class Config {
         const { OmniDownsampleImageTool } = await import(
           '../omni/policy/tools/downsample-image.js'
         );
-        return new OmniDownsampleImageTool();
+        return new OmniDownsampleImageTool(this);
       });
       await registerLazy(ToolNames.OMNI_DOWNSCALE_VIDEO, async () => {
         const { OmniDownscaleVideoTool } = await import(

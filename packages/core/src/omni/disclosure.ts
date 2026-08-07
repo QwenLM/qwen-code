@@ -31,3 +31,16 @@ export function formatDisclosureText(
 export function isDisclosureText(text: string): boolean {
   return text.startsWith(OMNI_DISCLOSURE_TEXT_PREFIX);
 }
+
+/** Marks a text Part as an explicit-omission notice: the transport guard
+ * could not bring a resource within limits, so the media was withheld and
+ * this text stands in its place (policy design §10.2). */
+export const OMNI_OMISSION_TEXT_PREFIX = '【媒体省略】';
+
+/** Model-facing omission notice for one withheld resource. */
+export function formatOmissionText(
+  displayName: string,
+  reason: string,
+): string {
+  return `${OMNI_OMISSION_TEXT_PREFIX}${displayName}：${reason}`;
+}

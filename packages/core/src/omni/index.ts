@@ -14,11 +14,15 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isAbortError } from '../utils/errors.js';
 import { isFfmpegAvailable, isFfprobeAvailable } from './ffmpeg.js';
-import type { OmniTokenEstimate } from './estimation.js';
+import {
+  estimateRawResourceTokens,
+  type OmniTokenEstimate,
+} from './estimation.js';
 import {
   assertWithinByteLimit,
   assertWithinTokenLimit,
   effectiveMaxUploadFileBytes,
+  OmniTransportGuardError,
 } from './guard.js';
 import {
   extensionForMime,
@@ -34,7 +38,7 @@ import {
   DEFAULT_UPLOAD_CACHE_TTL_HOURS,
 } from './upload-cache.js';
 import { runStartupRecoveryOnce } from './recovery.js';
-import { formatDisclosureText } from './disclosure.js';
+import { formatDisclosureText, formatOmissionText } from './disclosure.js';
 import {
   runFixedPolicies,
   type PolicyDeliveryResource,
@@ -86,7 +90,9 @@ export {
 export { resetCredentialCacheForTests } from './upload.js';
 export {
   OMNI_DISCLOSURE_TEXT_PREFIX,
+  OMNI_OMISSION_TEXT_PREFIX,
   formatDisclosureText,
+  formatOmissionText,
   isDisclosureText,
 } from './disclosure.js';
 export {
@@ -168,6 +174,11 @@ export interface OmniMediaDelivery {
   /** True when a fixed policy replaced the source with a lossy
    * derivative. */
   degraded?: boolean;
+  /** Present when the transport guard could not bring the resource within
+   * limits even after the transport-guard policies ran: the media was NOT
+   * uploaded (`fileUri` is empty) and callers must materialize an
+   * explicit-omission text Part in its place (policy design §10.2). */
+  omission?: { reason: string };
 }
 
 /** Thrown for omni pipeline failures. The pipeline fails closed: callers
@@ -225,6 +236,31 @@ export function isOmniDeliveryActive(config: Config): boolean {
     return false;
   }
   return DashScopeOpenAICompatibleProvider.isDashScopeProvider(cgc);
+}
+
+/** Non-throwing transport-limit check: runs both guard dimensions and
+ * reports the first violation as a message instead of an exception, so
+ * the Stage B guard loop can react (run guard policies / omit) while
+ * configs without a processing config keep the fail-closed throw. */
+function evaluateTransportLimits(
+  config: Config,
+  recognized: RecognizedMedia,
+  displayName: string,
+): { estimate: OmniTokenEstimate; violation?: string } {
+  try {
+    assertWithinByteLimit(config, recognized.sizeBytes, displayName);
+    return {
+      estimate: assertWithinTokenLimit(config, recognized, displayName),
+    };
+  } catch (err) {
+    if (err instanceof OmniTransportGuardError) {
+      return {
+        estimate: estimateRawResourceTokens(recognized),
+        violation: err.message,
+      };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -323,18 +359,23 @@ export async function processMediaForOmniDelivery(
     cacheScope,
   );
   // Lazy one-time hygiene scan (expired .part files, promotion orphans,
-  // sampled object verification). MUST run before the orchestrator: the
-  // scan deletes staging/ wholesale, which would race live invocations.
-  await runStartupRecoveryOnce(store, uploadCache);
+  // quarantine retention/size sweeps, sampled object verification). MUST
+  // run before the orchestrator: the scan deletes staging/ wholesale,
+  // which would race live invocations.
+  await runStartupRecoveryOnce(store, uploadCache, {
+    quarantineRetentionDays: config.getOmniQuarantineRetentionDays?.(),
+    quarantineMaxBytes: config.getOmniQuarantineMaxBytes?.(),
+  });
 
   // Fixed-policy preprocessing (decision D5: this single site covers
   // @-commands, tool results, the URL funnel and ACP). Structural view —
-  // the real accessor arrives with config normalization; a config without
-  // it (or with no policies) changes nothing.
+  // a config without the accessor (stub configs, embedders skipping
+  // initialize) or with no policies changes nothing.
+  const processingConfig = (
+    config as OmniProcessingConfigView
+  ).getOmniProcessingConfig?.();
   let final: PolicyDeliveryResource = { filePath, recognized };
-  const policies =
-    (config as OmniProcessingConfigView).getOmniProcessingConfig?.()
-      ?.fixedPolicies ?? [];
+  const policies = processingConfig?.fixedPolicies ?? [];
   if (policies.length > 0) {
     let deliveries: PolicyDeliveryResource[];
     try {
@@ -346,7 +387,7 @@ export async function processMediaForOmniDelivery(
           displayName,
           origin: options?.origin ?? 'user',
         },
-        { store, policies, signal },
+        { store, policies, signal, limits: processingConfig?.limits },
       ));
     } catch (err) {
       if (signal?.aborted) throw err;
@@ -368,13 +409,88 @@ export async function processMediaForOmniDelivery(
   }
 
   // Transport guard on the FINAL delivery set (decision D1): the bytes
-  // and token estimate judged are the ones actually delivered.
-  assertWithinByteLimit(config, final.recognized.sizeBytes, displayName);
-  const tokenEstimate = assertWithinTokenLimit(
-    config,
-    final.recognized,
-    displayName,
-  );
+  // and token estimate judged are the ones actually delivered. Stage B:
+  // a violation first runs the transport-guard policies (matched by
+  // modality only — no `when`, coverage of all three modalities is
+  // enforced at config normalization) for up to
+  // `limits.maxTransportPasses` passes; a still-over-limit resource is
+  // explicitly OMITTED (policy design §10.2) rather than delivered
+  // oversized. Without a normalized processing config (stub configs,
+  // embedders skipping initialize) the guard keeps its fail-closed throw.
+  let guard = evaluateTransportLimits(config, final.recognized, displayName);
+  if (guard.violation && processingConfig) {
+    const guardPolicies = processingConfig.transportGuardPolicies.filter((p) =>
+      p.mediaTypes.includes(final.recognized.modality),
+    );
+    const maxPasses = processingConfig.limits.maxTransportPasses;
+    for (
+      let pass = 0;
+      guard.violation && guardPolicies.length > 0 && pass < maxPasses;
+      pass++
+    ) {
+      let deliveries: PolicyDeliveryResource[];
+      try {
+        ({ deliveries } = await runFixedPolicies(
+          config,
+          {
+            filePath: final.filePath,
+            recognized: final.recognized,
+            displayName,
+            origin: options?.origin ?? 'user',
+          },
+          {
+            store,
+            policies: guardPolicies,
+            signal,
+            limits: processingConfig.limits,
+          },
+        ));
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        // Guard-policy failure with no compliant alternative: fail closed
+        // — a guard configuration error must never degrade into sending
+        // over-limit media (policy design §10.2).
+        throw new OmniDeliveryError(
+          `Transport-guard processing failed for ${displayName}: ` +
+            `${sanitizeErrorMessage(err, [final.filePath, store.getOmniRootDir()])}`,
+          { cause: err },
+        );
+      }
+      if (deliveries.length !== 1) {
+        throw new OmniDeliveryError(
+          `Transport-guard policies produced ${deliveries.length} deliverables for ${displayName}; exactly one is supported.`,
+        );
+      }
+      if (deliveries[0].filePath === final.filePath) {
+        // No progress (every guard policy was a no_op for this input) —
+        // further passes would repeat the same work.
+        break;
+      }
+      final = deliveries[0];
+      guard = evaluateTransportLimits(config, final.recognized, displayName);
+    }
+  }
+  if (guard.violation) {
+    if (!processingConfig) {
+      throw new OmniTransportGuardError(guard.violation);
+    }
+    debugLogger.debug(
+      `omni ${final.recognized.modality} explicitly omitted (transport guard): ${guard.violation}`,
+    );
+    return {
+      fileUri: '',
+      mimeType: final.recognized.detectedMimeType,
+      sha256: final.sha256 ?? '',
+      recognized: final.recognized,
+      tokenEstimate: guard.estimate,
+      deduped: false,
+      uploadCacheHit: false,
+      disclosure: final.disclosure,
+      degraded: final.degraded,
+      omission: { reason: guard.violation },
+    };
+  }
+  const tokenEstimate = guard.estimate;
 
   // Content hash: identity of the stored object. Derivatives arrive with
   // their hash from promotion; sources are hashed here, after all guards.
@@ -525,6 +641,16 @@ export async function readMediaViaOmniDelivery(params: {
       expectedModality,
       signal,
     });
+    if (delivery.omission) {
+      // Explicit omission (policy design §10.2): the media is withheld and
+      // the omission notice text stands in its place. Not an error — the
+      // read succeeded; the transport guard's verdict is the content.
+      return {
+        llmContent: formatOmissionText(displayName, delivery.omission.reason),
+        returnDisplay: `Media omitted by the omni transport guard: ${relativePathForDisplay}`,
+        tokenEstimate: delivery.tokenEstimate,
+      };
+    }
     const fileDataPart = {
       fileData: {
         fileUri: delivery.fileUri,

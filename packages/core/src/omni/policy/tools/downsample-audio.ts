@@ -201,6 +201,7 @@ export class OmniDownsampleAudioTool extends BaseMediaPolicyTool<DownsampleAudio
         required: ['inputPath', 'outputDir'],
         additionalProperties: false,
       },
+      config,
     );
   }
 

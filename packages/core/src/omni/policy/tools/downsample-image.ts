@@ -21,6 +21,7 @@ import {
   mediaPolicyToolSuccess,
   validateMediaPolicyIoParams,
   type MediaPolicyIoParams,
+  type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 
 export const OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME = 'omni_downsample_image';
@@ -206,7 +207,7 @@ class DownsampleImageInvocation extends BaseToolInvocation<
  * opens it up.
  */
 export class OmniDownsampleImageTool extends BaseMediaPolicyTool<DownsampleImageParams> {
-  constructor() {
+  constructor(config: MediaPolicyToolConfigView = {}) {
     super(
       OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME,
       'DownsampleImage',
@@ -221,6 +222,7 @@ export class OmniDownsampleImageTool extends BaseMediaPolicyTool<DownsampleImage
         required: ['inputPath', 'outputDir'],
         additionalProperties: false,
       },
+      config,
     );
   }
 

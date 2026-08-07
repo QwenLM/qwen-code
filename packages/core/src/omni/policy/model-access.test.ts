@@ -10,6 +10,7 @@ import type { OmniPolicyToolsSettings } from './types.js';
 import {
   evaluateMediaPolicyToolCall,
   isMediaPolicyToolHiddenFromModel,
+  projectMediaPolicyToolDeclaration,
   resolveMediaPolicyModelAccess,
   type MediaPolicyConfigView,
 } from './model-access.js';
@@ -101,6 +102,190 @@ describe('resolveMediaPolicyModelAccess', () => {
     expect(
       resolveMediaPolicyModelAccess(config, 'omni_compress_image'),
     ).toEqual({ enabled: true, defaultArguments: {}, lockedArguments: {} });
+  });
+
+  it('reads description and parameterSchema when well-formed', () => {
+    const config = configWith({
+      omni_compress_image: {
+        modelAccess: {
+          enabled: true,
+          description: 'Compress an image.',
+          parameterSchema: { properties: { quality: { maximum: 90 } } },
+        },
+      },
+    });
+    const access = resolveMediaPolicyModelAccess(config, 'omni_compress_image');
+    expect(access.description).toBe('Compress an image.');
+    expect(access.parameterSchema).toEqual({
+      properties: { quality: { maximum: 90 } },
+    });
+  });
+
+  it.each([
+    ['empty description', { description: '' }],
+    ['non-string description', { description: 42 }],
+    ['array parameterSchema', { parameterSchema: [] }],
+    ['string parameterSchema', { parameterSchema: '{}' }],
+  ])('drops a malformed declaration projection: %s', (_label, modelAccess) => {
+    const config = configWith({
+      omni_compress_image: { modelAccess },
+    } as unknown as OmniPolicyToolsSettings);
+    const access = resolveMediaPolicyModelAccess(config, 'omni_compress_image');
+    expect(access.description).toBeUndefined();
+    expect(access.parameterSchema).toBeUndefined();
+  });
+});
+
+describe('projectMediaPolicyToolDeclaration', () => {
+  const NATIVE = {
+    name: 'omni_compress_image',
+    description: 'Native description.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        inputPath: { type: 'string', description: 'Source path.' },
+        outputDir: { type: 'string' },
+        maxDimension: { type: 'number', minimum: 1 },
+        quality: { type: 'number', minimum: 1, maximum: 100 },
+      },
+      required: ['inputPath', 'outputDir'],
+      additionalProperties: false,
+    },
+  };
+
+  it('returns the native declaration unchanged without modelAccess settings', () => {
+    expect(projectMediaPolicyToolDeclaration({}, NATIVE)).toEqual(NATIVE);
+  });
+
+  it('removes lockedArguments keys from properties AND required', () => {
+    const config = configWith({
+      omni_compress_image: {
+        modelAccess: {
+          enabled: true,
+          lockedArguments: { outputDir: '/staging' },
+        },
+      },
+    });
+    expect(projectMediaPolicyToolDeclaration(config, NATIVE)).toEqual({
+      name: 'omni_compress_image',
+      description: 'Native description.',
+      parametersJsonSchema: {
+        type: 'object',
+        properties: {
+          inputPath: { type: 'string', description: 'Source path.' },
+          maxDimension: { type: 'number', minimum: 1 },
+          quality: { type: 'number', minimum: 1, maximum: 100 },
+        },
+        required: ['inputPath'],
+        additionalProperties: false,
+      },
+    });
+  });
+
+  it('narrows to parameterSchema properties, merging overrides over native constraints', () => {
+    const config = configWith({
+      omni_compress_image: {
+        modelAccess: {
+          enabled: true,
+          lockedArguments: { inputPath: '/x', outputDir: '/y' },
+          parameterSchema: {
+            properties: {
+              maxDimension: { maximum: 4096, description: 'Longest edge.' },
+            },
+          },
+        },
+      },
+    });
+    expect(projectMediaPolicyToolDeclaration(config, NATIVE)).toEqual({
+      name: 'omni_compress_image',
+      description: 'Native description.',
+      parametersJsonSchema: {
+        type: 'object',
+        properties: {
+          maxDimension: {
+            type: 'number', // native constraint preserved…
+            minimum: 1,
+            maximum: 4096, // …override merged on top
+            description: 'Longest edge.',
+          },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+    });
+  });
+
+  it('is narrowing-only: a projection property with no native counterpart is ignored', () => {
+    const config = configWith({
+      omni_compress_image: {
+        modelAccess: {
+          enabled: true,
+          parameterSchema: {
+            properties: {
+              quality: {},
+              madeUp: { type: 'string' },
+            },
+          },
+        },
+      },
+    });
+    const declaration = projectMediaPolicyToolDeclaration(config, NATIVE);
+    const schema = declaration.parametersJsonSchema as {
+      properties: Record<string, unknown>;
+    };
+    expect(Object.keys(schema.properties)).toEqual(['quality']);
+  });
+
+  it('never re-adds a locked key even when parameterSchema names it', () => {
+    const config = configWith({
+      omni_compress_image: {
+        modelAccess: {
+          enabled: true,
+          lockedArguments: { outputDir: '/staging' },
+          parameterSchema: {
+            properties: { outputDir: {}, quality: {} },
+          },
+        },
+      },
+    });
+    const declaration = projectMediaPolicyToolDeclaration(config, NATIVE);
+    const schema = declaration.parametersJsonSchema as {
+      properties: Record<string, unknown>;
+    };
+    expect(Object.keys(schema.properties)).toEqual(['quality']);
+  });
+
+  it('overrides the description when configured', () => {
+    const config = configWith({
+      omni_compress_image: {
+        modelAccess: { enabled: true, description: 'Model-facing text.' },
+      },
+    });
+    expect(projectMediaPolicyToolDeclaration(config, NATIVE).description).toBe(
+      'Model-facing text.',
+    );
+  });
+
+  it('passes a non-record native schema through, still applying the description override', () => {
+    const config = configWith({
+      omni_compress_image: {
+        modelAccess: {
+          enabled: true,
+          description: 'Overridden.',
+          lockedArguments: { outputDir: '/staging' },
+        },
+      },
+    });
+    const native = {
+      name: 'omni_compress_image',
+      description: 'Native description.',
+      parametersJsonSchema: undefined,
+    };
+    expect(projectMediaPolicyToolDeclaration(config, native)).toEqual({
+      name: 'omni_compress_image',
+      description: 'Overridden.',
+      parametersJsonSchema: undefined,
+    });
   });
 });
 

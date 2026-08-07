@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { FunctionDeclaration } from '@google/genai';
 import type { ToolExecutionOrigin } from '../../core/turn.js';
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
 import type {
@@ -35,6 +36,10 @@ export interface ResolvedMediaPolicyModelAccess {
   enabled: boolean;
   defaultArguments: Record<string, unknown>;
   lockedArguments: Record<string, unknown>;
+  /** Model-facing description override for the declaration projection. */
+  description?: string;
+  /** Narrowing-only projection over the native parameter schema. */
+  parameterSchema?: Record<string, unknown>;
 }
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
@@ -62,6 +67,86 @@ export function resolveMediaPolicyModelAccess(
     lockedArguments: isPlainRecord(modelAccess?.lockedArguments)
       ? modelAccess.lockedArguments
       : {},
+    description:
+      typeof modelAccess?.description === 'string' &&
+      modelAccess.description !== ''
+        ? modelAccess.description
+        : undefined,
+    parameterSchema: isPlainRecord(modelAccess?.parameterSchema)
+      ? modelAccess.parameterSchema
+      : undefined,
+  };
+}
+
+/**
+ * Model-visible declaration for a media-policy tool (decision D6, policy
+ * design §9.4): the projection is applied at the SINGLE `schema` getter
+ * the declaration surfaces read, while validation keeps using the native
+ * schema (the harness-injected arguments the projection hides must stay
+ * valid).
+ *
+ * Shape: the native parametersJsonSchema minus every
+ * `modelAccess.lockedArguments` key (removed from `properties` and
+ * `required` — the model must not see arguments it is forbidden to pass),
+ * then — when `modelAccess.parameterSchema` is configured — narrowed to
+ * the properties it names, with each named property's constraints merged
+ * over the native ones. A projection property with no native counterpart
+ * is ignored (narrowing-only: the projection can never ADD surface).
+ * `modelAccess.description` overrides the tool description when set.
+ */
+export function projectMediaPolicyToolDeclaration(
+  config: MediaPolicyConfigView,
+  native: {
+    name: string;
+    description: string;
+    parametersJsonSchema: unknown;
+  },
+): FunctionDeclaration {
+  const access = resolveMediaPolicyModelAccess(config, native.name);
+  const description = access.description ?? native.description;
+  const schema = isPlainRecord(native.parametersJsonSchema)
+    ? native.parametersJsonSchema
+    : undefined;
+  const nativeProps =
+    schema && isPlainRecord(schema['properties'])
+      ? schema['properties']
+      : undefined;
+  if (!schema || !nativeProps) {
+    return {
+      name: native.name,
+      description,
+      parametersJsonSchema: native.parametersJsonSchema,
+    };
+  }
+  const lockedKeys = new Set(Object.keys(access.lockedArguments));
+  const narrowProps =
+    access.parameterSchema &&
+    isPlainRecord(access.parameterSchema['properties'])
+      ? (access.parameterSchema['properties'] as Record<string, unknown>)
+      : undefined;
+  const properties: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(nativeProps)) {
+    if (lockedKeys.has(key)) continue;
+    if (narrowProps && !(key in narrowProps)) continue;
+    const override = narrowProps?.[key];
+    properties[key] =
+      isPlainRecord(override) && isPlainRecord(value)
+        ? { ...value, ...override }
+        : value;
+  }
+  const required = Array.isArray(schema['required'])
+    ? (schema['required'] as unknown[]).filter(
+        (key): key is string => typeof key === 'string' && key in properties,
+      )
+    : undefined;
+  return {
+    name: native.name,
+    description,
+    parametersJsonSchema: {
+      ...schema,
+      properties,
+      ...(required !== undefined ? { required } : {}),
+    },
   };
 }
 

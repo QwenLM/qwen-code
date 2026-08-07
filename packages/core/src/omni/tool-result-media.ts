@@ -11,7 +11,7 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isOmniDeliveryActive, processMediaForOmniDelivery } from './index.js';
-import { formatDisclosureText } from './disclosure.js';
+import { formatDisclosureText, formatOmissionText } from './disclosure.js';
 import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore } from './storage.js';
 import { sniffMediaType } from './recognition.js';
@@ -109,6 +109,16 @@ export async function processToolResultOmniMedia(
         displayName,
         origin: 'tool',
       });
+      if (delivery.omission) {
+        // Explicit omission (policy design §10.2): the transport guard
+        // could not bring the part within limits even after the guard
+        // policies ran — the media is withheld, the notice stands in for
+        // it, and the upload budgets are untouched (nothing was uploaded).
+        changed = true;
+        return [
+          { text: formatOmissionText(displayName, delivery.omission.reason) },
+        ];
+      }
       changed = true;
       uploadsRemaining--;
       uploadBytesRemaining -= bytes.length;

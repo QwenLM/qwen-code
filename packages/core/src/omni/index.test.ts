@@ -708,6 +708,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     vi.doUnmock('./storage.js');
     vi.doUnmock('./upload.js');
     vi.doUnmock('./policy/orchestrator.js');
+    vi.doUnmock('./recovery.js');
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -726,10 +727,26 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
   // Only `.length > 0` matters to the pipeline; the mocked orchestrator
   // never reads the entries.
   const POLICY_STUB = [{ id: 'img-downsample' }];
+  // Mirrors DEFAULT_OMNI_PROCESSING_LIMITS (normalization is unit-tested
+  // in policy/config.test.ts; the pipeline dereferences maxTransportPasses
+  // and forwards the object to the orchestrator).
+  const LIMITS_STUB = {
+    maxConcurrentResources: 1,
+    reservedOutputTokens: 8192,
+    maxLineageDepth: 8,
+    maxPolicyRunsPerRoot: 64,
+    maxArtifactsPerRoot: 256,
+    maxDerivedBytesPerRoot: 1073741824,
+    maxTransportPasses: 3,
+  };
 
   function policyConfig(overrides?: {
     maxUploadFileBytes?: number;
     policies?: unknown[];
+    transportGuardPolicies?: unknown[];
+    maxTransportPasses?: number;
+    /** Simulates a stub/embedder config without the accessor. */
+    noProcessingConfig?: boolean;
   }): Config {
     return {
       isOmniEnabled: vi.fn().mockReturnValue(true),
@@ -740,10 +757,20 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         .fn()
         .mockReturnValue(overrides?.maxUploadFileBytes ?? 0),
       getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
-      getOmniProcessingConfig: vi.fn().mockReturnValue({
-        fixedPolicies: overrides?.policies ?? POLICY_STUB,
-        transportGuardPolicies: [],
-      }),
+      getOmniProcessingConfig: vi.fn().mockReturnValue(
+        overrides?.noProcessingConfig
+          ? undefined
+          : {
+              fixedPolicies: overrides?.policies ?? POLICY_STUB,
+              transportGuardPolicies: overrides?.transportGuardPolicies ?? [],
+              limits: {
+                ...LIMITS_STUB,
+                ...(overrides?.maxTransportPasses !== undefined
+                  ? { maxTransportPasses: overrides.maxTransportPasses }
+                  : {}),
+              },
+            },
+      ),
       storage: { getQwenDir: () => tmpDir },
     } as unknown as Config;
   }
@@ -880,7 +907,10 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(result.degraded).toBe(true);
   });
 
-  it('still rejects when the FINAL delivery exceeds the byte cap', async () => {
+  it('explicitly omits an over-cap FINAL delivery when no guard policy matches its modality', async () => {
+    // Stage B (policy design §10.2): with a processing config present, a
+    // persisting violation is an explicit OMISSION, not a throw. The audio
+    // guard policy does not match an image, so no guard pass runs.
     const runMock = vi.fn().mockResolvedValue({
       deliveries: [
         {
@@ -892,13 +922,41 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
       ],
       records: [],
     });
+    const { putFileMock, uploadFileMock, mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [{ id: 'guard-audio', mediaTypes: ['audio'] }],
+      }),
+    );
+    // Only the fixed-policy stage ran — never a guard pass.
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      fileUri: '',
+      sha256: 'b'.repeat(64),
+      deduped: false,
+      uploadCacheHit: false,
+      degraded: true,
+    });
+    expect(result.omission?.reason).toContain('900 bytes > 500 bytes');
+    // Nothing was stored or uploaded for an omitted resource.
+    expect(putFileMock).not.toHaveBeenCalled();
+    expect(uploadFileMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the fail-closed throw when there is no processing config at all', async () => {
+    // Stub configs / embedders skipping initialize have no normalized
+    // processing config; the Stage A guard behavior must survive for them.
+    const runMock = vi.fn();
     const { mod } = await armPipeline(runMock);
     await expect(
       mod.processMediaForOmniDelivery(
         await realFile('pic.png'),
-        policyConfig({ maxUploadFileBytes: 500 }),
+        policyConfig({ maxUploadFileBytes: 500, noProcessingConfig: true }),
       ),
     ).rejects.toMatchObject({ name: 'OmniTransportGuardError' });
+    expect(runMock).not.toHaveBeenCalled();
   });
 
   it('wraps orchestrator failures into a sanitized OmniDeliveryError', async () => {
@@ -965,5 +1023,193 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         displayName: 'pic.png',
       },
     });
+  });
+
+  // ── Stage B transport-guard pass loop ────────────────────────────────
+  // With `policies: []` the fixed-policy stage is skipped entirely, so
+  // every runFixedPolicies call in these tests is a GUARD pass on the
+  // 5000-byte source (cap 500 → violation).
+  const IMG_GUARD = { id: 'img-guard', mediaTypes: ['image'] };
+
+  it('runs a matching guard policy on a violation and delivers the compliant result', async () => {
+    const guardedPath = path.join(tmpDir, 'objects', 'guarded.jpg');
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: guardedPath,
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const filePath = await realFile('pic.png');
+    const config = policyConfig({
+      policies: [],
+      maxUploadFileBytes: 500,
+      transportGuardPolicies: [IMG_GUARD],
+    });
+
+    const result = await mod.processMediaForOmniDelivery(filePath, config);
+
+    // One guard pass over the SOURCE, restricted to the matching policies.
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(runMock).toHaveBeenCalledWith(
+      config,
+      {
+        filePath,
+        recognized: SOURCE_RECOGNIZED,
+        displayName: 'pic.png',
+        origin: 'user',
+      },
+      expect.objectContaining({
+        policies: [IMG_GUARD],
+        limits: expect.objectContaining({ maxTransportPasses: 3 }),
+      }),
+    );
+    expect(result.fileUri).toBe('oss://bucket/degraded');
+    expect(result.omission).toBeUndefined();
+    expect(result.degraded).toBe(true);
+    expect(result.disclosure).toBe('downsampled to 1568px');
+  });
+
+  it('stops after maxTransportPasses passes and omits when still violating', async () => {
+    let call = 0;
+    const runMock = vi.fn().mockImplementation(async () => {
+      call += 1;
+      return {
+        deliveries: [
+          {
+            // A NEW path every pass: progress is being made, so only the
+            // pass counter can end the loop.
+            filePath: path.join(tmpDir, 'objects', `pass-${call}.jpg`),
+            recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+            sha256: String(call).repeat(64).slice(0, 64),
+            degraded: true,
+          },
+        ],
+        records: [],
+      };
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        policies: [],
+        maxUploadFileBytes: 500,
+        maxTransportPasses: 2,
+        transportGuardPolicies: [IMG_GUARD],
+      }),
+    );
+    expect(runMock).toHaveBeenCalledTimes(2);
+    expect(result.omission?.reason).toContain('900 bytes > 500 bytes');
+    expect(result.fileUri).toBe('');
+  });
+
+  it('breaks out of the guard loop when a pass makes no progress', async () => {
+    // Every guard policy no_op'd: the delivery IS the input resource. A
+    // second pass would repeat identical work forever.
+    const runMock = vi.fn().mockImplementation(async (_config, resource) => ({
+      deliveries: [
+        { filePath: resource.filePath, recognized: resource.recognized },
+      ],
+      records: [],
+    }));
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        policies: [],
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [IMG_GUARD],
+      }),
+    );
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(result.omission?.reason).toContain('5000 bytes > 500 bytes');
+  });
+
+  it('fails closed when a guard pass itself fails', async () => {
+    // A guard configuration error must never degrade into sending
+    // over-limit media (policy design §10.2).
+    const runMock = vi.fn().mockRejectedValue(new Error('guard blew up'));
+    const { mod } = await armPipeline(runMock);
+    await expect(
+      mod.processMediaForOmniDelivery(
+        await realFile('pic.png'),
+        policyConfig({
+          policies: [],
+          maxUploadFileBytes: 500,
+          transportGuardPolicies: [IMG_GUARD],
+        }),
+      ),
+    ).rejects.toMatchObject({
+      name: 'OmniDeliveryError',
+      message: 'Transport-guard processing failed for pic.png: guard blew up',
+    });
+  });
+
+  it('readMediaViaOmniDelivery renders an omission as the notice text, not an error', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+          sha256: 'b'.repeat(64),
+          degraded: true,
+        },
+      ],
+      records: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig({ maxUploadFileBytes: 500 }),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    expect(typeof result.llmContent).toBe('string');
+    expect(result.llmContent).toMatch(/^【媒体省略】pic\.png：/);
+    expect(result.llmContent).toContain('900 bytes > 500 bytes');
+    expect(result.returnDisplay).toBe(
+      'Media omitted by the omni transport guard: pic.png',
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.errorType).toBeUndefined();
+  });
+
+  it('threads the quarantine retention settings into startup recovery', async () => {
+    const recoveryMock = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./recovery.js', () => ({
+      runStartupRecoveryOnce: recoveryMock,
+      resetRecoveryLatchForTests: vi.fn(),
+    }));
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+        },
+      ],
+      records: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const config = {
+      ...policyConfig(),
+      getOmniQuarantineRetentionDays: () => 3,
+      getOmniQuarantineMaxBytes: () => 1024,
+    } as unknown as Config;
+
+    await mod.processMediaForOmniDelivery(await realFile('pic.png'), config);
+
+    expect(recoveryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      { quarantineRetentionDays: 3, quarantineMaxBytes: 1024 },
+    );
   });
 });

@@ -196,6 +196,65 @@ describe('processToolResultOmniMedia', () => {
     expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key3');
   });
 
+  it('replaces an explicitly omitted delivery with the omission notice text', async () => {
+    // Stage B (policy design §10.2): the pipeline itself withheld the media
+    // after the guard policies could not bring it within limits. Not an
+    // error — the notice stands in for the part.
+    deliverMock.mockResolvedValueOnce({
+      fileUri: '',
+      mimeType: 'image/png',
+      sha256: '',
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      omission: { reason: 'still 900 bytes over the upload limit' },
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).not.toBe(parts);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      text: '【媒体省略】tool-media.image：still 900 bytes over the upload limit',
+    });
+  });
+
+  it('an omission does not consume the per-result upload budgets', async () => {
+    // Nothing was uploaded for an omitted part, so all 8 upload slots must
+    // remain for the following parts.
+    deliverMock.mockResolvedValueOnce({
+      fileUri: '',
+      mimeType: 'image/png',
+      sha256: '',
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      omission: { reason: 'over limit' },
+    });
+    const parts = Array.from({ length: 9 }, () =>
+      inlinePart('image/png', PNG_BYTES),
+    );
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(deliverMock).toHaveBeenCalledTimes(9);
+    expect(result.filter((p) => p.fileData).length).toBe(8);
+    expect(result.filter((p) => p.inlineData).length).toBe(0);
+  });
+
   it('keeps the part inline when staging-dir setup itself fails', async () => {
     // ~/.qwen/omni existing as a regular FILE makes mkdir fail with ENOTDIR.
     // That failure must degrade THIS part to inline like any other delivery

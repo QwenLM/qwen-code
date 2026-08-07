@@ -23,7 +23,10 @@ import {
   runFixedPolicies,
   type PolicySourceResource,
 } from './orchestrator.js';
-import type { NormalizedFixedPolicy } from './types.js';
+import type {
+  NormalizedFixedPolicy,
+  NormalizedOmniProcessingLimits,
+} from './types.js';
 
 // The orchestrator resolves the executor with a dynamic import; vitest
 // intercepts it the same as a static one.
@@ -105,6 +108,22 @@ function makeConfig(
           : undefined,
     }),
   } as unknown as Config;
+}
+
+/** System defaults (P §12.2) with per-test overrides. */
+function limitsWith(
+  overrides: Partial<NormalizedOmniProcessingLimits>,
+): NormalizedOmniProcessingLimits {
+  return {
+    maxConcurrentResources: 1,
+    reservedOutputTokens: 8192,
+    maxLineageDepth: 8,
+    maxPolicyRunsPerRoot: 64,
+    maxArtifactsPerRoot: 256,
+    maxDerivedBytesPerRoot: 1073741824,
+    maxTransportPasses: 3,
+    ...overrides,
+  };
 }
 
 describe('runFixedPolicies', () => {
@@ -615,5 +634,224 @@ describe('runFixedPolicies', () => {
       return origin?.kind === 'fixed_policy' ? origin.policyId : undefined;
     });
     expect(order).toEqual(['a-high', 'a-low', 'b-low']);
+  });
+
+  it('stops BEFORE executing once maxPolicyRunsPerRoot is spent, recording budget_exhausted', async () => {
+    mockToolSuccess();
+    // Distinct arguments: identical ones would fingerprint identically and
+    // make the second policy a (budget-free) degradation-cache hit.
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [
+        makePolicy({
+          id: 'a-first',
+          arguments: { maxDimension: 100 },
+          output: { reprocessMedia: false, source: 'keep' },
+        }),
+        makePolicy({
+          id: 'b-second',
+          arguments: { maxDimension: 200 },
+          output: { reprocessMedia: false, source: 'keep' },
+        }),
+      ],
+      limits: limitsWith({ maxPolicyRunsPerRoot: 1 }),
+    });
+    expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+    expect(records).toEqual([
+      {
+        policyId: 'a-first',
+        toolName: 'omni_downsample_image',
+        outcome: 'succeeded',
+        resource: 'photo.png',
+      },
+      {
+        policyId: 'b-second',
+        toolName: 'omni_downsample_image',
+        outcome: 'budget_exhausted',
+        resource: 'photo.png',
+        error: 'maxPolicyRunsPerRoot (1) reached',
+      },
+    ]);
+    // The committed delivery stands (no rollback): source + derivative.
+    expect(deliveries.map((d) => d.filePath)).toEqual([
+      sourcePath,
+      store.objectPathFor(sha256Of(DEGRADED_BYTES), '.jpg'),
+    ]);
+  });
+
+  it('stops deriving when maxArtifactsPerRoot is exceeded but keeps the committed delivery', async () => {
+    mockToolSuccess();
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [
+        makePolicy(),
+        makePolicy({ id: 'never-runs', arguments: { maxDimension: 300 } }),
+      ],
+      limits: limitsWith({ maxArtifactsPerRoot: 0 }),
+    });
+    expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+    expect(records).toEqual([
+      {
+        policyId: 'img-downsample',
+        toolName: 'omni_downsample_image',
+        outcome: 'succeeded',
+        resource: 'photo.png',
+      },
+      {
+        policyId: 'img-downsample',
+        toolName: 'omni_downsample_image',
+        outcome: 'budget_exhausted',
+        resource: 'photo.png',
+        error: 'maxArtifactsPerRoot (0) exceeded',
+      },
+    ]);
+    // source: 'omit' already applied — the derivative alone is delivered.
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].degraded).toBe(true);
+  });
+
+  it('stops deriving when maxDerivedBytesPerRoot is exceeded', async () => {
+    mockToolSuccess(); // DEGRADED_BYTES is 20 bytes > the 10-byte budget
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [
+        makePolicy(),
+        makePolicy({ id: 'never-runs', arguments: { maxDimension: 300 } }),
+      ],
+      limits: limitsWith({ maxDerivedBytesPerRoot: 10 }),
+    });
+    expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+    expect(records[1]).toEqual({
+      policyId: 'img-downsample',
+      toolName: 'omni_downsample_image',
+      outcome: 'budget_exhausted',
+      resource: 'photo.png',
+      error: 'maxDerivedBytesPerRoot (10) exceeded',
+    });
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].degraded).toBe(true);
+  });
+
+  it('clamps reprocessing at maxLineageDepth even when lineage runs remain', async () => {
+    // Distinct bytes per run: identical output would end the chain as a
+    // no_op fixed point before the depth clamp could matter.
+    let round = 0;
+    executeToolCallMock.mockImplementation(
+      async (_config: Config, request: ToolCallRequestInfo) => {
+        round++;
+        const outputDir = request.args['outputDir'] as string;
+        await fs.writeFile(path.join(outputDir, 'out.jpg'), `round-${round}`);
+        return {
+          callId: request.callId,
+          responseParts: [],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          policyArtifacts: {
+            toolName: request.name,
+            invocationId: request.callId,
+            executionOrigin: request.executionOrigin,
+            artifacts: [
+              {
+                kind: 'image',
+                storage: 'workspace',
+                title: 'out.jpg',
+                workspacePath: 'out.jpg',
+                mimeType: 'image/jpeg',
+                metadata: { omniDisclosure: `round ${round}` },
+              },
+            ],
+          },
+        };
+      },
+    );
+    const { deliveries } = await runFixedPolicies(config, source, {
+      store,
+      policies: [
+        makePolicy({
+          origins: ['user', 'tool', 'policy'],
+          maxRunsPerLineage: 10,
+          output: { reprocessMedia: true, source: 'omit' },
+        }),
+      ],
+      limits: limitsWith({ maxLineageDepth: 2 }),
+    });
+    // root(depth 0) → run 1 → depth-1 child re-enters → run 2 → the
+    // depth-2 child delivers but does NOT re-enter (2 is not < 2). The
+    // lineage cap alone (10) would have allowed further runs.
+    expect(executeToolCallMock).toHaveBeenCalledTimes(2);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].sha256).toBe(sha256Of('round-2'));
+  });
+
+  it('quarantines the staging dir with a reason.json when the invocation fails (D10 Stage B)', async () => {
+    executeToolCallMock.mockResolvedValue({
+      callId: 'x',
+      responseParts: [],
+      resultDisplay: undefined,
+      error: new Error('ffmpeg exploded'),
+      errorType: undefined,
+    });
+    await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    await expect(fs.readdir(store.getStagingDir())).resolves.toEqual([]);
+    const quarantined = await fs.readdir(store.getQuarantineDir());
+    expect(quarantined).toHaveLength(1);
+    const reason = JSON.parse(
+      await fs.readFile(
+        path.join(store.getQuarantineDir(), quarantined[0], 'reason.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(reason).toMatchObject({
+      policyId: 'img-downsample',
+      toolName: 'omni_downsample_image',
+      reason: 'ffmpeg exploded',
+    });
+    expect(typeof reason['failedAt']).toBe('string');
+  });
+
+  it('removes (not quarantines) staging when the failure is a user abort', async () => {
+    const controller = new AbortController();
+    executeToolCallMock.mockImplementation(async () => {
+      controller.abort();
+      throw new Error('aborted mid-flight');
+    });
+    await expect(
+      runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy()],
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('aborted mid-flight');
+    await expect(fs.readdir(store.getStagingDir())).resolves.toEqual([]);
+    await expect(
+      fs.readdir(store.getQuarantineDir()).catch(() => []),
+    ).resolves.toEqual([]);
+  });
+
+  it('falls back to plain staging removal when quarantining itself fails', async () => {
+    vi.spyOn(store, 'quarantineInvocation').mockRejectedValue(
+      new Error('quarantine disk full'),
+    );
+    executeToolCallMock.mockResolvedValue({
+      callId: 'x',
+      responseParts: [],
+      resultDisplay: undefined,
+      error: new Error('ffmpeg exploded'),
+      errorType: undefined,
+    });
+    const { records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    expect(records[0]).toMatchObject({
+      outcome: 'failed',
+      error: 'ffmpeg exploded',
+    });
+    // The failed invocation still never leaves live staging state behind.
+    await expect(fs.readdir(store.getStagingDir())).resolves.toEqual([]);
   });
 });
