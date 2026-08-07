@@ -80,10 +80,32 @@ export interface NormalizedFixedPolicy {
   stage: 'preprocessing' | 'transport_guard';
 }
 
+/** Normalized `omni.processing.limits` — per-root derivation budgets
+ * (policy design §12.2). Every field concrete after normalization. */
+export interface NormalizedOmniProcessingLimits {
+  /** Media resources processed by policies in parallel per request. */
+  maxConcurrentResources: number;
+  /** Tokens reserved for model output when computing
+   * `session.availableContextTokens` for when-conditions. */
+  reservedOutputTokens: number;
+  /** Maximum derivation chain length from a root resource. */
+  maxLineageDepth: number;
+  /** Maximum policy invocations per root within one orchestrator run. */
+  maxPolicyRunsPerRoot: number;
+  /** Maximum derived artifacts per root within one orchestrator run. */
+  maxArtifactsPerRoot: number;
+  /** Byte budget for derived artifacts per root within one run. */
+  maxDerivedBytesPerRoot: number;
+  /** Maximum transport-guard passes per resource before explicit
+   * omission. */
+  maxTransportPasses: number;
+}
+
 /** Normalized `omni.processing` view the pipeline consumes. */
 export interface NormalizedOmniProcessingConfig {
   fixedPolicies: NormalizedFixedPolicy[];
   transportGuardPolicies: NormalizedFixedPolicy[];
+  limits: NormalizedOmniProcessingLimits;
 }
 
 /** Structural Config view for the processing config accessor (optional so

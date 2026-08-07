@@ -2203,6 +2203,17 @@ export async function loadCliConfig(
     omniPolicyTools: settings.omni?.processing?.policyTools as
       | OmniPolicyToolsSettings
       | undefined,
+    omniFixedPolicies: settings.omni?.processing?.fixedPolicies as
+      | Record<string, unknown>
+      | undefined,
+    omniTransportGuardPolicies: settings.omni?.processing?.transportGuard
+      ?.policies as Record<string, unknown> | undefined,
+    omniProcessingLimits: settings.omni?.processing?.limits as
+      | Record<string, unknown>
+      | undefined,
+    omniQuarantineRetentionDays:
+      settings.omni?.storage?.quarantine?.retentionDays,
+    omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.

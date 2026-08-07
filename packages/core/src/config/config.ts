@@ -28,7 +28,10 @@ import {
   selectVisionBridgeModel,
 } from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
-import type { OmniPolicyToolsSettings } from '../omni/policy/types.js';
+import type {
+  NormalizedOmniProcessingConfig,
+  OmniPolicyToolsSettings,
+} from '../omni/policy/types.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
@@ -1114,6 +1117,17 @@ export interface ConfigParameters {
   /** Raw `omni.processing.policyTools` map (per-tool settings/runtime/
    * modelAccess). Normalized lazily by the omni policy modules. */
   omniPolicyTools?: OmniPolicyToolsSettings;
+  /** Raw `omni.processing.fixedPolicies` map (id → policy | null
+   * tombstone). Normalized at startup against system defaults. */
+  omniFixedPolicies?: Record<string, unknown>;
+  /** Raw `omni.processing.transportGuard.policies` map. */
+  omniTransportGuardPolicies?: Record<string, unknown>;
+  /** Raw `omni.processing.limits` per-root derivation budgets. */
+  omniProcessingLimits?: Record<string, unknown>;
+  /** `omni.storage.quarantine.retentionDays` (default 7). */
+  omniQuarantineRetentionDays?: number;
+  /** `omni.storage.quarantine.maxBytes` (default 5 GiB). */
+  omniQuarantineMaxBytes?: number;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1945,6 +1959,14 @@ export class Config {
   private readonly omniUrlDownloadMaxFileBytes?: number;
   private readonly omniUploadUrlTtlHours?: number;
   private readonly omniPolicyTools?: OmniPolicyToolsSettings;
+  private readonly omniFixedPolicies?: Record<string, unknown>;
+  private readonly omniTransportGuardPolicies?: Record<string, unknown>;
+  private readonly omniProcessingLimits?: Record<string, unknown>;
+  private readonly omniQuarantineRetentionDays?: number;
+  private readonly omniQuarantineMaxBytes?: number;
+  /** Normalized `omni.processing` view; set once during initialize()
+   * (after the tool registry exists) when omni is enabled. */
+  private omniProcessingConfig?: NormalizedOmniProcessingConfig;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2226,6 +2248,11 @@ export class Config {
     this.omniUrlDownloadMaxFileBytes = params.omniUrlDownloadMaxFileBytes;
     this.omniUploadUrlTtlHours = params.omniUploadUrlTtlHours;
     this.omniPolicyTools = params.omniPolicyTools;
+    this.omniFixedPolicies = params.omniFixedPolicies;
+    this.omniTransportGuardPolicies = params.omniTransportGuardPolicies;
+    this.omniProcessingLimits = params.omniProcessingLimits;
+    this.omniQuarantineRetentionDays = params.omniQuarantineRetentionDays;
+    this.omniQuarantineMaxBytes = params.omniQuarantineMaxBytes;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -2958,6 +2985,27 @@ export class Config {
       strict: options?.lenientToolWarmup !== true,
     });
     recordStartupEvent('config_initialize_tool_warmup_end');
+
+    // Normalize the omni fixed-policy configuration now that the tool
+    // registry can resolve policy-tool references. A violation throws
+    // OmniPolicyConfigError and aborts startup — a mis-configured
+    // transport guard must never degrade into sending over-limit media.
+    if (this.isOmniEnabled()) {
+      const { normalizeOmniProcessingConfig } = await import(
+        '../omni/policy/config.js'
+      );
+      this.omniProcessingConfig = normalizeOmniProcessingConfig(
+        {
+          fixedPolicies: this.omniFixedPolicies,
+          transportGuardPolicies: this.omniTransportGuardPolicies,
+          limits: this.omniProcessingLimits,
+          policyTools: this.omniPolicyTools,
+          maxUploadFileBytes: this.omniMaxUploadFileBytes,
+          urlTtlHours: this.omniUploadUrlTtlHours,
+        },
+        this.toolRegistry,
+      );
+    }
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
@@ -6404,6 +6452,20 @@ export class Config {
 
   getOmniPolicyToolsSettings(): OmniPolicyToolsSettings | undefined {
     return this.omniPolicyTools;
+  }
+
+  /** Normalized `omni.processing` view. Undefined until initialize()
+   * completes (or when omni is disabled). */
+  getOmniProcessingConfig(): NormalizedOmniProcessingConfig | undefined {
+    return this.omniProcessingConfig;
+  }
+
+  getOmniQuarantineRetentionDays(): number {
+    return this.omniQuarantineRetentionDays ?? 7;
+  }
+
+  getOmniQuarantineMaxBytes(): number {
+    return this.omniQuarantineMaxBytes ?? 5 * 1024 * 1024 * 1024;
   }
 
   resolveImageGenerationModel(
