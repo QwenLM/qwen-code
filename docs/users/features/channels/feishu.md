@@ -121,9 +121,10 @@ Then set the request URL in Feishu Open Platform to `http://<your-server>:9321`.
 
 Feishu bots work in both DM and group conversations. To enable group support:
 
-1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. Add the bot to a Feishu group
 3. @mention the bot in the group to trigger a response
+4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages.
 
@@ -170,7 +171,8 @@ Multiple users can send messages simultaneously in the same group chat. Each mes
 
 ### Bot doesn't respond in groups
 
-- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- Check that `groupPolicy` is set to `"allowlist"`, `"pairing"`, or `"open"` (default is `"disabled"`)
+- If using `"pairing"`, verify the group's pairing request has been approved
 - Make sure you @mention the bot in the group message
 - Verify the bot has been added to the group
 
