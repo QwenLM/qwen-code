@@ -835,6 +835,34 @@ describe('useSlashCommandProcessor', () => {
       },
     );
 
+    it.each([
+      '/model --fast',
+      '/model --voice --project',
+      '/model --vision --global',
+      '/model --compaction',
+      '/model --image',
+      '/stats 2026-01',
+    ])('hides the invocation for the picker-only form %s', async (input) => {
+      const [name] = input.slice(1).split(' ');
+      const command = createTestCommand({ name, action: vi.fn() });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(input);
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalled();
+      expect(
+        mockConfig.getChatRecordingService()?.recordSlashCommand,
+      ).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: input,
+        sentToModel: false,
+        hiddenInvocation: true,
+      });
+    });
+
     it('hides the invocation for the /usage alias', async () => {
       const command = createTestCommand({
         name: 'stats',

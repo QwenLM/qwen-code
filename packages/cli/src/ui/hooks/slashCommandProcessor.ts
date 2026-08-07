@@ -126,12 +126,12 @@ const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
   'help',
   'settings',
   'status',
+  'stats',
   'theme',
 ]);
 const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'effort',
   'model',
-  'stats',
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
@@ -156,6 +156,11 @@ function shouldHideSlashCommandInvocation(
 
   const path = canonicalPath.join(' ');
   if (BARE_SLASH_COMMANDS_HIDE_INVOCATION.has(path)) {
+    if (path === 'model') {
+      return /^(\s*--(?:fast|voice|vision|compaction|image|project|global)\s*)*$/.test(
+        args,
+      );
+    }
     return args.trim() === '';
   }
 

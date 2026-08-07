@@ -78,6 +78,7 @@ const renderComponent = (
       getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
     })),
     getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+    getChatRecordingService: vi.fn(() => undefined),
 
     // --- Functions used by ClearcutLogger ---
     getUsageStatisticsEnabled: vi.fn(() => true),
@@ -1305,6 +1306,32 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('records dismissal feedback for resumed history', () => {
+    const recordSlashCommand = vi.fn();
+    const { mockHistoryManager } = renderComponent({}, {
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'info', text: `Kept model as ${DEFAULT_QWEN_MODEL}` },
+      ],
+    });
+  });
+
   it('does not close the primary picker on "left"', () => {
     const { props, mockHistoryManager } = renderComponent();
 
@@ -1409,6 +1436,58 @@ describe('<ModelDialog />', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('ignores escape while a model selection is in flight', async () => {
+    let resolveSwitch: (() => void) | undefined;
+    const switchModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const selection = mockedSelect.mock.calls[0][0].onSelect(
+      `${AuthType.USE_OPENAI}::gpt-4`,
+    );
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Kept model as'),
+      }),
+      expect.any(Number),
+    );
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    resolveSwitch?.();
+    await selection;
+    expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('updates initialIndex when config context changes', () => {

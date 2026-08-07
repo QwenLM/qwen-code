@@ -660,23 +660,28 @@ export function ModelDialog({
   // Escape can arrive twice in one stdin chunk before the parent unmounts
   // the dialog; latch so the close feedback and onClose fire only once.
   const closeLatchRef = useRef(false);
+  const selectionInFlightRef = useRef(false);
   const closeWithoutSelection = useCallback(() => {
-    if (closeLatchRef.current) return;
+    if (closeLatchRef.current || selectionInFlightRef.current) return;
     closeLatchRef.current = true;
     if (!isAuxiliaryModelMode) {
-      uiState?.historyManager.addItem(
-        {
-          type: 'info',
-          text: t('Kept model as {{model}}', {
-            model: activeRuntimeSnapshot?.modelId ?? preferredModelId,
-          }),
-        },
-        Date.now(),
-      );
+      const feedbackItem = {
+        type: 'info' as const,
+        text: t('Kept model as {{model}}', {
+          model: activeRuntimeSnapshot?.modelId ?? preferredModelId,
+        }),
+      };
+      uiState?.historyManager.addItem(feedbackItem, Date.now());
+      config?.getChatRecordingService?.()?.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [feedbackItem],
+      });
     }
     onClose();
   }, [
     activeRuntimeSnapshot,
+    config,
     isAuxiliaryModelMode,
     onClose,
     preferredModelId,
@@ -970,13 +975,18 @@ export function ModelDialog({
           selectedBaseUrl = parsed.baseUrl;
         }
 
-        await config.switchModel(selectedAuthType, modelId, {
-          ...(selectedAuthType !== authType &&
-          selectedAuthType === AuthType.QWEN_OAUTH
-            ? { requireCachedCredentials: true }
-            : {}),
-          baseUrl: selectedBaseUrl,
-        });
+        selectionInFlightRef.current = true;
+        try {
+          await config.switchModel(selectedAuthType, modelId, {
+            ...(selectedAuthType !== authType &&
+            selectedAuthType === AuthType.QWEN_OAUTH
+              ? { requireCachedCredentials: true }
+              : {}),
+            baseUrl: selectedBaseUrl,
+          });
+        } finally {
+          selectionInFlightRef.current = false;
+        }
 
         if (!isRuntime) {
           const event = new ModelSlashCommandEvent(modelId);
