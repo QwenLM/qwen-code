@@ -10042,6 +10042,9 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
+                  // Marker class (no declarations): keeps the ':not(...)'
+                  // exclusion in App.module.css matching.
+                  CustomFooter ? styles.chatViewWithCustomFooter : undefined,
                   activePanel ||
                   mainView !== 'chat' ||
                   artifactPanelFullscreen
