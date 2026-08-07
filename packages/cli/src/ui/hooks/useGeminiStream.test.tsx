@@ -522,6 +522,46 @@ describe('useGeminiStream', () => {
           })(),
       },
       {
+        caseName: 'a local maximum-turns event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.MaxSessionTurns };
+          })(),
+      },
+      {
+        caseName: 'a local session-token-limit event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.SessionTokenLimitExceeded,
+              value: {
+                currentTokens: 200,
+                limit: 100,
+                message: 'limit reached before send',
+              },
+            };
+          })(),
+      },
+      {
+        caseName: 'a retry control event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.Retry };
+          })(),
+      },
+      {
+        caseName: 'a model-fallback control event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ModelFallback,
+              fromModel: 'primary',
+              toModel: 'fallback',
+              fallbackIndex: 1,
+            };
+          })(),
+      },
+      {
         caseName: 'a thrown stream error',
         createStream: () =>
           // eslint-disable-next-line require-yield

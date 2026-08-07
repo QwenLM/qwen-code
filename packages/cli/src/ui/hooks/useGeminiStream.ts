@@ -3537,25 +3537,33 @@ export const useGeminiStream = (
           );
           const acknowledgedStream = (async function* () {
             let accepted = false;
-            let sawEvent = false;
             for await (const event of stream) {
-              sawEvent = true;
-              const rejected =
+              const terminalRejection =
                 event.type === ServerGeminiEventType.Error ||
                 event.type === ServerGeminiEventType.UserCancelled;
-              // Error and cancellation events are not evidence that the model
-              // accepted the request context.
-              if (rejected) {
+              // Only provider-produced output proves that the request context
+              // was accepted. Limit, retry, fallback, compression, and hook
+              // events can all be emitted locally before a request reaches
+              // the provider and must therefore fail closed.
+              const provesAcceptance =
+                event.type === ServerGeminiEventType.Content ||
+                event.type === ServerGeminiEventType.Thought ||
+                event.type === ServerGeminiEventType.ToolCallRequest ||
+                event.type === ServerGeminiEventType.Finished ||
+                event.type === ServerGeminiEventType.Citation ||
+                event.type === ServerGeminiEventType.LoopDetected;
+              if (terminalRejection) {
                 reportDeliveryFailure();
-              } else if (!accepted) {
+              } else if (provesAcceptance && !accepted) {
                 accepted = true;
                 metadata?.onContextAccepted?.();
               }
               yield event;
             }
-            // A cleanly closed empty iterable still provides no evidence that
-            // the model received schema-bearing context, so fail closed.
-            if (!accepted && !sawEvent) {
+            // An empty stream or a stream containing only locally generated
+            // control events provides no evidence that the model received
+            // schema-bearing context, so fail closed.
+            if (!accepted) {
               reportDeliveryFailure();
             }
           })();

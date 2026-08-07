@@ -1118,6 +1118,31 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).toContain('declared directly instead');
   });
 
+  it('falls back to the per-tool cap when the batch budget is disabled', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_without_batch_budget',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(
+      Number.POSITIVE_INFINITY,
+    );
+    vi.spyOn(config, 'getTruncateToolOutputThreshold').mockReturnValue(500);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:oversized_without_batch_budget' })
+      .execute(new AbortController().signal);
+
+    expect(setTools).toHaveBeenCalledOnce();
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(true);
+    expect(result.deferredToolPresentations).toBeUndefined();
+    expect(String(result.llmContent)).toContain('declared directly instead');
+    expect(String(result.llmContent).length).toBeLessThan(500);
+  });
+
   it('asks for smaller batches instead of declaring aggregate overflow directly', async () => {
     const first = new MockTool({
       name: 'medium_deferred_a',

@@ -19515,6 +19515,58 @@ describe('Session', () => {
       );
     });
 
+    it('keeps the deferred wrapper response name when cancellation arrives after execution', async () => {
+      const abortController = new AbortController();
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'cron created',
+        returnDisplay: 'cron created',
+      });
+      const cronTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        vi.fn().mockReturnValue({
+          params: {},
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(cronTool);
+      mockToolRegistry.ensureTool.mockResolvedValue(cronTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      mockToolRegistry.hasPresentedProxySchema.mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      bridgeToolResultImagesSpy.mockImplementationOnce(
+        async ({ responseParts }: { responseParts: Part[] }) => {
+          abortController.abort();
+          return responseParts;
+        },
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-proxy-cancelled', [
+        {
+          id: 'proxy_cancelled_call',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse).toMatchObject({
+        id: 'proxy_cancelled_call',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        response: {
+          error: 'The tool had already completed; its output was discarded.',
+        },
+      });
+    });
+
     it('shows the target and provider route when ACP hard-denies a proxy call', async () => {
       const targetTool = mockAllowedToolWithBuild(
         core.ToolNames.CRON_CREATE,

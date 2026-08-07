@@ -9487,7 +9487,7 @@ export class Session implements SessionContext {
           ) {
             status = 'cancelled';
             responseParts = convertToFunctionErrorResponse(
-              toolName,
+              responseToolName,
               callId,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,

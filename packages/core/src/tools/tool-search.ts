@@ -418,7 +418,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
     missing: readonly string[],
     truncated: readonly string[],
   ): Promise<ToolResult | undefined> {
-    const budget = this.config.getToolOutputBatchBudget();
+    const batchBudget = this.config.getToolOutputBatchBudget();
+    // Disabling the combined batch budget must not disable every output cap
+    // for tool_search. Fall back to the ordinary per-tool threshold so a
+    // single deferred schema can never expand into an unbounded inline frame.
+    const budget = Number.isFinite(batchBudget)
+      ? batchBudget
+      : this.config.getTruncateToolOutputThreshold();
     if (
       presentations.length === 0 ||
       !Number.isFinite(budget) ||
