@@ -2828,6 +2828,68 @@ describe('App composer footer renderer', () => {
   });
 });
 
+describe('App pre-session reasoning composer', () => {
+  it('derives reasoning state from stored preferences and ignores stale session state', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentModel = 'qwen3.8-max(openai)';
+    (mockConnection as { models: Array<Record<string, unknown>> }).models = [
+      {
+        id: 'qwen3.8-max(openai)',
+        baseModelId: 'qwen3.8-max',
+        label: 'Qwen 3.8 Max',
+        reasoningControls: {
+          thinking: { defaultEnabled: true },
+          effort: {
+            supported: ['low', 'medium', 'xhigh'],
+            default: 'xhigh',
+          },
+        },
+      },
+    ];
+    // Stale reasoning left over from a deleted session must not drive the
+    // pre-session composer.
+    (mockConnection as { reasoning?: unknown }).reasoning = {
+      thinking: { enabled: true },
+      effort: { value: 'low', options: ['low', 'medium', 'xhigh'] },
+    };
+    mockWorkspace.capabilities = {
+      workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+      features: ['session_reasoning_control'],
+    } as typeof mockWorkspace.capabilities;
+    testState.settings = [
+      {
+        key: 'model.reasoningPreferences',
+        type: 'object',
+        label: 'Reasoning preferences',
+        category: 'model',
+        requiresRestart: false,
+        default: {},
+        values: {
+          effective: {
+            'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' },
+          },
+          user: {
+            'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' },
+          },
+        },
+      } as DaemonSettingDescriptor,
+    ];
+
+    renderApp();
+    await flush();
+
+    const editorProps = testState.latestChatEditorProps as unknown as {
+      reasoningControlsSupported?: boolean;
+      reasoningState?: unknown;
+    };
+    expect(editorProps.reasoningControlsSupported).toBe(true);
+    expect(editorProps.reasoningState).toEqual({
+      thinking: { enabled: false },
+      effort: { value: 'medium', options: ['low', 'medium', 'xhigh'] },
+    });
+  });
+});
+
 describe('App shell command queueing', () => {
   it('lazily creates a session for ! shell commands in a new task', async () => {
     mockConnection.sessionId = undefined;

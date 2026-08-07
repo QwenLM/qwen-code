@@ -6312,6 +6312,81 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('routes setSessionConfigOption to the session reasoning setters', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getReasoningEffortPreference: vi.fn().mockReturnValue('xhigh'),
+      isThinkingEnabled: vi.fn().mockReturnValue(true),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: 'api-key',
+        },
+      ]),
+    });
+    const setThinking = vi.fn().mockResolvedValue(undefined);
+    const setEffort = vi.fn().mockResolvedValue(undefined);
+    const sendConfigOptionsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike & {
+      setSessionConfigOption: (params: {
+        sessionId: string;
+        configId: string;
+        value: string;
+      }) => Promise<{ configOptions: Array<{ id: string }> }>;
+    };
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    Object.assign(lastSessionMock!, {
+      setThinking,
+      setEffort,
+      sendConfigOptionsUpdate,
+    });
+
+    const thinkingResponse = await agent.setSessionConfigOption({
+      sessionId,
+      configId: 'thinking',
+      value: 'off',
+    });
+    expect(setThinking).toHaveBeenCalledWith('off');
+    expect(thinkingResponse.configOptions.map((option) => option.id)).toEqual(
+      expect.arrayContaining(['mode', 'model', 'thinking', 'effort']),
+    );
+    expect(sendConfigOptionsUpdate).toHaveBeenCalled();
+
+    await agent.setSessionConfigOption({
+      sessionId,
+      configId: 'effort',
+      value: 'medium',
+    });
+    expect(setEffort).toHaveBeenCalledWith('medium');
+
+    await expect(
+      agent.setSessionConfigOption({
+        sessionId,
+        configId: 'unknown',
+        value: 'x',
+      }),
+    ).rejects.toThrow('Unsupported configId: unknown');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it.each([
     {
       description: 'hide discontinued qwen-oauth for other auth types',

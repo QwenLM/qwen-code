@@ -343,10 +343,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return {};
     }
     const rawWireModel = model ?? this.contentGeneratorConfig.model ?? '';
-    const reasoningControls =
-      rawWireModel === 'qwen3.8-max'
-        ? getModelReasoningControls(rawWireModel)
-        : undefined;
+    const reasoningControls = getModelReasoningControls(rawWireModel);
     if (reasoningControls?.effort) {
       return {
         reasoning_effort: normalizeModelReasoningEffort(

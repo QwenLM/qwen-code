@@ -132,6 +132,25 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('reports workspace scope when workspace settings own modelProviders', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {},
+      workspaceTrusted: true,
+    });
+    await writeWorkspaceSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'model-a' },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.initialized).toBe(true);
+    expect(result.modelConfigScope).toBe('workspace');
+  });
+
   it('returns the workspace approval mode', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -590,6 +609,16 @@ describe('createWorkspaceProvidersStatusProvider', () => {
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
+      JSON.stringify(settings),
+      'utf8',
+    );
+  }
+
+  async function writeWorkspaceSettings(settings: Record<string, unknown>) {
+    const qwenDir = path.join(workspace, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    await fs.writeFile(
+      path.join(qwenDir, 'settings.json'),
       JSON.stringify(settings),
       'utf8',
     );

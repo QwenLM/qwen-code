@@ -7,12 +7,14 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonSessionContextStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
   mapReasoningConfigOptions,
+  mapSessionContextModels,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -160,6 +162,75 @@ describe('reasoning config options', () => {
         options: ['low', 'medium', 'xhigh'],
       },
     });
+  });
+});
+
+describe('mapSessionContextModels', () => {
+  function contextStatus(
+    currentModelId: string,
+    availableModels: Array<Record<string, unknown>>,
+  ): DaemonSessionContextStatus {
+    return {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      state: {
+        models: {
+          currentModelId,
+          availableModels,
+        },
+      },
+    } as DaemonSessionContextStatus;
+  }
+
+  it('maps reasoning controls from the model _meta', () => {
+    const rawSupported = ['low', 'medium', 'xhigh'];
+    const result = mapSessionContextModels(
+      contextStatus('qwen3.8-max(openai)', [
+        {
+          modelId: 'qwen3.8-max(openai)',
+          name: 'Qwen 3.8 Max',
+          _meta: {
+            reasoningControls: {
+              thinking: { defaultEnabled: true },
+              effort: {
+                supported: rawSupported,
+                default: 'xhigh',
+              },
+            },
+          },
+        },
+      ]),
+    );
+
+    expect(result?.models).toHaveLength(1);
+    const model = result?.models[0];
+    expect(model?.reasoningControls).toEqual({
+      thinking: { defaultEnabled: true },
+      effort: {
+        supported: ['low', 'medium', 'xhigh'],
+        default: 'xhigh',
+      },
+    });
+    // The mapper must hand out a copy, not the raw daemon record.
+    expect(model?.reasoningControls?.effort?.supported).not.toBe(rawSupported);
+  });
+
+  it('omits reasoningControls when the model has no reasoning controls meta', () => {
+    const result = mapSessionContextModels(
+      contextStatus('plain-model(openai)', [
+        { modelId: 'plain-model(openai)', name: 'Plain Model' },
+        {
+          modelId: 'meta-without-controls(openai)',
+          name: 'Meta Without Controls',
+          _meta: { contextLimit: 1000 },
+        },
+      ]),
+    );
+
+    expect(result?.models).toHaveLength(2);
+    expect(result?.models[0]).not.toHaveProperty('reasoningControls');
+    expect(result?.models[1]).not.toHaveProperty('reasoningControls');
   });
 });
 

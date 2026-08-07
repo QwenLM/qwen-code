@@ -2068,6 +2068,12 @@ export class Config {
   private compactionModel?: string;
   private imageModel?: string;
   private reasoningEffortPreference?: ReasoningEffort;
+  /**
+   * Last effort chosen while an unregistered model was active. Unregistered
+   * models share this global preference; registered models keep model-scoped
+   * state, so their selections must not overwrite it.
+   */
+  private globalReasoningEffortPreference?: ReasoningEffort;
   private reasoningConfigPreference?: Exclude<
     ContentGeneratorConfig['reasoning'],
     false | undefined
@@ -3657,7 +3663,9 @@ export class Config {
     // before the sync wipes it and re-apply it after the config is rebuilt, so
     // /effort survives an auth refresh, including the initial one at startup.
     // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
-    // already excludes both `false` and `undefined`.
+    // already excludes both `false` and `undefined`. A thinking-off state
+    // (`reasoning === false`) carries no effort to capture, so it is carried
+    // into applyRegisteredModelReasoning() separately below.
     const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
@@ -3697,41 +3705,9 @@ export class Config {
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
-    const reasoningControls = getModelReasoningControls(
-      this.contentGeneratorConfig.model,
-    );
-    if (reasoningControls) {
-      const resolvedReasoning = resolveModelReasoningControls(
-        this.contentGeneratorConfig.model,
-        {
-          ...(reasoningControls.thinking &&
-          this.contentGeneratorConfig.reasoning !== undefined
-            ? {
-                thinkingEnabled:
-                  this.contentGeneratorConfig.reasoning !== false,
-              }
-            : {}),
-          ...(reasoningControls.effort && this.contentGeneratorConfig.reasoning
-            ? { effort: this.contentGeneratorConfig.reasoning.effort }
-            : {}),
-        },
-      );
-      if (
-        reasoningControls.thinking &&
-        resolvedReasoning?.thinkingEnabled === false
-      ) {
-        this.contentGeneratorConfig.reasoning = false;
-      } else if (
-        reasoningControls.effort &&
-        this.contentGeneratorConfig.reasoning !== false &&
-        resolvedReasoning?.effort
-      ) {
-        this.contentGeneratorConfig.reasoning = {
-          ...(this.contentGeneratorConfig.reasoning ?? {}),
-          effort: resolvedReasoning.effort,
-        };
-      }
-    }
+    this.applyRegisteredModelReasoning({
+      priorThinkingDisabled: priorReasoning === false,
+    });
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
@@ -4306,6 +4282,9 @@ export class Config {
   setReasoningEffort(effort: ReasoningEffort | undefined): void {
     if (effort) {
       this.reasoningEffortPreference = effort;
+      if (!getModelReasoningControls(this.contentGeneratorConfig.model)) {
+        this.globalReasoningEffortPreference = effort;
+      }
     }
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
@@ -4337,6 +4316,57 @@ export class Config {
     }
     // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
     applyEffort(this.modelsConfig?.getGenerationConfig());
+  }
+
+  /**
+   * Resolve a registered model's reasoning state from the live generation
+   * config (provider preset or pre-rebuild state) and fill in registry
+   * defaults for anything it leaves undefined. Shared by the refreshAuth
+   * rebuild and hot model switches so both paths agree.
+   * `priorThinkingDisabled` carries an explicit thinking-off state the rebuild
+   * wiped — `reasoning === false` holds no effort to re-derive from.
+   */
+  private applyRegisteredModelReasoning(options?: {
+    priorThinkingDisabled?: boolean;
+  }): void {
+    const reasoningControls = getModelReasoningControls(
+      this.contentGeneratorConfig.model,
+    );
+    if (!reasoningControls) {
+      return;
+    }
+    const liveReasoning = this.contentGeneratorConfig.reasoning;
+    const thinkingEnabled = options?.priorThinkingDisabled
+      ? false
+      : liveReasoning !== undefined
+        ? liveReasoning !== false
+        : undefined;
+    const resolvedReasoning = resolveModelReasoningControls(
+      this.contentGeneratorConfig.model,
+      {
+        ...(reasoningControls.thinking && thinkingEnabled !== undefined
+          ? { thinkingEnabled }
+          : {}),
+        ...(reasoningControls.effort && liveReasoning
+          ? { effort: liveReasoning.effort }
+          : {}),
+      },
+    );
+    if (
+      reasoningControls.thinking &&
+      resolvedReasoning?.thinkingEnabled === false
+    ) {
+      this.contentGeneratorConfig.reasoning = false;
+    } else if (
+      reasoningControls.effort &&
+      this.contentGeneratorConfig.reasoning !== false &&
+      resolvedReasoning?.effort
+    ) {
+      this.contentGeneratorConfig.reasoning = {
+        ...(this.contentGeneratorConfig.reasoning ?? {}),
+        effort: resolvedReasoning.effort,
+      };
+    }
   }
 
   /**
@@ -4508,6 +4538,9 @@ export class Config {
     const priorReasoningEffort = previousModelHasReasoningControls
       ? undefined
       : this.getReasoningEffort();
+    if (priorReasoningEffort) {
+      this.globalReasoningEffortPreference = priorReasoningEffort;
+    }
 
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
@@ -4555,6 +4588,9 @@ export class Config {
       if (modelScopedReasoningSwitch) {
         this.contentGeneratorConfig.reasoning = config.reasoning;
       }
+      if (getModelReasoningControls(config.model)) {
+        this.applyRegisteredModelReasoning();
+      }
       // Modalities are model-derived: a hot switch between oauth models with
       // different image support must update them, or the vision-bridge gate and
       // image-stripping read the previous model's modalities.
@@ -4599,8 +4635,12 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (priorReasoningEffort && !modelScopedReasoningSwitch) {
-        this.setReasoningEffort(priorReasoningEffort);
+      if (!getModelReasoningControls(config.model)) {
+        const globalEffort =
+          priorReasoningEffort ?? this.globalReasoningEffortPreference;
+        if (globalEffort) {
+          this.setReasoningEffort(globalEffort);
+        }
       }
       resetPreloadedContentGenerator(this.contentGenerator);
       return;
@@ -4616,11 +4656,12 @@ export class Config {
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
     await this.refreshAuth(authType);
-    if (
-      priorReasoningEffort &&
-      !getModelReasoningControls(this.contentGeneratorConfig.model)
-    ) {
-      this.setReasoningEffort(priorReasoningEffort);
+    if (!getModelReasoningControls(this.contentGeneratorConfig.model)) {
+      const globalEffort =
+        priorReasoningEffort ?? this.globalReasoningEffortPreference;
+      if (globalEffort) {
+        this.setReasoningEffort(globalEffort);
+      }
     }
   }
 

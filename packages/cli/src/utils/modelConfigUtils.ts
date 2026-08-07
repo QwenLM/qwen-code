@@ -441,20 +441,40 @@ export function resolveCliGenerationConfig(
     !reasoningRegistration && rawReasoningEffort && !reasoningEffort
       ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
+  let invalidStoredReasoningEffortWarning: string | undefined;
   if (reasoningRegistration) {
     const reasoningPreference = getModelReasoningPreference(
       settings,
       resolved.config.model || '',
     );
-    const thinkingPreference =
+    const preferenceRecord =
       reasoningPreference &&
       typeof reasoningPreference === 'object' &&
       !Array.isArray(reasoningPreference)
-        ? (reasoningPreference as Record<string, unknown>)['thinkingEnabled']
+        ? (reasoningPreference as Record<string, unknown>)
         : undefined;
+    const thinkingPreference = preferenceRecord?.['thinkingEnabled'];
+    const storedEffort = preferenceRecord?.['effort'];
+    // A configured-but-unrecognized stored tier (e.g. a "hihg" typo in
+    // settings.json) normalizes to the registry default. Surface it the same
+    // way the global model.reasoningEffort path does.
+    invalidStoredReasoningEffortWarning =
+      typeof storedEffort === 'string' &&
+      !normalizeReasoningEffort(storedEffort)
+        ? `Ignoring invalid model.reasoningPreferences effort "${storedEffort}" for model "${resolved.config.model}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
+        : undefined;
+    const presetReasoning = resolved.config.reasoning;
     const resolvedReasoning = resolveModelReasoningControls(
       resolved.config.model,
-      reasoningPreference,
+      {
+        // Seed the resolver-supplied preset tier so an explicit provider
+        // generationConfig tier wins over the registry default; stored
+        // per-model preferences still override the preset.
+        ...(presetReasoning && presetReasoning.effort
+          ? { effort: presetReasoning.effort }
+          : {}),
+        ...(preferenceRecord ?? {}),
+      },
     );
     const canApplyRegisteredReasoning =
       generationConfig.reasoning !== false ||
@@ -494,6 +514,9 @@ export function resolveCliGenerationConfig(
     warnings: [
       ...resolved.warnings,
       ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
+      ...(invalidStoredReasoningEffortWarning
+        ? [invalidStoredReasoningEffortWarning]
+        : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]

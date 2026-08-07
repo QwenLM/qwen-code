@@ -4562,7 +4562,6 @@ export function App({
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
         id: m.id,
-        baseModelId: m.baseModelId,
         label: getModelDisplayName(m.label || m.id),
       })),
     [connection.models],
@@ -5103,6 +5102,18 @@ export function App({
   const [reasoningActionBusy, setReasoningActionBusy] = useState<
     Partial<Record<'thinking' | 'effort', boolean>>
   >({});
+  // Serialize thinking/effort writes: both merge into the same
+  // model.reasoningPreferences entry, so a concurrent pair computed from the
+  // same pre-write snapshot would silently drop the earlier toggle. Memoized
+  // so the derived object's identity stays stable across unrelated renders
+  // (ChatEditor is memo'd on these props).
+  const reasoningBusy = useMemo(
+    () =>
+      reasoningActionBusy.thinking || reasoningActionBusy.effort
+        ? { thinking: true, effort: true }
+        : {},
+    [reasoningActionBusy],
+  );
   const {
     settings: workspaceSettings,
     setValue: setWorkspaceSetting,
@@ -5120,16 +5131,19 @@ export function App({
   const reasoningPreferencesSetting = workspaceSettings.find(
     (setting) => setting.key === 'model.reasoningPreferences',
   );
-  const persistedReasoningPreferences = (() => {
+  const persistedReasoningPreferences = useMemo(() => {
     const value = reasoningPreferencesSetting?.values.effective;
     return value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
-  })();
+  }, [reasoningPreferencesSetting]);
   const composerReasoningState = useMemo(() => {
-    if (connection.reasoning) return connection.reasoning;
+    if (connection.sessionId && connection.reasoning) {
+      return connection.reasoning;
+    }
+    const composerModelId = currentModel || connection.currentModel;
     const model = connection.models?.find(
-      (candidate) => candidate.id === connection.currentModel,
+      (candidate) => candidate.id === composerModelId,
     );
     const controls = model?.reasoningControls;
     if (!controls) return undefined;
@@ -5173,6 +5187,8 @@ export function App({
     connection.currentModel,
     connection.models,
     connection.reasoning,
+    connection.sessionId,
+    currentModel,
     persistedReasoningPreferences,
   ]);
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
@@ -8320,9 +8336,10 @@ export function App({
               !Array.isArray(scopedPreferences)
                 ? (scopedPreferences as Record<string, unknown>)
                 : {};
+            const composerModelId =
+              currentModelRef.current || connectionRef.current.currentModel;
             const model = connectionRef.current.models?.find(
-              (candidate) =>
-                candidate.id === connectionRef.current.currentModel,
+              (candidate) => candidate.id === composerModelId,
             );
             if (!model?.baseModelId) {
               return Promise.reject(new Error('Current model is unavailable'));
@@ -8349,7 +8366,14 @@ export function App({
               scope,
               'model.reasoningPreferences',
               updatedPreferences,
-            ).then(() => reloadWorkspaceSettings());
+            ).then(() =>
+              reloadWorkspaceSettings().catch((error: unknown) => {
+                console.warn(
+                  '[web-shell] failed to reload settings after reasoning update',
+                  error,
+                );
+              }),
+            );
           })();
       void update
         .catch((error: unknown) => {
@@ -10402,7 +10426,7 @@ export function App({
                             ) ?? false
                           }
                           reasoningState={composerReasoningState}
-                          reasoningBusy={reasoningActionBusy}
+                          reasoningBusy={reasoningBusy}
                           onSelectReasoningOption={
                             handleReasoningOptionSelect
                           }

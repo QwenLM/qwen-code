@@ -175,11 +175,7 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
-  availableModels?: Array<{
-    id: string;
-    baseModelId?: string;
-    label?: string;
-  }>;
+  availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   reasoningControlsSupported?: boolean;
@@ -1990,9 +1986,9 @@ export const ChatEditor = memo(
       gitBranch,
       gitBranchVisible,
       isRunning,
-      modelLabel,
       modelLabelReady,
       modeLabel,
+      normalizedModelChipLabel,
       sessionName,
       showModelAction,
       showModeAction,
@@ -2791,7 +2787,9 @@ export const ChatEditor = memo(
                 <span className={styles.toolBtnModelIcon}>
                   <ModelIcon />
                 </span>
-                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnText}>
+                  {normalizedModelChipLabel}
+                </span>
                 <span className={styles.toolBtnArrow}>
                   <ChevronDownIcon />
                 </span>
@@ -2803,7 +2801,9 @@ export const ChatEditor = memo(
                 <span className={styles.toolBtnModelIcon}>
                   <ModelIcon />
                 </span>
-                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnText}>
+                  {normalizedModelChipLabel}
+                </span>
                 <span className={styles.toolBtnArrow}>
                   <ChevronDownIcon />
                 </span>

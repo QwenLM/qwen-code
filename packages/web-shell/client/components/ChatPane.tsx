@@ -569,7 +569,6 @@ export function ChatPane({
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
         id: model.id,
-        baseModelId: model.baseModelId,
         label: getModelDisplayName(model.label || model.id),
       })),
     [connection.models],
@@ -627,6 +626,16 @@ export function ChatPane({
   const [reasoningBusy, setReasoningBusy] = useState<
     Partial<Record<'thinking' | 'effort', boolean>>
   >({});
+  // Serialize thinking/effort writes: both merge into the same per-model
+  // reasoning preference, so concurrent writes could drop each other.
+  // Memoized to keep ChatEditor's memoized props referentially stable.
+  const reasoningControlsBusy = useMemo(
+    () =>
+      reasoningBusy.thinking || reasoningBusy.effort
+        ? { thinking: true, effort: true }
+        : {},
+    [reasoningBusy],
+  );
   const handleSelectReasoningOption = useCallback(
     (configId: 'thinking' | 'effort', value: string) => {
       setReasoningBusy((current) => ({ ...current, [configId]: true }));
@@ -904,7 +913,7 @@ export function ChatPane({
             ) ?? false
           }
           reasoningState={connection.reasoning}
-          reasoningBusy={reasoningBusy}
+          reasoningBusy={reasoningControlsBusy}
           onSelectReasoningOption={handleSelectReasoningOption}
           dialogOpen={approvalActive}
           disabled={approvalActive}

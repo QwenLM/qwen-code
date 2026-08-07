@@ -11190,6 +11190,9 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.switchModel(authType, newModelName);
+                // Mirror Session.setModel: apply the reloaded per-model
+                // reasoning preferences for the new model.
+                session.syncReasoningSettingsForCurrentModel(newMerged);
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,

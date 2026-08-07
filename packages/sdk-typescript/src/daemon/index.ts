@@ -608,6 +608,7 @@ export type {
   DaemonWorkspaceAcpPreheatResult,
   DaemonModelReasoningControls,
   DaemonModelReasoningEffort,
+  DaemonSessionConfigOptionResult,
   DaemonWorkspaceProviderCurrent,
   DaemonWorkspaceProviderModel,
   DaemonWorkspaceProviderStatus,

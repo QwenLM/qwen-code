@@ -2841,6 +2841,45 @@ describe('Session', () => {
       );
     });
 
+    it('does not override a provider reasoning opt-out when no preference is stored', () => {
+      currentModel = 'qwen3.8-max';
+      vi.mocked(mockConfig.setThinkingEnabled).mockClear();
+      vi.mocked(mockConfig.setReasoningEffort).mockClear();
+
+      new Session('opt-out-session', mockConfig, mockClient, mockSettings);
+
+      // No stored preferences: the resolved config's own state (including an
+      // explicit provider `reasoning: false` opt-out) must be left untouched.
+      expect(mockConfig.setThinkingEnabled).not.toHaveBeenCalled();
+      expect(mockConfig.setReasoningEffort).not.toHaveBeenCalled();
+    });
+
+    it('applies only the explicitly stored effort without forcing thinking on', () => {
+      currentModel = 'qwen3.8-max';
+      vi.mocked(mockConfig.setThinkingEnabled).mockClear();
+      vi.mocked(mockConfig.setReasoningEffort).mockClear();
+      const effortOnlySettings = {
+        ...mockSettings,
+        merged: {
+          model: {
+            reasoningPreferences: {
+              'qwen3.8-max': { effort: 'low' },
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      new Session(
+        'effort-only-session',
+        mockConfig,
+        mockClient,
+        effortOnlySettings,
+      );
+
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith('low');
+      expect(mockConfig.setThinkingEnabled).not.toHaveBeenCalled();
+    });
+
     it('does not change thinking state for a non-target model', () => {
       currentModel = 'qwen3.8-max-preview';
       vi.mocked(mockConfig.isThinkingEnabled).mockReturnValue(false);

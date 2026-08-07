@@ -233,7 +233,11 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  SettingScope,
+  type LoadedSettings,
+  type Settings,
+} from '../../config/settings.js';
 import {
   insertAfterFunctionResponses,
   normalizePartList,
@@ -1414,7 +1418,7 @@ export class Session implements SessionContext {
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
-    this.#syncReasoningSettingsForCurrentModel();
+    this.syncReasoningSettingsForCurrentModel();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -6895,19 +6899,41 @@ export class Session implements SessionContext {
     );
   }
 
-  #syncReasoningSettingsForCurrentModel(): void {
+  /**
+   * Apply explicitly stored per-model reasoning settings (on session restore
+   * and after model switches). A model without stored preferences keeps
+   * whatever state its resolved config already carries, so registry defaults
+   * cannot override an explicit provider opt-out (`reasoning: false`).
+   */
+  syncReasoningSettingsForCurrentModel(settingsOverride?: Settings): void {
     const model = this.config.getModel();
     const registration = getModelReasoningControls(model);
     if (!registration) return;
-    const resolved = resolveModelReasoningControls(
+    const rawPreference = getModelReasoningPreference(
+      settingsOverride ?? this.settings.merged,
       model,
-      getModelReasoningPreference(this.settings.merged, model),
     );
-    if (resolved?.effort) {
+    const preference =
+      rawPreference &&
+      typeof rawPreference === 'object' &&
+      !Array.isArray(rawPreference)
+        ? (rawPreference as Record<string, unknown>)
+        : undefined;
+    const hasStoredThinking =
+      registration.thinking &&
+      typeof preference?.['thinkingEnabled'] === 'boolean';
+    const hasStoredEffort =
+      registration.effort && preference?.['effort'] !== undefined;
+    if (!hasStoredThinking && !hasStoredEffort) return;
+    const resolved = resolveModelReasoningControls(model, rawPreference);
+    if (hasStoredEffort && resolved?.effort) {
       this.config.setReasoningEffort(resolved.effort);
     }
-    if (registration.thinking && resolved?.thinkingEnabled !== undefined) {
-      this.config.setThinkingEnabled(resolved.thinkingEnabled, resolved.effort);
+    if (hasStoredThinking && resolved?.thinkingEnabled !== undefined) {
+      this.config.setThinkingEnabled(
+        resolved.thinkingEnabled,
+        hasStoredEffort ? resolved.effort : undefined,
+      );
     }
   }
 
@@ -7013,7 +7039,7 @@ export class Session implements SessionContext {
       parsed.modelId,
       switchOptions,
     );
-    this.#syncReasoningSettingsForCurrentModel();
+    this.syncReasoningSettingsForCurrentModel();
 
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;

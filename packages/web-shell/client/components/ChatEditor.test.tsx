@@ -260,11 +260,7 @@ function renderChatEditor(props: {
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
   currentModel?: string;
-  availableModels?: Array<{
-    id: string;
-    baseModelId?: string;
-    label?: string;
-  }>;
+  availableModels?: Array<{ id: string; label?: string }>;
   sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -276,7 +272,7 @@ function renderChatEditor(props: {
       options: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>;
     };
   };
-  reasoningBusy?: boolean;
+  reasoningBusy?: Partial<Record<'thinking' | 'effort', boolean>>;
   onSelectReasoningOption?: (
     configId: 'thinking' | 'effort',
     value: string,
@@ -1006,13 +1002,7 @@ describe('ChatEditor toolbar popovers', () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['model'],
       currentModel: routeId,
-      availableModels: [
-        {
-          id: routeId,
-          baseModelId: 'qwen3.8-max',
-          label: 'Qwen 3.8 Max',
-        },
-      ],
+      availableModels: [{ id: routeId, label: 'Qwen 3.8 Max' }],
       reasoningControlsSupported: true,
       reasoningState: {
         thinking: { enabled: true },
@@ -1044,6 +1034,52 @@ describe('ChatEditor toolbar popovers', () => {
     act(() => medium?.click());
     expect(onSelectReasoningOption).toHaveBeenCalledWith('effort', 'medium');
     expect(trigger?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('turns thinking off through the popover switch', () => {
+    const onSelectReasoningOption = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [{ id: 'qwen-max', label: 'Qwen 3.8 Max' }],
+      reasoningControlsSupported: true,
+      reasoningState: {
+        thinking: { enabled: true },
+        effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+      },
+      onSelectReasoningOption,
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    act(() => trigger?.click());
+
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    const thinkingSwitch =
+      popover?.querySelector<HTMLButtonElement>('[role="switch"]');
+    expect(thinkingSwitch).not.toBeNull();
+    act(() => thinkingSwitch?.click());
+    expect(onSelectReasoningOption).toHaveBeenCalledWith('thinking', 'off');
+  });
+
+  it('shows the thinking-off state on the model chip', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [{ id: 'qwen-max', label: 'Qwen 3.8 Max' }],
+      reasoningControlsSupported: true,
+      reasoningState: {
+        thinking: { enabled: false },
+        effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+      },
+      onSelectReasoningOption: vi.fn(),
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(trigger?.textContent).toContain('Qwen 3.8 Max · Thinking Off');
   });
 
   it('opens model search as a second-level menu for reasoning models', () => {
@@ -1167,13 +1203,7 @@ describe('ChatEditor toolbar popovers', () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['model'],
       currentModel: 'preview-route',
-      availableModels: [
-        {
-          id: 'preview-route',
-          baseModelId: 'qwen3.8-max-preview',
-          label: 'Qwen 3.8 Max Preview',
-        },
-      ],
+      availableModels: [{ id: 'preview-route', label: 'Qwen 3.8 Max Preview' }],
       reasoningControlsSupported: true,
       onSelectReasoningOption: vi.fn(),
     });

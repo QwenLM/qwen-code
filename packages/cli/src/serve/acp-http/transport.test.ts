@@ -308,9 +308,25 @@ class FakeBridge {
   }
 
   lastApprovalMode: string | undefined;
-  async setSessionApprovalMode(_s: string, mode: string) {
+  lastApprovalModeOpts: { persist: boolean } | undefined;
+  async setSessionApprovalMode(
+    _s: string,
+    mode: string,
+    opts?: { persist: boolean },
+  ) {
     this.lastApprovalMode = mode;
+    this.lastApprovalModeOpts = opts;
     return { sessionId: 'sess-1', mode, previous: 'default', persisted: false };
+  }
+
+  configOptionCalls: Array<{
+    sessionId: string;
+    req: unknown;
+    ctx: unknown;
+  }> = [];
+  async setSessionConfigOption(sessionId: string, req: unknown, ctx: unknown) {
+    this.configOptionCalls.push({ sessionId, req, ctx });
+    return { configOptions: [] };
   }
 
   // Session config options live in the child's session context state.
@@ -3111,6 +3127,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }>;
     expect(frame.id).toBe(9);
     expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
+    expect(bridge.configOptionCalls).toHaveLength(0);
   });
 
   it('session/set_config_option (mode) routes to setSessionApprovalMode', async () => {
@@ -3127,6 +3144,87 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await got;
     expect(bridge.lastApprovalMode).toBe('yolo');
+    expect(bridge.lastApprovalModeOpts).toEqual({ persist: false });
+    expect(bridge.configOptionCalls).toHaveLength(0);
+  });
+
+  it('session/set_config_option (thinking) routes to setSessionConfigOption', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 910,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'thinking', value: 'off' },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { configOptions: unknown };
+    }>;
+    expect(frame.id).toBe(910);
+    expect(bridge.configOptionCalls).toEqual([
+      {
+        sessionId: 'sess-1',
+        req: { sessionId: 'sess-1', configId: 'thinking', value: 'off' },
+        ctx: { clientId: 'client-1', fromLoopback: true },
+      },
+    ]);
+    expect(bridge.lastSetModel).toBeUndefined();
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/set_config_option (effort) routes to setSessionConfigOption', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 911,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'effort', value: 'medium' },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { configOptions: unknown };
+    }>;
+    expect(frame.id).toBe(911);
+    expect(bridge.configOptionCalls).toEqual([
+      {
+        sessionId: 'sess-1',
+        req: { sessionId: 'sess-1', configId: 'effort', value: 'medium' },
+        ctx: { clientId: 'client-1', fromLoopback: true },
+      },
+    ]);
+    expect(bridge.lastSetModel).toBeUndefined();
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/set_config_option (mode) forwards persist:true', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 912,
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'sess-1',
+        configId: 'mode',
+        value: 'plan',
+        persist: true,
+      },
+    });
+    await got;
+    expect(bridge.lastApprovalMode).toBe('plan');
+    expect(bridge.lastApprovalModeOpts).toEqual({ persist: true });
+    expect(bridge.configOptionCalls).toHaveLength(0);
   });
 
   it('_qwen/workspace/mcp introspection reaches the bridge', async () => {

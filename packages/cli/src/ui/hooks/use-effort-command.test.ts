@@ -107,4 +107,71 @@ describe('useEffortCommand', () => {
     expect(item.type).toBe('info');
     expect(item.text).toContain('thinking is currently disabled');
   });
+
+  it('normalizes an unsupported tier for a registered model and persists reasoningPreferences', () => {
+    const addItem = vi.fn();
+    config = {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      setReasoningEffort,
+      getReasoningEffort: vi.fn().mockReturnValue('xhigh'),
+    } as unknown as Config;
+    const { result } = renderHook(() =>
+      useEffortCommand(settings, config, addItem),
+    );
+
+    act(() => result.current.handleEffortSelect('high'));
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningPreferences',
+      expect.objectContaining({
+        'qwen3.8-max': { effort: 'xhigh' },
+      }),
+    );
+    expect(setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      expect.anything(),
+    );
+    expect(addItem).toHaveBeenCalledTimes(1);
+    const [item] = addItem.mock.calls[0];
+    expect(item.type).toBe('info');
+    expect(item.text).toContain('xhigh');
+    expect(item.text).toContain('normalized from high');
+  });
+
+  it('keeps a supported tier for a registered model and reports it as requested', () => {
+    const addItem = vi.fn();
+    config = {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      setReasoningEffort,
+      getReasoningEffort: vi.fn().mockReturnValue('low'),
+    } as unknown as Config;
+    const { result } = renderHook(() =>
+      useEffortCommand(settings, config, addItem),
+    );
+
+    act(() => result.current.handleEffortSelect('low'));
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('low');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningPreferences',
+      expect.objectContaining({
+        'qwen3.8-max': { effort: 'low' },
+      }),
+    );
+    expect(setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      expect.anything(),
+    );
+    expect(addItem).toHaveBeenCalledTimes(1);
+    const [item] = addItem.mock.calls[0];
+    expect(item.type).toBe('info');
+    expect(item.text).toContain('low');
+    expect(item.text).toContain('requested');
+    expect(item.text).not.toContain('normalized');
+  });
 });
