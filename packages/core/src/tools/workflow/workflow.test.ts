@@ -49,6 +49,28 @@ describe('WorkflowTool', () => {
     expect(schema.properties.run_in_background.default).toBe(false);
   });
 
+  // The description is what makes the model pick pipeline() over a barrier
+  // and verify a finding before reporting it. A refactor that drops the
+  // policy prose leaves a runtime nobody drives well, and no other test
+  // would notice — so anchor the load-bearing claims.
+  it('description carries both the runtime facts and the orchestration policy', () => {
+    const { description } = new WorkflowTool(fakeConfig());
+    for (const anchor of [
+      'min(16, cpus-2)',
+      'QWEN_CODE_MAX_WORKFLOW_AGENTS',
+      'resumeFromRunId',
+      '/workflows',
+      'node:vm sandbox',
+    ]) {
+      expect(description).toContain(anchor);
+    }
+    expect(description).toMatch(/Default to `pipeline\(\)`/);
+    expect(description).toMatch(/A barrier is right only when/);
+    expect(description).toMatch(/refute/);
+    expect(description).toMatch(/against everything already seen/);
+    expect(description).toMatch(/log\(\)` what was dropped/);
+  });
+
   it('rejects build() when script is missing', () => {
     const tool = new WorkflowTool(fakeConfig());
     expect(() => tool.build({} as never)).toThrow(/script/);
