@@ -3664,15 +3664,15 @@ export class Config {
     // /effort survives an auth refresh, including the initial one at startup.
     // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
     // already excludes both `false` and `undefined`. A thinking-off state
-    // (`reasoning === false`) carries no effort to capture, so it is carried
-    // into applyRegisteredModelReasoning() separately below.
+    // (`reasoning === false`) carries no effort to capture, so preserve it
+    // separately below only when the refresh keeps the same model.
+    const modelId = this.modelsConfig.getModel();
     const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
       : undefined;
 
     // Sync modelsConfig state for this auth refresh
-    const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
     // Check and consume cached credentials flag
@@ -3706,7 +3706,8 @@ export class Config {
       this.setReasoningEffort(priorReasoningEffort);
     }
     this.applyRegisteredModelReasoning({
-      priorThinkingDisabled: priorReasoning === false,
+      priorThinkingDisabled:
+        priorReasoning === false && newContentGeneratorConfig.model === modelId,
     });
 
     // Initialize BaseLlmClient now that the ContentGenerator is available

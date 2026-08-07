@@ -4570,6 +4570,29 @@ describe('Server Config (config.ts)', () => {
       expect(config.isThinkingEnabled()).toBe(false);
     });
 
+    it('does not carry thinking-off when an auth refresh changes models', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { model: 'coder-model', reasoning: false },
+      });
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+      expect(config.isThinkingEnabled()).toBe(true);
+    });
+
     it('restores the global effort when switching back from a registered model', async () => {
       const config = new Config({
         ...baseParams,
