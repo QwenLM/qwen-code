@@ -1,0 +1,80 @@
+name: 'Qwen Autofix Fork Signal'
+
+# GitHub hands NO repository secrets to a workflow run tied to a pull request
+# whose head lives in a fork — the run header reads `Secret source: None` — so
+# `secrets.CI_DEV_BOT_PAT` arrives empty and the review lane in
+# `qwen-autofix.yml` cannot authenticate. That lane now skips itself for those
+# PRs (see route's `secretless` output) instead of failing three API calls and
+# reddening the run, which leaves a fork PR's review unanswered until the next
+# scheduled scan — up to ten minutes.
+#
+# This is the credential-free half of the standard `workflow_run` bridge that
+# closes the gap. It records WHICH PR was reviewed and nothing else;
+# `qwen-autofix-fork-bridge.yml` then runs in the base context, where the
+# secrets and `actions: write` do exist, and starts the real scan.
+#
+# The recorded number cannot be forged from a fork. `pull_request_review` runs
+# the workflow file from the BASE branch, not the PR head — verified on run
+# 31152873061, whose PR branch predates a main-only change to
+# `qwen-autofix.yml` and which still executed the NEW file — so a fork cannot
+# edit what is written here, and the value itself comes from GitHub's event
+# payload rather than from repository content. The bridge re-binds it to
+# `workflow_run.head_sha` regardless.
+#
+# Deliberately powerless: `permissions: {}`, no checkout, and no repository
+# code executed, so a fork-triggered run holds nothing worth stealing. For the
+# same reason it stays on the hosted pool — fork-triggered work never goes on
+# the persistent self-hosted runners, whose workspaces outlive the job.
+
+on:
+  pull_request_review:
+    types:
+      - 'submitted'
+
+permissions: {}
+
+defaults:
+  run:
+    shell: 'bash'
+
+concurrency:
+  group: 'qwen-autofix-fork-signal-${{ github.event.pull_request.number }}'
+  cancel-in-progress: true
+
+jobs:
+  signal:
+    name: 'Record the reviewed fork PR'
+    # In-repo PRs keep their secrets and reach the review lane directly, so
+    # signalling them would only dispatch a duplicate scan. The trust and base
+    # gates mirror route's so an untrusted review does not spend a bridge run.
+    # Every one of these is re-checked downstream — the bridge re-reads the PR
+    # and review-scan re-derives admission from live API state — so this gate
+    # is an optimisation, never the authorisation.
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code'
+      && github.event.pull_request.head.repo.full_name != github.repository
+      && github.event.pull_request.base.ref == 'main'
+      && github.event.pull_request.state == 'open'
+      && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
+      || github.event.review.user.login == 'qwen-code-ci-bot') }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Record the PR number'
+        env:
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          printf '%s\n' "${PR_NUMBER}" > pr-number.txt
+          echo "🔔 signalling fork PR #${PR_NUMBER} for the autofix review lane"
+
+      - name: 'Upload the signal'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-autofix-fork-signal'
+          path: 'pr-number.txt'
+          # The bridge reads this within seconds; nothing else ever wants it.
+          retention-days: 1
+          # A signal run that uploads nothing would complete `success` and send
+          # the bridge looking for an artifact that does not exist. Fail here,
+          # where the cause is visible, rather than there.
+          if-no-files-found: 'error'
