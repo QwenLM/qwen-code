@@ -54,6 +54,12 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     enableThinking: true,
   },
   { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
+  // Singapore's catalog lists only the dated snapshot; the bare alias answers
+  // there with 403 Unpurchased rather than 404, so it is a per-plan entitlement
+  // gap, not a retired id — it stays a built-in of the DeepSeek, Alibaba
+  // standard and IdeaLab presets. Both ship rather than one replacing the
+  // other, so neither region's users are stranded.
+  { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
   { id: 'deepseek-v4-flash-0731', contextWindowSize: 1000000 },
   { id: 'deepseek-v3.2', contextWindowSize: 131072 },
   {

@@ -44,8 +44,8 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
   [/^qwen3\.7-plus/, { image: true, video: true }],
-  // Qwen Max models (3.8+): image support
-  [/^qwen3\.8-max/, { image: true }],
+  // Qwen Max models (3.8+): image + video support
+  [/^qwen3\.8-max/, { image: true, video: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video
