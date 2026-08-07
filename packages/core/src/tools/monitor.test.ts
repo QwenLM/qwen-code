@@ -521,6 +521,21 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
+    // The `${var@P}` variant of issue #8582: tree-sitter emits no
+    // command_substitution node for prompt expansion, so the pre-AST
+    // substitution gate is the only monitor-side protection when the AST
+    // reports read-only. The suite's mocked `detectCommandSubstitution`
+    // cannot see this shape, so a green run pins the real
+    // `hasShellSubstitution` disjunct of the gate (#8590 review).
+    it('asks for ${var@P} prompt expansion (issue #8582)', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+      const invocation = createInvocation({
+        command: 'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    });
+
     it('allows read-only monitor commands by default', async () => {
       mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
       const invocation = createInvocation({

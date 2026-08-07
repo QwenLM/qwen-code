@@ -19,7 +19,11 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hasShellSubstitution } from './shell-utils.js';
+import {
+  hasShellSubstitution,
+  matchParameterExpansionHead,
+  skipLineContinuations,
+} from './shell-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -964,11 +968,15 @@ function processSafety(root: string, args: string[]): Safety {
  * tree-sitter-bash surfaces the transformation operator as a literal `@`
  * child of the `expansion` node. Array subscripts keep their `@` inside a
  * `subscript` child (`${arr[@]}` → `subscript` → `word`), so they do not
- * match here (#8582).
+ * match here (#8582). `${!prefix@}` / `${!prefix*}` enumerate variable
+ * names and cannot execute code — the same carve-out the scanner applies
+ * (#8590 review).
  */
 function hasParameterTransformation(node: SyntaxNode): boolean {
   for (let i = 0; i < node.childCount; i++) {
-    if (node.child(i)!.type === '@') return true;
+    if (node.child(i)!.type === '@') {
+      return !/^\$\{!(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)[@*]\}$/.test(node.text);
+    }
   }
   return false;
 }
@@ -1001,14 +1009,6 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
 }
 
 function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
-  // A comment nested inside the command node means tree-sitter joined lines
-  // across a `\<newline>` that bash kept inside the comment: bash ends the
-  // comment at the raw newline and executes the following line as a separate
-  // command, while this node presents that line's words as arguments. The
-  // argument list is therefore not trustworthy (#8582).
-  if (commandNode.namedChildren.some((child) => child.type === 'comment')) {
-    return 'unknown';
-  }
   const rawRoot = commandNode.childForFieldName('name')?.text;
   const root = getCommandName(commandNode);
   const argNodes = getArgumentNodes(commandNode);
@@ -1138,7 +1138,22 @@ async function classifyInternal(command: string): Promise<Safety> {
   try {
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
-    return mergeSafety(...root.namedChildren.map(evaluateStatementSafety));
+    const safety = mergeSafety(
+      ...root.namedChildren.map(evaluateStatementSafety),
+    );
+    // tree-sitter follows `\<newline>` inside comments that bash does not:
+    // bash ends the comment at the raw newline and executes the following
+    // line as a separate command, while the tree swallows that line's words
+    // into the enclosing node (a `command`, or a `file_redirect` under
+    // `redirected_statement`). The swallowed argument list is not
+    // trustworthy, so any comment nested below statement position downgrades
+    // the verdict (#8582, #8590 review). Statement-position comments already
+    // evaluated to `unknown`; merging (instead of overriding) preserves a
+    // `write` verdict — plan mode distinguishes it from `unknown` (#8590
+    // review).
+    const hasNestedComment =
+      collectDescendants(root, new Set(['comment'])).length > 0;
+    return hasNestedComment ? mergeSafety(safety, 'unknown') : safety;
   } finally {
     tree.delete();
   }
@@ -1157,22 +1172,31 @@ export async function classifyShellCommandSafety(
 }
 
 function isShellCommandReadOnlyFallback(command: string): boolean {
-  // The regex fallback cannot model Bash parameter transformations. Anchor
-  // the operator directly after the parameter name/subscript — the way
-  // `startsRiskyParameterExpansion` does — so an `@` inside a default value
-  // (`${EMAIL:-user@example.com}`) or an array subscript (`${arr[@]}`)
-  // stays allowed, while `@P` etc. fail closed. The `(?:\\\n)*` gaps
-  // tolerate line continuations, which bash removes before parsing (#8582).
-  // The regex requires a literal `@`, so commands without one skip the
-  // scan entirely (exact pre-filter, not a heuristic).
-  return (
-    !(
-      command.includes('@') &&
-      /\$\{#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[*@$?!-])(?:\[(?:[^[\]]|\[[^\]]*\])*\])?(?:\\\n)*@(?:\\\n)*[A-Za-z]/.test(
-        command,
-      )
-    ) && isShellCommandReadOnly(command)
-  );
+  // The regex checker cannot model Bash parameter transformations. Reuse
+  // the scanner's parameter-expansion grammar so the two cannot drift
+  // (#8590 review): any `${parameter@operator}` fails closed, including
+  // shapes split by `\<newline>` (bash removes continuations before
+  // parsing) and subscripts of any depth or quoting. The `@` pre-filter
+  // keeps commands without one off the scan entirely.
+  if (command.includes('@')) {
+    let index = command.indexOf('${');
+    while (index !== -1) {
+      const headEnd = matchParameterExpansionHead(command, index + 1);
+      // An unterminated subscript cannot be classified: fail closed.
+      if (headEnd === -2) return false;
+      if (
+        headEnd >= 0 &&
+        command[headEnd] === '@' &&
+        /[A-Za-z]/.test(
+          command[skipLineContinuations(command, headEnd + 1)] ?? '',
+        )
+      ) {
+        return false;
+      }
+      index = command.indexOf('${', index + 1);
+    }
+  }
+  return isShellCommandReadOnly(command);
 }
 
 /**

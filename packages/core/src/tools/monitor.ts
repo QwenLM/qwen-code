@@ -36,7 +36,6 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   buildShellExecWarnings,
-  detectCommandSubstitution,
   getCommandRoot,
   getShellConfiguration,
   hasShellSubstitution,
@@ -180,14 +179,12 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Mirror the pre-AST gate in `ShellToolInvocation.getDefaultPermission`:
     // substitution-bearing commands always ask. tree-sitter-bash cannot see
     // substitution hidden by a line continuation (`$\<newline>(...)`), so
-    // the AST read-only check alone would auto-allow it (#8582). Check both
-    // surfaces, as `buildShellExecWarnings` does below: the raw command
-    // (which also unwraps `bash -c` bodies via `stripShellWrapper`) and the
-    // normalized safety command.
-    if (
-      hasShellSubstitution(this.params.command) ||
-      detectCommandSubstitution(command)
-    ) {
+    // the AST read-only check alone would auto-allow it (#8582). The raw
+    // check also unwraps `bash -c` bodies via `stripShellWrapper`; the
+    // normalized safety command is re-checked by `isShellCommandReadOnlyAST`'s
+    // internal gate below, so it needs no separate disjunct here (#8590
+    // review).
+    if (hasShellSubstitution(this.params.command)) {
       return 'ask';
     }
 

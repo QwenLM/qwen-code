@@ -428,6 +428,17 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await classifyShellCommandSafety('echo "${!arr[@]}"')).toBe(
         'read-only',
       );
+      // `${!prefix@}` / `${!prefix*}` enumerate variable names — the same
+      // safe idiom, so the classifier must agree with the scanner and the
+      // `*` twin instead of downgrading one of them (#8590 review).
+      expect(await isShellCommandReadOnlyAST('echo "${!prefix@}"')).toBe(true);
+      expect(await classifyShellCommandSafety('echo "${!prefix@}"')).toBe(
+        'read-only',
+      );
+      expect(await isShellCommandReadOnlyAST('echo "${!prefix*}"')).toBe(true);
+      expect(await classifyShellCommandSafety('echo "${!prefix*}"')).toBe(
+        'read-only',
+      );
     });
 
     it('rejects indirect expansion that can evaluate an array subscript', async () => {
@@ -500,6 +511,24 @@ describe('isShellCommandReadOnlyAST', () => {
     expect(await classifyShellCommandSafety('echo hello # $(rm -rf /)')).toBe(
       'unknown',
     );
+  });
+
+  it('rejects a continuation-broken comment swallowed by a redirection (#8590)', async () => {
+    // tree-sitter nests the swallowed comment and payload words inside the
+    // `file_redirect` node, where the command-node guard cannot see them;
+    // the check must cover the whole tree (#8590 review).
+    const cmd = 'ls < /dev/null #x\\\n\\\nrm -rf /tmp/zzz';
+    expect(await isShellCommandReadOnlyAST(cmd)).toBe(false);
+    expect(await classifyShellCommandSafety(cmd)).toBe('unknown');
+  });
+
+  it('preserves a write verdict swallowed alongside a comment (#8590)', async () => {
+    // bash ends the comment at the raw newline and runs `rm -rf /tmp/a`;
+    // the write classification must survive the comment downgrade so plan
+    // mode keeps its hard block instead of offering approval (#8590 review).
+    expect(
+      await classifyShellCommandSafety('rm -rf /tmp/a #x\\\n\\\necho hi'),
+    ).toBe('write');
   });
 });
 
@@ -1182,10 +1211,29 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
 
   it('fails closed on continuation-split @P when parser is marked failed', async () => {
     // Bash removes `\<newline>` before parsing, so `@` + continuation + `P`
-    // is the `@P` operator at execution time (#8590 review).
+    // is the `@P` operator at execution time (#8590 review). The @P inputs
+    // are already caught by the `hasShellSubstitution` pre-gate; they stay
+    // as defense-in-depth pins.
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('echo "${two@\\\nP}"')).toBe(false);
     expect(await isShellCommandReadOnlyAST('echo "$\\\n{PWD@P}"')).toBe(false);
+    // Continuation-split non-@P transform: `@Q` passes the pre-gate, so this
+    // input actually exercises the fallback's continuation gaps (#8590
+    // review).
+    expect(await isShellCommandReadOnlyAST('echo "${two@\\\nQ}"')).toBe(false);
+  });
+
+  it('fails closed on deep and quoted-] @P subscripts when parser is marked failed (#8590)', async () => {
+    _setParserFailedForTesting();
+    expect(
+      await isShellCommandReadOnlyAST('echo "${x[${y[${z[0]}]}]@P}"'),
+    ).toBe(false);
+    expect(await isShellCommandReadOnlyAST('echo "${qa["a]b"]@P}"')).toBe(
+      false,
+    );
+    expect(await isShellCommandReadOnlyAST('echo "${qb[\'a]b\']@P}"')).toBe(
+      false,
+    );
   });
 
   it('re-initialises normally after _resetParser', async () => {

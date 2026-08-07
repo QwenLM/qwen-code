@@ -1518,6 +1518,132 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
 }
 
 /**
+ * Skips `\<newline>` line continuations: bash removes them before parsing,
+ * so the characters on either side become adjacent.
+ */
+export function skipLineContinuations(text: string, index: number): number {
+  while (text[index] === '\\' && text[index + 1] === '\n') {
+    index += 2;
+  }
+  return index;
+}
+
+function consumeParameterName(text: string, index: number): number {
+  let i = index;
+  if (/[A-Za-z_]/.test(text[i] ?? '')) {
+    while (/[A-Za-z0-9_]/.test(text[i] ?? '')) i++;
+  } else if (/[0-9]/.test(text[i] ?? '')) {
+    while (/[0-9]/.test(text[i] ?? '')) i++;
+  }
+  return i;
+}
+
+/**
+ * Matches `[subscript]` starting at `text[openIndex]`. Bash subscripts nest
+ * arbitrarily deep and may quote `[`/`]` (`${x["a]b"]}`), so a bounded
+ * regex cannot model them (#8590 review). Returns the index just past the
+ * matching `]`, or -1 when the subscript never closes.
+ */
+function matchParameterSubscript(text: string, openIndex: number): number {
+  let depth = 0;
+  let inSingleQuotes = false;
+  let inDoubleQuotes = false;
+  let i = openIndex;
+  while (i < text.length) {
+    const char = text[i]!;
+    if (inSingleQuotes) {
+      if (char === "'") inSingleQuotes = false;
+      i++;
+      continue;
+    }
+    if (inDoubleQuotes) {
+      const next = text[i + 1];
+      // In double quotes a backslash only escapes $ ` " \ and newline;
+      // any other `\x` keeps the backslash literal.
+      if (
+        char === '\\' &&
+        (next === '$' ||
+          next === '`' ||
+          next === '"' ||
+          next === '\\' ||
+          next === '\n')
+      ) {
+        i += 2;
+        continue;
+      }
+      if (char === '"') inDoubleQuotes = false;
+      i++;
+      continue;
+    }
+    if (char === '\\') {
+      // Also skips `\<newline>`: bash removes the pair before parsing.
+      i += 2;
+      continue;
+    }
+    if (char === "'") {
+      inSingleQuotes = true;
+      i++;
+      continue;
+    }
+    if (char === '"') {
+      inDoubleQuotes = true;
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      depth++;
+    } else if (char === ']') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * Matches the head `${[#][!]parameter[subscript]` of the parameter
+ * expansion whose opening brace is at `text[braceIndex]`, skipping
+ * `\<newline>` continuations the way bash does. Shared by the scanner's
+ * `@P` check and the parser-failure fallback so the grammar cannot drift
+ * between the two files (#8590 review).
+ *
+ * @returns the index of the first character after the head (the operator
+ * or the closing brace); -1 when there is no parameter name at all; -2
+ * when a subscript never closes — callers fail closed on -2.
+ */
+export function matchParameterExpansionHead(
+  text: string,
+  braceIndex: number,
+): number {
+  let i = skipLineContinuations(text, braceIndex + 1);
+  if (text[i] === '#') i = skipLineContinuations(text, i + 1);
+  if (text[i] === '!') i = skipLineContinuations(text, i + 1);
+
+  const nameEnd = consumeParameterName(text, i);
+  let end: number;
+  if (nameEnd > i) {
+    end = nameEnd;
+  } else if (
+    text[i] === '*' ||
+    text[i] === '@' ||
+    text[i] === '$' ||
+    text[i] === '?' ||
+    text[i] === '-'
+  ) {
+    end = i + 1;
+  } else {
+    return -1;
+  }
+
+  i = skipLineContinuations(text, end);
+  if (text[i] !== '[') return i;
+  const afterSubscript = matchParameterSubscript(text, i);
+  if (afterSubscript === -1) return -2;
+  return skipLineContinuations(text, afterSubscript);
+}
+
+/**
  * Detects command substitution and risky parameter expansion in a shell command,
  * following bash quoting rules:
  * - Single quotes ('): Everything literal, no substitution possible
@@ -1533,27 +1659,57 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
  * @returns true if bash may execute nested shell code during expansion
  */
 export function detectCommandSubstitution(command: string): boolean {
-  const startsRiskyParameterExpansion = (text: string, index: number) => {
-    const expansion = text.slice(index).replaceAll('\\\n', '');
-    if (/^\$\{!/.test(expansion)) {
-      // `${!name[@]}` / `${!name[*]}` enumerate array keys and
-      // `${!prefix@}` / `${!prefix*}` enumerate variable names; neither
-      // evaluates a subscript, so neither can execute code. Every other
-      // `${!...}` is indirect expansion: bash evaluates the referenced
-      // name including any subscript, executing embedded substitution
+  // Returns true when the `${...}` expansion whose opening brace is at
+  // `text[braceIndex]` can execute code during expansion. Bounded to the
+  // expansion itself — no remainder-wide slicing (#8590 review).
+  const startsRiskyParameterExpansion = (
+    text: string,
+    braceIndex: number,
+  ): boolean => {
+    let i = skipLineContinuations(text, braceIndex + 1);
+    if (text[i] === '!') {
+      // `${!name[@]}` / `${!name[*]}` enumerate array keys,
+      // `${!prefix@}` / `${!prefix*}` enumerate variable names, and bare
+      // `${!}` is the last background job PID; none evaluates a subscript,
+      // so none can execute code. Every other `${!...}` is indirect
+      // expansion: bash evaluates the referenced name including any
+      // subscript, executing embedded substitution
       // (`ref='a[$(cmd)]'; echo "${!ref}"` runs `cmd`).
-      return !/^\$\{!(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?:\[[@*]\]|[@*])\}/.test(
-        expansion,
-      );
+      i = skipLineContinuations(text, i + 1);
+      if (text[i] === '}') return false;
+      const nameEnd = consumeParameterName(text, i);
+      if (nameEnd === i) return true;
+      i = skipLineContinuations(text, nameEnd);
+      if (text[i] === '[') {
+        const k = skipLineContinuations(text, i + 1);
+        if (text[k] === '@' || text[k] === '*') {
+          const m = skipLineContinuations(text, k + 1);
+          if (text[m] === ']') {
+            const n = skipLineContinuations(text, m + 1);
+            return text[n] !== '}';
+          }
+        }
+        return true;
+      }
+      if (text[i] === '@' || text[i] === '*') {
+        const k = skipLineContinuations(text, i + 1);
+        return text[k] !== '}';
+      }
+      return true;
     }
+
     // Only the `@P` transformation executes code: prompt expansion runs
     // any command substitution embedded in the value. `@Q`, `@E`, etc.
     // only reformat the value, so they must not reach the hard-deny path;
-    // the AST classifier still downgrades them to confirmation. The
-    // subscript may nest one level deep (`${x[${y[1]}]@P}`).
-    return /^\$\{#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[*@$?!-])(?:\[(?:[^[\]]|\[[^\]]*\])*\])?@P\}/.test(
-      expansion,
-    );
+    // the AST classifier still downgrades them to confirmation.
+    const headEnd = matchParameterExpansionHead(text, braceIndex);
+    if (headEnd === -1) return false;
+    if (headEnd === -2) return true;
+    if (text[headEnd] !== '@') return false;
+    i = skipLineContinuations(text, headEnd + 1);
+    if (text[i] !== 'P') return false;
+    i = skipLineContinuations(text, i + 1);
+    return text[i] === '}';
   };
 
   type PendingHeredoc = {
@@ -1598,7 +1754,10 @@ export function detectCommandSubstitution(command: string): boolean {
       return null;
     }
 
-    let i = startIndex + 2;
+    // Bash removes `\<newline>` before recognizing the operator, so the
+    // tab-strip flag may sit on the next line. Don't skip whitespace first:
+    // `<< -EOF` is a literal `-EOF` delimiter without tab stripping.
+    let i = skipLineContinuations(command, startIndex + 2);
     const stripLeadingTabs = command[i] === '-';
     if (stripLeadingTabs) i++;
 
@@ -1728,7 +1887,7 @@ export function detectCommandSubstitution(command: string): boolean {
       if (
         char === '$' &&
         nextChar === '{' &&
-        startsRiskyParameterExpansion(line, i)
+        startsRiskyParameterExpansion(line, i + 1)
       ) {
         return true;
       }
@@ -1740,6 +1899,16 @@ export function detectCommandSubstitution(command: string): boolean {
     return false;
   };
 
+  // True when `line` ends in an unescaped continuation backslash: an odd
+  // count of trailing backslashes (bash removes the `\<newline>` pair).
+  const endsWithLineContinuation = (line: string): boolean => {
+    let backslashes = 0;
+    for (let j = line.length - 1; j >= 0 && line[j] === '\\'; j--) {
+      backslashes++;
+    }
+    return backslashes % 2 === 1;
+  };
+
   const consumeHeredocBodies = (
     startIndex: number,
     pending: PendingHeredoc[],
@@ -1747,10 +1916,13 @@ export function detectCommandSubstitution(command: string): boolean {
     let i = startIndex;
 
     for (const heredoc of pending) {
-      // Track `$\<newline>` line continuations in unquoted heredocs, since
-      // bash ignores `\<newline>` during heredoc expansions and this can join
-      // `$` and `(` across lines to form `$(`.
-      let pendingDollarLineContinuation = false;
+      // Bash removes `\<newline>` from unquoted heredoc bodies before
+      // expanding them AND before matching the delimiter (#8590 review:
+      // `foo\` + `EOF` joins into the body line `fooEOF`). Accumulate
+      // continuation-joined physical lines into one logical line so an
+      // expansion split across a continuation is seen the way bash
+      // executes it, in both directions (#8590 review).
+      let logicalLine = '';
 
       while (i <= command.length) {
         const lineStart = i;
@@ -1782,57 +1954,32 @@ export function detectCommandSubstitution(command: string): boolean {
           ? rawLine.replace(/^\t+/, '')
           : rawLine;
 
-        if (effectiveLine === heredoc.delimiter) {
-          i = lineEnd + newlineLength;
+        i = lineEnd + newlineLength;
+
+        if (heredoc.isQuotedDelimiter) {
+          // No expansions in the body; only the delimiter matters. Quoted
+          // bodies are literal, so no continuation joining happens.
+          if (effectiveLine === heredoc.delimiter) break;
+          if (newlineLength === 0) break;
+          continue;
+        }
+
+        if (newlineLength > 0 && endsWithLineContinuation(effectiveLine)) {
+          logicalLine += effectiveLine.slice(0, -1);
+          continue;
+        }
+
+        logicalLine += effectiveLine;
+
+        if (logicalLine === heredoc.delimiter) {
           break;
         }
 
-        if (!heredoc.isQuotedDelimiter) {
-          if (
-            pendingDollarLineContinuation &&
-            (effectiveLine.startsWith('(') ||
-              startsRiskyParameterExpansion(`$${effectiveLine}`, 0))
-          ) {
-            return { nextIndex: i, hasSubstitution: true };
-          }
-
-          if (lineHasCommandSubstitution(effectiveLine)) {
-            return { nextIndex: i, hasSubstitution: true };
-          }
-
-          const wasPendingDollarLineContinuation =
-            pendingDollarLineContinuation;
-          pendingDollarLineContinuation = false;
-          if (
-            newlineLength > 0 &&
-            rawLine.length >= 2 &&
-            rawLine.endsWith('\\') &&
-            rawLine[rawLine.length - 2] === '$'
-          ) {
-            let backslashCount = 0;
-            for (
-              let j = rawLine.length - 3;
-              j >= 0 && rawLine[j] === '\\';
-              j--
-            ) {
-              backslashCount++;
-            }
-            const isEscapedDollar = backslashCount % 2 === 1;
-            pendingDollarLineContinuation = !isEscapedDollar;
-          } else if (
-            wasPendingDollarLineContinuation &&
-            newlineLength > 0 &&
-            effectiveLine === '\\'
-          ) {
-            // A line consisting only of a continuation is itself removed by
-            // bash, so a pending `$\<newline>` stays live and can still join
-            // with a `(` on a later line (#8582).
-            pendingDollarLineContinuation = true;
-          }
+        if (lineHasCommandSubstitution(logicalLine)) {
+          return { nextIndex: i, hasSubstitution: true };
         }
 
-        // Advance to the next line (or end).
-        i = lineEnd + newlineLength;
+        logicalLine = '';
         if (newlineLength === 0) {
           break;
         }
@@ -1862,6 +2009,18 @@ export function detectCommandSubstitution(command: string): boolean {
   let lastSignificantWasEscaped = false;
   let justAfterContinuation = false;
 
+  // A consumed heredoc body ends any pending continuation adjacency: a
+  // `$`/`<`/`>` before the heredoc operator cannot join with a `(` or
+  // `${` that appears after the body (#8590 review).
+  const resetContinuationContext = (): void => {
+    justAfterContinuation = false;
+    lastSignificantChar = '';
+    lastSignificantInDoubleQuotes = false;
+    lastSignificantInSingleQuotes = false;
+    lastSignificantInBackticks = false;
+    lastSignificantWasEscaped = false;
+  };
+
   while (i < command.length) {
     const char = command[i]!;
     const nextChar = command[i + 1];
@@ -1877,6 +2036,7 @@ export function detectCommandSubstitution(command: string): boolean {
           if (result.hasSubstitution) return true;
           pendingHeredocs.length = 0;
           i = result.nextIndex;
+          resetContinuationContext();
           continue;
         }
       } else if (char === '\n' || char === '\r') {
@@ -1886,6 +2046,7 @@ export function detectCommandSubstitution(command: string): boolean {
           if (result.hasSubstitution) return true;
           pendingHeredocs.length = 0;
           i = result.nextIndex;
+          resetContinuationContext();
           continue;
         }
       }
@@ -1949,8 +2110,7 @@ export function detectCommandSubstitution(command: string): boolean {
           lastSignificantChar === '$' &&
           !lastSignificantInSingleQuotes &&
           lastSignificantInDoubleQuotes === inDoubleQuotes &&
-          (char === '(' ||
-            startsRiskyParameterExpansion(`$${command.slice(i)}`, 0))
+          (char === '(' || startsRiskyParameterExpansion(command, i))
         ) {
           return true;
         }
@@ -2006,7 +2166,7 @@ export function detectCommandSubstitution(command: string): boolean {
       if (
         char === '$' &&
         nextChar === '{' &&
-        startsRiskyParameterExpansion(command, i)
+        startsRiskyParameterExpansion(command, i + 1)
       ) {
         return true;
       }
@@ -2061,14 +2221,15 @@ export const COMMAND_SUBSTITUTION_WARNING =
  * (e.g. `bash -c 'echo $(cat secret)'`, where the raw `$(` sits inside
  * outer single quotes and is invisible to a raw-only check).
  *
- * Used by `buildShellExecWarnings` (UI warning surface),
- * `shouldAuditSubstitutionBypass` (audit log gate), and the
- * pre-AST gates in `ShellToolInvocation.getDefaultPermission`,
+ * Used by `buildShellExecWarnings` (UI warning surface), the
+ * pre-AST gates in `ShellToolInvocation.getDefaultPermission` and
  * `MonitorToolInvocation.getDefaultPermission`, and the shared
- * `isShellCommandReadOnlyAST` classifier used by `PermissionManager`.
- * Centralising the dual-check here keeps detection semantics in lockstep
- * across all surfaces. See PR #4386 round 6 for the env-prefix wrapper
- * regression that motivated this.
+ * `isShellCommandReadOnlyAST` classifier (backing
+ * `PermissionManager`) and `classifyShellCommandSafety` (backing the
+ * plan-mode shell policy and the speculation tool gate). Centralising
+ * the dual-check here keeps detection semantics in lockstep across all
+ * surfaces. See PR #4386 round 6 for the env-prefix wrapper regression
+ * that motivated this.
  */
 export function hasShellSubstitution(rawCommand: string): boolean {
   if (typeof rawCommand !== 'string' || rawCommand.length === 0) return false;

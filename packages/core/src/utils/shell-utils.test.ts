@@ -1499,6 +1499,11 @@ describe('detectCommandSubstitution risky-expansion scope (#8590)', () => {
     'echo "${!arr[*]}"',
     'echo "${!prefix@}"',
     'echo "${!prefix*}"',
+    // Bare `${!}` is the braced form of `$!` (last background job PID)
+    // (#8590 review).
+    'echo "${!}"',
+    // Double-quoted `\\` subscript without a transform is a plain lookup.
+    'echo "${q["\\\\"]}"',
   ])('does not flag expansions that cannot execute code: %j', (command) => {
     expect(detectCommandSubstitution(command)).toBe(false);
   });
@@ -1513,8 +1518,83 @@ describe('detectCommandSubstitution risky-expansion scope (#8590)', () => {
     // Nested subscripts: the AST classifier downgrades this shape, so the
     // scanner must agree (finding 5).
     'echo "${x[${y[1]}]@P}"',
+    // Bash subscripts nest arbitrarily deep and may quote `]`; bash 5.2
+    // executes the embedded substitution in all three (#8590 review).
+    'echo "${x[${y[${z[0]}]}]@P}"',
+    'echo "${qa["a]b"]@P}"',
+    'echo "${qb[\'a]b\']@P}"',
+    // Double-quoted `\\` subscript: bash 5.2 executes the payload.
+    'echo "${q["\\\\"]@P}"',
   ])('still flags expansions that can execute code: %j', (command) => {
     expect(detectCommandSubstitution(command)).toBe(true);
+  });
+});
+
+// Regression coverage for the second #8590 review round: heredoc bodies were
+// scanned one physical line at a time, so a `${var@P}` expansion split by a
+// `\<newline>` inside its braces bypassed the scanner even though bash
+// removes `\<newline>` from unquoted heredoc bodies before expanding — and
+// even before matching the delimiter. The body scan now joins
+// continuation-split lines into logical lines first (#8590 review).
+describe('detectCommandSubstitution heredoc continuation joins (#8590)', () => {
+  it('detects a continuation-split @P expansion in an unquoted heredoc body', () => {
+    // bash 5.2 executes the embedded substitution for both shapes.
+    const threeWay = ['cat <<EOF', '$\\', '{v\\', '@P}', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(threeWay)).toBe(true);
+    const twoWay = ['cat <<EOF', '${two\\', '@P}', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(twoWay)).toBe(true);
+  });
+
+  it('does not flag a continuation-split safe enumeration in a heredoc body', () => {
+    // bash joins this into the inert key enumeration `${!arr[@]}` — the
+    // false-positive twin of the split-@P bypass (#8590 review).
+    const cmd = ['cat <<EOF', '${!arr[@]\\', '}', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(false);
+  });
+
+  it('still flags the risky twin of the split safe enumeration', () => {
+    // bash joins this into the risky `${PWD@P}`.
+    const cmd = ['cat <<EOF', '${PWD@P\\', '}', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('treats a joined delimiter line as body, like bash', () => {
+    // bash joins `foo\` + `EOF` into the body line `fooEOF` and ends the
+    // heredoc at the second `EOF`, so the trailing substitution is live.
+    const cmd = [
+      'cat <<EOF',
+      'foo\\',
+      'EOF',
+      'echo "$(touch /tmp/pwned)"',
+    ].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('detects substitution after a continuation-split <<- flag', () => {
+    // bash removes `\<newline>` before recognizing the operator, so this is
+    // `<<-'EOF'`; the quoted body is inert, but the trailing substitution
+    // executes (#8590 review).
+    const cmd = [
+      'cat <<\\',
+      "-'EOF'",
+      'inert body',
+      'EOF',
+      'echo "$(touch /tmp/pwned)"',
+    ].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('does not carry continuation state across a consumed heredoc body', () => {
+    // bash leaves `cat <<EOF $` with a dangling literal `$` and runs
+    // `(echo hi)` as a separate command — no substitution (#8590 review).
+    expect(detectCommandSubstitution('cat <<EOF $\\\n\nEOF\n(echo hi)')).toBe(
+      false,
+    );
+  });
+
+  it('detects an @P operator split from the parameter name on the command line', () => {
+    expect(detectCommandSubstitution('echo "${two\\\n@P}"')).toBe(true);
+    expect(detectCommandSubstitution('echo "${two@\\\nP}"')).toBe(true);
   });
 });
 
