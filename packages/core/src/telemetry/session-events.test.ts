@@ -23,6 +23,7 @@ describe('session lifecycle events', () => {
       body: 'Session started.',
       attributes: {
         'event.name': 'session.start',
+        'event.timestamp': expect.any(String),
         'session.id': 'session-2',
         'session.previous_id': 'session-1',
       },
@@ -36,6 +37,7 @@ describe('session lifecycle events', () => {
       body: 'Session started.',
       attributes: {
         'event.name': 'session.start',
+        'event.timestamp': expect.any(String),
         'session.id': 'replacement-session',
       },
     });
@@ -55,6 +57,7 @@ describe('session lifecycle events', () => {
       body: 'Session ended.',
       attributes: {
         'event.name': 'session.end',
+        'event.timestamp': expect.any(String),
         'session.id': 'session-1',
       },
     });

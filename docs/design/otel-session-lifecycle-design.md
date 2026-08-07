@@ -52,5 +52,8 @@ shutdown ends the currently active session before shutting down the SDK.
   spans.
 - `session.previous_id` is emitted only when the application has an explicit
   persisted continuation, and it is never equal to the new `session.id`.
+- Cold-start resumptions (`--resume`, `--continue`, `--fork-session`) do not
+  carry `session.previous_id`; startup lineage, including the fork source, is
+  left to a follow-up.
 - Session event emission is best-effort through the existing OTel logger and
   does not block session switching or shutdown.

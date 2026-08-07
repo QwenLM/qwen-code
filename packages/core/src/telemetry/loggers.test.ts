@@ -34,6 +34,8 @@ import {
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
   EVENT_RIPGREP_RUNTIME_RECOVERY,
+  EVENT_SESSION_END,
+  EVENT_SESSION_START,
   EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_ENABLE,
   EVENT_EXTENSION_DISABLE,
@@ -47,6 +49,7 @@ import {
   logApiRequest,
   logApiResponse,
   logStartSession,
+  logSessionEnd,
   logUserPrompt,
   logToolCall,
   logFlashFallback,
@@ -342,6 +345,75 @@ describe('loggers', () => {
           output_format: 'json',
           skills: undefined,
           subagents: undefined,
+        },
+      });
+    });
+  });
+
+  describe('session lifecycle wiring', () => {
+    // Distinct session ids per case: emitSessionStart is idempotent per id,
+    // and the module-level guard persists across tests in this file.
+    it('logStartSession emits the standard session.start record with lineage', () => {
+      const mockConfig = {
+        getSessionId: () => 'lifecycle-start-session',
+        getModel: () => 'test-model',
+        getSandbox: () => true,
+        getCoreTools: () => ['ls', 'read-file'],
+        getApprovalMode: () => 'default',
+        getTruncateToolOutputThreshold: () => 25000,
+        getTruncateToolOutputLines: () => 1000,
+        getTelemetryEnabled: () => true,
+        getUsageStatisticsEnabled: () => true,
+        getTelemetryLogPromptsEnabled: () => true,
+        getFileFilteringRespectGitIgnore: () => true,
+        getFileFilteringAllowBuildArtifacts: () => false,
+        getDebugMode: () => true,
+        getMcpServers: () => ({
+          'test-server': {
+            command: 'test-command',
+          },
+        }),
+        getQuestion: () => 'test-question',
+        getTargetDir: () => 'target-dir',
+        getProxy: () => 'http://test.proxy.com:8080',
+        getOutputFormat: () => OutputFormat.JSON,
+        getToolRegistry: () => undefined,
+        getChatRecordingService: () => undefined,
+        getHookSystem: () => undefined,
+        getIdeMode: () => false,
+        getShouldUseNodePtyShell: () => true,
+      } as unknown as Config;
+
+      logStartSession(
+        mockConfig,
+        new StartSessionEvent(mockConfig),
+        'previous-session-id',
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session started.',
+        attributes: {
+          'event.name': EVENT_SESSION_START,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'lifecycle-start-session',
+          'session.previous_id': 'previous-session-id',
+        },
+      });
+    });
+
+    it('logSessionEnd emits the standard session.end record', () => {
+      const mockConfig = {
+        getSessionId: () => 'lifecycle-end-session',
+      } as unknown as Config;
+
+      logSessionEnd(mockConfig);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session ended.',
+        attributes: {
+          'event.name': EVENT_SESSION_END,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'lifecycle-end-session',
         },
       });
     });

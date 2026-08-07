@@ -67,10 +67,10 @@ vi.mock('./tracer.js', () => ({
 }));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
-import { setSessionContext } from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
 import { createSessionRootContext } from './tracer.js';
-import { emitSessionStart } from './session-events.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 
@@ -193,6 +193,7 @@ describe('Telemetry SDK', () => {
 
       expect(NodeSDK).toHaveBeenCalledTimes(1);
       expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
+      expect(emitSessionStart).not.toHaveBeenCalled();
     });
 
     it('emits the initial session start after deferred telemetry initialization', async () => {
@@ -252,6 +253,28 @@ describe('Telemetry SDK', () => {
       await shutdownTelemetry();
       expect(NodeSDK.prototype.shutdown).toHaveBeenCalledTimes(1);
       expect(isTelemetrySdkInitialized()).toBe(false);
+    });
+
+    it('ends the active session before the SDK shuts down', async () => {
+      vi.mocked(getCurrentSessionId).mockReturnValueOnce('active-session');
+      await initializeTelemetry(mockConfig);
+
+      await shutdownTelemetry();
+
+      expect(emitSessionEnd).toHaveBeenCalledWith('active-session');
+      expect(
+        vi.mocked(emitSessionEnd).mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(NodeSDK.prototype.shutdown).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('does not end a session at shutdown when no session context exists', async () => {
+      await initializeTelemetry(mockConfig);
+
+      await shutdownTelemetry();
+
+      expect(emitSessionEnd).not.toHaveBeenCalled();
     });
   });
 

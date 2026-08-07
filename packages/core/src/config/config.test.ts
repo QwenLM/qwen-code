@@ -34,6 +34,7 @@ import {
   shutdownTelemetry,
   refreshSessionContext,
   logStartSession,
+  logSessionEnd,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -328,6 +329,7 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
     ...actual,
     logRipgrepFallback: vi.fn(),
     logStartSession: vi.fn(actual.logStartSession),
+    logSessionEnd: vi.fn(actual.logSessionEnd),
   };
 });
 
@@ -2254,6 +2256,59 @@ describe('Server Config (config.ts)', () => {
         config,
         expect.anything(),
         undefined,
+      );
+    });
+
+    it('ends the outgoing session before starting a replacement without continuation', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      const endedSessionIds: string[] = [];
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+      vi.mocked(logSessionEnd).mockImplementationOnce((cfg: Config) => {
+        endedSessionIds.push(cfg.getSessionId());
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(endedSessionIds).toEqual([outgoingSessionId]);
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+      expect(vi.mocked(logSessionEnd).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(logStartSession).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('carries the outgoing session id when resuming a different persisted session', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession('resumed-session-id', {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        outgoingSessionId,
       );
     });
 

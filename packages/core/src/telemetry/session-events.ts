@@ -26,6 +26,7 @@ export function emitSessionStart(
 
   const attributes: LogAttributes = {
     'event.name': EVENT_SESSION_START,
+    'event.timestamp': new Date().toISOString(),
     'session.id': sessionId,
     ...(previousSessionId ? { 'session.previous_id': previousSessionId } : {}),
   };
@@ -45,6 +46,7 @@ export function emitSessionEnd(sessionId: string): void {
     body: 'Session ended.',
     attributes: {
       'event.name': EVENT_SESSION_END,
+      'event.timestamp': new Date().toISOString(),
       'session.id': sessionId,
     },
   });
