@@ -67,12 +67,15 @@ const MANIFEST_PREFIX = 'repository context manifest ';
 const SKIPPED_DIRECTORIES = new Set([
   '.git',
   '.next',
+  '.playwright',
   '.turbo',
   'coverage',
   'dist',
   'node_modules',
   'out',
+  'playwright-report',
   'target',
+  'test-results',
 ]);
 
 const MANIFEST_KEYS = ['label', 'rules', 'version'].sort();
