@@ -164,7 +164,10 @@ function readUsage(
 /**
  * An auditor's own brief line, exactly as `buildRoleLaunchPrompt` prints it.
  * A bare `reverse-audit--chunk-N--round-M--<hex>` path mentioned anywhere is
- * NOT this: folded findings quote other rounds' brief paths routinely.
+ * NOT this — quoted mentions must never be credited. The findings section
+ * cannot inject one: since #8597 it is a pointer to a `.findings.md` file,
+ * which this regex's `.brief.md` suffix cannot match, and the list itself no
+ * longer rides the launch prompt.
  */
 const AUDIT_BRIEF_RE =
   /read_file\(file_path="[^"]*reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f][^"]*\.brief\.md"\)/g;
@@ -172,13 +175,14 @@ const AUDIT_BRIEF_RE =
 /** A role label out of the launch prompt, else the fallback. */
 function labelOf(launch: string, fallback: string): string {
   // Every identity-based parse stays on the identity LINE, and nothing runs
-  // at all without one at the head. The folded findings below it can quote
-  // budget disclosures' "(round N)", other agents' `Your file:` lines, ledger
-  // rows, and `You are review agent` lines — a whole-launch match would hand
-  // the quoted label to the agent carrying the quote. A prompt with no
-  // identity line is an older harness's, or an agent this review never
-  // launched (the session's transcript dir also holds nested subagents): its
-  // free text can name anything, so keep the one label it owns — the file id.
+  // at all without one at the head. The text below it — the findings section,
+  // the builder's own prose — can quote budget disclosures' "(round N)",
+  // other agents' `Your file:` lines, ledger rows, and `You are review agent`
+  // lines — a whole-launch match would hand the quoted label to the agent
+  // carrying the quote. A prompt with no identity line is an older harness's,
+  // or an agent this review never launched (the session's transcript dir also
+  // holds nested subagents): its free text can name anything, so keep the one
+  // label it owns — the file id.
   const nl = launch.indexOf('\n');
   const identity = nl === -1 ? launch : launch.slice(0, nl);
   if (!identity.startsWith('You are review agent `')) return fallback;
@@ -186,8 +190,8 @@ function labelOf(launch: string, fallback: string): string {
   // finder; only its brief path carries the stage and the round — without
   // it, five audit rounds fold into one row and the ledger reports one agent
   // where six pipeline stages ran. Match the agent's OWN brief line, never a
-  // quoted mention: the folds sit ABOVE the agent's own brief line
-  // (foldFindings folds them there), so the last brief-shaped read_file in
+  // quoted mention: the findings section sits ABOVE the agent's own brief
+  // line (foldFindings puts it there), so the last brief-shaped read_file in
   // the launch is the agent's own.
   let auditChunk: RegExpExecArray | null = null;
   for (const m of launch.matchAll(AUDIT_BRIEF_RE)) auditChunk = m;
