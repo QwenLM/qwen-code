@@ -5,7 +5,6 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
-
 from qwen_code_sdk.errors import AbortError, ControlRequestTimeoutError
 from qwen_code_sdk.json_lines import parse_json_line
 from qwen_code_sdk.query import Query
