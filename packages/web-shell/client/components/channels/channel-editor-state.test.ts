@@ -34,6 +34,12 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       required: true,
       envResolvable: true,
     },
+    {
+      key: 'interactiveCards',
+      label: 'Interactive Cards',
+      kind: 'object',
+      properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
+    },
   ],
 };
 
@@ -46,6 +52,10 @@ function configuredInstance(): DaemonChannelInstanceSnapshot {
       senderPolicy: 'open',
       sessionScope: 'thread',
       model: 'qwen3-coder-plus',
+      interactiveCards: {
+        enabled: true,
+        statusCard: { enabled: true },
+      },
     },
     secrets: {
       clientSecret: { present: true, source: 'environment' },
@@ -96,6 +106,10 @@ describe('Channel editor state', () => {
         senderPolicy: 'open',
         sessionScope: 'thread',
         model: 'qwen3-coder-plus',
+        interactiveCards: {
+          enabled: true,
+          statusCard: { enabled: true },
+        },
       },
       secrets: {
         clientSecret: { operation: 'preserve' },
@@ -159,6 +173,86 @@ describe('Channel editor state', () => {
       clientSecret: 'required',
       senderPolicy: 'policy',
     });
+  });
+
+  it('keeps object fields out of the editor draft', () => {
+    const draft = createChannelEditorDraft(DINGTALK, configuredInstance());
+    expect(draft.values).not.toHaveProperty('interactiveCards');
+  });
+
+  it('ignores object fields during validation even when marked required', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'interactiveCards',
+          label: 'Interactive Cards',
+          kind: 'object',
+          required: true,
+        },
+      ] as unknown as DaemonChannelTypeDescriptor['fields'],
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'example';
+    draft.values.interactiveCards = '';
+
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+  });
+
+  it('rejects number values at or below the exclusive minimum', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'timeoutMs',
+          label: 'Timeout (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+        },
+      ],
+    };
+
+    const invalid = createChannelEditorDraft(descriptor);
+    invalid.name = 'example';
+    invalid.values.timeoutMs = '0';
+    expect(validateChannelEditorDraft(descriptor, invalid, [])).toEqual({
+      timeoutMs: 'outOfRange',
+    });
+
+    const valid = createChannelEditorDraft(descriptor);
+    valid.name = 'example';
+    valid.values.timeoutMs = '270000';
+    expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
+  });
+
+  it('treats a whitespace-only number draft as empty instead of invalid', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'timeoutMs',
+          label: 'Timeout (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+        },
+      ],
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'example';
+    draft.values.timeoutMs = '   ';
+
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+    expect(
+      buildChannelUpsertRequest(descriptor, draft, 'revision-1').config,
+    ).toEqual({ type: 'example', senderPolicy: 'pairing' });
   });
 
   it('rejects a non-numeric value for a number field', () => {
