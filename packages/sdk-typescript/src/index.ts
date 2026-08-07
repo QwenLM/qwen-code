@@ -312,6 +312,7 @@ export {
   type DaemonLiveSetupUpdate,
   type DaemonLiveState,
   type DaemonLiveStatus,
+  type DaemonSseConnectReason,
   type HeartbeatResult,
   type KnownDaemonEvent,
   type MCPServerConfigShape,
