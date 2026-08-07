@@ -22,6 +22,8 @@ import {
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
 
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
+
 const goalRecord = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
   goalId: 'g-1',
   revision: 1,
@@ -243,9 +245,13 @@ describe('goal reducer', () => {
     },
   );
 
-  it('resets the continuation turn budget when resuming an exhausted goal', () => {
+  it('preserves the cumulative turn count when resuming a limited goal', () => {
     const resumed = reduceGoalControl(
-      goalRecord({ status: 'usage_limited', revision: 4, turnCount: 50 }),
+      goalRecord({
+        status: 'usage_limited',
+        revision: 4,
+        turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
+      }),
       {
         request: {
           action: 'resume',
@@ -261,7 +267,7 @@ describe('goal reducer', () => {
     expect(resumed).toMatchObject({
       status: 'active',
       revision: 4,
-      turnCount: 0,
+      turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
       evidenceCursor: { recordId: 'r-100' },
     });
   });

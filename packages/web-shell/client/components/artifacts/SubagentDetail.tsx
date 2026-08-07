@@ -3,8 +3,6 @@ import {
   DaemonSessionProvider,
   useConnection,
   useWorkspace,
-  useWorkspaceActions,
-  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
@@ -139,13 +137,11 @@ function SubagentDetailContent({
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const connection = useConnection();
-  const workspaceActions = useWorkspaceActions();
   const messages = useMessages(t);
   const { artifacts } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
@@ -176,23 +172,15 @@ function SubagentDetailContent({
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
-    onArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    onArtifactsChange?.(sessionId, artifacts);
     return () => {
-      onArtifactsChange?.(sessionId, [], workspaceActions);
+      onArtifactsChange?.(sessionId, []);
     };
-  }, [artifacts, connection.sessionId, onArtifactsChange, workspaceActions]);
+  }, [artifacts, connection.sessionId, onArtifactsChange]);
 
   const handleRightPanelOpen = (request: TurnOutputOpenRequest) => {
-    if (request.kind === 'subagent') {
-      onRightPanelOpen?.({
-        ...request,
-        sourceSessionId: connection.sessionId,
-      });
-      return;
-    }
     onRightPanelOpen?.({
       ...request,
-      workspaceActions,
       sourceSessionId: connection.sessionId,
     });
   };
@@ -286,7 +274,6 @@ export function SubagentDetail({
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
 }) {
