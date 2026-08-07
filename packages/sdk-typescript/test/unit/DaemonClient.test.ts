@@ -7428,5 +7428,18 @@ describe('DaemonClient', () => {
         senderId: 'sender-1',
       });
     });
+
+    it('sends a group ID when revoking a group pairing approval', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { revoked: 'group-1', senderIds: [], groupIds: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.revokeWorkspaceChannelPairingApproval('bot', {
+        groupId: 'group-1',
+      });
+
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
+    });
   });
 });
