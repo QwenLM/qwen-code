@@ -113,7 +113,7 @@ describe('terminal-bench integration', () => {
     it(
       `should complete ${taskId} task with oracle agent`,
       async () => {
-        rig.setup(`terminal-bench-oracle-${taskId}`);
+        await rig.setup(`terminal-bench-oracle-${taskId}`);
 
         const outputPath = join(outputBase, `oracle-${taskId}`);
 
@@ -213,7 +213,7 @@ describe('terminal-bench integration', () => {
     it(
       `should complete ${taskId} task with qwen-code agent`,
       async () => {
-        rig.setup(`terminal-bench-qwen-${taskId}`);
+        await rig.setup(`terminal-bench-qwen-${taskId}`);
 
         const outputPath = join(outputBase, `qwen-${taskId}`);
 

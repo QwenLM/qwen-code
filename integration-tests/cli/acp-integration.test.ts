@@ -308,7 +308,7 @@ function setupAcpTest(
 (IS_SANDBOX ? describe.skip : describe)('acp integration', () => {
   it('basic smoke test', async () => {
     const rig = new TestRig();
-    rig.setup('acp load session');
+    await rig.setup('acp load session');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -348,7 +348,7 @@ function setupAcpTest(
 
   it('initializes and allows setting mode', async () => {
     const rig = new TestRig();
-    rig.setup('acp mode and model');
+    await rig.setup('acp mode and model');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -412,7 +412,7 @@ function setupAcpTest(
 
   it('returns internal error details when model auth is required', async () => {
     const rig = new TestRig();
-    rig.setup('acp auth methods in error data', {
+    await rig.setup('acp auth methods in error data', {
       settings: {
         modelProviders: {
           openai: [
@@ -488,7 +488,7 @@ function setupAcpTest(
     // below). A registry model configured via `modelProviders` is always
     // enumerated and switchable without inference, making this test
     // deterministic regardless of how the ambient openai credentials resolve.
-    rig.setup('acp set config option', {
+    await rig.setup('acp set config option', {
       settings: {
         modelProviders: {
           openai: [
@@ -602,7 +602,7 @@ function setupAcpTest(
 
   it('returns error for invalid configId in set_config_option', async () => {
     const rig = new TestRig();
-    rig.setup('acp set config option error');
+    await rig.setup('acp set config option error');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -649,7 +649,7 @@ function setupAcpTest(
 
   it('receives available_commands_update with slash commands after session creation', async () => {
     const rig = new TestRig();
-    rig.setup('acp slash commands');
+    await rig.setup('acp slash commands');
 
     const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
 
@@ -709,7 +709,7 @@ function setupAcpTest(
 
   it('handles exit plan mode with permission request and mode update notification', async () => {
     const rig = new TestRig();
-    rig.setup('acp exit plan mode');
+    await rig.setup('acp exit plan mode');
 
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
@@ -825,7 +825,7 @@ function setupAcpTest(
 
   it('blocks write tools in plan mode (issue #1806)', async () => {
     const rig = new TestRig();
-    rig.setup('acp plan mode enforcement');
+    await rig.setup('acp plan mode enforcement');
 
     const toolCallEvents: Array<{
       toolName: string;
@@ -926,7 +926,7 @@ function setupAcpTest(
 
   it('receives usage metadata in agent_message_chunk updates', async () => {
     const rig = new TestRig();
-    rig.setup('acp usage metadata');
+    await rig.setup('acp usage metadata');
 
     const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
 
@@ -978,7 +978,7 @@ function setupAcpTest(
   () => {
     it('should work with deprecated --experimental-acp flag and show warning', async () => {
       const rig = new TestRig();
-      rig.setup('acp backward compatibility');
+      await rig.setup('acp backward compatibility');
 
       const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
         useNewFlag: false,
@@ -1024,7 +1024,7 @@ function setupAcpTest(
 
     it('should work with new --acp flag without warnings', async () => {
       const rig = new TestRig();
-      rig.setup('acp new flag');
+      await rig.setup('acp new flag');
 
       const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
         useNewFlag: true,
