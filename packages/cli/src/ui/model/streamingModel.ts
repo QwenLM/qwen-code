@@ -15,6 +15,7 @@
  */
 
 export type StreamEvent =
+  | { type: 'user'; text: string }
   | { type: 'thinking'; delta: string }
   | { type: 'thinking-end' }
   | { type: 'text'; delta: string }
@@ -33,6 +34,7 @@ export type StreamEvent =
   | { type: 'done' };
 
 export type HistoryItem =
+  | { kind: 'user'; id: string; text: string }
   | { kind: 'thinking'; id: string; text: string; done: boolean }
   | { kind: 'assistant'; id: string; text: string; streaming: boolean }
   | {
@@ -99,6 +101,11 @@ export function reduceStreamEvent(
   };
 
   switch (event.type) {
+    case 'user': {
+      closeTrailingAssistant();
+      items.push({ kind: 'user', id: `user-${nextSeq++}`, text: event.text });
+      break;
+    }
     case 'thinking': {
       if (last?.kind === 'thinking' && !last.done) {
         items[items.length - 1] = { ...last, text: last.text + event.delta };
