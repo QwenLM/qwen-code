@@ -9814,6 +9814,7 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
+                  CustomFooter ? styles.chatViewWithCustomFooter : undefined,
                   activePanel || mainView !== 'chat'
                     ? styles.chatViewHidden
                     : undefined,

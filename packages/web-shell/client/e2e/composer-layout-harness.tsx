@@ -8,6 +8,7 @@ const { WebShellWithProviders } = await import(/* @vite-ignore */ indexEntry);
 const params = new URLSearchParams(window.location.search);
 const emptyMobileWelcome = params.get('emptyMobileWelcome') === 'true';
 const includeWelcomeFooter = params.get('welcomeFooter') !== 'false';
+const includeCustomFooter = params.get('customFooter') === 'true';
 const sessionId = params.get('sessionId') ?? 'composer-layout-e2e';
 const tags = Array.from({ length: 18 }, (_, index) => ({
   id: `table-${index + 1}`,
@@ -25,6 +26,14 @@ const sessionProps = emptyMobileWelcome
             renderWelcomeFooter: () => (
               <div data-e2e-mobile-welcome-footer>Welcome footer</div>
             ),
+          }
+        : {}),
+      ...(includeCustomFooter
+        ? {
+            renderFooter: () => <div data-e2e-custom-footer>Custom footer</div>,
+            bottomStatusItems: [
+              { id: 'composer-layout-status', label: 'Bottom status item' },
+            ],
           }
         : {}),
     }
