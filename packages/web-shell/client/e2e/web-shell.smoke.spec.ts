@@ -101,6 +101,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
   let uploadUrl = '';
   let uploadHeaders: Record<string, string> = {};
   let uploadBody: Buffer | null = null;
+  let rejectUpload = false;
   await page.route(
     '**/workspace/extensions/install-archive?*',
     async (route) => {
@@ -109,8 +110,12 @@ test('uploads an Extension archive from the manager @smoke', async ({
       uploadBody = route.request().postDataBuffer();
       await route.fulfill({
         contentType: 'application/json',
-        status: 202,
-        body: JSON.stringify({ accepted: true, operationId: 'op-upload' }),
+        status: rejectUpload ? 400 : 202,
+        body: JSON.stringify(
+          rejectUpload
+            ? { error: 'Archive rejected for test' }
+            : { accepted: true, operationId: 'op-upload' },
+        ),
       });
     },
   );
@@ -202,6 +207,20 @@ test('uploads an Extension archive from the manager @smoke', async ({
   await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
 
   await archiveInput.setInputFiles({
+    name: `${'a'.repeat(251)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'exact.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
     name: 'large.zip',
     mimeType: 'application/zip',
     buffer: Buffer.alloc(10 * 1024 * 1024 + 1),
@@ -225,6 +244,16 @@ test('uploads an Extension archive from the manager @smoke', async ({
     buffer: Buffer.from('archive-content'),
   });
   await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  rejectUpload = true;
+  await page.getByRole('button', { name: 'Install' }).click();
+  await expect(page.getByText('Archive rejected for test')).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toBeVisible();
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  rejectUpload = false;
   await page.getByRole('button', { name: 'Install' }).click();
 
   await expect

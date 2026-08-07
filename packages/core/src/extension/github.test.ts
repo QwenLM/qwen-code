@@ -488,6 +488,8 @@ describe('git extension helpers', () => {
           path.join(os.tmpdir(), 'uploaded-archive-update-test-'),
         );
         const source = `upload:v1:${randomBytes(8).toString('hex')}:extension.zip`;
+        const previousCwd = process.cwd();
+        process.chdir(tempDir);
         try {
           const archive = await createZipBuffer(tempDir, [
             {
@@ -514,6 +516,7 @@ describe('git extension helpers', () => {
           expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
         } finally {
           await fs.rm(source, { force: true });
+          process.chdir(previousCwd);
           await fs.rm(tempDir, { recursive: true, force: true });
         }
       },

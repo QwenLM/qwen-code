@@ -858,7 +858,7 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.installExtensionArchive(params, clientId),
         'Install extension timed out',
-        EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
+        EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS + 10_000,
       );
     },
 

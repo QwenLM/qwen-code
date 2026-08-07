@@ -317,6 +317,25 @@ describe('extension tests', () => {
       );
       expect(metadata?.source).toBe('upload:uploaded.zip');
       await manager.disposePreparedExtension(prepared);
+      expect(fs.existsSync(archivePath)).toBe(true);
+    });
+
+    it('rejects a local source path for non-local installs', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      const manager = createExtensionManager();
+
+      await expect(
+        manager.prepareExtensionInstall({
+          installMetadata: {
+            type: 'git',
+            source: 'https://example.com/extension.git',
+          },
+          localSourcePath: archivePath,
+          initialActivation: { scope: 'user' },
+          requestConsent: async () => {},
+        }),
+      ).rejects.toThrow('A local source path requires a local install.');
     });
 
     it('signals the durable commit before runtime refresh completes', async () => {

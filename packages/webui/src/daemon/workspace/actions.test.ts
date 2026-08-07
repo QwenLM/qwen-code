@@ -55,7 +55,7 @@ describe('workspace actions', () => {
     expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
   });
 
-  it('allows archive uploads to run for two minutes', async () => {
+  it('allows the SDK archive timeout to run before the wrapper timeout', async () => {
     vi.useFakeTimers();
     const installExtensionArchive = vi.fn(() => new Promise<never>(() => {}));
     const actions = createDaemonWorkspaceActions({
@@ -74,10 +74,10 @@ describe('workspace actions', () => {
         (error: unknown) => error,
       );
 
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(130_000);
 
     await expect(result).resolves.toMatchObject({
-      message: 'Install extension timed out after 120000ms',
+      message: 'Install extension timed out after 130000ms',
     });
   });
 
