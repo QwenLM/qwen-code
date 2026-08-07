@@ -67,7 +67,8 @@ export async function openUrlInBuiltInBrowser(
 
   if (isChannelAvailable && !isChannelAvailable(RPC_CHANNELS.browserPane.CREATE)) {
     console.info(
-      '[openUrlInBuiltInBrowser] Browser pane channel unavailable, falling back to default browser',
+      '[openUrlInBuiltInBrowser] Browser pane channel unavailable, falling back to default browser:',
+      trimmedUrl,
     )
     openExternal(externalUrl)
     return
@@ -84,6 +85,7 @@ export async function openUrlInBuiltInBrowser(
   } catch (error) {
     console.warn(
       '[openUrlInBuiltInBrowser] Failed to open URL in built-in browser, falling back to default browser:',
+      trimmedUrl,
       error,
     )
     openExternal(externalUrl)

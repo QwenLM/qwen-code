@@ -606,6 +606,15 @@ describe('BrowserPaneManager', () => {
     )
   })
 
+  it('navigate searches free text with lone surrogates using replacement characters', async () => {
+    manager.createInstance('nav-surrogate')
+    await manager.navigate('nav-surrogate', 'search \ud800 term')
+    const instance = (manager as any).instances.get('nav-surrogate')
+    expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith(
+      'https://duckduckgo.com/?q=search%20%EF%BF%BD%20term'
+    )
+  })
+
   it('emits loading state immediately when navigation starts', async () => {
     const states: any[] = []
     manager.onStateChange((info) => states.push(info))

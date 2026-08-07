@@ -154,7 +154,8 @@ describe('openUrlInBuiltInBrowser', () => {
 
     expect(isChannelAvailable).toHaveBeenCalledWith('browser-pane:create')
     expect(infoSpy).toHaveBeenCalledWith(
-      '[openUrlInBuiltInBrowser] Browser pane channel unavailable, falling back to default browser',
+      '[openUrlInBuiltInBrowser] Browser pane channel unavailable, falling back to default browser:',
+      '127.0.0.1:3000/docs',
     )
     expect(openExternal).toHaveBeenCalledTimes(1)
     expect(openExternal).toHaveBeenCalledWith('https://127.0.0.1:3000/docs')
@@ -204,6 +205,7 @@ describe('openUrlInBuiltInBrowser', () => {
       create: mock(() => Promise.reject(new Error('no handler for browser-pane:create'))),
     } as Partial<BrowserPaneApi>)
     const openExternal = mock(() => {})
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
 
     await openUrlInBuiltInBrowser('localhost:3000/docs', {
       browserPaneApi,
@@ -211,9 +213,15 @@ describe('openUrlInBuiltInBrowser', () => {
       openExternal,
     })
 
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[openUrlInBuiltInBrowser] Failed to open URL in built-in browser, falling back to default browser:',
+      'localhost:3000/docs',
+      expect.any(Error),
+    )
     expect(openExternal).toHaveBeenCalledTimes(1)
     expect(openExternal).toHaveBeenCalledWith('https://localhost:3000/docs')
     expect(browserPaneApi.hide).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
   })
 
   it('falls back without hiding a reused pane when navigation fails after create', async () => {

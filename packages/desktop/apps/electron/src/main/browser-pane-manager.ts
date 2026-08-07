@@ -766,7 +766,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
           normalizedUrl = `https://duckduckgo.com/?q=${encodeURIComponent(host)}`
         }
       } else {
-        normalizedUrl = `https://duckduckgo.com/?q=${encodeURIComponent(normalizedUrl)}`
+        normalizedUrl = `https://duckduckgo.com/?q=${encodeURIComponent(normalizedUrl.toWellFormed())}`
       }
     }
 
