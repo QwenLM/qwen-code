@@ -2,10 +2,12 @@
 
 ## 状态
 
-针对 [#8321](https://github.com/QwenLM/qwen-code/issues/8321) 的实现方案。
+针对 [#8321](https://github.com/QwenLM/qwen-code/issues/8321) 的实现方案。初始实现由
+`48d1e1d69` 落地，review 修正由 `afb55ebae` 补齐 admission、恢复和资源边界。
 
 该功能只补齐 Web Shell composer 的图片拖放入口，并复用现有图片粘贴、
-附件预览、prompt 提交和多模态模型链路。daemon、SDK、ACP 和 Core 协议均不变。
+附件预览、prompt 提交和多模态模型链路。daemon wire format、ACP、Core 和公开
+Web Shell API 均不变；内部 WebUI action contract 增加 admission 边界和确认删除结果。
 
 ## 问题与现状
 
@@ -48,8 +50,9 @@ prompt；本方案把这一点作为拖放可用性的必要修复，而不是�
 - 不改变模型是否支持图片输入的判断；拖放与现有粘贴遵循相同的模型行为。
 - 不承诺从 daemon 的 text-only pending summary 跨页面重载恢复图片；summary-only prompt
   保持可执行/可删除，但不能编辑为一个缺少原附件的 payload。
-- 不在本功能中新增图片数量、单图大小或总大小策略。composer 接受图片不代表 daemon
-  已接纳 prompt；超出既有 encoded JSON 请求上限时，沿用现有发送失败与重试提示。
+- 不复制 daemon、代理或 Core 的 production 限制作为客户端 admission 策略。composer
+  仅使用固定的并发和 encoded-data 预算保护浏览器资源；读取成功仍不代表 daemon 已接纳
+  prompt，超出服务端请求上限时继续沿用既有发送失败与重试提示。
 - 不让浏览器根据扩展名覆盖一个明确但不受支持的 MIME 类型。
 
 ## 架构与所有权
@@ -130,19 +133,24 @@ interface ImageIngestionBatchResult {
   accepted: PromptImage[];
   rejected: Array<{
     name?: string;
-    reason: 'unsupported' | 'unavailable' | 'read-failed';
+    reason: 'unsupported' | 'unavailable' | 'too-large' | 'read-failed';
   }>;
 }
 ```
 
-`useComposerCore` 使用 generation-scoped promise queue 串行处理批次，批次内部并行读取
-文件，并在全部 reader settled 后一次性追加成功结果：
+`useComposerCore` 使用 generation-scoped promise queue 串行处理批次。每批先按 base64
+encoded-data 估算筛选候选文件，再由最多四个 worker 并行读取，并在全部 reader settled
+后一次性追加成功结果：
 
-- `Promise.allSettled` 的结果索引保持批次内文件顺序；
+- helper 默认给单次调用 `8 * 1024 * 1024` bytes 的 base64 预算；`useComposerCore` 用该
+  预算减去已有附件的 `data.length`，候选文件按 `ceil(file.size / 3) * 4` 预估，超过剩余
+  预算的文件以 `too-large` 拒绝且不创建 `FileReader`；
+- 同时活动的 `FileReader` 不超过四个，worker 把结果写回候选文件的原始索引，因此完成
+  顺序不改变附件顺序；
 - promise queue 保持批次到达顺序；
 - 某个文件失败不阻止同批其他文件；
-- `useComposerCore` 作为唯一提示所有者，把不支持和读取失败分别聚合为每批最多一条
-  warning/error toast；
+- `useComposerCore` 作为唯一提示所有者，把不支持、超预算和读取失败分别聚合为 warning、
+  warning 和 error，每类每批最多一条 toast；
 - queue 的 rejection 在内部消化，不能让一次失败阻断后续批次。
 
 `imageIngestionLaneRef.current.pendingBatches` 是唯一同步权威，不再维护第二个 pending
@@ -227,11 +235,13 @@ correlation id，属于本功能禁止的协议变更。
 1. 先校验 captured owner token、payload 是 complete 且 editor handle 存在；不满足时不
    修改状态、也不记录 key；
 2. 过滤已经恢复的 key；把非空文字按 queue order 连接为一个 block，再只调用一次
-   `mergeRestoredPromptText(current, block)`，没有非空文字时跳过文字 merge；图片按同一
-   queue order 展平。即使文字为空或合并后不变，未恢复 prompt 的图片仍追加一次；
-3. 文字和图片都同步写入成功后才记录对应 key，再恢复焦点；同一 owner 内重复的 abort
-   catch 或 refresh callback 因相同 key 成为 no-op；
-4. 批量恢复只适用于明确拒绝或已确认从 server 删除的 complete prompt；一次完成上述
+   `mergeRestoredPromptText(current, block)`，没有非空文字时跳过文字 merge；
+3. 图片按同一 queue order 展平；`inputAnnotations` 按合并后文字位置平移，再通过 editor
+   handle 恢复。已有 annotation 在新 block 前插时同步平移，普通编辑发生在范围之前时映射
+   offset，编辑与范围重叠时删除 annotation，避免提交 stale metadata；
+4. 文字、图片和 annotations 都同步写入成功后才记录对应 key，再恢复焦点；同一 owner 内
+   重复的 abort catch 或 refresh callback 因相同 key 成为 no-op；
+5. 批量恢复只适用于明确拒绝或已确认从 server 删除的 complete prompt；一次完成上述
    合并，保证 `[A, B]` 得到 `A\nB` 和 `[A-images, B-images]`，不能逐项正序调用前插 helper。
 
 `popQueuedPromptForEdit` 相应改为返回 `QueuedPrompt | null`，调用方只判断 `null`，不能用
@@ -252,14 +262,19 @@ response，先按 `promptId` 缓存在 captured owner；response 精确绑定 lo
 不能用空 text 猜测多个 image prompt 的归属。main、split 和 side-task 因而都会即时显示
 一次含图 user block。
 
-started buffer 是 `QueuedPromptOwner` 内按插入顺序维护、最多 200 项的 map，与现有
-pending sidechannel 容量一致。它必须在成功绑定并 flush、对应
-`pending_prompt_completed`/`turn_complete`/`turn_error`、一次成功 refresh 确认 prompt 已不在
-pending 集合、或 owner 替换时删除。admission 进入 outcome unknown 时，所有尚未精确绑定
-且无法证明属于其他 attempt 的 started 项立即失去 flush 资格并删除；后续收到成功 response
-的其他 attempt 通过 exact prompt id 和 refresh 的 queued/running 状态继续处理，不能复活
-被删除的模糊事件。这样 202 永久丢失后即使 terminal 晚到，也不追加未经证明的 user block，
-buffer 最终为空且不会长期持有 event/payload 引用。
+response 前的生命周期证据在 `QueuedPromptOwner` 内按 prompt id 保存，并限制为最多 200
+项。一个 attempt 进入 outcome unknown 不得清除其他 attempt 的 started 证据；refresh 也
+不能因为 terminal 已让 prompt 离开 pending list，就过早删除仍在等待 response 精确绑定的
+证据。实现分别保留 started、已经 append、settled 和 removed 状态：
+
+- started/terminal 都早于 response 时，response 绑定 local payload 后只 append 一次；文本
+  prompt 即使 started 时已经 append，也不会在 terminal 或 response 后重复追加；
+- queued prompt 被删除时，bridge 会发送 `pending_prompt_completed{removed}`，随后发送
+  `turn_complete{stopReason:'cancelled'}`。若没有 started 证据，该 prompt 从未 dispatch，
+  response 到达后直接移除本地 row，不追加 user block；
+- started 后被取消仍保留已执行过的本地 user block；turn error 和普通 completion 在 response
+  到达后按 exact prompt id flush；
+- exact response 消费对应证据，owner 替换清空 owner 状态，超过容量时按插入顺序淘汰。
 
 ```mermaid
 flowchart TD
@@ -267,15 +282,17 @@ flowchart TD
   REQUEST --> OUTCOME{"admission 结果"}
   OUTCOME -->|"明确 pre-admission 拒绝"| RESTORE["幂等恢复完整 payload"]
   OUTCOME -->|"transport outcome unknown"| UNKNOWN["保留 unknown row<br/>禁止自动恢复或重试"]
-  UNKNOWN --> DROP_BUFFER["删除无法精确归属的 started buffer"]
-  DROP_BUFFER --> REFRESH
+  UNKNOWN --> REFRESH["刷新 daemon pending summary<br/>不破坏其他 attempt 证据"]
   OUTCOME -->|"收到 prompt id"| RESPONSE{"response 返回时<br/>owner 仍相同?"}
   RESPONSE -->|"否"| STALE["丢弃旧 callback"]
   RESPONSE -->|"是"| BIND["按 local id 绑定 server prompt id"]
   STARTED["pending_prompt_started"] --> KNOWN{"已精确绑定本地 payload?"}
   KNOWN -->|"是"| ECHO["追加一次 text-or-images user block"]
   KNOWN -->|"尚未"| BUFFER["按 prompt id 暂存到当前 owner"]
-  BIND --> FLUSH{"存在暂存 started event?"}
+  TERMINAL["turn_complete / turn_error / removed"] --> EVIDENCE["按 prompt id 保留<br/>settled / removed 证据"]
+  BIND --> FLUSH{"存在 started / appended /<br/>settled / removed 证据?"}
+  BUFFER --> FLUSH
+  EVIDENCE --> FLUSH
   FLUSH -->|"是"| ECHO
   FLUSH -->|"否"| QUEUED["保持精确绑定的 queued row"]
   REFRESH["daemon pending summary"] --> LOCAL_PENDING{"仍在等待 admission response?"}
@@ -291,16 +308,25 @@ App 的 direct submit、`onSubmitBefore` queued submit 和普通 queued submit �
 
 main App 的 post-admission turn-error retry 同样采用 text-or-images 内容谓词：retry hint 和
 `handleRetry` 都在 `lastSubmittedPromptRef` 非空或 `lastSubmittedImagesRef` 非空时允许重试，
-并继续以 `optimisticUserMessage: false` 重发保存的原 MIME/base64。owner 变化时两份 last
-submitted payload 与 retryable error 一起失效，避免把旧 session 图片重发到新 session。
+并继续以 `optimisticUserMessage: false` 重发保存的原 MIME/base64 和 input annotations。
+owner 变化时完整 last-submitted payload 与 retryable error 一起失效，避免把旧 session
+payload 重发到新 session。
 这与前述 pre-admission `413` failed-prompt retry 是两条不同路径，两者都要覆盖。
 上述 definite/unknown 分类同样约束 main App 与 `ChatPane` 的 admission catch：只有明确
 pre-admission 拒绝才进入 failed-prompt retry；transport outcome unknown 时 optimistic
-message 标成未知、不可一键重试，并等待 transcript/queue 刷新。`turn_error` 则已经证明
-admission 成功，所以仍可安全使用本段的 post-admission retry。
+message 标成未知、不可一键重试，并等待 transcript/queue 刷新。post-turn retry 若在
+`onAdmitted` 前丢失 response，也建立保存完整 payload 的相同 unknown 状态；`turn_error`
+已经证明 admission 成功，所以 `onAdmitted` 之后的 reject 只按 turn error 处理。
 
 两个 direct consumer 与 queue 共用一个仅内部的 definitely-rejected/outcome-unknown
-分类 helper，但各自保存 owner-scoped 状态，不增加 transcript store 或公开 Web Shell API：
+分类 helper，但各自保存 owner-scoped 状态，不增加 transcript store 或公开 Web Shell API。
+当前 definitely-rejected allowlist 只有结构化 `413` 和 endpoint 不支持的 `501`；
+`400`、`408`、`429`、`499`、5xx 和 transport/parse error 都按 unknown 处理。
+
+WebUI action 在本地 active-prompt guard 和 payload 组装完成后、调用 daemon
+`submitPrompt` 前触发内部 `onAdmissionStarted`。consumer 只有收到该边界后才把非明确拒绝
+视为 outcome unknown；本地 guard rejection 仍是普通错误。action 收到 admission 后先触发
+`onAdmitted`，随后 turn completion 的 reject 不得回退为 admission unknown：
 
 - attempt 捕获 owner token、session id、完整 payload、composer commit callback；App 继续
   用发送前后 transcript snapshot 得到 optimistic user `messageId`；
@@ -328,7 +354,8 @@ user block”。`ChatPane` 只有在 `trimmed.length > 0` 时才设置
 transcript 中 `block.kind === 'user' && block.text.trim().length > 0` 判断是否已经存在可命名
 prompt；仅有 image-only user block 的新建或恢复 session 仍保留命名资格。这样首次
 image-only admission 不会用空标题消耗资格，随后第一条非空文字仍只触发一次既有 rename
-重试流程。
+重试流程。direct、ordinary queued 和 mid-turn insertion 都在各自精确 admission 成功时调用
+同一个 once-only callback。
 
 ### Generation 与清理
 
@@ -431,6 +458,7 @@ generation lane 替换和组件卸载。全局监听器只在 active 期间安�
 | 混合支持/不支持文件          | 按原顺序添加支持的图片，并聚合提示跳过数量                      |
 | `getAsFile()` 返回 `null`    | 记为 unavailable；同批其他文件继续                              |
 | `FileReader` error/空结果    | 不添加该文件；当前 lane 下聚合 read-failed error                |
+| 超过客户端 encoded-data 预算 | 不创建 reader；跳过该文件并聚合 too-large warning               |
 | generation reset 触发 abort  | 静默 settle，不更新旧 lane 的附件、pending 或 toast             |
 | 图片仍在读取时提交           | 同步拒绝提交，保持文字和附件，等待后由用户再次发送              |
 | 读取中切换 session/workspace | abort 并丢弃旧 generation，不提示新会话                         |
@@ -443,18 +471,21 @@ helper 只返回结构化 accepted/rejected；toast 只能由当前 lane 的 `us
 
 ### 既有大小边界
 
-这里存在两个独立且计量对象不同的现有上限：
+这里存在三个独立且计量对象不同的边界：
 
+- Web Shell 在每次 paste/drop ingestion 中以 `8 MiB` base64 data 预算减去当前已有附件，
+  限制本批可读候选，属于固定的浏览器资源保护，不是 daemon admission 阈值；
 - `qwen serve` 的 `express.json({ limit: '10mb' })` 限制整个已经 base64 编码并包含 JSON
   envelope 的 HTTP 请求体；超过后在路由前返回结构化 `413`。
 - Core 的 `DEFAULT_MAX_INLINE_MEDIA_BYTES = 10 * 1024 * 1024` 限制单个
   `inlineData` 的估算 decoded bytes，只有请求先通过 daemon parser 后才生效，且可由
   daemon 环境配置覆盖。
 
-base64 通常比原始文件大约增加三分之一，因此不存在“10 MiB 原图一定可通过 Web
-Shell 发送”的契约。composer 不复制一个可能被 daemon 配置或部署代理改变的阈值，
-也不把本地读取成功显示成 admission 成功。HTTP `413` 走现有 prompt send-failure
-路径。主 App 的 active-session 路径保持现有 optimistic clear：失败的 user message
+base64 通常比原始文件大约增加三分之一，因此不存在“某个固定大小的原图一定可通过 Web
+Shell 发送”的契约。composer 的 `8 MiB` 是独立的客户端资源预算，不复制可能被 daemon
+配置或部署代理改变的阈值，也不把本地读取成功显示成 admission 成功。HTTP `413` 走现有
+prompt send-failure 路径。主 App 的 active-session 路径保持现有 optimistic clear：失败的
+user message
 保存原始文字和图片副本并提供同 payload retry，但原 composer 不承诺原位保留或编辑；
 用户需要重新创建较小的 prompt。`ChatPane` 继续只在 `onAdmitted` 后调用 composer
 commit，因此该消费端在 pre-admission `413` 时保留原 composer。两条路径都必须按各自
@@ -464,7 +495,8 @@ commit，因此该消费端在 pre-admission `413` 时保留原 composer。两�
 `Buffer.byteLength(body)` 分别为 `10 MiB - 1`、`10 MiB`、`10 MiB + 1` 的 JSON body，
 前两者进入路由、后者返回 `413`；Core 测试构造估算 decoded bytes 为
 `limit - 1`、`limit`、`limit + 1` 的 base64，前两者保留 `inlineData`、后者替换为
-oversized placeholder。它们验证现有契约，不向 Web Shell 暴露新阈值。
+oversized placeholder。它们验证既有服务端契约；Web Shell helper 测试单独验证四路并发、
+候选顺序和 encoded-data 剩余预算。
 
 BMP 以 `image/bmp` 进入缩略图 data URL 和 daemon image block。Core 的
 `SUPPORTED_IMAGE_MIME_TYPES` 明确包含 `image/bmp`，`ImageTokenizer` 解析 BMP 尺寸，
@@ -496,6 +528,8 @@ Web Shell 输入层静默改变格式。
 - 五种规范 MIME、BMP 两种别名、空 MIME/`application/octet-stream` 扩展名回退。
 - 明确的非图片 MIME、SVG、TIFF、目录和 `getAsFile() === null`。
 - 多文件读取乱序完成、部分失败和空 reader 结果仍输出有序成功项和正确计数。
+- 同时活动的 reader 不超过四个；超过 encoded-data 剩余预算的文件不创建 reader，并返回
+  `too-large`。
 - `load`、`error`、`abort` 竞态只 settle 一次；helper 只返回结构化结果且从不发 toast。
 
 ### Hook 与 DOM 测试
@@ -522,8 +556,9 @@ Web Shell 输入层静默改变格式。
 - 同一 mounted owner 内，image-only queued prompt 在明确 admission 拒绝或确认删除后的
   edit/restore 中恢复原始图片恰好一次；文字为空或已经位于 editor 顶部时也不抑制首次
   图片恢复。批量恢复 `[A, B]` 具体断言文字为 `A\nB`、图片为
-  `[A-images, B-images]`；owner 不匹配或 editor 尚未就绪时不写入、也不提前消费
-  恢复 id，`popQueuedPromptForEdit` 不把空 text 当成未找到。
+  `[A-images, B-images]`，annotations 按文字 offset 合并；范围前编辑会平移 annotation，
+  范围内编辑会删除它。owner 不匹配或 editor 尚未就绪时不写入、也不提前消费恢复 id，
+  `popQueuedPromptForEdit` 不把空 text 当成未找到。
 - 模拟 daemon 已接纳但 202 response 丢失：queued、main App 和 `ChatPane` 都标记
   outcome unknown，不自动恢复/重试、不生成第二次请求。App 显示独立的持久 unknown
   警告而不显示 retry；`ChatPane` 的按钮、Enter、imperative submit、编辑和附件删除
@@ -537,10 +572,14 @@ Web Shell 输入层静默改变格式。
   不做未经证明的合并。
 - complete image-only row 绑定后再 refresh/started/edit/retry，canonical text 始终是 `''`；
   daemon 的 `[image]` 只能成为 summary-only 展示文案，不能覆盖本地 payload。
-- started 先到且 202 永久丢失时，分别覆盖随后收到 `pending_prompt_completed`、
-  `turn_complete`、`turn_error`，以及成功 refresh 确认 prompt 已不在 pending 的路径；均不
-  追加未经证明的 user block 且 buffer 清空。outcome unknown、owner 替换和超过 200 项也
-  清理/淘汰，其他已精确绑定 attempt 仍能正常 flush。
+- started、terminal 和 response 的乱序同时覆盖 image-only 与 text prompt：已执行 prompt
+  恰好 append 一次。真实 `pending_prompt_completed{removed}` → cancelled terminal 且没有
+  started 的 queued prompt 不 append；started 后取消仍保留已经显示的 user block。
+- 一个 attempt outcome unknown 不清除另一个 attempt 的 started 证据；exact response、owner
+  替换和超过 200 项分别消费、清空或淘汰关联状态。
+- action 的 `onAdmissionStarted` 只在本地 guard 通过后触发；`onAdmitted` 后的 turn error 不
+  建立 unknown。clear abort 后若 server removal 确认成功，返回 `removedAfterAbort` 并删除
+  local row；remove 失败或结果不明确才保留 unknown。
 - reload 后只有 daemon summary 的 prompt 标为 summary-only：仍可执行或删除，但 edit 被
   禁用并显示附件无法恢复的说明；不得承诺或测试跨重载恢复原图。非空 text 加图片的
   summary 同样不能被误当成完整 payload。
@@ -608,6 +647,11 @@ Playwright CI 当前只安装 Chromium，因此 issue 中报告的 Linux Firefox
 `npm run build` 和 `npm run test:e2e:smoke`。设计文档本身使用 Prettier check 和
 `git diff --check` 验证格式。
 
+`afb55ebae` 的 review 修正验证包括 Web Shell 7 个聚焦文件 530 tests、WebUI 2 个聚焦文件
+237 tests、两包 lint、相关文件 Prettier、全仓 `npm run build && npm run typecheck` 和
+`git diff --check`。该修正没有改变浏览器 drag/drop DOM 路径，因此没有重复运行原功能的
+browser smoke。
+
 ## 验收标准
 
 - PNG、JPEG、GIF、WebP、BMP 可通过 paste 或文件 drop 成为同一种 composer 附件。
@@ -627,6 +671,8 @@ Playwright CI 当前只安装 Chromium，因此 issue 中报告的 Linux Firefox
   side-task 的首次自动命名资格留给第一条 admission 成功的非空文本。
 - image-only 的 post-admission turn error 可以重试原图片且不复制 optimistic user message。
 - 多图、多批次、部分失败时，成功附件始终保持用户选择顺序。
+- 图片读取最多使用四个并发 reader；paste/drop ingestion 按已有附件计算剩余预算，不接纳
+  会使估算 base64 data 超过 `8 MiB` 的新候选。该预算不宣称等于 daemon admission 限制。
 - 图片读取期间无法发送不完整 prompt；读取完成后用户可以正常发送或删除附件。
 - 当前 ingestion lane 的 `pendingBatches` 是唯一同步提交门禁，渲染 state 只做镜像。
 - 清空、切换 owner 或卸载后没有跨 composer 的晚到附件或提示。
@@ -638,4 +684,5 @@ Playwright CI 当前只安装 Chromium，因此 issue 中报告的 Linux Firefox
   与 docked side-task 的 ArtifactPanel hop 均有覆盖，生命周期 abort 静默。
 - BMP 在 composer、user transcript、Core canonical content、OpenAI/Gemini 图片路径和
   Anthropic 文本降级上的语义都有明确测试，不承诺跨 provider 一致图片语义。
-- daemon、SDK、ACP、Core 和公开 Web Shell API 没有协议或类型变更。
+- daemon wire format、ACP、Core 和公开 Web Shell API 没有协议或类型变更；内部 WebUI
+  action contract 增加 `onAdmissionStarted` 和 `removedAfterAbort`。
