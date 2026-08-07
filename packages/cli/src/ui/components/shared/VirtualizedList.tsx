@@ -91,6 +91,19 @@ function findLastLE(arr: number[], target: number): number {
   return upperBound(arr, target) - 1;
 }
 
+// First index of the run of coincident offsets containing `index`.
+// Cached zero heights make adjacent offsets equal, and findLastLE resolves
+// such a run to its LAST item; the scroll anchor and the render window
+// start must both resolve to the run's FIRST item, or they desynchronize
+// when the cached zeros heal (blank gap / scroll jump on re-expand).
+function firstIndexOfOffsetRun(offsets: number[], index: number): number {
+  let i = index;
+  while (i > 0 && offsets[i - 1] === offsets[i]) {
+    i--;
+  }
+  return i;
+}
+
 const VirtualizedListItem = memo(
   ({
     content,
@@ -285,17 +298,11 @@ function VirtualizedList<T>(
       scrollTop: number,
       offsets: number[],
     ): { index: number; offset: number } => {
-      let index = findLastLE(offsets, scrollTop);
-      if (index === -1) {
+      const found = findLastLE(offsets, scrollTop);
+      if (found === -1) {
         return { index: 0, offset: 0 };
       }
-      // Mirror the startIndex walk-back: anchoring to a coincident-offset
-      // run's LAST item makes actualScrollTop jump by the run's whole
-      // re-expanded height once the cached zeros heal, dropping the
-      // expanded content above the viewport.
-      while (index > 0 && offsets[index - 1] === offsets[index]) {
-        index--;
-      }
+      const index = firstIndexOfOffsetRun(offsets, found);
       return { index, offset: scrollTop - offsets[index] };
     },
     [],
@@ -506,16 +513,10 @@ function VirtualizedList<T>(
   // cascade shrank the content and re-engaged sticking); windowing
   // around the anchor then leaves the visible bottom rows unmounted and
   // paints a fully blank frame that only a scroll heals.
-  //
-  // Cached zero heights create runs of coincident offsets; findLastLE
-  // lands on the run's LAST item, leaving the run's earlier items
-  // unmounted and unable to re-measure their re-expanded content. Walk
-  // back to the run's first item so a re-expand heals the whole run in
-  // one pass instead of one item per scroll.
-  let startIndex = Math.max(0, findLastLE(offsets, clampedScrollTop) - 1);
-  while (startIndex > 0 && offsets[startIndex - 1] === offsets[startIndex]) {
-    startIndex--;
-  }
+  const startIndex = firstIndexOfOffsetRun(
+    offsets,
+    Math.max(0, findLastLE(offsets, clampedScrollTop) - 1),
+  );
   const viewHeightForEndIndex =
     scrollableContainerHeight > 0 ? scrollableContainerHeight : 50;
   const endIndexOffsetRaw = upperBound(
