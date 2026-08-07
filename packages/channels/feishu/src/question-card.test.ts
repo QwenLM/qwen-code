@@ -303,6 +303,13 @@ describe('Feishu question cards', () => {
       },
     },
     {
+      // No value at all — the name-prefix recovery is submit-only, so a
+      // value-stripped cancel must stay fail-closed as unhandled.
+      action: {
+        name: 'qwen_ask_cancel_request-1',
+      },
+    },
+    {
       action: {
         name: 'qwen_ask_cancel_wrong-request',
         value: {

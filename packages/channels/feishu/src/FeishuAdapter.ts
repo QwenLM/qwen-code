@@ -66,6 +66,9 @@ interface CardSessionState {
   accumulatedText: string;
   lastUpdateAt: number;
   pendingUpdateTimer?: ReturnType<typeof setTimeout>;
+  /** In-flight throttled streaming PATCH; finalization awaits it so the final
+   *  patch is always the last card update Feishu applies. */
+  pendingUpdatePromise?: Promise<void>;
   /** Captured before cleanup so the creating→stopped callback retains the @sender prefix. */
   atPrefix?: string;
   /** Set by onResponseComplete to prevent concurrent updateCard from pendingUpdateTimer callback. */
@@ -130,14 +133,16 @@ const BASE_URL = 'https://open.feishu.cn/open-apis';
 const FEISHU_ID_RE = /^[a-zA-Z0-9_.:-]+$/;
 
 /**
- * Typed failure for interactive-card delivery. `status` is set for HTTP
- * failures so callers (createStreamingCard) can classify by type instead of
- * string-matching message literals that could drift under rewording.
+ * Typed failure for interactive-card delivery. `status` and `detail` are set
+ * for HTTP failures so callers (createStreamingCard) can classify and report
+ * by field instead of string-matching message literals that could drift
+ * under rewording.
  */
 class FeishuCardDeliveryError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    readonly detail?: string,
   ) {
     super(message);
     this.name = 'FeishuCardDeliveryError';
@@ -878,9 +883,11 @@ export class FeishuChannel extends ChannelBase {
     if (!resp.ok) {
       if (resp.status === 401) this.tokenCache = undefined;
       const detail = await resp.text().catch(() => '');
+      const errorDetail = `HTTP ${resp.status} ${detail}`;
       throw new FeishuCardDeliveryError(
-        `Feishu card delivery failed: HTTP ${resp.status} ${detail}`,
+        `Feishu card delivery failed: ${errorDetail}`,
         resp.status,
+        errorDetail,
       );
     }
 
@@ -953,9 +960,8 @@ export class FeishuChannel extends ChannelBase {
     } catch (err) {
       if (err instanceof FeishuCardDeliveryError) {
         if (err.status !== undefined) {
-          const deliveryPrefix = 'Feishu card delivery failed: ';
           process.stderr.write(
-            `[Feishu:${this.name}] createStreamingCard failed: ${err.message.slice(deliveryPrefix.length)}\n`,
+            `[Feishu:${this.name}] createStreamingCard failed: ${err.detail ?? err.message}\n`,
           );
         }
         return { messageId: '', success: false };
@@ -1167,34 +1173,43 @@ export class FeishuChannel extends ChannelBase {
       const elapsed = Date.now() - cardState.lastUpdateAt;
       const delay = Math.max(0, CARD_UPDATE_INTERVAL_MS - elapsed);
 
-      cardState.pendingUpdateTimer = setTimeout(async () => {
+      cardState.pendingUpdateTimer = setTimeout(() => {
         cs.pendingUpdateTimer = undefined;
         if (cs.stopped || cs.finalizing) return;
         cs.lastUpdateAt = Date.now();
-        try {
-          const atPrefix = this.msgToSenderName.get(inboundMsgId);
-          const displayContent = this.truncateCardText(
-            atPrefix
-              ? `${atPrefix}\n\n${cs.accumulatedText}`
-              : cs.accumulatedText,
-          );
-          const ok = await this.updateCard(
-            cs.messageId,
-            displayContent,
-            false,
-            inboundMsgId,
-          );
-          if (!ok) {
-            // Fallback: strip tables to avoid card table limit (code-fence aware)
-            const stripped = this.stripTables(displayContent, '(表格)');
-            await this.updateCard(cs.messageId, stripped, false, inboundMsgId);
-          }
-        } catch (err) {
-          process.stderr.write(
-            `[Feishu:${this.name}] card update error: ${err}\n`,
-          );
-        }
+        cs.pendingUpdatePromise = (
+          cs.pendingUpdatePromise ?? Promise.resolve()
+        ).then(() => this.runThrottledCardUpdate(inboundMsgId, cs));
       }, delay);
+    }
+  }
+
+  /** Runs one throttled streaming PATCH. Serialized behind
+   *  `pendingUpdatePromise` so finalization can drain every in-flight update
+   *  before sending the final patch. */
+  private async runThrottledCardUpdate(
+    inboundMsgId: string,
+    cs: CardSessionState,
+  ): Promise<void> {
+    if (cs.stopped || cs.finalizing) return;
+    try {
+      const atPrefix = this.msgToSenderName.get(inboundMsgId);
+      const displayContent = this.truncateCardText(
+        atPrefix ? `${atPrefix}\n\n${cs.accumulatedText}` : cs.accumulatedText,
+      );
+      const ok = await this.updateCard(
+        cs.messageId,
+        displayContent,
+        false,
+        inboundMsgId,
+      );
+      if (!ok) {
+        // Fallback: strip tables to avoid card table limit (code-fence aware)
+        const stripped = this.stripTables(displayContent, '(表格)');
+        await this.updateCard(cs.messageId, stripped, false, inboundMsgId);
+      }
+    } catch (err) {
+      process.stderr.write(`[Feishu:${this.name}] card update error: ${err}\n`);
     }
   }
 
@@ -1254,11 +1269,16 @@ export class FeishuChannel extends ChannelBase {
     try {
       if (cardState.created && cardState.messageId && !cardState.stopped) {
         // Mirror onResponseComplete: block the throttled update path before
-        // the final patch so it cannot race a concurrent streaming PATCH.
+        // the final patch. Clearing a timer that already fired is a no-op, so
+        // an in-flight streaming PATCH is awaited as well — otherwise it can
+        // land after the final patch and re-render the card as running.
         cardState.finalizing = true;
         if (cardState.pendingUpdateTimer) {
           clearTimeout(cardState.pendingUpdateTimer);
           cardState.pendingUpdateTimer = undefined;
+        }
+        if (cardState.pendingUpdatePromise) {
+          await cardState.pendingUpdatePromise;
         }
         let updated = false;
         try {
@@ -1462,6 +1482,9 @@ export class FeishuChannel extends ChannelBase {
     }
     if (cardState?.creationTimer) {
       clearTimeout(cardState.creationTimer);
+    }
+    if (cardState?.pendingUpdatePromise) {
+      await cardState.pendingUpdatePromise;
     }
 
     // Wait for in-flight card creation (with 10s timeout)
@@ -2076,7 +2099,8 @@ export class FeishuChannel extends ChannelBase {
       clearTimeout(cardState.creationTimer);
     }
     // Keep an inert entry while the question is pending: the orphan sweep and
-    // the terminal-feedback paths both key on card-session presence.
+    // the terminal-feedback paths both key on card-session presence. Carry any
+    // terminal status onTaskLifecycle wrote during the awaited finalization.
     this.cardSessions.set(inboundMsgId, {
       messageId: '',
       created: false,
@@ -2084,6 +2108,7 @@ export class FeishuChannel extends ChannelBase {
       stopped: false,
       accumulatedText: '',
       lastUpdateAt: Date.now(),
+      terminalStatus: cardState.terminalStatus,
     });
   }
 

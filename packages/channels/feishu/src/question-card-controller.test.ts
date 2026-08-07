@@ -163,6 +163,21 @@ describe('FeishuQuestionCardController presentation', () => {
     ).resolves.toEqual({ kind: 'presented' });
   });
 
+  it('falls back and cancels when delivery resolves without a message id', async () => {
+    const { controller, sendCard, sendFallback } = createHarness();
+    sendCard.mockResolvedValue('');
+    const { context, respond } = createContext('request-empty-id');
+
+    await expect(controller.present(context)).resolves.toEqual({
+      kind: 'handled',
+    });
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('互动问题卡片投递失败'),
+    );
+    expect(respond).toHaveBeenCalledWith({ outcome: { outcome: 'cancelled' } });
+  });
+
   it('keeps a synchronously settled request from falling back on delivery failure', async () => {
     const delivery = deferred<string>();
     const { controller, sendCard, sendFallback } = createHarness();
@@ -214,7 +229,7 @@ describe('FeishuQuestionCardController presentation', () => {
 
 describe('FeishuQuestionCardController callbacks', () => {
   it('claims a valid owner submit synchronously and responds only from execute', async () => {
-    const { controller, patchCard } = createHarness();
+    const { controller, patchCard, sendFallback } = createHarness();
     const { context, respond } = createContext('request-submit', {
       questions: [
         {
@@ -252,6 +267,8 @@ describe('FeishuQuestionCardController callbacks', () => {
       },
     });
     expect(JSON.stringify(claimed)).toContain('正在处理...');
+    expect(JSON.stringify(claimed)).toContain('Beijing');
+    expect(JSON.stringify(claimed)).toContain('Logs, Metrics');
     expect(respond).not.toHaveBeenCalled();
     expect(controller.claim(validCancel('request-submit'))).toEqual({
       kind: 'handled',
@@ -279,6 +296,7 @@ describe('FeishuQuestionCardController callbacks', () => {
     expect(JSON.stringify(patchCard.mock.calls.at(-1)?.[1])).toContain(
       '已提交',
     );
+    expect(sendFallback).not.toHaveBeenCalled();
 
     await expect(
       controller.present(createContext('request-after-submit').context),
@@ -286,7 +304,7 @@ describe('FeishuQuestionCardController callbacks', () => {
   });
 
   it('claims a valid owner cancellation and responds from execute', async () => {
-    const { controller } = createHarness();
+    const { controller, patchCard } = createHarness();
     const { context, respond } = createContext('request-cancel');
     await controller.present(context);
 
@@ -301,6 +319,7 @@ describe('FeishuQuestionCardController callbacks', () => {
         },
       },
     });
+    expect(JSON.stringify(claimed)).toContain('**已取消**');
     expect(respond).not.toHaveBeenCalled();
     if (claimed.kind !== 'handled' || !claimed.execute) {
       throw new Error('Expected claimed callback execution');
@@ -308,6 +327,9 @@ describe('FeishuQuestionCardController callbacks', () => {
     await claimed.execute();
 
     expect(respond).toHaveBeenCalledWith({ outcome: { outcome: 'cancelled' } });
+    expect(JSON.stringify(patchCard.mock.calls.at(-1)?.[1])).toContain(
+      '已取消',
+    );
     await expect(
       controller.present(createContext('request-after-cancel').context),
     ).resolves.toEqual({ kind: 'presented' });
@@ -553,26 +575,45 @@ describe('FeishuQuestionCardController callbacks', () => {
     await controller.present(second.context);
     await controller.present(third.context);
 
-    expect(
-      controller.claim(validCancel('request-one', { messageId: 'om_one' })),
-    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
-    expect(
-      controller.claim(
-        validCancel('request-two', {
-          operatorId: 'owner-2',
-          chatId: 'oc_2',
-          messageId: 'om_two',
-        }),
-      ),
-    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
-    expect(
-      controller.claim(
-        validCancel('request-three', {
-          chatId: 'oc_3',
-          messageId: 'om_three',
-        }),
-      ),
-    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
+    const firstClaimed = controller.claim(
+      validCancel('request-one', { messageId: 'om_one' }),
+    );
+    const secondClaimed = controller.claim(
+      validCancel('request-two', {
+        operatorId: 'owner-2',
+        chatId: 'oc_2',
+        messageId: 'om_two',
+      }),
+    );
+    const thirdClaimed = controller.claim(
+      validCancel('request-three', {
+        chatId: 'oc_3',
+        messageId: 'om_three',
+      }),
+    );
+    expect(firstClaimed).toMatchObject({
+      kind: 'handled',
+      execute: expect.any(Function),
+    });
+    expect(secondClaimed).toMatchObject({
+      kind: 'handled',
+      execute: expect.any(Function),
+    });
+    expect(thirdClaimed).toMatchObject({
+      kind: 'handled',
+      execute: expect.any(Function),
+    });
+
+    // Executing one claimed callback must settle only its own request.
+    if (thirdClaimed.kind !== 'handled' || !thirdClaimed.execute) {
+      throw new Error('Expected claimed callback execution');
+    }
+    await thirdClaimed.execute();
+    expect(third.respond).toHaveBeenCalledWith({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(first.respond).not.toHaveBeenCalled();
+    expect(second.respond).not.toHaveBeenCalled();
   });
 });
 
@@ -582,7 +623,7 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
   it('expires locally before cancelling the original request', async () => {
     vi.useFakeTimers();
     const events: string[] = [];
-    const { controller, patchCard } = createHarness(270_000);
+    const { controller, patchCard, sendFallback } = createHarness(270_000);
     patchCard.mockImplementation(async () => {
       events.push('patch');
       return true;
@@ -598,6 +639,7 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
 
     expect(events).toEqual(['patch', 'respond']);
     expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已过期');
+    expect(sendFallback).not.toHaveBeenCalled();
     expect(respond).toHaveBeenCalledWith({ outcome: { outcome: 'cancelled' } });
     expect(controller.claim(validCancel('request-timeout'))).toEqual({
       kind: 'handled',
@@ -613,6 +655,38 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
       (controller as unknown as { activeByScope: Map<string, unknown> })
         .activeByScope.size,
     ).toBe(0);
+  });
+
+  it('keeps the expiry timer alive after a malformed-form rejection', async () => {
+    vi.useFakeTimers();
+    try {
+      const respond = vi.fn().mockResolvedValue(true);
+      const { controller, patchCard } = createHarness(270_000);
+      const { context } = createContext('request-malformed-expiry', {
+        respond,
+      });
+      await controller.present(context);
+
+      expect(
+        controller.claim(
+          submit('request-malformed-expiry', { '0': 'Unknown' }),
+        ),
+      ).toEqual({
+        kind: 'handled',
+        response: {
+          toast: { type: 'warning', content: '请完整选择有效答案。' },
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(270_000);
+
+      expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已过期');
+      expect(respond).toHaveBeenCalledWith({
+        outcome: { outcome: 'cancelled' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('cancels every live request for a run exactly once', async () => {
@@ -724,6 +798,7 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
       'om_late',
       expect.objectContaining({ schema: '2.0' }),
     );
+    expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已取消');
     expect(respond).not.toHaveBeenCalled();
     expect(
       controller.claim(validCancel('request-late', { messageId: 'om_late' })),
