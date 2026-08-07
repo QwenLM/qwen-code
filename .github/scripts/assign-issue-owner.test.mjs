@@ -55,7 +55,7 @@ describe('assign-issue-owner: owner map', () => {
   // Deliberately NOT asserted against CODEOWNERS: that file answers "who owns
   // this code path", which is a narrower question than "who may be assigned an
   // issue in this area". The repository has ~44 collaborators with push access
-  // and only 7 CODEOWNERS entries, so that check would reject legitimate
+  // and only 4 CODEOWNERS path rules, so that check would reject legitimate
   // additions. Push access is verified against the live API at write time.
   it('rejects a duplicated owner that would skew load balancing', () => {
     const broken = JSON.parse(ownersRaw);

@@ -53,8 +53,8 @@ nothing else in the repository needs updating.
 
 An owner does **not** need a `.github/CODEOWNERS` entry. CODEOWNERS answers "who
 owns this code path", which is narrower than "who may be assigned an issue in
-this area" — the repository has roughly 44 collaborators with push access and 7
-CODEOWNERS entries, so requiring one would reject legitimate additions. The
+this area" — the repository has roughly 44 collaborators with push access and 4
+CODEOWNERS path rules, so requiring one would reject legitimate additions. The
 permission check enforces the property that actually matters.
 
 To add a new area, append an entry with its labels and owners. Areas are matched
