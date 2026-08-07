@@ -1662,6 +1662,78 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
 
+  // Regression for #8653: the fast path runs before runQwenServeImpl freezes
+  // daemonRuntimeBaseEnv, so any loader key it applies is baked into the base
+  // env distributed to every workspace's session subprocesses — the exact
+  // cross-workspace vector the daemon-side scrub closes.
+  it('never applies loader-affecting keys from .env files or settings.env', () => {
+    const trackedKeys = ['NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-env-')),
+    );
+    try {
+      writeFileSync(
+        join(tempWorkspace, '.env'),
+        [
+          'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+          'FASTPATH_DOTENV_ALLOWED=allowed',
+          '',
+        ].join('\n'),
+      );
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['FASTPATH_DOTENV_ALLOWED']).toBe('allowed');
+      rmSync(tempWorkspace, { recursive: true, force: true });
+
+      // The privileged .qwen/.env scope bypasses excludedEnvVars, so pin it
+      // separately: exempting it would ship green without this case.
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-env-')),
+      );
+      mkdirSync(join(tempWorkspace, SETTINGS_DIRECTORY_NAME));
+      writeFileSync(
+        join(tempWorkspace, SETTINGS_DIRECTORY_NAME, '.env'),
+        [
+          'NODE_PATH=/workspace-a/node_modules',
+          'FASTPATH_QWEN_ALLOWED=allowed',
+          '',
+        ].join('\n'),
+      );
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['NODE_PATH']).toBeUndefined();
+      expect(process.env['FASTPATH_QWEN_ALLOWED']).toBe('allowed');
+
+      loadServeFastPathEnvironment(
+        {
+          env: {
+            LD_PRELOAD: '/workspace-a/hijack.so',
+            FASTPATH_SETTINGS_ALLOWED: 'allowed',
+          },
+        },
+        tempWorkspace,
+      );
+      expect(process.env['LD_PRELOAD']).toBeUndefined();
+      expect(process.env['FASTPATH_SETTINGS_ALLOWED']).toBe('allowed');
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+      delete process.env['FASTPATH_DOTENV_ALLOWED'];
+      delete process.env['FASTPATH_QWEN_ALLOWED'];
+      delete process.env['FASTPATH_SETTINGS_ALLOWED'];
+    }
+  });
+
   it('prioritizes trusted parent folders over nested distrust rules', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();

@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   INHERITED_LOADER_ENV_KEYS,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  scrubAndReportInheritedLoaderEnv,
   scrubInheritedLoaderEnv,
 } from './shared-env-keys.js';
 
@@ -82,5 +83,60 @@ describe('scrubInheritedLoaderEnv', () => {
       'NODE_OPTIONS',
       'NODE_PATH',
     ]);
+  });
+});
+
+describe('scrubAndReportInheritedLoaderEnv', () => {
+  function captureStderr(run: () => void): string {
+    const writes: string[] = [];
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    try {
+      run();
+    } finally {
+      write.mockRestore();
+    }
+    return writes.join('');
+  }
+
+  it('scrubs and reports the removed keys with the boundary labels', () => {
+    const env: NodeJS.ProcessEnv = {
+      NODE_OPTIONS: '--import file:///other-checkout/register.mjs',
+      LD_PRELOAD: '/evil.so',
+      HOME: '/home/user',
+    };
+
+    let removedKeys: string[] = [];
+    const breadcrumb = captureStderr(() => {
+      removedKeys = scrubAndReportInheritedLoaderEnv(
+        env,
+        'qwen serve',
+        'daemon',
+      );
+    });
+
+    expect(removedKeys).toEqual(['NODE_OPTIONS', 'LD_PRELOAD']);
+    expect(env['HOME']).toBe('/home/user');
+    expect(breadcrumb).toContain(
+      'qwen serve: scrubbed inherited loader env vars from the daemon ' +
+        'process; session subprocesses will not inherit them: ' +
+        'NODE_OPTIONS, LD_PRELOAD',
+    );
+  });
+
+  it('stays silent when there is nothing to scrub', () => {
+    const env: NodeJS.ProcessEnv = { HOME: '/home/user' };
+
+    const breadcrumb = captureStderr(() => {
+      expect(
+        scrubAndReportInheritedLoaderEnv(env, 'qwen', 'ACP child'),
+      ).toEqual([]);
+    });
+
+    expect(breadcrumb).toBe('');
   });
 });

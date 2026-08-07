@@ -7182,6 +7182,56 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     }
   });
 
+  // Desktop/systemd-launched daemons rarely surface boot stderr, so the
+  // scrub breadcrumb is additionally persisted to the durable daemon log.
+  it('persists the loader env scrub decision in the daemon log', async () => {
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    // Point the daemon log at the temp workspace (mirrors the daemon logger
+    // wiring test) so the assertion reads a test-owned file.
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+        await vi.waitFor(
+          () => {
+            const content = fs.readFileSync(logPath, 'utf8');
+            expect(content).toContain('scrubbed inherited loader env vars');
+            expect(content).toContain('NODE_OPTIONS');
+          },
+          { timeout: 7_000, interval: 50 },
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+    }
+  });
+
   it('wires the pipe message observer without changing existing pipe stats', async () => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
 

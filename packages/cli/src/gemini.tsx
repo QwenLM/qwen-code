@@ -33,7 +33,7 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { scrubInheritedLoaderEnv } from './config/shared-env-keys.js';
+import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
@@ -678,14 +678,7 @@ export async function main() {
     // process.env and still need the loader to boot, and the respawned child
     // re-runs this scrub itself. Only the final process (no relaunch) reaches
     // here.
-    const scrubbedLoaderEnvKeys = scrubInheritedLoaderEnv(process.env);
-    if (scrubbedLoaderEnvKeys.length > 0) {
-      writeStderrLine(
-        `qwen: scrubbed inherited loader env vars from the ACP child ` +
-          `process; session subprocesses will not inherit them: ` +
-          scrubbedLoaderEnvKeys.join(', '),
-      );
-    }
+    scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve

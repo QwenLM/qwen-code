@@ -20,7 +20,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
-import { scrubInheritedLoaderEnv } from '../config/shared-env-keys.js';
+import { scrubAndReportInheritedLoaderEnv } from '../config/shared-env-keys.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
@@ -2083,14 +2083,11 @@ async function runQwenServeImpl(
   // boot with the harness loader, but the daemon process itself is done with
   // them: session-shell subprocesses run here with process.env while their
   // cwd is another workspace.
-  const scrubbedLoaderEnvKeys = scrubInheritedLoaderEnv(process.env);
-  if (scrubbedLoaderEnvKeys.length > 0) {
-    writeStderrLine(
-      `qwen serve: scrubbed inherited loader env vars from the daemon ` +
-        `process; session subprocesses will not inherit them: ` +
-        scrubbedLoaderEnvKeys.join(', '),
-    );
-  }
+  const scrubbedLoaderEnvKeys = scrubAndReportInheritedLoaderEnv(
+    process.env,
+    'qwen serve',
+    'daemon',
+  );
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -2607,6 +2604,15 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  // Boot stderr rarely survives desktop/systemd daemon launches, so persist
+  // the scrub decision in the durable daemon log as well.
+  if (scrubbedLoaderEnvKeys.length > 0) {
+    daemonLog.info(
+      'scrubbed inherited loader env vars from the daemon process; ' +
+        'session subprocesses will not inherit them',
+      { removedKeys: scrubbedLoaderEnvKeys },
+    );
+  }
   let loggerPublished = false;
   let loggerSignalOwned = false;
   writeStderrLine(

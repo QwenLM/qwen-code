@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { writeStderrLine } from '../utils/stdioHelpers.js';
+
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
 export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
@@ -64,6 +66,26 @@ export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): string[] {
       delete env[key];
       removedKeys.push(key);
     }
+  }
+  return removedKeys;
+}
+
+// Runs the scrub and leaves a stderr breadcrumb naming the removed keys, so a
+// session subprocess missing an inherited var can be traced back to the
+// boundary that dropped it. Shared by every scrub boundary so the message
+// wording cannot desync between them.
+export function scrubAndReportInheritedLoaderEnv(
+  env: NodeJS.ProcessEnv,
+  commandLabel: string,
+  processLabel: string,
+): string[] {
+  const removedKeys = scrubInheritedLoaderEnv(env);
+  if (removedKeys.length > 0) {
+    writeStderrLine(
+      `${commandLabel}: scrubbed inherited loader env vars from the ` +
+        `${processLabel} process; session subprocesses will not inherit ` +
+        `them: ${removedKeys.join(', ')}`,
+    );
   }
   return removedKeys;
 }

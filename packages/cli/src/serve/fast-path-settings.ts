@@ -13,6 +13,7 @@ import { V1_INDICATOR_KEYS } from '../config/migration/versions/v1-to-v2-shared.
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  INHERITED_LOADER_ENV_KEYS,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
 } from '../config/shared-env-keys.js';
 import {
@@ -47,6 +48,12 @@ const V2_SETTINGS_VERSION = 2;
 const TRUST_FOLDER = 'TRUST_FOLDER';
 const TRUST_PARENT = 'TRUST_PARENT';
 const DO_NOT_TRUST = 'DO_NOT_TRUST';
+// Loader-affecting keys must never enter process.env here: this fast path
+// runs before runQwenServeImpl freezes daemonRuntimeBaseEnv, so anything it
+// writes is baked into the base env distributed to every workspace's session
+// subprocesses — the exact #8653 vector the daemon-side scrub closes.
+const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(INHERITED_LOADER_ENV_KEYS);
+
 type CachedTrustRule = {
   level: 'trusted' | 'untrusted';
   variants: Set<string>;
@@ -265,6 +272,7 @@ export function loadServeFastPathEnvironment(
 
       for (const key in parsedEnv) {
         if (!Object.hasOwn(parsedEnv, key)) continue;
+        if (LOADER_ENV_KEYS.has(key)) continue;
         if (
           !isHomeScopedEnvFile &&
           PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
@@ -286,6 +294,7 @@ export function loadServeFastPathEnvironment(
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (LOADER_ENV_KEYS.has(key)) continue;
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
       }
