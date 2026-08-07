@@ -445,11 +445,13 @@ function makeBridge(
     get activeWork() {
       return false;
     },
-    get activeWorkReporting() {
-      return 'full' as const;
-    },
-    get activeWorkOldestReportAt() {
-      return null;
+    get activeWorkCoverage() {
+      return {
+        total: 0,
+        covered: 0,
+        onNegotiatedChannel: 0,
+        oldestCoveredReportAt: null,
+      };
     },
     get pendingPromptTotal() {
       return 0;

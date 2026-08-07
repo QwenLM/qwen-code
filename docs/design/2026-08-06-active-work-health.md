@@ -10,6 +10,8 @@
 
 `activeWork` is true while any managed workspace has an accepted-but-unsettled prompt, a running background Agent, or an Agent terminal notification that is queued, awaiting acceptance, or being processed by its parent continuation. It deliberately does **not** cover background shells, Monitors, workflows, or cron. That exclusion is a scope decision, not an oversight: those categories have no equivalent signal today, and a controller that treats `activeWork: false` as "nothing at all is running" will be wrong about them.
 
+It is also **Session-scoped, not channel-scoped**. Channel-level work with no Session attached yet — a spawn in flight, a pending restore, MCP discovery or authentication — is not counted, so `activeWork` can read false while the daemon's own `hasNoChannelWork` is simultaneously refusing to reclaim that channel. The two answer different questions and are allowed to disagree: this field describes work owned by Sessions, and widening it to cover channel setup would change what the boolean means for every existing reader. A controller that needs "is this daemon reclaimable" must combine the three-term rule below with a graceful-shutdown handshake, not read more into this one field than it claims.
+
 Restart policy stays with the external controller. The daemon publishes facts; it does not publish `restartSafe`.
 
 ## Why holds, and why full snapshots
@@ -32,7 +34,7 @@ The agent category uses `BackgroundTaskRegistry.hasUnfinalizedTasks()`'s predica
 }
 ```
 
-A dropped report therefore costs one interval of staleness and needs no retransmit, ack, or "last reported" state to diff against — the next snapshot is the whole truth again. `seq` guards against reordering only; a gap is not an error. Channel scope is what keeps an always-on cadence affordable (one small message per interval regardless of Session count) and it gives the daemon a second fact for free: a Session **absent** from a fresh snapshot is positive evidence the child released it.
+A dropped report therefore costs one interval of staleness and needs no retransmit, ack, or "last reported" state to diff against — the next snapshot is the whole truth again. `seq` guards against reordering only; a gap is not an error. Channel scope is what keeps an always-on cadence affordable (one small message per interval regardless of Session count) and it gives the daemon a second fact for free: because the report is complete, a Session **absent** from a fresh snapshot holds nothing on the child side. Absence and reported-with-no-holds are therefore the same fact and take the same path — one that ends in asking the child, never in assuming.
 
 Prompts are absent from the child's report on purpose. The daemon accepts, queues, dispatches, and settles them, so its own `pendingPromptCount` is authoritative and strictly wider — it covers prompts still waiting in the FIFO, which the child cannot see. Reporting them from both sides would create two sources of truth for one fact with nothing to reconcile them.
 
@@ -45,8 +47,10 @@ A snapshot is flushed ahead of the prompt response on the same stream. The daemo
 Per Session the daemon holds one of:
 
 - **unsupported** — the channel never negotiated. Contributes nothing; pre-existing cleanup behavior applies unchanged. Treating this as "unknown" would make every legacy Session permanently unreapable.
-- **unknown** — negotiated, not yet heard from. Reads as retained, but is not a state the daemon sits in: it asks.
-- **known** — a snapshot has been applied.
+- **unknown** — negotiated, not yet heard from _recently enough_. Reads as retained, but is not a state the daemon sits in: it asks.
+- **known** — a fresh snapshot has been applied.
+
+Never-reported and gone-quiet are the same state on purpose. A snapshot older than the grading window (`intervalMs × 3`) is not a report that the Session is idle, it is the absence of one — a background Agent could have started at any point since — so it stops counting as evidence and the Session reads as retained again. Reclaiming a channel that has genuinely stopped answering is not this mechanism's job; see below.
 
 The cache decides _when_ it is worth asking. It never authorizes destruction, because a fresh empty snapshot only describes the moment it was built and work can start in the gap. So automatic cleanup closes through a conditional RPC:
 
@@ -55,11 +59,27 @@ qwen/control/session/close { sessionId, onlyIfUnheld: true }
   → { closed: true, holds: [] } | { closed: false, holds: [...] }
 ```
 
-The child evaluates it under its own close gate, before anything destructive runs. With the gate held the Session admits no new prompt and starts no new automatic turn, so a hold cannot appear between the check and the teardown. If holds exist, the gate is released and they are handed back; the daemon adopts them and backs off.
+The child evaluates it under its own close gate, before anything destructive runs. With the gate held the Session admits no new prompt and starts no new automatic turn, so a hold cannot appear between the check and the teardown **on the child side**. If holds exist, the gate is released and they are handed back; the daemon adopts them and backs off.
 
-On timeout the daemon cannot tell whether the child closed. It does not retry and does not assume: it leaves the Session in place and lets the next snapshot settle it — present means the close never happened, absent means it did. A genuinely wedged channel is not this mechanism's problem; see below.
+The daemon side needs its own cover, because the round trip is an await of up to ten seconds. A Session with a conditional close outstanding is marked in-flight, and every admission path — attach, prompt, rewind — refuses it exactly as it refuses one that is already closing. Without that, a prompt accepted during the round trip is lost when the teardown it raced completes; the previous synchronous guard-then-teardown sequence got this for free, and splitting it is what created the need to say so explicitly.
+
+On timeout the daemon cannot tell whether the child closed. It does not retry in place and does not assume: it leaves the Session alone and lets the next snapshot settle it. Absence from that snapshot is not consent to destroy — it makes the Session a candidate, and the candidate still has to clear every ordinary guard (no SSE subscriber, no registered client, nothing daemon-owned in flight) before the daemon asks the child once more. A child that already closed the Session answers `closed` for a Session it no longer has, which is how a lost close response is recovered without ever guessing.
 
 Explicit close, kill, shutdown, and channel exit keep their force semantics and do not go through this path.
+
+## One guard model, four triggers
+
+Four things can decide it is time to look at a Session: the last client detaching, a prompt settling, a terminal notification settling, and the idle reaper's TTL. Each brings its own policy, and none of them may weaken the shared part:
+
+| Guard                                       | Why it is shared                                                                                                     |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| not already closing or close-in-flight      | two paths racing the same teardown duplicate the round trip and race each other's guards                             |
+| no SSE subscriber                           | someone is watching this Session's stream                                                                            |
+| nothing daemon-owned in flight              | queued and dispatched prompts and notifications the daemon is pushing; never depends on the child reporting anything |
+| no fresh child report of held work          | fails closed on ignorance and on staleness alike                                                                     |
+| the child confirms under its own close gate | the cache says what _was_ true; only the child can say what is true now                                              |
+
+The reaper deliberately ignores registered client ids — it exists for the crash path where a detach never arrived — but that is the only difference, and it still has to ask the child before destroying anything.
 
 ## What this deliberately does not do
 
@@ -81,7 +101,9 @@ Killing a whole multiplexed channel is reasonable when the channel is _actually_
 | `activeWorkReporting` | `full` / `partial` / `none` — how much of that boolean is vouched for |
 | `activeWorkStaleMs`   | Age of the oldest snapshot it rests on; `0` when nothing is covered   |
 
-Freshness is graded by the daemon, not the controller: the reporting cadence is negotiated per channel (the child proposes, the daemon clamps into an agreed range), so only the daemon can judge it. A stale snapshot or a child that omits a category degrades the grade to `partial` rather than silently narrowing what the boolean covers. `activeWorkStaleMs` is diagnostic.
+Freshness is graded by the daemon, not the controller: the reporting cadence is negotiated per channel (the child proposes, the daemon clamps into an agreed range), so only the daemon can judge it. A stale snapshot or a child that omits a category degrades the grade to `partial` rather than silently narrowing what the boolean covers. `activeWorkStaleMs` is diagnostic, and it measures only the _covered_ Sessions — an uncovered one already shows up in the grade, so letting it also drag the age down would double-count it and produce a positive staleness next to a grade saying nothing is covered.
+
+The grade is computed once over the whole daemon rather than per runtime and then combined, because grades do not compose: a runtime with no Sessions vouches for everything it has, and folding that vacuous `full` in as evidence let an empty workspace vouch for another workspace's unreported Sessions. Each runtime therefore exposes coverage counts and the route sums them before grading.
 
 Controllers should treat the daemon as busy when:
 

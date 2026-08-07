@@ -27,6 +27,8 @@ import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_MAX_SESSION_HOLDS,
+  ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -53,7 +55,8 @@ function parseActiveWorkSnapshot(
     typeof seq !== 'number' ||
     !Number.isSafeInteger(seq) ||
     seq <= 0 ||
-    !Array.isArray(sessions)
+    !Array.isArray(sessions) ||
+    sessions.length > ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS
   ) {
     return undefined;
   }
@@ -63,7 +66,11 @@ function parseActiveWorkSnapshot(
     const entry = raw as Record<string, unknown>;
     const sessionId = entry['sessionId'];
     const holds = entry['holds'];
-    if (typeof sessionId !== 'string' || !Array.isArray(holds)) {
+    if (
+      typeof sessionId !== 'string' ||
+      !Array.isArray(holds) ||
+      holds.length > ACTIVE_WORK_MAX_SESSION_HOLDS
+    ) {
       return undefined;
     }
     const parsedHolds: ActiveWorkHoldV1[] = [];

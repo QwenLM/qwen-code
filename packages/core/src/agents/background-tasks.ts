@@ -1529,6 +1529,20 @@ export class BackgroundTaskRegistry {
     this.statusChangeCallback = cb;
   }
 
+  /**
+   * Retract `cb`, but only if it is still the installed one.
+   *
+   * The slot holds a single callback, so a subscriber that clears it
+   * unconditionally on teardown can unhook whoever claimed it afterwards. This
+   * makes the retraction safe to call from any owner's dispose path without
+   * having to know whether it is still the owner.
+   */
+  clearStatusChangeCallback(cb: BackgroundStatusChangeCallback): void {
+    if (this.statusChangeCallback === cb) {
+      this.statusChangeCallback = undefined;
+    }
+  }
+
   setActivityChangeCallback(
     cb: BackgroundActivityChangeCallback | undefined,
   ): void {

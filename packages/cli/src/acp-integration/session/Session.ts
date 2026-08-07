@@ -1361,6 +1361,9 @@ export class Session implements SessionContext {
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
+  /** The exact status-change callback this Session installed, so dispose can
+   *  retract its own and nobody else's. */
+  #statusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -2391,7 +2394,12 @@ export class Session implements SessionContext {
 
     this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
-    this.config.getBackgroundTaskRegistry().setStatusChangeCallback(undefined);
+    if (this.#statusChangeCallback) {
+      this.config
+        .getBackgroundTaskRegistry()
+        .clearStatusChangeCallback(this.#statusChangeCallback);
+      this.#statusChangeCallback = undefined;
+    }
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
@@ -6146,9 +6154,14 @@ export class Session implements SessionContext {
 
   #registerBackgroundNotificationCallbacks(): void {
     const backgroundRegistry = this.config.getBackgroundTaskRegistry();
-    backgroundRegistry.setStatusChangeCallback(() => {
+    // Single-slot setter, so remember exactly what we installed and only ever
+    // retract that. Under ACP nothing else claims the slot today, but a Session
+    // must not clear a callback it did not install — the TUI uses the same
+    // registry, and "clear on dispose" would silently unhook it.
+    this.#statusChangeCallback = () => {
       this.#activeWorkChanged();
-    });
+    };
+    backgroundRegistry.setStatusChangeCallback(this.#statusChangeCallback);
     backgroundRegistry.setNotificationCallback(
       (displayText, modelText, meta) => {
         this.#enqueueBackgroundNotification({

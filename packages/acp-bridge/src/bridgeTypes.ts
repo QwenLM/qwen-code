@@ -208,6 +208,12 @@ export const ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM = 'onlyIfUnheld';
  *  longer buys nothing — an unanswered request is simply left for the next
  *  snapshot to settle. */
 export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
+/** Bounds on a single snapshot. Generous next to any real deployment — they
+ *  exist so a version-skewed or buggy child cannot make the daemon walk an
+ *  unbounded structure per report, not to constrain legitimate use. A packet
+ *  over either bound is discarded whole, like any other malformed one. */
+export const ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS = 1024;
+export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 /**
@@ -248,6 +254,28 @@ export function clampActiveWorkIntervalMs(raw: unknown): number {
     ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS,
     Math.max(ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS, Math.round(value)),
   );
+}
+
+/**
+ * Collapse coverage counts into the grade `/health?deep=1` reports.
+ *
+ * Deliberately a function over summed counts rather than a per-runtime getter:
+ * grades do not compose. A runtime with no Sessions vouches for everything it
+ * has, so folding its vacuous `full` in as evidence let an empty workspace
+ * vouch for another workspace's unreported Sessions. Callers sum the counts
+ * across every runtime first, then grade once.
+ */
+export function gradeActiveWorkCoverage(totals: {
+  total: number;
+  covered: number;
+  onNegotiatedChannel: number;
+}): 'full' | 'partial' | 'none' {
+  // No Sessions means nothing is unreported, so the picture is complete.
+  if (totals.total === 0 || totals.covered === totals.total) return 'full';
+  // `none` is reserved for "not one Session sits on a channel that negotiated
+  // reporting" — the case where acting on `activeWork` is unsafe rather than
+  // merely degraded.
+  return totals.onNegotiatedChannel === 0 ? 'none' : 'partial';
 }
 
 export interface ActiveWorkHoldV1 {
@@ -1783,23 +1811,35 @@ export interface AcpSessionBridge {
   readonly activeWork: boolean;
 
   /**
-   * How much of `activeWork` this runtime can actually vouch for. `full` means
-   * every live Session is covered by a fresh report from a child that reports
-   * all the categories; `none` means no Session is; `partial` is anything
-   * between, including a stale snapshot or a child that omits a category.
+   * How much of `activeWork` this runtime can vouch for, as counts rather than
+   * a grade.
    *
-   * Without this a controller cannot tell "nothing is running" from "nobody
-   * told me what is running", and those must not lead to the same decision.
+   * Counts, because the daemon-wide grade cannot be assembled from per-runtime
+   * grades: a runtime with zero Sessions vouches for everything it has and is
+   * therefore vacuously complete, which must not count as evidence that some
+   * *other* runtime's unreported Sessions are covered. Summing counts and
+   * grading once at the end is the only composition that gets that right.
+   *
+   * A Session counts as covered only when its owning channel negotiated
+   * reporting, reports every category, and its last snapshot is still inside
+   * the freshness window. Without this a controller cannot tell "nothing is
+   * running" from "nobody told me what is running", and those must not lead to
+   * the same decision.
    */
-  readonly activeWorkReporting: 'full' | 'partial' | 'none';
-
-  /**
-   * Epoch ms of the oldest snapshot `activeWork` currently rests on, or null
-   * when no Session is covered. Diagnostic: the freshness *decision* is
-   * already folded into `activeWorkReporting`, because only the daemon knows
-   * each channel's negotiated cadence.
-   */
-  readonly activeWorkOldestReportAt: number | null;
+  readonly activeWorkCoverage: {
+    /** Live Sessions in this runtime. */
+    total: number;
+    /** Of those, how many `activeWork` actually speaks for. */
+    covered: number;
+    /** Of those, how many sit on a channel that negotiated reporting at all.
+     *  Zero is what distinguishes `none` from `partial`. */
+    onNegotiatedChannel: number;
+    /** Epoch ms of the oldest snapshot among the *covered* Sessions, or null
+     *  when none are covered. Diagnostic: the freshness decision is already
+     *  folded into `covered`, because only the daemon knows each channel's
+     *  negotiated cadence. */
+    oldestCoveredReportAt: number | null;
+  };
 
   /** Queued prompts across all sessions — accepted but not yet dispatched,
    *  excluding the one running per session — i.e. the queue-depth gauge for the

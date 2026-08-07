@@ -1807,11 +1807,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get activeWork() {
       return false;
     },
-    get activeWorkReporting() {
-      return 'full' as const;
-    },
-    get activeWorkOldestReportAt() {
-      return null;
+    get activeWorkCoverage() {
+      return {
+        total: 0,
+        covered: 0,
+        onNegotiatedChannel: 0,
+        oldestCoveredReportAt: null,
+      };
     },
     get lastActivityAt() {
       return null;
@@ -20607,6 +20609,14 @@ describe('createServeApp', () => {
         pendingPermissionCount: { get: () => 1 },
         activePromptCount: { get: () => 1 },
         activeWork: { get: () => false },
+        activeWorkCoverage: {
+          get: () => ({
+            total: 2,
+            covered: 2,
+            onNegotiatedChannel: 2,
+            oldestCoveredReportAt: now - 20_000,
+          }),
+        },
         lastActivityAt: { get: () => now - 120_000 },
         isChannelLive: { value: () => true },
       });
@@ -20615,10 +20625,16 @@ describe('createServeApp', () => {
         pendingPermissionCount: { get: () => 2 },
         activePromptCount: { get: () => 2 },
         activeWork: { get: () => true },
-        // One runtime that cannot vouch for its sessions drags the daemon-wide
-        // grade down, because `activeWork` is an OR across all of them.
-        activeWorkReporting: { get: () => 'partial' as const },
-        activeWorkOldestReportAt: { get: () => now - 45_000 },
+        // Sessions this runtime cannot vouch for drag the daemon-wide grade
+        // down, because `activeWork` is an OR across all of them.
+        activeWorkCoverage: {
+          get: () => ({
+            total: 3,
+            covered: 1,
+            onNegotiatedChannel: 3,
+            oldestCoveredReportAt: now - 45_000,
+          }),
+        },
         lastActivityAt: { get: () => now - 30_000 },
         isChannelLive: { value: () => false },
       });
@@ -20657,6 +20673,63 @@ describe('createServeApp', () => {
           channelAlive: true,
           lastActivityAt: new Date(now - 30_000).toISOString(),
           idleSinceMs: 30_000,
+        });
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('does not let an empty workspace vouch for another one at deep=1', async () => {
+      const now = 1_700_000_120_000;
+      // Nothing to report, so this runtime vouches for everything it has —
+      // vacuously. Grading per runtime and combining the grades would let that
+      // count as evidence about the *other* runtime's sessions.
+      const emptyBridge = fakeBridge();
+      const unsupportedBridge = fakeBridge();
+      Object.defineProperties(unsupportedBridge, {
+        sessionCount: { get: () => 2 },
+        activeWork: { get: () => false },
+        // Two live sessions, neither on a channel that negotiated reporting:
+        // `activeWork: false` here means "nobody told me", not "nothing runs".
+        activeWorkCoverage: {
+          get: () => ({
+            total: 2,
+            covered: 0,
+            onNegotiatedChannel: 0,
+            oldestCoveredReportAt: null,
+          }),
+        },
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'health-empty',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: emptyBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'health-unsupported',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: unsupportedBridge,
+        }),
+      ]);
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        const app = createServeApp(baseOpts, undefined, {
+          workspaceRegistry: registry,
+        });
+        const res = await request(app)
+          .get('/health?deep=1')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({
+          sessions: 2,
+          activeWork: false,
+          // `none`, not `partial`: no session anywhere is covered, which is the
+          // one case where a controller must not act on `activeWork` at all.
+          activeWorkReporting: 'none',
+          activeWorkStaleMs: 0,
         });
       } finally {
         nowSpy.mockRestore();

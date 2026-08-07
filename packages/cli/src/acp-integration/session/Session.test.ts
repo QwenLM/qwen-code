@@ -409,6 +409,7 @@ describe('Session', () => {
     abortAll: ReturnType<typeof vi.fn>;
     setNotificationCallback: ReturnType<typeof vi.fn>;
     setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     hasRunningTasks: ReturnType<typeof vi.fn>;
     listUnfinalizedBackgroundAgentIds: ReturnType<typeof vi.fn>;
@@ -575,6 +576,7 @@ describe('Session', () => {
       abortAll: vi.fn(),
       setNotificationCallback: vi.fn(),
       setStatusChangeCallback: vi.fn(),
+      clearStatusChangeCallback: vi.fn(),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
       hasRunningTasks: vi.fn().mockReturnValue(false),
       listUnfinalizedBackgroundAgentIds: vi.fn().mockReturnValue([]),
@@ -890,9 +892,15 @@ describe('Session', () => {
       expect(changes).toBe(before + 1);
 
       session.dispose();
+      // Retracts the exact callback it installed rather than blanking the slot.
+      // The registry holds one callback and the TUI uses the same registry, so
+      // an unconditional clear on dispose would unhook whoever owns it now.
       expect(
-        mockBackgroundTaskRegistry.setStatusChangeCallback.mock.calls.at(-1),
-      ).toEqual([undefined]);
+        mockBackgroundTaskRegistry.clearStatusChangeCallback,
+      ).toHaveBeenCalledWith(statusChanged);
+      expect(
+        mockBackgroundTaskRegistry.setStatusChangeCallback,
+      ).not.toHaveBeenCalledWith(undefined);
     });
 
     it('holds an Agent terminal notification from persistence to continuation', async () => {
