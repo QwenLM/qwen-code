@@ -1132,6 +1132,37 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
     });
 
+    it('keeps a higher-priority budget over a request-level disable', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: { thinking_budget: 4096 },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['thinking_budget']).toBe(4096);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: undefined,
+          dropped: ['enable_thinking'],
+        },
+      );
+    });
+
     it('keeps a legacy Qwen budget over an opaque none effort', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {
@@ -1174,6 +1205,37 @@ describe('DashScopeOpenAICompatibleProvider', () => {
           model: 'qwen3.8-max',
           reasoningEffort: 'high',
           dropped: ['enable_thinking', 'thinking_budget'],
+        },
+      );
+    });
+
+    it('drops an explicit budget when none disables thinking', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          extra_body: { enable_thinking: false, thinking_budget: 1024 },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          reasoning_effort: 'none',
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('none');
+      expect(result['enable_thinking']).toBe(false);
+      expect(result['thinking_budget']).toBeUndefined();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max',
+          reasoningEffort: 'none',
+          dropped: ['thinking_budget'],
         },
       );
     });

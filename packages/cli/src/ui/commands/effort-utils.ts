@@ -12,6 +12,13 @@ export function formatEffortChangeMessage(
   tier: ReasoningEffort,
 ): string {
   if (config.getReasoningEffort() !== tier) {
+    const override = config.getReasoningEffortOverride?.();
+    if (override) {
+      return t(
+        'Reasoning effort set to {{tier}}, but thinking is currently disabled; after thinking is re-enabled, {{source}}.{{field}} will still have higher priority.',
+        { tier, source: override.source, field: override.field },
+      );
+    }
     return t(
       'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
       { tier },

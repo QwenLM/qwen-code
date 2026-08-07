@@ -189,14 +189,20 @@ export class SystemController extends BaseController {
           this.context.config.setReasoningEffort(normalized);
           const override =
             this.context.config.getReasoningEffortOverride?.() ?? null;
-          const applied =
-            this.context.config.getReasoningEffort() === normalized &&
-            override === null;
+          const effortMatches =
+            this.context.config.getReasoningEffort() === normalized;
+          const applied = effortMatches && override === null;
           effortStatus = { effort: normalized, applied, override };
 
           if (!applied) {
+            const reason = [
+              ...(effortMatches ? [] : ['thinking may be disabled']),
+              ...(override
+                ? [`${override.source}.${override.field} takes precedence`]
+                : []),
+            ].join('; ');
             debugLogger.warn(
-              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
+              `[SystemController] Effort '${normalized}' was not applied (${reason})`,
             );
           } else {
             debugLogger.info(

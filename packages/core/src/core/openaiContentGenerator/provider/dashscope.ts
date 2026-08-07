@@ -395,11 +395,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     };
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
-    if (
-      selectedThinkingKnob?.field === 'thinking_budget' &&
-      reasoningEffort !== undefined
-    ) {
-      dropped.add('reasoning_effort');
+    if (selectedThinkingKnob?.field === 'thinking_budget') {
+      if (reasoningEffort !== undefined) {
+        dropped.add('reasoning_effort');
+      }
+      if (merged['enable_thinking'] === false) {
+        dropped.add('enable_thinking');
+      }
     }
     if (
       selectedThinkingKnob?.field === 'reasoning_effort' &&
@@ -489,7 +491,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // models reasoning_effort is opaque, so preserve the meaningful budget
     // and drop the inert field just like any other effort value.
     if (isTieredEffortWireModel(wireModel) && effort === 'none') {
-      return [];
+      if (merged['thinking_budget'] === undefined) {
+        return [];
+      }
+      delete merged['thinking_budget'];
+      return ['thinking_budget'];
     }
     const dropped: string[] = [];
     if (isTieredEffortWireModel(wireModel)) {
@@ -506,13 +512,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         if (merged['thinking_budget'] !== undefined) {
           dropped.push('thinking_budget');
         }
-      } else if (
-        selectedThinkingKnob?.field === 'thinking_budget' &&
-        merged['enable_thinking'] === false
-      ) {
-        // A lower-priority samplingParams disable must not override a winning
-        // extra_body budget.
-        dropped.push('enable_thinking');
       }
       if (dropped.length > 0) {
         for (const key of dropped) {

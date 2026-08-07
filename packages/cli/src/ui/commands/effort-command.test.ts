@@ -95,6 +95,27 @@ describe('effortCommand', () => {
     );
   });
 
+  it('reports a static override while thinking is disabled', async () => {
+    setReasoningEffort.mockImplementation(() => {});
+    getReasoningEffort.mockReturnValue(undefined);
+    const getReasoningEffortOverride = vi.fn().mockReturnValue({
+      source: 'extra_body',
+      field: 'thinking_budget',
+    });
+    (context.services.config as unknown as Record<string, unknown>)[
+      'getReasoningEffortOverride'
+    ] = getReasoningEffortOverride;
+
+    const res = await effortCommand.action!(context, 'high');
+
+    expect((res as { content: string }).content).toContain(
+      'thinking is currently disabled',
+    );
+    expect((res as { content: string }).content).toContain(
+      'will still have higher priority',
+    );
+  });
+
   it('reports a higher-priority static thinking knob', async () => {
     const getReasoningEffortOverride = vi.fn().mockReturnValue({
       source: 'extra_body',

@@ -1138,7 +1138,7 @@ export class ContentGenerationPipeline {
       (thinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
-            (typeof thinkingBudget === 'number' &&
+            (thinkingBudget !== undefined &&
               typed['enable_thinking'] !== false) ||
             (typeof reasoningEffort === 'string' &&
               reasoningEffort !== 'none'))))

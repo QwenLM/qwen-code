@@ -12,6 +12,20 @@ import type { IControlContext } from '../ControlContext.js';
 import type { IPendingRequestRegistry } from './baseController.js';
 import { SystemController } from './systemController.js';
 
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 function createContext(
   overrides: Partial<IControlContext> = {},
 ): IControlContext {
@@ -511,6 +525,42 @@ describe('SystemController', () => {
       expect(context.config.setReasoningEffort).toHaveBeenCalledWith('high');
       expect(context.config.getReasoningEffort).toHaveBeenCalled();
       expect(result).toHaveProperty('subtype', 'initialize');
+    });
+
+    it('reports the higher-priority override during initialize', async () => {
+      mockDebugLogger.warn.mockClear();
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('high');
+      (
+        context.config.getReasoningEffortOverride as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        source: 'samplingParams',
+        field: 'enable_thinking',
+      });
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'initialize', effort: 'high' },
+        'init-effort-override',
+      );
+
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: false,
+        override: {
+          source: 'samplingParams',
+          field: 'enable_thinking',
+        },
+      });
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "[SystemController] Effort 'high' was not applied (samplingParams.enable_thinking takes precedence)",
+      );
     });
 
     it('rejects invalid effort during initialize', async () => {
