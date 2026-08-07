@@ -2144,9 +2144,8 @@ export function registerSessionRoutes(
         return;
       }
       try {
-        const session = await archiveCoordinator.runSharedMany(
-          [sessionId],
-          async () => {
+        const session = await runWithWorkspaceRuntimeStorage(runtime, () =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
             await assertSessionLoadable(
               workspaceCwd,
               sessionId,
@@ -2255,7 +2254,7 @@ export function registerSessionRoutes(
               }
             }
             return restored;
-          },
+          }),
         );
         try {
           runtime.generationGuard?.assertOpen();
