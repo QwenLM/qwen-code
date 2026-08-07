@@ -139,6 +139,18 @@ describe('createSpawnChannelFactory env policy', () => {
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
   });
 
+  it('marks the spawned ACP child as daemon-spawned for telemetry', async () => {
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+
+    const factory = createSpawnChannelFactory();
+    await factory('/tmp/project');
+
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env?.['QWEN_CODE_SERVE']).toBe('1');
+  });
+
   it('passes optional child args after --acp', async () => {
     mockSpawn.mockReturnValue(createFakeChildProcess());
 
