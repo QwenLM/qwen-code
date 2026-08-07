@@ -195,7 +195,12 @@ export function ProviderConnectForm({
     );
     setModelIdsText(seededModelIds.join(', '));
     setModelsEdited(
-      modelIdsDifferFromDefaults(provider, baseUrl, seededModelIds),
+      modelIdsDifferFromDefaults(
+        provider,
+        baseUrl,
+        seededModelIds,
+        customModelIdsRef.current,
+      ),
     );
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
@@ -512,8 +517,20 @@ export function ProviderConnectForm({
             onChange={(event) => {
               const value = event.target.value;
               setModelIdsText(value);
+              const ids = parseModelIds(value);
+              const defaults = new Set(
+                defaultModelIds(selectedProvider, baseUrl),
+              );
+              customModelIdsRef.current = ids.filter(
+                (id) => !defaults.has(id),
+              );
               setModelsEdited(
-                modelIdsDifferFromDefaults(selectedProvider, baseUrl, value),
+                modelIdsDifferFromDefaults(
+                  selectedProvider,
+                  baseUrl,
+                  ids,
+                  customModelIdsRef.current,
+                ),
               );
             }}
             placeholder={t('providerConnect.modelsPlaceholder')}

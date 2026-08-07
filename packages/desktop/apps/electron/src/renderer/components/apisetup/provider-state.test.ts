@@ -127,6 +127,37 @@ describe('provider endpoint state', () => {
     ).toBe(false);
   });
 
+  it('treats seeded custom ids as part of the clean model baseline', () => {
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: 'https://api.kimi.com/coding/v1',
+          models: [{ id: 'k3-256k' }, { id: 'k3' }],
+        },
+      ],
+    };
+
+    expect(
+      modelIdsDifferFromDefaults(
+        provider,
+        'https://api.kimi.com/coding/v1',
+        ['custom-model', 'k3', 'k3-256k'],
+        ['custom-model'],
+      ),
+    ).toBe(false);
+    expect(
+      modelIdsDifferFromDefaults(
+        provider,
+        'https://api.kimi.com/coding/v1',
+        ['custom-model', 'k3-256k'],
+        ['custom-model'],
+      ),
+    ).toBe(true);
+  });
+
   it('resets API keys only when the endpoint key domain changes', () => {
     const regionalKimi: QwenProviderSummary = {
       ...kimi,

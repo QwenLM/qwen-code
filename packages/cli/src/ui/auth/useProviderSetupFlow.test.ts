@@ -201,6 +201,50 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('second-default');
   });
 
+  it('rebuilds endpoint defaults after a net-zero edit with seeded custom ids', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'seeded-custom-net-zero-provider',
+      label: 'Seeded Custom Net Zero Provider',
+      description: 'Provider with endpoint defaults and a saved custom id',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-default' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-default' }],
+        },
+      ],
+      envKey: () => 'NET_ZERO_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Net Zero',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider, undefined, undefined, ['custom-model']);
+    });
+    act(() => {
+      result.current.changeModelIds('temporary');
+    });
+    act(() => {
+      result.current.changeModelIds('custom-model, first-default');
+    });
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('second-default, custom-model');
+  });
+
   it('does not resurrect deselected defaults after an endpoint round trip', () => {
     const firstUrl = 'https://first.example/v1';
     const secondUrl = 'https://second.example/v1';
@@ -464,6 +508,89 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.baseUrl).toBe('https://my-proxy.example/v1');
     expect(result.current.state.baseUrlPlaceholder).toBe('');
     expect(result.current.state.apiKey).toBe('sk-new-rotated');
+  });
+
+  it('restores edited endpoint and key together across protocol switches', () => {
+    const provider: ProviderConfig = {
+      id: 'custom-multi-protocol-provider',
+      label: 'Custom Multi Protocol Provider',
+      description: 'Custom provider with protocol-specific endpoint drafts',
+      protocol: AuthType.USE_OPENAI,
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+      envKey: (selectedProtocol, selectedBaseUrl) =>
+        `${selectedProtocol}:${selectedBaseUrl}`,
+      modelsEditable: true,
+      modelNamePrefix: 'Custom',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        provider,
+        AuthType.USE_OPENAI,
+        { 'openai:https://saved.example/v1': 'sk-saved' },
+        [],
+        'https://saved.example/v1',
+      );
+    });
+    act(() => {
+      result.current.changeBaseUrl('https://edited.example/v1');
+      result.current.changeApiKey('sk-edited');
+    });
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    act(() => {
+      result.current.changeBaseUrl('https://anthropic-proxy.example/v1');
+      result.current.changeApiKey('sk-anthropic');
+    });
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_OPENAI);
+    });
+    expect(result.current.state.baseUrl).toBe('https://edited.example/v1');
+    expect(result.current.state.apiKey).toBe('sk-edited');
+
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    expect(result.current.state.baseUrl).toBe(
+      'https://anthropic-proxy.example/v1',
+    );
+    expect(result.current.state.apiKey).toBe('sk-anthropic');
+  });
+
+  it('keeps a promoted protocol default endpoint in its protocol draft', () => {
+    const provider: ProviderConfig = {
+      id: 'fresh-custom-provider',
+      label: 'Fresh Custom Provider',
+      description: 'Custom provider with protocol defaults',
+      protocol: AuthType.USE_OPENAI,
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+      envKey: (selectedProtocol, selectedBaseUrl) =>
+        `${selectedProtocol}:${selectedBaseUrl}`,
+      modelsEditable: true,
+      modelNamePrefix: 'Custom',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider, AuthType.USE_OPENAI);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    act(() => {
+      result.current.changeApiKey('sk-openai');
+    });
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_OPENAI);
+    });
+
+    expect(result.current.state.baseUrl).toBe('https://api.openai.com/v1');
+    expect(result.current.state.apiKey).toBe('sk-openai');
   });
 
   it('does not leak API key drafts into the next provider flow', () => {

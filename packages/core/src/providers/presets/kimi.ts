@@ -124,6 +124,10 @@ export const kimiProvider: ProviderConfig = {
         ? 'https://platform.kimi.com/docs/api/overview'
         : 'https://platform.kimi.ai/docs/api/overview',
   ownsModel: ownsKimiModel,
+  // Kimi owns both its Coding Plan and API credential domains. Reinstalling
+  // one endpoint must replace only that endpoint's exact model identities,
+  // not delete the models installed for the other credential domain.
+  mergeModelsByIdentity: true,
   uiGroup: 'third-party',
   uiLabels: { baseUrlStepTitle: 'Access type' },
 };

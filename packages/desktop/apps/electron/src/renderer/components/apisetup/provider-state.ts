@@ -42,12 +42,17 @@ export function modelIdsDifferFromDefaults(
   provider: QwenProviderSummary,
   baseUrl: string,
   value: string | readonly string[],
+  customModelIds: readonly string[] = [],
 ): boolean {
   const ids = typeof value === 'string' ? parseModelIds(value) : [...value];
-  const defaults = defaultModelIds(provider, baseUrl);
+  const baseline = new Set([
+    ...defaultModelIds(provider, baseUrl),
+    ...customModelIds,
+  ]);
+  const actual = new Set(ids);
   return (
-    ids.length !== defaults.length ||
-    ids.some((id, index) => id !== defaults[index])
+    actual.size !== baseline.size ||
+    [...actual].some((id) => !baseline.has(id))
   );
 }
 

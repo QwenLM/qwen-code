@@ -111,6 +111,7 @@ describe('kimiProvider', () => {
       label: 'Kimi',
       protocol: AuthType.USE_OPENAI,
       modelsEditable: true,
+      mergeModelsByIdentity: true,
       uiGroup: 'third-party',
     });
 
@@ -254,6 +255,32 @@ describe('kimiProvider', () => {
         },
       },
     ]);
+  });
+
+  it('uses identity-scoped patches so Code and API installs can coexist', () => {
+    const codePlan = buildInstallPlan(kimiProvider, {
+      baseUrl: KIMI_CODE_BASE_URL,
+      apiKey: 'sk-code',
+      modelIds: ['k3-256k'],
+    });
+    const apiPlan = buildInstallPlan(kimiProvider, {
+      baseUrl: 'https://api.moonshot.ai/v1',
+      apiKey: 'sk-api',
+      modelIds: ['kimi-k3'],
+    });
+
+    expect(codePlan.modelProviders?.[0]).not.toHaveProperty('ownsModel');
+    expect(apiPlan.modelProviders?.[0]).not.toHaveProperty('ownsModel');
+    expect(codePlan.modelProviders?.[0]?.models[0]).toMatchObject({
+      id: 'k3-256k',
+      baseUrl: KIMI_CODE_BASE_URL,
+      envKey: KIMI_CODE_ENV_KEY,
+    });
+    expect(apiPlan.modelProviders?.[0]?.models[0]).toMatchObject({
+      id: 'kimi-k3',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: KIMI_API_ENV_KEY,
+    });
   });
 
   it.each([
