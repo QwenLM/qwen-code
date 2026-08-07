@@ -94,6 +94,7 @@ const renderAuthDialog = (
   configAuthType: AuthType | undefined = undefined,
   configApiKey: string | undefined = undefined,
   availableTerminalHeight?: number,
+  initialViewLevel?: 'main' | 'alibaba-select' | 'thirdparty-select',
 ) => {
   const uiState = createMockUIState(uiStateOverrides);
   const uiActions = createMockUIActions(uiActionsOverrides);
@@ -106,7 +107,10 @@ const renderAuthDialog = (
   return renderWithProviders(
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
-        <AuthDialog availableTerminalHeight={availableTerminalHeight} />
+        <AuthDialog
+          availableTerminalHeight={availableTerminalHeight}
+          initialViewLevel={initialViewLevel}
+        />
       </UIActionsContext.Provider>
     </UIStateContext.Provider>,
     { settings, config: mockConfig },
@@ -471,6 +475,25 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
     const frame = lastFrame();
     expect(frame?.split('\n')).toHaveLength(19);
+    expect(frame).toContain('Authentication failed');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
+  it('keeps a provider sub-menu within the exact height when an error is shown', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      { authError: `Authentication failed: ${'x'.repeat(200)}` },
+      {},
+      undefined,
+      undefined,
+      22,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame).toContain('Third-party Providers · Provider');
+    expect(frame?.split('\n')).toHaveLength(22);
     expect(frame).toContain('Authentication failed');
     expect(frame).toContain('▲');
     expect(frame).toContain('▼');

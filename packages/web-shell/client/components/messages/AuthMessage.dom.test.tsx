@@ -272,6 +272,58 @@ describe('AuthMessage draft isolation', () => {
     expect(passwordInput().value).toBe('draft-a');
   });
 
+  it('keeps drafts isolated across three credential domains', async () => {
+    const urls = [
+      'https://domain-a.example/v1',
+      'https://domain-b.example/v1',
+      'https://domain-c.example/v1',
+    ];
+    const provider: DaemonAuthProviderDescriptor = {
+      ...providerA,
+      id: 'provider-three-domains',
+      label: 'Provider Three Domains',
+      baseUrl: urls.map((url, index) => ({
+        id: `domain-${index}`,
+        label: `Domain ${index}`,
+        url,
+        envKey: `DOMAIN_${index}_KEY`,
+      })),
+    };
+    actions.getAuthProviders.mockResolvedValue({
+      ...catalog,
+      providers: [provider],
+      groups: [
+        {
+          ...catalog.groups[0]!,
+          providerIds: [provider.id],
+        },
+      ],
+    });
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Three Domains'));
+    click(findButtonContaining('Domain 0'));
+    setInput(passwordInput(), 'key-a');
+
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Domain 1'));
+    expect(passwordInput().value).toBe('');
+    setInput(passwordInput(), 'key-b');
+
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Domain 2'));
+    expect(passwordInput().value).toBe('');
+
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Domain 0'));
+    expect(passwordInput().value).toBe('key-a');
+
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Domain 1'));
+    expect(passwordInput().value).toBe('key-b');
+  });
+
   it('resets dirty model state before starting another provider', async () => {
     actions.getAuthProviders.mockResolvedValue(catalog);
     actions.installAuthProvider.mockResolvedValue({

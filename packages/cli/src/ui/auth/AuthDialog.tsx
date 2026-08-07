@@ -127,6 +127,7 @@ const SCROLL_AFFORDANCE_ROWS = 4;
 
 interface AuthDialogProps {
   availableTerminalHeight?: number;
+  initialViewLevel?: Exclude<ViewLevel, 'provider-setup'>;
 }
 
 export function getMaxItemsToShow(
@@ -187,6 +188,7 @@ export function getExistingProviderSetup(
 
 export function AuthDialog({
   availableTerminalHeight,
+  initialViewLevel = 'main',
 }: AuthDialogProps = {}): React.JSX.Element {
   const {
     auth: { authError },
@@ -198,7 +200,7 @@ export function AuthDialog({
   const settings = useSettings();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
+  const [viewLevel, setViewLevel] = useState<ViewLevel>(initialViewLevel);
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
   const [mainIndex, setMainIndex] = useState<number | null>(null);
