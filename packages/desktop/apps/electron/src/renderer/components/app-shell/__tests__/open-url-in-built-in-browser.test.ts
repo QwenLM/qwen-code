@@ -60,6 +60,56 @@ describe('openUrlInBuiltInBrowser', () => {
     expect(openExternal).not.toHaveBeenCalled()
   })
 
+  it('opens host-like URLs with a fragment in the built-in browser', async () => {
+    const browserPaneApi = makeBrowserPaneApi()
+    const openExternal = mock(() => {})
+
+    await openUrlInBuiltInBrowser('localhost:3000#docs', {
+      browserPaneApi,
+      isChannelAvailable: () => true,
+      openExternal,
+    })
+
+    expect(browserPaneApi.navigate).toHaveBeenCalledWith(
+      'built-in-browser',
+      'localhost:3000#docs',
+    )
+    expect(openExternal).not.toHaveBeenCalled()
+  })
+
+  it('opens bare host-like URLs with a query in the built-in browser', async () => {
+    const browserPaneApi = makeBrowserPaneApi()
+    const openExternal = mock(() => {})
+
+    await openUrlInBuiltInBrowser('example.com?q=1', {
+      browserPaneApi,
+      isChannelAvailable: () => true,
+      openExternal,
+    })
+
+    expect(browserPaneApi.navigate).toHaveBeenCalledWith(
+      'built-in-browser',
+      'example.com?q=1',
+    )
+    expect(openExternal).not.toHaveBeenCalled()
+  })
+
+  it('normalizes a bare host-like query URL before the external fallback', async () => {
+    const browserPaneApi = makeBrowserPaneApi({
+      navigate: mock(() => Promise.reject(new Error('Navigation timed out after 30s'))),
+    } as Partial<BrowserPaneApi>)
+    const openExternal = mock(() => {})
+
+    await openUrlInBuiltInBrowser('example.com?q=1', {
+      browserPaneApi,
+      isChannelAvailable: () => true,
+      openExternal,
+    })
+
+    expect(openExternal).toHaveBeenCalledTimes(1)
+    expect(openExternal).toHaveBeenCalledWith('https://example.com?q=1')
+  })
+
   it('routes scheme-prefixed non-http URLs to the system browser', async () => {
     const browserPaneApi = makeBrowserPaneApi()
     const openExternal = mock(() => {})

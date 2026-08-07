@@ -65,7 +65,7 @@ export async function openUrlInBuiltInBrowser(
     return
   }
 
-  if (isChannelAvailable?.(RPC_CHANNELS.browserPane.CREATE) === false) {
+  if (isChannelAvailable && !isChannelAvailable(RPC_CHANNELS.browserPane.CREATE)) {
     console.info(
       '[openUrlInBuiltInBrowser] Browser pane channel unavailable, falling back to default browser',
     )

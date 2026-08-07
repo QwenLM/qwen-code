@@ -572,10 +572,28 @@ describe('BrowserPaneManager', () => {
 
   it('navigate recognizes host-like inputs with a query', async () => {
     manager.createInstance('nav-query')
-    await manager.navigate('nav-query', '192.168.1.1:70000?token=SECRET')
+    await manager.navigate('nav-query', 'example.com?q=1')
     const instance = (manager as any).instances.get('nav-query')
     expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith(
-      'https://192.168.1.1:70000?token=SECRET'
+      'https://example.com?q=1'
+    )
+  })
+
+  it('navigate recognizes host-like inputs with a fragment', async () => {
+    manager.createInstance('nav-fragment')
+    await manager.navigate('nav-fragment', 'localhost:3000#docs')
+    const instance = (manager as any).instances.get('nav-fragment')
+    expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith(
+      'https://localhost:3000#docs'
+    )
+  })
+
+  it('navigate searches invalid host-like inputs instead of loading them', async () => {
+    manager.createInstance('nav-invalid')
+    await manager.navigate('nav-invalid', '192.168.1.1:70000?token=SECRET')
+    const instance = (manager as any).instances.get('nav-invalid')
+    expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith(
+      'https://duckduckgo.com/?q=192.168.1.1%3A70000'
     )
   })
 
