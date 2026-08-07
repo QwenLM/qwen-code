@@ -74,6 +74,7 @@ function makeRuntime(input: {
   trusted: boolean;
   bridge: HttpAcpBridge;
   env?: WorkspaceRuntimeEnvMetadata;
+  provenance?: WorkspaceRuntime['provenance'];
 }): WorkspaceRuntime {
   return {
     workspaceId: input.id,
@@ -89,6 +90,7 @@ function makeRuntime(input: {
       forRequest: () => ({}),
     } as unknown as WorkspaceFileSystemFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+    ...(input.provenance ? { provenance: input.provenance } : {}),
   };
 }
 
@@ -98,12 +100,19 @@ const INITIALIZE = JSON.stringify({
   method: 'initialize',
 });
 
-async function writeStoredSession(sessionId: string, cwd: string) {
+async function writeStoredSession(
+  sessionId: string,
+  cwd: string,
+  metadata: {
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  } = {},
+) {
   const chatsDir = path.join(new Storage(cwd).getProjectDir(), 'chats');
   await fsp.mkdir(chatsDir, { recursive: true });
-  await fsp.writeFile(
-    path.join(chatsDir, `${sessionId}.jsonl`),
-    `${JSON.stringify({
+  const records: unknown[] = [
+    {
       uuid: `${sessionId}-user-1`,
       parentUuid: null,
       sessionId,
@@ -111,7 +120,38 @@ async function writeStoredSession(sessionId: string, cwd: string) {
       type: 'user',
       message: { role: 'user', parts: [{ text: 'secondary session' }] },
       cwd,
-    })}\n`,
+    },
+  ];
+  if (metadata.parentSessionId) {
+    records.push({
+      uuid: `${sessionId}-parent-1`,
+      parentUuid: `${sessionId}-user-1`,
+      sessionId,
+      timestamp: '2026-07-11T00:00:00.000Z',
+      type: 'system',
+      subtype: 'parent_session',
+      systemPayload: { parentSessionId: metadata.parentSessionId },
+      cwd,
+    });
+  }
+  if (metadata.sourceType) {
+    records.push({
+      uuid: `${sessionId}-source-1`,
+      parentUuid: `${sessionId}-user-1`,
+      sessionId,
+      timestamp: '2026-07-11T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: {
+        sourceType: metadata.sourceType,
+        ...(metadata.sourceId ? { sourceId: metadata.sourceId } : {}),
+      },
+      cwd,
+    });
+  }
+  await fsp.writeFile(
+    path.join(chatsDir, `${sessionId}.jsonl`),
+    `${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
     'utf8',
   );
 }
@@ -129,6 +169,8 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let workspaceRegistry: ReturnType<typeof createWorkspaceRegistry>;
   let secondaryRuntime: WorkspaceRuntime;
   let workspaceVoiceConnection: ReturnType<typeof vi.fn>;
+  let materializeLiveConversationDirectory: ReturnType<typeof vi.fn>;
+  let activeLiveSessionIds: Set<string>;
   let runtimeDir: string;
   let previousRuntimeDir: string | undefined;
 
@@ -200,6 +242,10 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         ws.close(1000, 'done');
       },
     );
+    materializeLiveConversationDirectory = vi.fn(
+      async (sessionId: string) => `/live-root/conversation-${sessionId}`,
+    );
+    activeLiveSessionIds = new Set();
 
     const app = express();
     app.use(express.json());
@@ -220,6 +266,11 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       sessionShellCommandEnabled: true,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
       workspaceVoiceConnection,
+      liveSessionIsolation: {
+        materializeConversationDirectory: materializeLiveConversationDirectory,
+        isSessionActive: (sessionId: string) =>
+          activeLiveSessionIds.has(sessionId),
+      },
     });
 
     await new Promise<void>((resolve) => {
@@ -630,6 +681,291 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   it('keeps legacy /acp working', async () => {
     const res = await postInitialize('/acp');
     expect(res.status).toBe(200);
+  });
+
+  it('reserves Live creation and relocates compatible ACP restores before exposing them', async () => {
+    const liveBridge = makeBridge();
+    const restoreSession = async (req: { sessionId: string }) => ({
+      sessionId: req.sessionId,
+      workspaceCwd: '/live-root',
+      attached: req.sessionId.startsWith('live-active'),
+      clientId: 'live-client',
+      state: {},
+      hasActivePrompt: req.sessionId.startsWith('live-active'),
+      ...(req.sessionId === 'live-active'
+        ? { currentCwd: '/live-root/conversation-live-active' }
+        : {}),
+    });
+    const loadSession = vi.fn(restoreSession);
+    const resumeSession = vi.fn(restoreSession);
+    const changeSessionCwd = vi.fn(
+      async (sessionId: string, req: { path: string }) => ({
+        sessionId,
+        previousCwd: '/live-root',
+        newCwd: req.path,
+        warnings: [],
+      }),
+    );
+    Object.assign(liveBridge, {
+      loadSession,
+      resumeSession,
+      changeSessionCwd,
+      branchSession: vi.fn(),
+      closeSession: vi.fn(async () => undefined),
+      killSession: vi.fn(async () => true),
+      getSessionContextStatus: vi.fn(async () => ({ state: {} })),
+    });
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'live-id',
+        cwd: '/live-root',
+        primary: false,
+        trusted: true,
+        bridge: liveBridge,
+        provenance: 'live-conversation',
+      }),
+    );
+
+    const rejectedNew = await sendWsRequest('/workspaces/live-id/acp', {
+      jsonrpc: '2.0',
+      id: 40,
+      method: 'session/new',
+      params: {},
+    });
+    expect(rejectedNew['error']).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'live_session_creation_reserved' },
+    });
+    expect(liveBridge.spawnOrAttach).not.toHaveBeenCalled();
+
+    const rejectedFork = await sendWsRequest('/workspaces/live-id/acp', {
+      jsonrpc: '2.0',
+      id: 46,
+      method: 'session/fork',
+      params: { sessionId: 'live-session' },
+    });
+    expect(rejectedFork['error']).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'live_session_creation_reserved' },
+    });
+    expect(liveBridge.branchSession).not.toHaveBeenCalled();
+
+    await writeStoredSession('generic-session', '/live-root');
+    const restoredProjectless = await sendWsRequest('/workspaces/live-id/acp', {
+      jsonrpc: '2.0',
+      id: 41,
+      method: 'session/load',
+      params: { sessionId: 'generic-session' },
+    });
+    expect(restoredProjectless['result']).toMatchObject({});
+    expect(materializeLiveConversationDirectory).toHaveBeenCalledWith(
+      'generic-session',
+    );
+    expect(loadSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'generic-session',
+        workspaceCwd: '/live-root',
+      }),
+    );
+    expect(changeSessionCwd).toHaveBeenCalledWith('generic-session', {
+      path: '/live-root/conversation-generic-session',
+      allowedRoots: ['/live-root'],
+      managedRelocation: 'live-conversation',
+    });
+    materializeLiveConversationDirectory.mockClear();
+    loadSession.mockClear();
+    changeSessionCwd.mockClear();
+
+    const foreignWorkspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-live-foreign-workspace-'),
+    );
+    try {
+      await writeStoredSession('foreign-live-session', foreignWorkspace, {
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:foreign-call',
+      });
+      const rejectedForeignLoad = await sendWsRequest(
+        '/workspaces/live-id/acp',
+        {
+          jsonrpc: '2.0',
+          id: 47,
+          method: 'session/load',
+          params: {
+            sessionId: 'foreign-live-session',
+            cwd: foreignWorkspace,
+          },
+        },
+      );
+      expect(rejectedForeignLoad['error']).toMatchObject({ code: -32602 });
+      expect(materializeLiveConversationDirectory).not.toHaveBeenCalled();
+      expect(loadSession).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(foreignWorkspace, { recursive: true, force: true });
+    }
+
+    await writeStoredSession('live-session', '/live-root', {
+      sourceType: 'default',
+      sourceId: 'realtime_voice:p1:h1:a1:call-1',
+    });
+    const restored = await sendWsRequest('/workspaces/live-id/acp', {
+      jsonrpc: '2.0',
+      id: 42,
+      method: 'session/load',
+      params: { sessionId: 'live-session' },
+    });
+    expect(restored['result']).toMatchObject({});
+    expect(materializeLiveConversationDirectory).toHaveBeenCalledWith(
+      'live-session',
+    );
+    expect(loadSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'live-session',
+        workspaceCwd: '/live-root',
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+      }),
+    );
+    expect(changeSessionCwd).toHaveBeenCalledWith('live-session', {
+      path: '/live-root/conversation-live-session',
+      allowedRoots: ['/live-root'],
+      managedRelocation: 'live-conversation',
+    });
+    expect(
+      materializeLiveConversationDirectory.mock.invocationCallOrder[0],
+    ).toBeLessThan(loadSession.mock.invocationCallOrder[0]!);
+    expect(loadSession.mock.invocationCallOrder[0]).toBeLessThan(
+      changeSessionCwd.mock.invocationCallOrder[0]!,
+    );
+
+    activeLiveSessionIds.add('live-session');
+    const blockedClose = await new Promise<Record<string, unknown>>(
+      (resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${port}/workspaces/live-id/acp`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('open', () => ws.send(INITIALIZE));
+        ws.on('message', (data: WebSocket.RawData) => {
+          const message = JSON.parse(data.toString()) as Record<
+            string,
+            unknown
+          >;
+          if (message['id'] === 1) {
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 2,
+                method: 'session/load',
+                params: { sessionId: 'live-session' },
+              }),
+            );
+          } else if (message['id'] === 2) {
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 3,
+                method: 'session/close',
+                params: { sessionId: 'live-session' },
+              }),
+            );
+          } else if (message['id'] === 3) {
+            ws.close();
+            resolve(message);
+          }
+        });
+        ws.on('error', reject);
+      },
+    );
+    expect(blockedClose['error']).toMatchObject({
+      code: -32600,
+      data: {
+        errorKind: 'live_session_active',
+        httpStatus: 409,
+        sessionId: 'live-session',
+      },
+    });
+    for (const [id, method] of [
+      [48, '_qwen/sessions/archive'],
+      [49, '_qwen/sessions/delete'],
+    ] as const) {
+      const blocked = await sendWsRequest('/workspaces/live-id/acp', {
+        jsonrpc: '2.0',
+        id,
+        method,
+        params: { sessionIds: ['live-session'] },
+      });
+      expect(blocked['error']).toMatchObject({
+        code: -32600,
+        data: {
+          errorKind: 'live_session_active',
+          httpStatus: 409,
+          sessionId: 'live-session',
+        },
+      });
+    }
+    expect(liveBridge.closeSession).not.toHaveBeenCalled();
+    activeLiveSessionIds.delete('live-session');
+
+    await writeStoredSession('live-resume', '/live-root', {
+      sourceType: 'default',
+      sourceId: 'realtime_voice:p1:h1:a1:call-2',
+    });
+    const resumed = await sendWsRequest('/workspaces/live-id/acp', {
+      jsonrpc: '2.0',
+      id: 43,
+      method: 'session/resume',
+      params: { sessionId: 'live-resume' },
+    });
+    expect(resumed['result']).toMatchObject({});
+    expect(resumeSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'live-resume',
+        workspaceCwd: '/live-root',
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-2',
+      }),
+    );
+    expect(changeSessionCwd).toHaveBeenCalledWith('live-resume', {
+      path: '/live-root/conversation-live-resume',
+      allowedRoots: ['/live-root'],
+      managedRelocation: 'live-conversation',
+    });
+
+    await writeStoredSession('live-active', '/live-root', {
+      sourceType: 'default',
+      sourceId: 'realtime_voice:p1:h1:a1:call-active',
+    });
+    const active = await sendWsRequest('/workspaces/live-id/acp', {
+      jsonrpc: '2.0',
+      id: 44,
+      method: 'session/load',
+      params: { sessionId: 'live-active' },
+    });
+    expect(active['result']).toMatchObject({});
+    expect(changeSessionCwd).not.toHaveBeenCalledWith(
+      'live-active',
+      expect.anything(),
+    );
+
+    await writeStoredSession('live-active-root', '/live-root', {
+      sourceType: 'default',
+      sourceId: 'realtime_voice:p1:h1:a1:call-active-root',
+    });
+    const activeAtRoot = await sendWsRequest('/workspaces/live-id/acp', {
+      jsonrpc: '2.0',
+      id: 45,
+      method: 'session/load',
+      params: { sessionId: 'live-active-root' },
+    });
+    expect(activeAtRoot['error']).toMatchObject({ code: -32603 });
+    expect(liveBridge.detachClient).toHaveBeenCalledWith(
+      'live-active-root',
+      'live-client',
+    );
+    expect(liveBridge.killSession).not.toHaveBeenCalledWith(
+      'live-active-root',
+      expect.anything(),
+    );
   });
 
   it('forwards unexpected legacy POST failures to Express', async () => {

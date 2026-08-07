@@ -302,6 +302,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           )}
           <AssistantMessage
             text={itemForDisplay.text}
+            images={itemForDisplay.images}
+            omittedImageCount={itemForDisplay.omittedImageCount}
             isPending={isPending}
             availableTerminalHeight={
               availableTerminalHeightGemini ?? availableTerminalHeight
@@ -314,6 +316,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_content' && (
         <AssistantMessageContent
           text={itemForDisplay.text}
+          images={itemForDisplay.images}
+          omittedImageCount={itemForDisplay.omittedImageCount}
           isPending={isPending}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight

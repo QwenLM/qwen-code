@@ -144,6 +144,21 @@ vi.mock('./MessageList', () => ({
       data-approval={props.pendingApproval ? 'yes' : 'no'}
     >
       {props.messages.length}
+      <button
+        data-testid="pane-open-turn-output"
+        type="button"
+        onClick={() =>
+          props.onTurnOutputOpen?.({
+            id: 'artifact:turn-artifact',
+            kind: 'artifact',
+            title: 'Turn artifact',
+            turnId: 'turn-1',
+            artifactId: 'turn-artifact',
+            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+            workspaceCwd: '/w',
+          })
+        }
+      />
     </div>
   ),
 }));
@@ -706,11 +721,29 @@ describe('ChatPane', () => {
       await Promise.resolve();
     });
 
-    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
-      'sess-1',
-      [artifact],
-      expect.any(Object),
-    );
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith('sess-1', [
+      artifact,
+    ]);
+  });
+
+  it('stamps its session identity on turn-output open requests', () => {
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+
+    act(() => {
+      testid('pane-open-turn-output')?.click();
+    });
+
+    expect(onRightPanelOpen).toHaveBeenCalledWith({
+      id: 'artifact:turn-artifact',
+      kind: 'artifact',
+      title: 'Turn artifact',
+      turnId: 'turn-1',
+      artifactId: 'turn-artifact',
+      artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+      workspaceCwd: '/w',
+      sourceSessionId: 'sess-1',
+    });
   });
 
   it('suppresses the rotating loading phrase in its compact status', () => {
@@ -979,15 +1012,51 @@ describe('ChatPane', () => {
   it('passes this pane workflow to its exit-plan approval', () => {
     messagesState = [
       {
-        id: 'plan',
-        role: 'plan',
-        todos: [
-          { id: 'prepare', content: 'Prepare', status: 'completed' },
+        id: 'plan-update',
+        role: 'tool_group',
+        tools: [
           {
-            id: 'ship',
-            content: 'Ship',
-            status: 'pending',
-            blockedBy: ['prepare'],
+            callId: 'todo-call-1',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Prepare',
+                  status: 'completed',
+                  _meta: { qwenTodo: { id: 'prepare' } },
+                },
+                {
+                  content: 'Ship',
+                  status: 'pending',
+                  _meta: {
+                    qwenTodo: { id: 'ship', blockedBy: ['prepare'] },
+                  },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      {
+        id: 'plan-update-newer',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-2',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Ship v2',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'ship-v2' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
           },
         ],
       },
@@ -1001,6 +1070,7 @@ describe('ChatPane', () => {
       id: 'perm-plan',
       toolKind: 'switch_mode',
       toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
       rawInput: {},
     };
 
@@ -1009,6 +1079,37 @@ describe('ChatPane', () => {
     expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
       '["prepare","ship"]',
     );
+  });
+
+  it('keeps the exit-plan approval text-only when Session Workflow is off', () => {
+    messagesState = [
+      {
+        id: 'plan-update',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-1',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [{ content: 'Ship', status: 'pending' }],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+      rawInput: {},
+    };
+
+    render();
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe('[]');
   });
 
   it('reflects streaming state on the composer', () => {

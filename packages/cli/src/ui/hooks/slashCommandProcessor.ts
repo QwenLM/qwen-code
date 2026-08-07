@@ -164,6 +164,7 @@ export interface SlashCommandProcessorActions {
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
+  clearPendingState: () => void;
 }
 
 /**
@@ -480,11 +481,13 @@ export const useSlashCommandProcessor = (
         addItem,
         clear: () => {
           cancelBtw();
+          actions.clearPendingState();
           clearItems();
           clearScreen();
           refreshStatic();
           setSessionName?.(null);
         },
+        clearPendingState: actions.clearPendingState,
         loadHistory,
         refreshStatic,
         setDebugMessage: actions.setDebugMessage,

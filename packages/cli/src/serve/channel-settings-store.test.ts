@@ -426,6 +426,7 @@ describe('WorkspaceChannelSettingsStore', () => {
         retries: 3,
         mode: 'safe',
         senderPolicy: 'open',
+        groupPolicy: 'pairing',
         allowedUsers: ['user-1'],
         groupHistoryLimit: 25,
         blockStreaming: 'on',
@@ -446,6 +447,7 @@ describe('WorkspaceChannelSettingsStore', () => {
       retries: 3,
       mode: 'safe',
       senderPolicy: 'open',
+      groupPolicy: 'pairing',
       allowedUsers: ['user-1'],
       groupHistoryLimit: 25,
       blockStreaming: 'on',
@@ -482,6 +484,80 @@ describe('WorkspaceChannelSettingsStore', () => {
         farewell: 'bye',
         attention_requested: 'ping',
       },
+    });
+  });
+
+  it('rejects a github channel with neither token nor local gh authentication without writing', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'github',
+          senderPolicy: 'allowlist',
+          groupPolicy: 'open',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringContaining('local GitHub CLI authentication'),
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('rejects clearing the github token without local gh authentication', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "github",
+    "token": "existing-token",
+    "senderPolicy": "allowlist",
+    "groupPolicy": "open"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'github',
+          senderPolicy: 'allowlist',
+          groupPolicy: 'open',
+        },
+        secrets: { token: { operation: 'clear' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringContaining('local GitHub CLI authentication'),
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('accepts a github channel that enables local gh authentication without a token', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        senderPolicy: 'allowlist',
+        groupPolicy: 'open',
+        allowedUsers: ['operator'],
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      type: 'github',
+      useLocalGh: true,
+      senderPolicy: 'allowlist',
+      groupPolicy: 'open',
     });
   });
 

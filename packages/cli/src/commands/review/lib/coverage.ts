@@ -63,6 +63,7 @@ import {
   readRecordedPrompts,
   wasDeliveredVerbatim,
   briefPath,
+  findingsPointerOf,
 } from './prompt-record.js';
 import {
   requiredAgents,
@@ -71,6 +72,7 @@ import {
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
 import { chunkIdsProblem } from './diff-plan.js';
+import { readBudgetStop } from './deadline.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -234,7 +236,7 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
 }
 
 /** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
-const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
+export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
 
 /** The chunk this agent owns, when it was launched to own one. */
 function assignedChunk(rec: AgentRecord): number | null {
@@ -885,9 +887,10 @@ export function coverageFromTranscripts(
 }
 
 /**
- * How a Step 4/5 step's agents got their prompt — four shapes, four different fixes.
+ * How a Step 4/5 step's agents got their prompt — five shapes, five different fixes.
  *
- * `ok` — an agent was launched with the prompt the CLI built and opened its brief.
+ * `ok` — an agent was launched with the prompt the CLI built, opened its brief,
+ *   and — when the built prompt points at one — read the findings file.
  * `not-built` — `agent-prompt --role <r>` never ran. Decided before the transcripts
  *   are consulted (there is no brief whose open could be looked for), so it proves
  *   the builder was skipped — NOT that no agent ran: a hand-written launch with no
@@ -897,13 +900,20 @@ export function coverageFromTranscripts(
  * `rewritten` — an agent ran and opened the brief, but no agent got the built prompt
  *   intact: the orchestrator wrote the launch itself.
  * `brief-unread` — an agent got the built prompt and never opened the brief it names.
+ * `findings-unread` — an agent got the built prompt and opened its brief, but never
+ *   read the findings file the prompt points at. Since #8597 the verify/reverse-audit
+ *   list rides that file (the block carries only the pointer), and the brief's read
+ *   receipt does not cover it — an instruction-skipping agent could open the brief,
+ *   skip the one instructed findings read, and rule on a list it never saw. The read
+ *   is a tool call like the brief's, so it is checked the same way.
  */
 type Delivery =
   | 'ok'
   | 'not-built'
   | 'not-launched'
   | 'rewritten'
-  | 'brief-unread';
+  | 'brief-unread'
+  | 'findings-unread';
 
 /**
  * Two sentences per failed shape, for two different readers.
@@ -913,7 +923,7 @@ type Delivery =
  * command (`agent-prompt --findings …` is not something an author can run, and on
  * #7012 fourteen lines of exactly that register WERE the public review). `fix` is
  * the per-shape remediation, printed to stderr where the orchestrator reads — the
- * four shapes exist because the four fixes differ, and that precision belongs to
+ * shapes exist because the fixes differ, and that precision belongs to
  * the reader who relaunches agents, not the one who reads the verdict.
  */
 interface GapEntry {
@@ -938,7 +948,13 @@ type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
 const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
   `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
   `--plan <plan> --role ${role} --findings <file> [--rules <rules file>] ` +
-  `[--round <k>]\` ` +
+  // --round is MANDATORY for a reverse-audit build (`agent-prompt` refuses a
+  // round-less call — the label keys the record and the budget gate's
+  // accounting), so the paste-and-run repair must not bracket it as optional:
+  // an orchestrator honouring the bracket convention would have its first
+  // repair attempt rejected. Verify genuinely takes it or not (only a repeat
+  // verification round passes one), so its brackets stay.
+  (role === 'reverse-audit' ? `--round <k>\` ` : `[--round <k>]\` `) +
   (role === 'reverse-audit'
     ? `(an early round with nothing confirmed passes an empty file; `
     : `(pass the shard's findings, never an empty file — a verifier that sees ` +
@@ -1008,6 +1024,19 @@ const REVERSE_AUDIT_GAP: GapText = {
       'relaunch with the same printed prompt — the agent must OPEN the brief ' +
       'file the prompt names; that read is the receipt',
   },
+  'findings-unread': {
+    gap:
+      'it was launched with the built prompt and opened its brief, but never ' +
+      'read the findings file the prompt points at, so it audited without ' +
+      'the confirmed list it was launched against',
+    gapZh:
+      '它用构建的 prompt 启动并打开了自己的 brief，却从未读取 prompt 所指向的 ' +
+      'findings 文件，审计时缺失了它本应对照的已确认发现列表',
+    fix:
+      'relaunch with the same printed prompt — the agent must OPEN the brief ' +
+      'file AND read the findings file the prompt names; those reads are ' +
+      'the receipt',
+  },
 };
 
 const VERIFY_GAP: GapText = {
@@ -1051,6 +1080,19 @@ const VERIFY_GAP: GapText = {
     fix:
       'relaunch with the same printed prompt — the agent must OPEN the brief ' +
       'file the prompt names; that read is the receipt',
+  },
+  'findings-unread': {
+    gap:
+      'it was launched with the built prompt and opened its brief, but never ' +
+      'read the findings file the prompt points at, so it ruled on findings ' +
+      'it was never shown',
+    gapZh:
+      '它用构建的 prompt 启动并打开了自己的 brief，却从未读取 prompt 所指向的 ' +
+      'findings 文件，等于在未见到这些发现的情况下作出裁定',
+    fix:
+      'relaunch with the same printed prompt — the agent must OPEN the brief ' +
+      'file AND read the findings file the prompt names; those reads are ' +
+      'the receipt',
   },
 };
 
@@ -1109,6 +1151,17 @@ const COMBINED_STEP45_GAP: Record<
     zh:
       '两者都用构建的 prompt 启动，却都从未打开自己的 brief——发现的裁定缺失了' +
       '裁定标准，审计也缺失了它本应遵循的只报缺口的方法',
+  },
+  'findings-unread': {
+    en:
+      'each was launched with its built prompt and opened its brief, but never ' +
+      'read the findings file its prompt points at, so the findings were ' +
+      'ruled on by agents never shown them, and the audit ran without the ' +
+      'confirmed list it was launched against',
+    zh:
+      '两者都用构建的 prompt 启动并打开了各自的 brief，却都未读取 prompt 所指向' +
+      '的 findings 文件——发现是在裁定者未见到它们的情况下被裁定的，审计也缺失' +
+      '了它本应对照的已确认发现列表',
   },
 };
 
@@ -1189,7 +1242,7 @@ export function verificationGaps(
   // (Step 4) still runs at medium, so its floor below is untouched.
   const balancedMedium = (plan as { effort?: unknown }).effort === 'medium';
 
-  // How a step's agents actually got their prompt. The floor needs the four shapes
+  // How a step's agents actually got their prompt. The floor needs the shapes
   // apart, not one boolean, because the fix for each is different — and a refusal
   // that names the wrong one is a refusal that gets argued with.
   //
@@ -1206,14 +1259,41 @@ export function verificationGaps(
     // lesson `parseTranscript` learned for the diff path: a bare substring credits
     // `…/x.brief.md.bak` for `…/x.brief.md`. `successfulCallArgs` are already
     // `JSON.stringify(args)`, so the quoted path is what a real read of the brief
-    // leaves in them.
+    // leaves in them. The findings file — the list a findings-role block points
+    // at since #8597 — is matched the same way: the pointer comes from the
+    // recorded prompt itself (a per-chunk key and its round's findings file
+    // are keyed differently, so the key cannot derive the path), and a prompt
+    // with no pointer (an empty early round, a pre-#8597 inlined list, or a
+    // round whose findings-file write failed and fell back to inlining) owes
+    // no findings read. Deliberate weakening versus the inlined shape this
+    // replaced: the floor proves the findings file was OPENED (one successful
+    // read_file of the path — no other tool's args count), not that it was
+    // paged to completion — `read_file` truncates, so a first-page-only read
+    // still leaves a matching `fNeedle`.
+    // The old `wasDeliveredVerbatim` required the whole list in the delivered
+    // prompt; the pointer proves delivery of the pointer line, not receipt of
+    // the whole list. Accepted: the brief now orders the full read, and a
+    // verifier that under-reads surfaces in the verdicts it gets wrong.
     const needle = JSON.stringify(briefPath(planPath, key));
     const opened = (r: AgentRecord) =>
       r.successfulCallArgs.some((a) => a.includes(needle));
+    const findingsPointer = findingsPointerOf(b);
+    const readTheFindings = (r: AgentRecord) => {
+      if (findingsPointer === null) return true;
+      const fNeedle = JSON.stringify(findingsPointer);
+      // Successful read_file calls ONLY: every tool serializes its args, and
+      // a `search_file_content` or a `list_directory` over the record dir
+      // names the path without reading a line of it. The floor certifies
+      // that the list was OPENED, and a mention is not an open.
+      return r.successfulReadFileArgs.some((a) => a.includes(fNeedle));
+    };
     const gotTheBuiltPrompt = records.filter((r) =>
       wasDeliveredVerbatim(r.launchPrompt, b),
     );
-    if (gotTheBuiltPrompt.some(opened)) return 'ok';
+    if (gotTheBuiltPrompt.some((r) => opened(r) && readTheFindings(r))) {
+      return 'ok';
+    }
+    if (gotTheBuiltPrompt.some(opened)) return 'findings-unread';
     if (gotTheBuiltPrompt.length > 0) return 'brief-unread';
     // Nothing was launched with the built prompt. Did anything open this key's brief
     // anyway? Then an agent DID run — on a launch the orchestrator wrote itself. A
@@ -1227,10 +1307,11 @@ export function verificationGaps(
     if (keys.length === 0) return 'not-built';
     const rank: Record<Delivery, number> = {
       ok: 0,
-      'brief-unread': 1,
-      rewritten: 2,
-      'not-launched': 3,
-      'not-built': 4,
+      'findings-unread': 1,
+      'brief-unread': 2,
+      rewritten: 3,
+      'not-launched': 4,
+      'not-built': 5,
     };
     return keys
       .map(deliveryOf)
@@ -1249,8 +1330,23 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
+  // A budget-stop marker means the round builder itself refused the reverse
+  // audit on the run's time budget. Exactly ONE gap shape is then by design:
+  // `not-built` — the refusal writes no record, so an audit with no records
+  // is the audit the gate stopped, and the gap's FIX (rebuild the round)
+  // would be refused by the very gate that stopped it — exit 4,
+  // deterministically, time only moves forward. compose-review synthesizes
+  // the marker's own disclosure instead: it names the stop honestly and caps
+  // the verdict. Every OTHER shape describes a round that predates the
+  // refusal — a built round nobody launched, a launch the orchestrator
+  // rewrote, a brief never opened — and those disclosures are still owed: a
+  // hand-written round-1 launch is exactly as undelivered when round 3 later
+  // hits the budget, and suppressing it would let "stopped before round 3"
+  // imply the rounds that did run were faithful.
+  const budgetStopped = readBudgetStop(planPath) !== null;
+  const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
-  const reverseGap = !balancedMedium && reverse !== 'ok';
+  const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';
   if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6
@@ -1273,9 +1369,10 @@ export function verificationGaps(
   let unverifiedFindings = false;
   let verify: Delivery | null = null;
   if (opts.postsFindings) {
-    // The whole key family: `verify--<digest>` per shard (the record now folds
-    // the findings in, so a launch that dropped them matches nothing), plus the
-    // bare legacy key. Floor of one, as documented.
+    // The whole key family: `verify--<digest>` per shard (the record carries
+    // the findings-file pointer, and `deliveryOf` now also requires the agent
+    // to have read that file, so a launch that dropped the read matches
+    // nothing), plus the bare legacy key. Floor of one, as documented.
     const verifyKeys = [...built.keys()].filter(
       (k) => k === 'verify' || k.startsWith('verify--'),
     );

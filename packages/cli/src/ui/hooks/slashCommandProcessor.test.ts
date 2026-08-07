@@ -145,6 +145,7 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
+  const mockClearPendingState = vi.fn();
 
   const mockConfig = makeFakeConfig({});
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -181,6 +182,7 @@ describe('useSlashCommandProcessor', () => {
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
     openRewindSelector: vi.fn(),
+    clearPendingState: mockClearPendingState,
   });
 
   beforeEach(() => {
@@ -2632,6 +2634,18 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('ui.clear and /btw dialog', () => {
+    it('should discard pending Gemini state when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.commandContext).toBeDefined());
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      expect(mockClearPendingState).toHaveBeenCalledTimes(1);
+      expect(mockClearItems).toHaveBeenCalledTimes(1);
+    });
+
     it('should dismiss an active btw dialog when ui.clear is called', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.commandContext).toBeDefined());

@@ -21,7 +21,7 @@
 
           Dev / VM testing: a self-signed cert added to LocalMachine\Root and
           LocalMachine\TrustedPublisher is enough; EnableSecureUIAPaths=0 lets
-          this run from %LOCALAPPDATA%\Programs\trycua\cua-driver-rs\bin\.
+          this run from %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin\.
           Prod: signed by Anthropic/trycua EV cert + installed under \Program Files\.
         -->
         <requestedExecutionLevel level="asInvoker" uiAccess="true"/>

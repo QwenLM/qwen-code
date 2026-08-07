@@ -254,6 +254,11 @@
   margin-bottom: 12px;
 }
 
+.liveWorkspaceLabel {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .projectsHeader {
   display: flex;
   flex: 0 0 auto;
