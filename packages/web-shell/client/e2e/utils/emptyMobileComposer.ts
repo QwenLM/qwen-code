@@ -97,6 +97,11 @@ export async function emptyMobileComposerLayout(
         }
       }
       if (!footer) throw new Error('Expected the composer footer.');
+      if (footer.getClientRects().length === 0) {
+        throw new Error(
+          'The composer footer has no box in the custom footer welcome variant (it renders display: contents by design), so anchored layout measurements do not apply there.',
+        );
+      }
 
       const chatPaneRect = chatPane.getBoundingClientRect();
       const chatPaneStyle = getComputedStyle(chatPane);

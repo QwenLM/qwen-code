@@ -581,6 +581,13 @@ test('keeps the bottom status panel visible in the custom footer mobile welcome 
   expect(statusPanelBox.y + statusPanelBox.height).toBeLessThanOrEqual(
     chatPaneBox.y + chatPaneBox.height,
   );
+
+  // This variant renders the composer footer `display: contents`, so the
+  // anchored-layout helper has no footer box to measure and must reject
+  // instead of reporting a misleading zero rect.
+  await expect(emptyMobileComposerLayout(page)).rejects.toThrow(
+    /custom footer welcome variant/,
+  );
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
