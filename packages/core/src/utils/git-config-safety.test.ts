@@ -101,6 +101,8 @@ describe('gitConfigMayExecutePrograms', () => {
       '[remote "origin"]\n\tproxy = nc -X 5 -x proxy:1080 %h %p\n',
       'remote-proxy',
     ],
+    ['[remote "origin"]\n\tuploadpack = /tmp/evil\n', 'remote-uploadpack'],
+    ['[remote "origin"]\n\treceivepack = /tmp/evil\n', 'remote-receivepack'],
     ['[remote "origin"]\n\turl = ext::sh -c evil%% %S %u\n', 'remote-ext-url'],
   ] as Array<[string, string]>)('flags subsection key %s', (config, label) => {
     const repo = makeRepo(label, config);
@@ -112,6 +114,15 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(enabled)).toBe(false);
     const disabled = makeRepo('fsm-false', '[core]\n\tfsmonitor = false\n');
     expect(gitConfigMayExecutePrograms(disabled)).toBe(false);
+  });
+
+  it('does not flag boolean core.pager values (no repo-supplied program)', () => {
+    const off = makeRepo('pager-false', '[core]\n\tpager = false\n');
+    expect(gitConfigMayExecutePrograms(off)).toBe(false);
+    const on = makeRepo('pager-true', '[core]\n\tpager = true\n');
+    expect(gitConfigMayExecutePrograms(on)).toBe(false);
+    const program = makeRepo('pager-prog', '[core]\n\tpager = less -R\n');
+    expect(gitConfigMayExecutePrograms(program)).toBe(true);
   });
 
   it('does not flag empty values or non-executing keys', () => {
@@ -130,6 +141,19 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(false);
   });
 
+  it('strips comments inside sections (trailing and whole-line)', () => {
+    // git strips trailing comments, so the value is the boolean `false` —
+    // a probe that kept the comment text would fail the boolean exemption
+    // and spuriously confirm every whitelisted command.
+    const trailing = makeRepo(
+      'inline-comment',
+      '[pager]\n\tlog = false # disabled\n',
+    );
+    expect(gitConfigMayExecutePrograms(trailing)).toBe(false);
+    const wholeLine = makeRepo('whole-line-comment', '[pager]\n# log = evil\n');
+    expect(gitConfigMayExecutePrograms(wholeLine)).toBe(false);
+  });
+
   it('parses inline `[section] key = value` lines', () => {
     const dirty = makeRepo('inline-dirty', '[diff] external = /tmp/evil\n');
     expect(gitConfigMayExecutePrograms(dirty)).toBe(true);
@@ -141,6 +165,45 @@ describe('gitConfigMayExecutePrograms', () => {
     const repo = makeRepo('gitproxy', '[core]\n\tgitProxy = /tmp/evil\n');
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
+
+  it('flags core.hooksPath overrides (hooks resolve to attacker files)', () => {
+    const repo = makeRepo('hookspath', '[core]\n\thooksPath = .myhooks\n');
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('flags executable hooks that read-only commands trigger', () => {
+    for (const hook of ['post-index-change', 'fsmonitor-watchman']) {
+      const repo = makeRepo(`hook-${hook}`, '');
+      const hooksDir = path.join(repo, '.git', 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      const hookPath = path.join(hooksDir, hook);
+      fs.writeFileSync(hookPath, '#!/bin/sh\ntouch /tmp/evil\n');
+      fs.chmodSync(hookPath, 0o755);
+      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+    }
+  });
+
+  // fs.accessSync(X_OK) is not meaningful on Windows — every file is
+  // "executable" there — so only assert the negative case elsewhere.
+  it.skipIf(process.platform === 'win32')(
+    'does not flag non-executable or unrelated hooks',
+    () => {
+      const repo = makeRepo('hook-inactive', '');
+      const hooksDir = path.join(repo, '.git', 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hooksDir, 'post-index-change'),
+        '#!/bin/sh\ntouch /tmp/evil\n',
+      );
+      fs.chmodSync(path.join(hooksDir, 'post-index-change'), 0o644);
+      fs.writeFileSync(
+        path.join(hooksDir, 'pre-commit.sample'),
+        '#!/bin/sh\n',
+        { mode: 0o755 },
+      );
+      expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+    },
+  );
 
   it('flags include/includeIf entries instead of resolving them', () => {
     const inc = makeRepo('include', '[include]\n\tpath = ../other-config\n');
@@ -171,6 +234,35 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
 
+  it('flags ext:: url rewrites with an EMPTY insteadOf (match-all prefix)', () => {
+    // git treats an empty insteadOf as matching every URL.
+    const repo = makeRepo(
+      'empty-insteadof',
+      '[url "ext::sh -c evil"]\n\tinsteadOf =\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('flags protocol.<name>.allow lifts of the ext:: transport block', () => {
+    const always = makeRepo(
+      'proto-always',
+      '[protocol "ext"]\n\tallow = always\n',
+    );
+    expect(gitConfigMayExecutePrograms(always)).toBe(true);
+    const user = makeRepo('proto-user', '[protocol]\n\tallow = user\n');
+    expect(gitConfigMayExecutePrograms(user)).toBe(true);
+    const undecodable = makeRepo(
+      'proto-undecodable',
+      '[protocol "ext"]\n\tallow = "unterminated\n',
+    );
+    expect(gitConfigMayExecutePrograms(undecodable)).toBe(true);
+    const never = makeRepo(
+      'proto-never',
+      '[protocol "ext"]\n\tallow = never\n',
+    );
+    expect(gitConfigMayExecutePrograms(never)).toBe(false);
+  });
+
   it('does not flag boolean pager overrides', () => {
     const repo = makeRepo(
       'pager-bool',
@@ -186,6 +278,18 @@ describe('gitConfigMayExecutePrograms', () => {
       `[core]\n\tbare = false\n# ${'x'.repeat(1 << 20)}\n`,
     );
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('joins continued lines before checking values', () => {
+    // git joins values across a backslash continuation; the dirty evidence
+    // only exists AFTER the join.
+    const dirty = makeRepo(
+      'cont-ext',
+      '[remote "origin"]\n\turl = ext\\\n::sh -c evil %S %u\n',
+    );
+    expect(gitConfigMayExecutePrograms(dirty)).toBe(true);
+    const clean = makeRepo('cont-bool', '[pager]\n\tlog = fal\\\nse\n');
+    expect(gitConfigMayExecutePrograms(clean)).toBe(false);
   });
 
   it('reads config.worktree of the main checkout (extensions.worktreeConfig)', () => {
@@ -323,19 +427,69 @@ describe('gitConfigMayExecutePrograms', () => {
   it('probes through a symlinked workspace directory', () => {
     if (process.platform === 'win32') return; // symlink perms differ
     const repo = makeRepo('sym-repo', '[diff]\n\texternal = /tmp/evil\n');
+    // Point the link at a NESTED path: without the realpathSync in the
+    // probe the walk would climb the link's own ancestors, never find the
+    // repo, and fail open.
+    const nested = path.join(repo, 'src');
+    fs.mkdirSync(nested);
     const link = path.join(root, 'ws-link');
-    fs.symlinkSync(repo, link);
+    fs.symlinkSync(nested, link);
     expect(gitConfigMayExecutePrograms(link)).toBe(true);
   });
 
   it('fails closed when the repo search depth is exhausted', () => {
-    const repo = makeRepo('deep-repo', '[diff]\n\texternal = /tmp/evil\n');
+    // A CLEAN config: discovery would return false, so the `true` verdict
+    // uniquely pins the exhaustion path (a raised/removed depth cap would
+    // otherwise reach the repo and read the clean config undetected).
+    // Single-char segments keep 70 levels under Windows MAX_PATH.
+    const repo = makeRepo('deep-repo', '[core]\n\tbare = false\n');
     let deep = repo;
     for (let i = 0; i < 70; i++) {
-      deep = path.join(deep, `d${i}`);
+      deep = path.join(deep, 'd');
     }
     fs.mkdirSync(deep, { recursive: true });
     expect(gitConfigMayExecutePrograms(deep)).toBe(true);
+  });
+
+  it('probes the target of a .git/commondir redirect (main checkout)', () => {
+    // git honors a `.git/commondir` file and reads the pointed-to
+    // directory's config as the common config — the probe must too.
+    const evilCommon = makeRepo(
+      'common-evil',
+      '[core]\n\tfsmonitor = /tmp/evil\n',
+    );
+    const repo = makeRepo('redirected', '');
+    fs.writeFileSync(
+      path.join(repo, '.git', 'commondir'),
+      `${path.join(evilCommon, '.git')}\n`,
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+
+    // Clean redirect target keeps the repo clean.
+    const cleanCommon = makeRepo('common-clean', '[core]\n\tbare = false\n');
+    fs.writeFileSync(
+      path.join(repo, '.git', 'commondir'),
+      `${path.join(cleanCommon, '.git')}\n`,
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+  });
+
+  it('probes HEAD+commondir git directories git itself accepts', () => {
+    // A HEAD-plus-commondir pair is a git directory to git even without
+    // objects/refs (linked-worktree admin dirs — and attacker-shaped
+    // stand-ins with a config.worktree).
+    const stand = path.join(root, 'stand-head-commondir');
+    fs.mkdirSync(stand, { recursive: true });
+    fs.writeFileSync(path.join(stand, 'HEAD'), 'ref: refs/heads/main\n');
+    const target = makeRepo(
+      'head-commondir-target',
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+    fs.writeFileSync(
+      path.join(stand, 'commondir'),
+      `${path.join(target, '.git')}\n`,
+    );
+    expect(gitConfigMayExecutePrograms(stand)).toBe(true);
   });
 
   it('reads the config of a git directory the cwd stands in', () => {
@@ -357,6 +511,30 @@ describe('gitConfigMayExecutePrograms', () => {
       '[diff]\n\texternal = /tmp/evil\n',
     );
     expect(gitConfigMayExecutePrograms(moduleGitDir)).toBe(true);
+  });
+
+  it('probes the commondir target of a standing git directory', () => {
+    // cwd stands in a HEAD+objects+refs dir whose commondir points at a
+    // NON-ANCESTOR git dir — the walk-up never reaches the target, only
+    // the commondir read does.
+    const target = makeRepo(
+      'standing-commondir-target',
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+    const stand = path.join(root, 'standing-gitdir');
+    fs.mkdirSync(path.join(stand, 'objects'), { recursive: true });
+    fs.mkdirSync(path.join(stand, 'refs'), { recursive: true });
+    fs.writeFileSync(path.join(stand, 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(stand, 'config'), '[core]\n');
+    fs.writeFileSync(
+      path.join(stand, 'commondir'),
+      `${path.join(target, '.git')}\n`,
+    );
+    expect(gitConfigMayExecutePrograms(stand)).toBe(true);
+
+    // Same git dir without a commondir stays clean.
+    fs.rmSync(path.join(stand, 'commondir'));
+    expect(gitConfigMayExecutePrograms(stand)).toBe(false);
   });
 
   it('fails closed on section headers it cannot parse', () => {

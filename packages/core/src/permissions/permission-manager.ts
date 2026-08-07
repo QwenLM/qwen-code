@@ -17,7 +17,10 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  isDirectoryChangeSegment,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -435,7 +438,10 @@ export class PermissionManager {
    *   - Otherwise (including command substitution) → 'ask'
    *
    * Example: with rules `allow: [git checkout *]`
-   *   - "cd /path && git checkout -b feature" → allow (cd) + allow (rule) → allow
+   *   - "ls && git checkout -b feature" → allow (ls) + allow (rule) → allow
+   *   - "cd /path && git checkout -b feature" → contains a directory
+   *     change, so 'default' segments resolve against the FULL command
+   *     (a write) → ask
    *   - "rm /path && git checkout -b feature" → ask (rm) + allow (rule) → ask
    *   - "evil-cmd && git checkout" (deny: [evil-cmd]) → deny + allow → deny
    */
@@ -453,16 +459,17 @@ export class PermissionManager {
 
     let mostRestrictive: ResolvedDecision = 'allow';
 
-    // A 'default' sub-command resolves against the FULL original command:
-    // per-segment classification cannot see cd context across the split and
-    // would probe a stale cwd, letting `cd <dirty> && git status` auto-run
-    // whenever any rule matches a sibling segment (#8575). The
-    // whole-command classifier tracks directory changes.
-    // Called only for compound commands, so ctx.command is defined.
-    const defaultDecision = await this.resolveDefaultPermission(
-      ctx.command!,
-      this.probeCwd(ctx),
-    );
+    // When the compound contains a directory-changing segment, a 'default'
+    // sub-command resolves against the FULL original command: per-segment
+    // classification cannot see cd context across the split and would probe
+    // a stale cwd, letting `cd <dirty> && git status` auto-run whenever any
+    // rule matches a sibling segment (#8575). The whole-command classifier
+    // tracks directory changes. Without a directory change, per-segment
+    // resolution keeps rule composition working. Called only for compound
+    // commands, so ctx.command is defined; computed lazily — rule-heavy
+    // configs may never reach a 'default' segment.
+    const hasDirectoryChange = subCommands.some(isDirectoryChangeSegment);
+    let wholeCommandDecision: 'allow' | 'ask' | undefined;
 
     for (const subCmd of subCommands) {
       const subCtx: PermissionCheckContext = {
@@ -473,10 +480,21 @@ export class PermissionManager {
 
       // Resolve 'default' to actual permission using AST analysis
       // (same logic as ShellToolInvocation.getDefaultPermission)
-      const decision: ResolvedDecision =
-        rawDecision === 'default'
-          ? defaultDecision
-          : (rawDecision as ResolvedDecision);
+      let decision: ResolvedDecision;
+      if (rawDecision !== 'default') {
+        decision = rawDecision as ResolvedDecision;
+      } else if (hasDirectoryChange) {
+        wholeCommandDecision ??= await this.resolveDefaultPermission(
+          ctx.command!,
+          this.probeCwd(ctx),
+        );
+        decision = wholeCommandDecision;
+      } else {
+        decision = await this.resolveDefaultPermission(
+          subCmd,
+          this.probeCwd(ctx),
+        );
+      }
 
       if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
         mostRestrictive = decision;

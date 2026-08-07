@@ -369,9 +369,35 @@ export function splitCommands(command: string): string[] {
 
 /** True when a split segment changes the working directory. */
 const DIRECTORY_CHANGE_SEGMENT = /^\(*\s*(?:cd|pushd|popd)(?:[\s);]|$)/;
+const DIRECTORY_CHANGE_COMMANDS = new Set(['cd', 'pushd', 'popd']);
+const DIRECTORY_CHANGE_PREFIXES = new Set(['builtin', 'command']);
 
 export function isDirectoryChangeSegment(segment: string): boolean {
-  return DIRECTORY_CHANGE_SEGMENT.test(segment.trim());
+  // Parse with shell-quote so disguised forms are recognized too:
+  // `builtin cd` / `command cd`, env-prefixed cds (`FOO=x cd /dir`), and
+  // quoted or escaped roots (`"cd"`, `'cd'`, `\cd`) all change the
+  // directory in bash. Over-detecting only widens the confirmation scope;
+  // under-detecting would drop the git segments after the cd from it
+  // (#8575).
+  try {
+    const tokens = parse(segment).filter(
+      (token): token is string => typeof token === 'string',
+    );
+    let index = 0;
+    while (index < tokens.length && ENV_ASSIGNMENT_REGEX.test(tokens[index]!)) {
+      index++;
+    }
+    if (
+      index < tokens.length &&
+      DIRECTORY_CHANGE_PREFIXES.has(tokens[index]!)
+    ) {
+      index++;
+    }
+    const root = tokens[index];
+    return root !== undefined && DIRECTORY_CHANGE_COMMANDS.has(root);
+  } catch {
+    return DIRECTORY_CHANGE_SEGMENT.test(segment.trim());
+  }
 }
 
 /**
@@ -484,6 +510,31 @@ export function getCommandRoots(command: string): string[] {
   return splitCommands(command)
     .map((c) => getCommandRoot(c))
     .filter((c): c is string => !!c);
+}
+
+const GIT_CONFIG_OVERRIDING_ENV = /^GIT_(?:DIR|WORK_TREE|COMMON_DIR|CONFIG)/;
+
+/**
+ * True when the command's leading env assignments override git's
+ * repository discovery (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR) or inject
+ * config (GIT_CONFIG_COUNT and GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n).
+ * Such assignments survive
+ * `stripShellWrapper`'s wrapper unwrap and still apply to the inner
+ * script, so classifying the stripped command alone would probe the wrong
+ * repository (#8575).
+ */
+export function hasGitConfigOverridingEnv(command: string): boolean {
+  let rest = command;
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) return false;
+    if (
+      GIT_CONFIG_OVERRIDING_ENV.test(stripSymmetricQuotes(token.token).value)
+    ) {
+      return true;
+    }
+    rest = token.rest;
+  }
 }
 
 export function stripShellWrapper(command: string): string {

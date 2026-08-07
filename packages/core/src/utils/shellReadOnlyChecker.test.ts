@@ -503,13 +503,17 @@ describe('git config execution probe (#8575)', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it.each(['git diff', 'git status', 'git log'])(
-    'downgrades %s when repo config executes programs',
-    (command) => {
-      expect(isShellCommandReadOnly(command, { cwd: dirtyRepo })).toBe(false);
-      expect(isShellCommandReadOnly(command, { cwd: cleanRepo })).toBe(true);
-    },
-  );
+  it.each([
+    'git diff',
+    'git status',
+    'git log',
+    'git remote show origin',
+    'git branch',
+    'git branch --list',
+  ])('downgrades %s when repo config executes programs', (command) => {
+    expect(isShellCommandReadOnly(command, { cwd: dirtyRepo })).toBe(false);
+    expect(isShellCommandReadOnly(command, { cwd: cleanRepo })).toBe(true);
+  });
 
   it('keeps git --version and bare git read-only under a dirty cwd', () => {
     expect(isShellCommandReadOnly('git --version', { cwd: dirtyRepo })).toBe(
@@ -555,9 +559,14 @@ describe('git config probe cd tracking (#8575)', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  // On Windows tmpdir paths contain backslashes, which the cd-target
+  // resolver (correctly) rejects; normalize to slashes so the tracking
+  // logic is still exercised there.
+  const p = (dir: string) => dir.split(path.sep).join('/');
+
   it('probes the post-cd repository', () => {
     expect(
-      isShellCommandReadOnly(`cd ${dirtyRepo} && git status`, {
+      isShellCommandReadOnly(`cd ${p(dirtyRepo)} && git status`, {
         cwd: cleanRepo,
       }),
     ).toBe(false);
@@ -567,7 +576,7 @@ describe('git config probe cd tracking (#8575)', () => {
       }),
     ).toBe(false);
     expect(
-      isShellCommandReadOnly(`cd ${cleanRepo} && git status`, {
+      isShellCommandReadOnly(`cd ${p(cleanRepo)} && git status`, {
         cwd: dirtyRepo,
       }),
     ).toBe(true);
@@ -590,18 +599,20 @@ describe('git config probe cd tracking (#8575)', () => {
 
   it('leaves non-git commands after cd untouched', () => {
     expect(
-      isShellCommandReadOnly(`cd ${dirtyRepo} && ls -la`, { cwd: cleanRepo }),
+      isShellCommandReadOnly(`cd ${p(dirtyRepo)} && ls -la`, {
+        cwd: cleanRepo,
+      }),
     ).toBe(true);
   });
 
   it('does not take cd flags as the destination directory', () => {
     expect(
-      isShellCommandReadOnly(`cd -P ${dirtyRepo} && git status`, {
+      isShellCommandReadOnly(`cd -P ${p(dirtyRepo)} && git status`, {
         cwd: cleanRepo,
       }),
     ).toBe(false);
     expect(
-      isShellCommandReadOnly(`cd -- ${cleanRepo} && git status`, {
+      isShellCommandReadOnly(`cd -- ${p(cleanRepo)} && git status`, {
         cwd: dirtyRepo,
       }),
     ).toBe(true);
@@ -618,12 +629,85 @@ describe('git config probe cd tracking (#8575)', () => {
 
   it('does not propagate cd state across non-&& separators', () => {
     expect(
-      isShellCommandReadOnly(`cd ${cleanRepo} || git status`, {
+      isShellCommandReadOnly(`cd ${p(cleanRepo)} || git status`, {
         cwd: dirtyRepo,
       }),
     ).toBe(false);
     expect(
-      isShellCommandReadOnly(`cd ${dirtyRepo}; git status`, {
+      isShellCommandReadOnly(`cd ${p(dirtyRepo)}; git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    // The guard must fire for ALL five non-&& separators (#8575).
+    expect(
+      isShellCommandReadOnly(`cd ${p(cleanRepo)} & git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly(`cd ${p(cleanRepo)} | git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly(`cd ${p(cleanRepo)}\ngit status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('does not trust a ||-joined cd (it may be skipped entirely)', () => {
+    expect(
+      isShellCommandReadOnly(`echo hi || cd ${p(cleanRepo)} && git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly(`echo hi || cd ${p(cleanRepo)} && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(true);
+  });
+
+  it('ignores cd in pipeline members (they run in subshells)', () => {
+    expect(
+      isShellCommandReadOnly(
+        `cat /dev/null | cd ${p(cleanRepo)} && git status`,
+        { cwd: dirtyRepo },
+      ),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly(
+        `cat /dev/null | cd ${p(dirtyRepo)} && git status`,
+        { cwd: cleanRepo },
+      ),
+    ).toBe(true);
+    expect(
+      isShellCommandReadOnly(
+        `cat /dev/null |& cd ${p(cleanRepo)} && git status`,
+        { cwd: dirtyRepo },
+      ),
+    ).toBe(false);
+  });
+
+  it('fails closed for quoted and escaped cd forms', () => {
+    for (const form of ['"cd"', "'cd'", '\\cd', 'c\\d']) {
+      expect(
+        isShellCommandReadOnly(`${form} ${p(dirtyRepo)} && git status`, {
+          cwd: cleanRepo,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('fails closed when cd is glued to an input redirection', () => {
+    expect(
+      isShellCommandReadOnly(`cd</dev/null ${p(dirtyRepo)} && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly(`cd<<<x ${p(dirtyRepo)} && git status`, {
         cwd: cleanRepo,
       }),
     ).toBe(false);
@@ -631,7 +715,7 @@ describe('git config probe cd tracking (#8575)', () => {
 
   it('fails closed for a subshell-wrapped cd', () => {
     expect(
-      isShellCommandReadOnly(`(cd ${dirtyRepo} && git status)`, {
+      isShellCommandReadOnly(`(cd ${p(dirtyRepo)} && git status)`, {
         cwd: cleanRepo,
       }),
     ).toBe(false);
@@ -639,7 +723,7 @@ describe('git config probe cd tracking (#8575)', () => {
 
   it('downgrades git after a multi-argument cd (bash stays put)', () => {
     expect(
-      isShellCommandReadOnly(`cd ${cleanRepo} extra; git status`, {
+      isShellCommandReadOnly(`cd ${p(cleanRepo)} extra; git status`, {
         cwd: dirtyRepo,
       }),
     ).toBe(false);
@@ -647,7 +731,7 @@ describe('git config probe cd tracking (#8575)', () => {
 
   it('downgrades git when the cd target does not exist (bash stays put)', () => {
     expect(
-      isShellCommandReadOnly(`cd ${root}/no-such-dir; git status`, {
+      isShellCommandReadOnly(`cd ${p(root)}/no-such-dir; git status`, {
         cwd: dirtyRepo,
       }),
     ).toBe(false);

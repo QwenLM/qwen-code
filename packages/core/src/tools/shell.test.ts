@@ -7141,6 +7141,47 @@ describe('ShellTool', () => {
       expect(details.rootCommand).toContain('rm');
     });
 
+    it('keeps sub-commands after a disguised cd in the confirmation scope (#8575)', async () => {
+      mockGitConfigMayExecutePrograms.mockReturnValue(false);
+      const invocation = shellTool.build({
+        command: 'builtin cd /tmp/repo && git status && rm x',
+        is_background: false,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string };
+
+      // `builtin cd` genuinely changes the directory in bash, so the git
+      // segment must not be filtered out of the dialog.
+      expect(details.rootCommand).toContain('git');
+      expect(details.rootCommand).toContain('rm');
+    });
+
+    it('asks when a git-overriding env prefix precedes a shell wrapper (#8575)', async () => {
+      // GIT_DIR survives the wrapper unwrap and applies to the inner
+      // script; without the guard the stripped `git status` probes the
+      // clean execution cwd and auto-executes against the planted repo.
+      const invocation = shellTool.build({
+        command: `GIT_DIR=/planted/.git bash -c 'git status'`,
+        is_background: false,
+      });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+
+      const configInjection = shellTool.build({
+        command: `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=evil bash -c 'git status'`,
+        is_background: false,
+      });
+      expect(await configInjection.getDefaultPermission()).toBe('ask');
+
+      // Unrelated env prefixes keep their normal classification.
+      const unrelated = shellTool.build({
+        command: `FOO=bar bash -c 'ls -la'`,
+        is_background: false,
+      });
+      expect(await unrelated.getDefaultPermission()).toBe('allow');
+    });
+
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the
     // env-prefix wrapper substitution bypass. `getDefaultPermission`
     // calls `stripShellWrapper(this.params.command)` BEFORE the AST

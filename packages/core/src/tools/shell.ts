@@ -62,6 +62,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  hasGitConfigOverridingEnv,
   hasShellSubstitution,
   isDirectoryChangeSegment,
   SHELL_SELF_KILL_REJECTION,
@@ -2034,6 +2035,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // gate the command auto-executes silently with no confirmation
     // dialog and no warning. See PR #4386 R6 (cid 3298521039).
     if (hasShellSubstitution(this.params.command)) {
+      return 'ask';
+    }
+
+    // A git-overriding env prefix (GIT_DIR=…, GIT_CONFIG_COUNT=…) survives
+    // the wrapper unwrap below and still applies to the inner script,
+    // while the probe would only see the stripped command's cwd — the
+    // compound would auto-execute against attacker-chosen config (#8575).
+    if (hasGitConfigOverridingEnv(this.params.command)) {
       return 'ask';
     }
 

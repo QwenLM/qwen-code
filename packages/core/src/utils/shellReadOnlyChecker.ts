@@ -370,6 +370,16 @@ function trackDirectoryChange(
   const wrapped = trimmed.startsWith('(');
   const bare = wrapped ? trimmed.replace(/^\(+\s*/, '') : trimmed;
   if (!CD_COMMAND.test(bare)) {
+    // A disguised cd still changes the directory in bash even though the
+    // raw text misses the bare-cd regex: quoted or escaped roots (`"cd"`,
+    // `'cd'`, `\cd`) are unquoted before command lookup, and a glued
+    // input redirection (`cd<file dir`) is a separate token. When the
+    // segment parses to a cd root, fail closed so the following git
+    // segments are downgraded instead of probed at the pre-cd cwd (#8575).
+    const { root } = skipEnvironmentAssignments(normalizeTokens(bare));
+    if (root === 'cd' || root === 'pushd' || root === 'popd') {
+      return { currentCwd: undefined, unknownDir: true };
+    }
     return { currentCwd, unknownDir: false };
   }
   if (wrapped) {
@@ -440,10 +450,11 @@ export function isShellCommandReadOnly(
 
   for (let index = 0; index < segments.length; index++) {
     const segment = segments[index]!.command;
+    const incoming = index > 0 ? segments[index - 1]!.separator : null;
     // A segment after a non-`&&` operator (`;`, `||`, `|`, newline, `&`)
     // also runs when a preceding cd did not take effect, so the tracked
     // directory no longer applies once one was involved (#8575).
-    if (index > 0 && segments[index - 1]!.separator !== '&&' && dirChanged) {
+    if (incoming !== null && incoming !== '&&' && dirChanged) {
       diverged = true;
     }
     if (diverged) {
@@ -459,6 +470,9 @@ export function isShellCommandReadOnly(
       return false;
     }
     if (diverged) continue;
+    // Every pipeline member runs in a subshell — a cd there never moves
+    // the directory the following segments execute in (#8575).
+    if (incoming === '|' || incoming === '|&') continue;
     const tracked = trackDirectoryChange(segment, currentCwd);
     if (tracked.unknownDir) {
       unknownDir = true;
@@ -468,7 +482,19 @@ export function isShellCommandReadOnly(
       tracked.currentCwd !== undefined &&
       tracked.currentCwd !== currentCwd
     ) {
-      currentCwd = tracked.currentCwd;
+      // A cd joined by `||` may be skipped entirely (the preceding
+      // segment succeeded), in which case the following segments run in
+      // the prior directory — it must be clean too (#8575).
+      if (
+        incoming === '||' &&
+        currentCwd !== undefined &&
+        gitConfigMayExecutePrograms(currentCwd)
+      ) {
+        unknownDir = true;
+        currentCwd = undefined;
+      } else {
+        currentCwd = tracked.currentCwd;
+      }
       dirChanged = true;
     }
   }

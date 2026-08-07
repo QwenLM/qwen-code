@@ -18,9 +18,12 @@
  *   - `core.alternateRefsCommand` — `log --alternate-refs`
  *   - `core.pager`, `pager.<cmd>` — log / show / diff / blame on a TTY
  *   - `core.askpass`, `credential.helper`, `core.sshCommand`,
- *     `remote.<name>.proxy`, `ext::` remote URLs, `core.gitProxy` —
- *     `remote show` network/transport helpers
+ *     `remote.<name>.proxy`, `remote.<name>.uploadpack`, `ext::` remote
+ *     URLs, `protocol.<name>.allow` lifts, `core.gitProxy` — `remote
+ *     show` network/transport helpers
  *   - `gpg.program` — signature verification helpers
+ *   - `core.hooksPath` — redirects hook resolution; the default hooks
+ *     directory is also probed for hooks that read-only commands fire
  *
  * A `.git/config` planted by an attacker (prompt-injection chain with local
  * file write, shared workspace) could therefore turn an auto-approved
@@ -84,6 +87,7 @@ const PROGRAM_VALUED_KEYS = new Set([
   'core.askpass', // credential prompts (e.g. `git remote show <url>`)
   'core.fsmonitor', // fsmonitor hook command (`git status`)
   'core.gitproxy', // git:// transport proxy (`git remote show git://…`)
+  'core.hookspath', // redirects hook resolution to attacker-chosen files
   'core.pager', // pager program for log / show / diff output
   'core.sshcommand', // ssh override for authenticated remotes
   'credential.helper', // credential helpers during network auth
@@ -243,6 +247,32 @@ function decodeGitConfigValue(raw: string): string | null {
 function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
   for (const entry of entries) {
     const value = decodeGitConfigValue(entry.value);
+
+    // `url.<base>.insteadOf` rewrites remote URLs before connecting; an
+    // ext:: rewrite target executes a program. Checked before the
+    // empty-value skip: git treats an EMPTY insteadOf as a match-all
+    // rewrite prefix. Git decodes subsection escapes first (`\x` → `x`),
+    // so over-approximate by dropping backslashes before comparing.
+    if (
+      entry.section === 'url' &&
+      entry.subsection !== null &&
+      entry.subsection.replace(/\\/g, '').startsWith('ext::')
+    ) {
+      return true;
+    }
+
+    // `protocol.allow` / `protocol.<name>.allow` lifts the default block
+    // on program transports (ext::) — any value that is not definitely
+    // `never` enables the lift, and a command-line ext:: URL passed to a
+    // whitelisted command then executes a program.
+    if (
+      entry.section === 'protocol' &&
+      entry.key === 'allow' &&
+      value?.toLowerCase() !== 'never'
+    ) {
+      return true;
+    }
+
     if (value === '') continue;
 
     // Include targets can live outside `.git` (e.g. files tracked in the
@@ -261,9 +291,10 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
       const name = `${entry.section}.${entry.key}`;
       if (!PROGRAM_VALUED_KEYS.has(name)) continue;
       // core.fsmonitor true/false selects the built-in daemon or disables
-      // monitoring — neither executes an external program.
+      // monitoring; core.pager true/false disables paging or falls back to
+      // $PAGER — neither executes a repo-config-supplied program.
       if (
-        name === 'core.fsmonitor' &&
+        (name === 'core.fsmonitor' || name === 'core.pager') &&
         value !== null &&
         /^(?:true|false)$/i.test(value)
       ) {
@@ -283,7 +314,13 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
         if (entry.key === 'program') return true;
         break;
       case 'remote':
-        if (entry.key === 'proxy') return true;
+        if (
+          entry.key === 'proxy' ||
+          entry.key === 'uploadpack' ||
+          entry.key === 'receivepack'
+        ) {
+          return true;
+        }
         if (entry.key === 'url' && (value === null || /^ext::/.test(value))) {
           return true;
         }
@@ -299,18 +336,27 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
           return true;
         }
         break;
-      case 'url':
-        // `url.<base>.insteadOf` rewrites remote URLs before connecting;
-        // an ext:: rewrite target executes a program (the transport
-        // block can be lifted via protocol.ext.allow in the same file).
-        // Git decodes subsection escapes first (`\x` → `x`), so
-        // over-approximate by dropping backslashes before comparing.
-        if (entry.subsection!.replace(/\\/g, '').startsWith('ext::')) {
-          return true;
-        }
-        break;
       default:
         break;
+    }
+  }
+  return false;
+}
+
+/**
+ * Hooks that fire while whitelisted read-only commands run: an index
+ * refresh runs `post-index-change`, and `git status` consults
+ * `fsmonitor-watchman` when monitoring is hook-based.
+ */
+const READ_ONLY_TRIGGERED_HOOKS = ['post-index-change', 'fsmonitor-watchman'];
+
+function hooksMayExecutePrograms(hooksDir: string): boolean {
+  for (const hook of READ_ONLY_TRIGGERED_HOOKS) {
+    try {
+      fs.accessSync(path.join(hooksDir, hook), fs.constants.X_OK);
+      return true;
+    } catch {
+      // Hook absent or not executable.
     }
   }
   return false;
@@ -340,11 +386,17 @@ function worktreeConfigEnabled(entries: ConfigEntry[]): boolean {
  * objects and refs/packed-refs is itself a git directory (is_git_directory
  * in setup.c) — a bare repository, or a submodule's storage dir like
  * `<repo>/.git/modules/<name>` whose own config git reads while standing
- * in it.
+ * in it. git also accepts a HEAD-plus-commondir pair (linked-worktree
+ * admin directories — and attacker-shaped stand-ins), so mirror that.
  */
 function isGitDirectory(dir: string): boolean {
   try {
     if (!fs.statSync(path.join(dir, 'HEAD')).isFile()) return false;
+    try {
+      if (fs.statSync(path.join(dir, 'commondir')).isFile()) return true;
+    } catch {
+      // No commondir — fall through to the objects/refs requirement.
+    }
     if (!fs.statSync(path.join(dir, 'objects')).isDirectory()) return false;
     try {
       if (fs.statSync(path.join(dir, 'refs')).isDirectory()) return true;
@@ -400,11 +452,22 @@ function findLocalGitConfigFiles(cwd: string): string[] {
     if (stat) {
       if (stat.isDirectory()) {
         // With extensions.worktreeConfig enabled, git also reads
-        // `config.worktree` for the MAIN worktree — probe both.
-        return [
-          path.join(gitPath, 'config'),
-          path.join(gitPath, 'config.worktree'),
-        ];
+        // `config.worktree` for the MAIN worktree — probe both. A
+        // `commondir` file redirects the common config git reads, so
+        // probe the pointed-to directory's config as well.
+        const files = [path.join(gitPath, 'config')];
+        try {
+          const commonDir = fs
+            .readFileSync(path.join(gitPath, 'commondir'), 'utf8')
+            .trim();
+          if (commonDir) {
+            files.push(path.join(path.resolve(gitPath, commonDir), 'config'));
+          }
+        } catch {
+          // No commondir — the repo's own config is the common config.
+        }
+        files.push(path.join(gitPath, 'config.worktree'));
+        return files;
       }
       if (stat.isFile()) {
         let pointer: string;
@@ -473,7 +536,11 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
 
   try {
     let readWorktreeConfig = false;
+    const hooksDirs = new Set<string>();
     for (const file of findLocalGitConfigFiles(cwd)) {
+      if (path.basename(file) === 'config') {
+        hooksDirs.add(path.join(path.dirname(file), 'hooks'));
+      }
       if (file.endsWith('config.worktree') && !readWorktreeConfig) continue;
       try {
         if (fs.statSync(file).size > MAX_CONFIG_FILE_BYTES) {
@@ -493,6 +560,9 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
       const entries = parseGitConfig(content);
       if (entriesMayExecutePrograms(entries)) return true;
       readWorktreeConfig ||= worktreeConfigEnabled(entries);
+    }
+    for (const hooksDir of hooksDirs) {
+      if (hooksMayExecutePrograms(hooksDir)) return true;
     }
     return false;
   } catch {

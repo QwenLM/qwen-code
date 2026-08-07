@@ -3974,6 +3974,39 @@ describe('git config execution probe wiring (#8575)', () => {
     ).resolves.toBe('allow');
   });
 
+  it('keeps per-segment rule composition without directory changes', async () => {
+    // Without a cd, a rule-matched segment and a read-only 'default'
+    // segment compose to allow — whole-command resolution would ask here
+    // because checkout is a write sub-command.
+    const manager = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(git checkout *)'] }),
+    );
+    manager.initialize();
+
+    await expect(
+      manager.evaluate({
+        toolName: 'run_shell_command',
+        command: 'ls && git checkout -b feature',
+        cwd: cleanRepo,
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('resolves cd-containing compounds against the full command even with a rule match', async () => {
+    const manager = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(git checkout *)'] }),
+    );
+    manager.initialize();
+
+    await expect(
+      manager.evaluate({
+        toolName: 'run_shell_command',
+        command: `cd ${cleanRepo} && git checkout -b feature`,
+        cwd: cleanRepo,
+      }),
+    ).resolves.toBe('ask');
+  });
+
   it('does not let a segment rule override the cd-aware compound default', async () => {
     // With a rule matching one segment, the other segment's 'default' must
     // resolve against the FULL command (cd-aware), not the bare segment

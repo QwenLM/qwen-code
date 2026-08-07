@@ -14,7 +14,10 @@ import type {
 } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  hasGitConfigOverridingEnv,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
@@ -252,7 +255,12 @@ async function evaluateScopedDecision(
       }
       // Managed memory agents' shell calls carry no `directory` parameter,
       // so ctx.cwd is absent in production — fall back to the scoped
-      // execution root or the git-config probe never runs (#8575).
+      // execution root or the git-config probe never runs (#8575). A
+      // git-overriding env prefix survives the wrapper unwrap and still
+      // applies to the inner script, so it can never be auto-allowed.
+      if (hasGitConfigOverridingEnv(ctx.command)) {
+        return 'deny';
+      }
       const isReadOnly = await isShellCommandReadOnlyAST(
         stripShellWrapper(ctx.command),
         { cwd: ctx.cwd ?? projectRoot },

@@ -1122,14 +1122,25 @@ function childrenSafety(
  * actually reaches (#8575).
  */
 function evaluateSequenceSafety(
-  statements: SyntaxNode[],
+  node: SyntaxNode,
   checkOptions?: ShellReadOnlyCheckOptions,
 ): ShellCommandSafety {
   let context = checkOptions;
   let result: ShellCommandSafety = 'read-only';
-  for (const node of statements) {
-    result = mergeSafety(result, evaluateStatementSafety(node, context));
-    context = contextAfterStatement(node, context);
+  const children = node.children;
+  for (let index = 0; index < children.length; index++) {
+    const child = children[index]!;
+    if (!child.isNamed) continue;
+    result = mergeSafety(result, evaluateStatementSafety(child, context));
+    // A `&` terminator backgrounds the statement: it runs in a subshell,
+    // so its directory changes never reach the statements that follow
+    // (#8575). (`&` is a terminator between statements, never inside a
+    // `list` node.)
+    const terminator = children[index + 1];
+    context =
+      terminator && !terminator.isNamed && terminator.type === '&'
+        ? context
+        : contextAfterStatement(child, context);
   }
   return result;
 }
@@ -1146,7 +1157,10 @@ function* iterateListStatements(
   let operator = leadingOperator;
   for (const child of node.children) {
     if (!child.isNamed) {
-      if (child.type === '&&' || child.type === '||' || child.type === '&') {
+      // `&` never appears inside a `list` node — it terminates the list
+      // at program/compound level, where evaluateSequenceSafety handles
+      // it — so only `&&`/`||` join list members.
+      if (child.type === '&&' || child.type === '||') {
         operator = child.type;
       }
       continue;
@@ -1192,7 +1206,11 @@ function evaluateListSafety(
       continue;
     }
     result = mergeSafety(result, evaluateStatementSafety(statement, context));
-    const next = contextAfterStatement(statement, context, true);
+    // A cd joined by `||` may be skipped entirely (the preceding segment
+    // succeeded), so the following segments can also run in the prior
+    // directory — pass `certain=false` so contextAfterCd applies its
+    // prior-directory check (#8575).
+    const next = contextAfterStatement(statement, context, operator !== '||');
     if (next !== context) {
       context = next;
       directoryTracked = true;
@@ -1213,12 +1231,19 @@ function contextAfterStatement(
   context?: ShellReadOnlyCheckOptions,
   certain = false,
 ): ShellReadOnlyCheckOptions | undefined {
-  if (node.type === 'redirected_statement' || node.type === 'negated_command') {
-    // Redirection/negation still runs the body in the current shell.
+  if (node.type === 'redirected_statement') {
+    // Redirection still runs the body in the current shell.
     const body = node.namedChildren[0];
     return body
       ? contextAfterStatement(body, context, certain)
       : { ...context, cwd: undefined, unknownDir: true };
+  }
+  if (node.type === 'negated_command') {
+    // `! cd X && …` continues the chain precisely when the cd FAILED —
+    // the resolved target would point at a directory git never reaches.
+    return containsCurrentShellCd(node)
+      ? { ...context, cwd: undefined, unknownDir: true }
+      : context;
   }
   if (node.type === 'command') {
     const name = getCommandName(node);
@@ -1347,7 +1372,7 @@ function evaluateStatementSafety(
   if (node.type === 'command') return evaluateCommandSafety(node, checkOptions);
   if (node.type === 'list') return evaluateListSafety(node, checkOptions);
   if (node.type === 'compound_statement' || node.type === 'subshell')
-    return evaluateSequenceSafety(node.namedChildren, checkOptions);
+    return evaluateSequenceSafety(node, checkOptions);
   if (CHILD_STATEMENT.test(node.type))
     return childrenSafety(node, 'read-only', checkOptions);
   if (node.type === 'redirected_statement')
@@ -1374,7 +1399,7 @@ async function classifyInternal(
   try {
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
-    return evaluateSequenceSafety(root.namedChildren, checkOptions);
+    return evaluateSequenceSafety(root, checkOptions);
   } finally {
     tree.delete();
   }
