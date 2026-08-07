@@ -6713,6 +6713,10 @@ describe('Session', () => {
           name: 'read_file',
           args: { file_path: `file_${index}.ts` },
         }));
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
         mockToolRegistry.getTool.mockImplementation((name: string) =>
           name === 'read_file'
             ? {
@@ -6725,10 +6729,7 @@ describe('Session', () => {
                   getDefaultPermission: vi.fn().mockResolvedValue('allow'),
                   getDescription: vi.fn().mockReturnValue('read'),
                   toolLocations: vi.fn().mockReturnValue([]),
-                  execute: vi.fn().mockResolvedValue({
-                    llmContent: 'ok',
-                    returnDisplay: 'ok',
-                  }),
+                  execute,
                 })),
                 canUpdateOutput: false,
                 isOutputMarkdown: false,
@@ -6753,6 +6754,7 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected ?? false).toBe(false);
+        expect(execute).toHaveBeenCalledTimes(5);
         expect(result.parts).toHaveLength(5);
       });
 
@@ -6769,15 +6771,20 @@ describe('Session', () => {
           maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
-        // Six identical (tool, args) calls below the cap — the shape core's
-        // checkGlobalDuplicate covers. Core gates that detector on
-        // skipLoopDetection (default true) because long turns legitimately
-        // re-run the same call, so the daemon default must let it run too.
+        // Six identical (tool, args) calls below the cap. Core's always-on
+        // consecutive-identical guard (TOOL_CALL_LOOP_THRESHOLD = 5) halts
+        // this exact shape regardless of skipLoopDetection; the daemon
+        // deliberately does not mirror that guard, so the daemon default
+        // must let it run too.
         const calls = Array.from({ length: 6 }, (_, index) => ({
           id: `read_${index}`,
           name: 'read_file',
           args: { file_path: 'same.ts' },
         }));
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
         mockToolRegistry.getTool.mockImplementation((name: string) =>
           name === 'read_file'
             ? {
@@ -6790,10 +6797,7 @@ describe('Session', () => {
                   getDefaultPermission: vi.fn().mockResolvedValue('allow'),
                   getDescription: vi.fn().mockReturnValue('read'),
                   toolLocations: vi.fn().mockReturnValue([]),
-                  execute: vi.fn().mockResolvedValue({
-                    llmContent: 'ok',
-                    returnDisplay: 'ok',
-                  }),
+                  execute,
                 })),
                 canUpdateOutput: false,
                 isOutputMarkdown: false,
@@ -6818,6 +6822,7 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected ?? false).toBe(false);
+        expect(execute).toHaveBeenCalledTimes(6);
         expect(result.parts).toHaveLength(6);
       });
 
@@ -6840,6 +6845,10 @@ describe('Session', () => {
           name: 'read_file',
           args: { file_path: 'same.ts' },
         }));
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
         mockToolRegistry.getTool.mockImplementation((name: string) =>
           name === 'read_file'
             ? {
@@ -6852,10 +6861,7 @@ describe('Session', () => {
                   getDefaultPermission: vi.fn().mockResolvedValue('allow'),
                   getDescription: vi.fn().mockReturnValue('read'),
                   toolLocations: vi.fn().mockReturnValue([]),
-                  execute: vi.fn().mockResolvedValue({
-                    llmContent: 'ok',
-                    returnDisplay: 'ok',
-                  }),
+                  execute,
                 })),
                 canUpdateOutput: false,
                 isOutputMarkdown: false,
@@ -6880,6 +6886,113 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected).toBe(true);
+        expect(execute).not.toHaveBeenCalled();
+        expect(
+          result.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 6 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after the same tool call repeated 6 times.',
+          ),
+        );
+      });
+
+      it('accumulates repeat counts across responses against the same loop state', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // The prompt loop calls runToolCalls once per model response against
+        // the same per-prompt loop state (never reset between responses), so
+        // repeats split across responses must accumulate toward the
+        // global-duplicate threshold: a stuck model re-emitting the same call
+        // in separate responses is the shape this mirror exists to catch.
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+        const sessionInternals = session as unknown as {
+          runToolCalls: (
+            abortSignal: AbortSignal,
+            promptId: string,
+            calls: unknown[],
+            loopState: typeof toolLoopState,
+          ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+        };
+        const makeCalls = (idPrefix: string) =>
+          Array.from({ length: 3 }, (_, index) => ({
+            id: `${idPrefix}_${index}`,
+            name: 'read_file',
+            args: { file_path: 'same.ts' },
+          }));
+
+        const first = await sessionInternals.runToolCalls(
+          new AbortController().signal,
+          'prompt-cross-response-repeats',
+          makeCalls('read_a'),
+          toolLoopState,
+        );
+        expect(first.loopDetected ?? false).toBe(false);
+        expect(first.parts).toHaveLength(3);
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(toolLoopState.maxToolCallKeyRepeat).toBe(3);
+
+        const second = await sessionInternals.runToolCalls(
+          new AbortController().signal,
+          'prompt-cross-response-repeats',
+          makeCalls('read_b'),
+          toolLoopState,
+        );
+        expect(second.loopDetected).toBe(true);
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(toolLoopState.maxToolCallKeyRepeat).toBe(6);
+        expect(
+          second.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 3 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after the same tool call repeated 6 times.',
@@ -7017,6 +7130,10 @@ describe('Session', () => {
             args: { file_path: 'same.ts' },
           })),
         ];
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
         mockToolRegistry.getTool.mockImplementation((name: string) =>
           name === 'read_file'
             ? {
@@ -7029,10 +7146,7 @@ describe('Session', () => {
                   getDefaultPermission: vi.fn().mockResolvedValue('allow'),
                   getDescription: vi.fn().mockReturnValue('read'),
                   toolLocations: vi.fn().mockReturnValue([]),
-                  execute: vi.fn().mockResolvedValue({
-                    llmContent: 'ok',
-                    returnDisplay: 'ok',
-                  }),
+                  execute,
                 })),
                 canUpdateOutput: false,
                 isOutputMarkdown: false,
@@ -7057,7 +7171,18 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected).toBe(true);
-        expect(result.parts).toHaveLength(7);
+        expect(execute).not.toHaveBeenCalled();
+        expect(
+          result.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 7 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after 106 tool calls in one turn.',
@@ -7096,6 +7221,10 @@ describe('Session', () => {
             args: { file_path: 'same.ts' },
           })),
         ];
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
         mockToolRegistry.getTool.mockImplementation((name: string) =>
           name === 'read_file'
             ? {
@@ -7108,10 +7237,7 @@ describe('Session', () => {
                   getDefaultPermission: vi.fn().mockResolvedValue('allow'),
                   getDescription: vi.fn().mockReturnValue('read'),
                   toolLocations: vi.fn().mockReturnValue([]),
-                  execute: vi.fn().mockResolvedValue({
-                    llmContent: 'ok',
-                    returnDisplay: 'ok',
-                  }),
+                  execute,
                 })),
                 canUpdateOutput: false,
                 isOutputMarkdown: false,
@@ -7136,7 +7262,18 @@ describe('Session', () => {
         );
 
         expect(result.loopDetected).toBe(true);
-        expect(result.parts).toHaveLength(7);
+        expect(execute).not.toHaveBeenCalled();
+        expect(
+          result.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 7 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after 106 tool calls in one turn.',
