@@ -5245,6 +5245,9 @@ describe('Session', () => {
     });
 
     it('clamps oversized native audio when the bridge skips an audio-capable primary', async () => {
+      const key = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[key];
+      delete process.env[key];
       mockConfig.getEffectiveInputModalities = vi
         .fn()
         .mockReturnValue({ audio: true });
@@ -5252,19 +5255,24 @@ describe('Session', () => {
         .fn()
         .mockResolvedValue(createEmptyStream());
 
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [
-          { type: 'text', text: 'listen to this' },
-          {
-            type: 'audio',
-            mimeType: 'audio/wav',
-            // ~11 MiB decoded: over the 10 MiB inline-media cap the bridge
-            // skip must hand back to.
-            data: 'A'.repeat(Math.ceil((11 * 1024 * 1024 * 4) / 3)),
-          },
-        ],
-      });
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'listen to this' },
+            {
+              type: 'audio',
+              mimeType: 'audio/wav',
+              // ~11 MiB decoded: over the 10 MiB inline-media cap the bridge
+              // skip must hand back to.
+              data: 'A'.repeat(Math.ceil((11 * 1024 * 1024 * 4) / 3)),
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+      }
 
       expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
       const sent = firstSentMessage();
@@ -5662,6 +5670,69 @@ describe('Session', () => {
         expect.any(String),
       );
       expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
+    });
+
+    it('keeps native ACP audio on the primary route while bridging a mixed image', async () => {
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ audio: true });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const audioPart: Part = {
+        inlineData: { mimeType: 'audio/ogg', data: 'T2dnUw==' },
+      };
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [
+          { text: 'look at this' },
+          audioPart,
+          { text: '[transcribed image]' },
+        ],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-agent',
+        egressOccurred: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'audio',
+            mimeType: 'audio/ogg',
+            data: 'T2dnUw==',
+          },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: mockConfig,
+          parts: expect.arrayContaining([audioPart]),
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        expect.any(Object),
+        expect.any(String),
+      );
+      expect(firstSentMessage()).toEqual(
+        expect.arrayContaining([audioPart, { text: '[transcribed image]' }]),
+      );
     });
 
     it('clamps full-turn images before selecting the ACP route', async () => {

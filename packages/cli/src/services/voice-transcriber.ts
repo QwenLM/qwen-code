@@ -7,7 +7,10 @@
 import process from 'node:process';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  DEFAULT_MAX_AUDIO_BRIDGE_BYTES,
+} from '@qwen-code/qwen-code-core';
 import type { AvailableModel } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { buildVoiceKeyterms } from './voice-keyterms.js';
@@ -700,7 +703,7 @@ export function isKeytermEcho(
 
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV
 // is ~32 KB/s, so guard before encoding to give a clear error on overlong holds.
-export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+export const MAX_AUDIO_BYTES = DEFAULT_MAX_AUDIO_BRIDGE_BYTES;
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
 function escapeRegExp(value: string): string {

@@ -12,6 +12,7 @@ import { sanitizeMimeForPlaceholder } from '../services/compactionInputSlimming.
  * the model, measured in decoded bytes. Oversized payloads blow up the request
  * size and token budget, so they are replaced with a text placeholder instead.
  */
+export const DEFAULT_MAX_AUDIO_BRIDGE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_MAX_INLINE_MEDIA_BYTES = 10 * 1024 * 1024;
 
 /**

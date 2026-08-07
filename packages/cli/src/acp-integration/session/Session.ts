@@ -9987,7 +9987,11 @@ export class Session implements SessionContext {
     }
 
     const fullTurnModel = this.config.getDefaultVisionBridgeModel();
-    if (onFullTurnModel && fullTurnModel?.agentCapable) {
+    if (
+      onFullTurnModel &&
+      fullTurnModel?.agentCapable &&
+      !hasAudioParts(parts)
+    ) {
       const fullTurnParts = parts.map((part) => clampInlineMediaPart(part));
       if (!hasImageParts(fullTurnParts)) {
         return fullTurnParts;

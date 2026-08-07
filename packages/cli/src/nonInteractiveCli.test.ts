@@ -1383,6 +1383,74 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('keeps native audio on the primary route while bridging a mixed image', async () => {
+    setupMetricsMock();
+    const mixedParts: Part[] = [
+      { text: 'inspect this image and audio' },
+      { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+      { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+    ];
+    const { resolveForModel } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({ audio: true }),
+    });
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: mixedParts,
+      shouldProceed: true,
+    });
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'skipped',
+      parts: mixedParts,
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+    });
+    const bridgedParts: Part[] = [
+      mixedParts[0],
+      mixedParts[1],
+      { text: '[transcribed image]' },
+    ];
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: bridgedParts,
+      transcript: '[transcribed image]',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-agent',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png and @recording.wav',
+      'prompt-mixed-media',
+    );
+
+    expect(resolveForModel).not.toHaveBeenCalled();
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: mixedParts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      bridgedParts,
+      expect.any(AbortSignal),
+      'prompt-mixed-media',
+      { type: SendMessageType.UserQuery },
+    );
+  });
+
   it('does not bridge audio when a slash prompt selects an audio model', async () => {
     setupMetricsMock();
     Object.assign(mockConfig, {

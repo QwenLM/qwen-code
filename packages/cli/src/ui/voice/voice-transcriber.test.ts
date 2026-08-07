@@ -1293,7 +1293,7 @@ describe('voice-transcriber', () => {
           model: 'qwen3-asr-flash',
           baseUrl: 'https://asr.example/v1',
         },
-        vi.fn().mockResolvedValue({ address: '::ffff:c612:40' }),
+        vi.fn().mockResolvedValue({ address: '::ffff:5db8:d822' }),
       ),
     ).resolves.toBeUndefined();
   });

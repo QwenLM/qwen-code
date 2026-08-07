@@ -11,6 +11,7 @@ import type { LoadedSettings } from '../config/settings.js';
 import {
   MAX_AUDIO_PARTS_PER_TURN,
   formatAudioBridgeNotice,
+  hasAudioParts,
   runAudioBridge,
 } from './audio-bridge-service.js';
 
@@ -63,6 +64,36 @@ describe('audio bridge service', () => {
     expect(result).toMatchObject({ status: 'skipped' });
     expect(result.parts).toEqual(parts);
     expect(transcribeVoiceAudio).not.toHaveBeenCalled();
+  });
+
+  it('reapplies the inline media clamp when native audio skips the bridge', async () => {
+    const key = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+    const original = process.env[key];
+    process.env[key] = '4';
+    try {
+      const result = await runAudioBridge({
+        config: config(true),
+        settings: settings('qwen3-asr-flash'),
+        parts: [audio('QUJDREVGR0g=')],
+        signal: new AbortController().signal,
+      });
+
+      expect(result).toMatchObject({ status: 'skipped', audioCount: 1 });
+      expect(result.parts[0]).not.toHaveProperty('inlineData');
+      expect(result.parts[0]?.text).toMatch(/omitted/i);
+      expect(transcribeVoiceAudio).not.toHaveBeenCalled();
+    } finally {
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
+  });
+
+  it('recognizes audio MIME types case-insensitively', () => {
+    expect(
+      hasAudioParts([
+        { inlineData: { mimeType: 'Audio/WAV', data: 'UklGRg==' } },
+      ]),
+    ).toBe(true);
   });
 
   it('transcribes for a text-only target even when the session model supports audio', async () => {

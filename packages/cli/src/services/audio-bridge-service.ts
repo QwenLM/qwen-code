@@ -8,6 +8,7 @@ import { Buffer } from 'node:buffer';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   approxBase64Bytes,
+  clampInlineMediaPart,
   createDebugLogger,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -47,7 +48,7 @@ function normalizeParts(parts: PartListUnion): Part[] {
 function isAudioPart(part: Part): boolean {
   return (
     typeof part.inlineData?.mimeType === 'string' &&
-    part.inlineData.mimeType.startsWith('audio/') &&
+    part.inlineData.mimeType.toLowerCase().startsWith('audio/') &&
     typeof part.inlineData.data === 'string'
   );
 }
@@ -119,7 +120,11 @@ export async function runAudioBridge(params: {
   if (audioCount === 0 || targetSupportsAudio) {
     return {
       status: 'skipped',
-      parts,
+      parts: targetSupportsAudio
+        ? parts.map((part) =>
+            isAudioPart(part) ? clampInlineMediaPart(part) : part,
+          )
+        : parts,
       audioCount,
       convertedCount: 0,
       egressCount: 0,

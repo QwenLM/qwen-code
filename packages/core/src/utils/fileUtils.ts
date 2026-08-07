@@ -18,7 +18,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
-import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from '../core/inlineMediaLimit.js';
+import { DEFAULT_MAX_AUDIO_BRIDGE_BYTES } from '../core/inlineMediaLimit.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import type { PDFRenderedImage } from './pdf.js';
 import {
@@ -1279,7 +1279,7 @@ export async function processSingleFileContent(
       fileType === 'audio' &&
       preserveUnsupportedAudio &&
       !modalities.audio &&
-      stats.size <= DEFAULT_MAX_INLINE_MEDIA_BYTES;
+      stats.size <= DEFAULT_MAX_AUDIO_BRIDGE_BYTES;
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&

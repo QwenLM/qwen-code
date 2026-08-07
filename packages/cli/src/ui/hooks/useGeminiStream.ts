@@ -1249,6 +1249,7 @@ export const useGeminiStream = (
             ? activeOverride.slice(0, -1)
             : activeOverride;
           let supportsAudio = false;
+          let routeResolutionFailed = false;
           try {
             const runtimeView = await config
               .getBaseLlmClient()
@@ -1256,6 +1257,7 @@ export const useGeminiStream = (
             supportsAudio =
               runtimeView.contentGeneratorConfig.modalities?.audio === true;
           } catch (error) {
+            routeResolutionFailed = true;
             debugLogger.warn(
               `audio route capability check failed for '${routeSelector}': ${
                 error instanceof Error ? error.message : String(error)
@@ -1264,7 +1266,7 @@ export const useGeminiStream = (
           }
           targetSupportsAudio = supportsAudio;
           if (!supportsAudio) {
-            if (inlineModelOverrideActiveRef.current) {
+            if (inlineModelOverrideActiveRef.current || routeResolutionFailed) {
               const reason = 'the active model override does not support audio';
               nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
               addItem(

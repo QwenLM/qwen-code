@@ -1299,7 +1299,7 @@ export async function runNonInteractive(
         hasImageParts(initialParts)
       ) {
         const fullTurnModel = config.getDefaultVisionBridgeModel();
-        if (fullTurnModel?.agentCapable) {
+        if (fullTurnModel?.agentCapable && !hasAudioParts(initialParts)) {
           const fullTurnParts = initialParts.map((part) =>
             clampInlineMediaPart(part),
           );

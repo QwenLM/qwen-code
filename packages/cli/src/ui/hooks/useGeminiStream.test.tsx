@@ -1196,6 +1196,61 @@ describe('useGeminiStream', () => {
     expect(sent).not.toContain('inlineData');
   });
 
+  it('feeds failed-audio markers into the vision bridge for mixed prompts', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'abc123' },
+    };
+    const audioMarker = { text: 'audio unavailable' };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart, imagePart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'listen' }, audioMarker, imagePart],
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+      error: 'no voice model is configured',
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'listen' }, audioMarker, { text: 'vision output' }],
+      transcript: 'vision output',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vm',
+      egressOccurred: true,
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [{ text: 'listen' }, audioMarker, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      audioMarker,
+      { text: 'vision output' },
+    ]);
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
@@ -3828,7 +3883,7 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('still bridges mid-turn audio when an internal skill override is active', async () => {
+  it('bridges mid-turn audio only while an internal skill route resolves', async () => {
     const queuedPrompt = 'listen @/tmp/recording.wav';
     const resolvedAudioPart: Part = {
       inlineData: {
@@ -3897,6 +3952,7 @@ describe('useGeminiStream', () => {
       current: vi
         .fn<() => string[]>()
         .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValueOnce([queuedPrompt])
         .mockReturnValue([]),
     };
     let capturedOnComplete:
@@ -3961,6 +4017,46 @@ describe('useGeminiStream', () => {
       }),
     );
     expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Audio was not sent'),
+      }),
+      expect.any(Number),
+    );
+
+    resolveForModel.mockRejectedValueOnce(new Error('route unavailable'));
+    mockRunAudioBridge.mockClear();
+    const secondToolCalls: TrackedToolCall[] = [
+      {
+        ...completedToolCalls[0],
+        request: {
+          ...completedToolCalls[0].request,
+          callId: 'call2',
+          prompt_id: 'prompt-id-midturn-audio-route-failure',
+        },
+        responseSubmittedToGemini: false,
+        response: {
+          ...completedToolCalls[0].response,
+          callId: 'call2',
+        },
+      } as TrackedCompletedToolCall,
+    ];
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(secondToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    const secondSent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    expect(secondSent).toContain(
+      'the active model override does not support audio',
+    );
+    expect(secondSent).not.toContain('inlineData');
+    expect(mockAddItem).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('Audio was not sent'),
       }),
