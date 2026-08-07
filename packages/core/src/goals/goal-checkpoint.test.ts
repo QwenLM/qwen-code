@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  InvalidGoalCheckpointError,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerificationResult,
 } from './goal-checkpoint.js';
@@ -70,7 +69,7 @@ describe('materializeGoalEvidenceCheckpoint', () => {
           },
         ],
       }),
-    ).toThrow(InvalidGoalCheckpointError);
+    ).toThrow(/cites unknown source missing/);
     expect(() =>
       materialize({
         claims: [
