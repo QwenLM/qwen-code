@@ -237,6 +237,22 @@ describe('matchRemotes', () => {
     expect(matched).toEqual([]);
   });
 
+  it('matches a partial-clone remote despite the filter annotation', () => {
+    // `git clone --filter=blob:none` makes `git remote -v` print
+    // `<name>\t<url> (fetch) [blob:none]` — the annotation sits after the
+    // marker and must not lose the remote (a silent exit-6 demotion for
+    // every partial clone).
+    const remotes = [
+      'origin\thttps://github.com/QwenLM/qwen-code.git (fetch) [blob:none]',
+      'origin\thttps://github.com/QwenLM/qwen-code.git (push)',
+    ].join('\n');
+    const { matched } = matchRemotes(remotes, {
+      owner: 'QwenLM',
+      repo: 'qwen-code',
+    });
+    expect(matched).toEqual(['origin']);
+  });
+
   it('skips unparsable remotes', () => {
     const remotes = [
       'local\t/srv/git/qwen-code.git (fetch)',

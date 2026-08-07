@@ -104,6 +104,24 @@ export function getGhHost(): string | undefined {
 }
 
 /**
+ * The effective GitHub host for a command invocation: an explicit `--host`
+ * flag wins, else an operator-exported GH_HOST, else `undefined` — the
+ * caller applies its own default (`gh`'s github.com, or the matcher's
+ * comparison host). Every host-routing call site resolves through this one
+ * helper so the matcher and the write-side authorisation gates cannot
+ * disagree about which host a run targets.
+ *
+ * `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
+ * `??`, being non-nullish) must read as "no host", not as a host named ""
+ * that fails every comparison.
+ */
+export function resolveGhHost(
+  flagHost: string | undefined,
+): string | undefined {
+  return flagHost ?? (process.env['GH_HOST']?.trim() || undefined);
+}
+
+/**
  * Environment for `gh` child processes. `undefined` means "inherit the
  * parent env untouched"; with a host set, the inherited env is extended
  * with GH_HOST, which `gh` honours on every command.

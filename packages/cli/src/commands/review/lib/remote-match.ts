@@ -116,11 +116,18 @@ export function matchRemotes(
 
   for (const line of remoteVOutput.split('\n')) {
     const trimmed = line.trim();
-    if (trimmed === '' || !trimmed.endsWith('(fetch)')) continue;
-    // `<name>\t<url> (fetch)` — the name never contains whitespace, so the
-    // first run of non-space characters is the name and the URL sits between
-    // it and the trailing marker.
-    const nameMatch = trimmed.match(/^(\S+)\s+(.*)\s+\(fetch\)$/);
+    // A partial clone's fetch entry carries git's filter annotation AFTER
+    // the marker — `<name>\t<url> (fetch) [blob:none]` — so the gate
+    // cannot anchor on `(fetch)` alone or that remote is silently lost.
+    if (trimmed === '' || !/\(fetch\)(\s+\[[^\]]*\])?$/.test(trimmed)) {
+      continue;
+    }
+    // `<name>\t<url> (fetch)` plus that optional trailing annotation — the
+    // name never contains whitespace, so the first run of non-space
+    // characters is the name and the URL sits between it and the marker.
+    const nameMatch = trimmed.match(
+      /^(\S+)\s+(.*)\s+\(fetch\)(\s+\[[^\]]*\])?$/,
+    );
     if (!nameMatch) continue;
     const identity = parseRemoteUrl(nameMatch[2]);
     if (identity === null) continue;

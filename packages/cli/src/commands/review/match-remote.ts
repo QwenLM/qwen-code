@@ -21,7 +21,8 @@
 // closed like the other gates.
 
 import type { CommandModule } from 'yargs';
-import { git, gitOpt } from './lib/git.js';
+import { resolveGhHost } from './lib/gh.js';
+import { git } from './lib/git.js';
 import { matchRemotes } from './lib/remote-match.js';
 import {
   writeStdoutLine,
@@ -40,21 +41,24 @@ export function runMatchRemote(args: MatchRemoteArgs): void {
   // (mirror/CI-style checkout) serves the whole flow — `git remote -v`,
   // fetch-pr's fetch, and `git worktree add` all succeed inside one — so
   // `--is-inside-work-tree` printing `false` must not stop the review.
-  // `gitOpt` returns null only when git itself fails: no repository, or no
-  // binary.
-  if (gitOpt('rev-parse', '--is-inside-work-tree') === null) {
+  // Failure means git itself refused the repository — carry its fatal to
+  // stderr (a fixed two-cause guess misreports container CI's `dubious
+  // ownership` refusals) and fail closed.
+  try {
+    git('rev-parse', '--is-inside-work-tree');
+  } catch (err) {
     writeStderrLineSafe(
-      'match-remote: not a git repository, or git is unavailable — cannot resolve a remote.',
+      `match-remote: git cannot resolve this repository: ${
+        (err as Error).message
+      }`,
     );
     process.exitCode = 1;
     return;
   }
 
-  // Same resolution as submit: an explicit flag wins, else an
-  // operator-exported GH_HOST, else github.com. `|| undefined`, not `??`:
-  // an exported-but-empty GH_HOST must fall through to the default.
-  const host =
-    args.host ?? (process.env['GH_HOST']?.trim() || undefined) ?? 'github.com';
+  // resolveGhHost leaves the default to the caller; the matcher's
+  // comparison needs a concrete host.
+  const host = resolveGhHost(args.host) ?? 'github.com';
 
   let remoteV: string;
   try {

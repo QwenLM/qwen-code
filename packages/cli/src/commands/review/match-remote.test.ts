@@ -11,6 +11,7 @@
 // exists for.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { Argv, CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,7 +24,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: stderrSpy,
 }));
 
-import { runMatchRemote } from './match-remote.js';
+import { matchRemoteCommand, runMatchRemote } from './match-remote.js';
 
 let repo: string;
 let savedCwd: string;
@@ -108,6 +109,12 @@ describe('runMatchRemote (real git)', () => {
       run();
       expect(process.exitCode).toBe(1);
       expect(stdoutSpy).not.toHaveBeenCalled();
+      // git's own fatal is surfaced, not swallowed behind a fixed guess —
+      // container CI's `dubious ownership` refusals must read as what they
+      // are.
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('git cannot resolve this repository'),
+      );
     } finally {
       process.chdir(savedCwd);
       rmSync(bare, { recursive: true, force: true });
@@ -133,6 +140,27 @@ describe('runMatchRemote (real git)', () => {
     } finally {
       process.chdir(savedCwd);
       rmSync(bareRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('falls through to github.com when GH_HOST is empty or whitespace', () => {
+    // Intentional fall-through (resolveGhHost): a templated CI export of
+    // GH_HOST= must read as "no host", not route matching at a host named
+    // "" and hard-stop.
+    git('remote', 'add', 'origin', 'git@github.com:QwenLM/qwen-code.git');
+    process.chdir(repo);
+    const savedGhHost = process.env['GH_HOST'];
+    try {
+      for (const empty of ['', ' ']) {
+        process.env['GH_HOST'] = empty;
+        stdoutSpy.mockClear();
+        run({ host: undefined });
+        expect(stdoutSpy).toHaveBeenCalledWith('origin');
+        expect(process.exitCode).toBeUndefined();
+      }
+    } finally {
+      if (savedGhHost === undefined) delete process.env['GH_HOST'];
+      else process.env['GH_HOST'] = savedGhHost;
     }
   });
 
@@ -164,5 +192,25 @@ describe('runMatchRemote (real git)', () => {
     run();
     expect(stdoutSpy).toHaveBeenCalledWith('origin');
     expect(process.exitCode).toBeUndefined();
+  });
+});
+
+describe('matchRemoteCommand builder', () => {
+  // The demandOption guards are the misuse stop: without them a missing
+  // --owner becomes String(undefined), matches nothing, exits 6 — and the
+  // skill reads 6 as "go lightweight", silently degrading the review.
+  it('demands --owner and --repo; --host stays optional', () => {
+    const opts: Record<string, { demandOption?: boolean }> = {};
+    const stub = {
+      option: (name: string, config: { demandOption?: boolean }) => {
+        opts[name] = config;
+        return stub;
+      },
+    } as unknown as Argv;
+    ((matchRemoteCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
+    expect(opts['owner']?.demandOption).toBe(true);
+    expect(opts['repo']?.demandOption).toBe(true);
+    expect(opts['host']).toBeDefined();
+    expect(opts['host']?.demandOption).toBeFalsy();
   });
 });
