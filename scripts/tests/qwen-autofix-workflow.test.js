@@ -178,6 +178,80 @@ const nodeSetupSteps =
   workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
 
+// GitHub Actions expressions return operand VALUES from &&/||, not
+// booleans: && yields the first falsy operand (else the last operand), ||
+// the first truthy (else the last), '' is falsy, and && binds tighter
+// than ||. A ternary can therefore read right and evaluate wrong, which
+// text pins cannot see — so the cache choice is also pinned semantically
+// with this minimal evaluator.
+function evalGhaExpression(expression, facts) {
+  let pos = 0;
+  const truthy = (value) =>
+    value !== false && value !== null && value !== 0 && value !== '';
+  const skipSpace = () => {
+    while (/\s/.test(expression[pos] ?? '')) {
+      pos += 1;
+    }
+  };
+  const parsePrimary = () => {
+    skipSpace();
+    if (expression[pos] === "'") {
+      const end = expression.indexOf("'", pos + 1);
+      const value = expression.slice(pos + 1, end);
+      pos = end + 1;
+      return value;
+    }
+    const name = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(expression.slice(pos))[0];
+    pos += name.length;
+    if (name === 'true') {
+      return true;
+    }
+    if (name === 'false') {
+      return false;
+    }
+    if (name === 'null') {
+      return null;
+    }
+    return facts[name];
+  };
+  const parseComparison = () => {
+    const left = parsePrimary();
+    skipSpace();
+    const op = expression.slice(pos, pos + 2);
+    if (op !== '==' && op !== '!=') {
+      return left;
+    }
+    pos += 2;
+    const right = parsePrimary();
+    return op === '==' ? left === right : left !== right;
+  };
+  const parseAnd = () => {
+    let left = parseComparison();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '&&') {
+        return left;
+      }
+      pos += 2;
+      const right = parseComparison();
+      left = truthy(left) ? right : left;
+    }
+  };
+  const parseOr = () => {
+    let left = parseAnd();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '||') {
+        return left;
+      }
+      pos += 2;
+      const right = parseAnd();
+      left = truthy(left) ? left : right;
+    }
+  };
+  return parseOr();
+}
+
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
@@ -323,7 +397,8 @@ describe('qwen-autofix workflow', () => {
     expect(authRounds).toBeLessThan(strictRounds);
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
-    expect(reviewScanJob).toContain('not an open main-targeting PR');
+    expect(reviewScanJob).toContain('Forced PR #${FORCED_PR} rejected:');
+    expect(reviewScanJob).toContain('forced_admission_reason');
     // Candidates fail CLOSED on the fork field, matching the forced path
     // and the NOTE that documents the jq // false trap.
     expect(reviewScanJob).toContain('select(.isCrossRepository == false)');
@@ -1803,13 +1878,13 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain(
       'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
     );
-    // In-repo PRs are managed only when the bot authored them; forks only
-    // under the scan's takeover rules (allow-edits + bot fork or the label).
+    // In-repo PRs are managed only when the bot authored them. Forks are not
+    // managed from this event at all — it carries no repository secrets, so
+    // nothing downstream of it could authenticate ('declines fork PRs at the
+    // real-time review trigger' replays that).
     expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
-    expect(routeStep).toContain('.maintainerCanModify == true');
-    expect(routeStep).toContain('index($t) != null');
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
     );
@@ -1817,7 +1892,7 @@ describe('qwen-autofix workflow', () => {
       "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
     );
     expect(routeStep).toContain(
-      'review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits',
+      'fork review noted for #${PR_NUMBER_EVENT} — this event carries no repository secrets',
     );
   });
 
@@ -1841,7 +1916,11 @@ describe('qwen-autofix workflow', () => {
     // Per-TARGET keys: cron ticks coalesce with each other; review events
     // coalesce per PR (near-simultaneous reviews on one PR route once, without
     // events on OTHER PRs cancelling this one); issue events per issue;
-    // dispatches unique and never cancelled.
+    // dispatches unique and never cancelled — fork-bridge dispatches
+    // included: `source` is a public workflow_dispatch input, so no dispatch
+    // may claim trusted per-PR coalescing by asserting an origin; fork-review
+    // bursts coalesce upstream instead (the signal per PR, the bridge per
+    // conclusion+head).
     expect(routeJob).toContain("'qwen-autofix-route-cron'");
     expect(routeJob).toContain(
       "format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
@@ -1852,6 +1931,12 @@ describe('qwen-autofix workflow', () => {
     expect(routeJob).toContain(
       "format('qwen-autofix-route-{0}', github.run_id)",
     );
+    // The public `source` marker must not buy any dispatch a shared group or
+    // cancellation rights: pin the forkbridge branch OUT (order-blind
+    // substring pins cannot see a re-added disjunct before the run-id
+    // fallback, but an absent one cannot hide).
+    expect(routeJob).not.toContain('forkbridge');
+    expect(routeJob).not.toContain("inputs.source == 'fork-bridge'");
     expect(routeJob).toContain(
       "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
     );
@@ -2576,9 +2661,14 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(13);
+    expect(workflow.split('--paginate').length - 1).toBe(14);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
-    // report COMMENTS_JSON fallback = nine normalized fetch sites.
+    // report COMMENTS_JSON fallback = nine normalized fetch sites. The
+    // blocked-takeover status lookup is deliberately NOT among them: like the
+    // sibling STATUS_ID read, it consumes the page stream inline via
+    // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
+    // so piping it through `jq -s 'add // []'` would wrap the id stream in an
+    // array and break the tail-1 consumer.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -2774,9 +2864,27 @@ describe('qwen-autofix workflow', () => {
     // spammed 7 refusals on #7836 — those stay covered by the
     // once-per-window pause notice. No dedup on the dispatch itself: the
     // shepherd sends at most one per head, and a human asking twice
-    // deserves two answers.
+    // deserves two answers. fork-bridge dispatches are the one
+    // dispatch-shaped exception — they are fork-PR reviews laundered into
+    // dispatch form, so answering each one loudly would post one refusal
+    // per review on a capped fork PR (the exact #7836 spam this gate
+    // prevents). But `source` is a public workflow_dispatch input a manual
+    // dispatch can set, so the silence is honored ONLY on positive proof of
+    // origin: a recent SUCCESSFUL fork-bridge run whose title names this
+    // exact PR. Unverified markers are answered like explicit dispatches.
     expect(reviewScanJob).toContain(
-      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+      "DISPATCH_SOURCE: \"${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}\"",
+    );
+    expect(reviewScanJob).toContain('FORK_BRIDGE_VERIFIED=false');
+    expect(reviewScanJob).toContain(
+      '--workflow qwen-autofix-fork-bridge.yml --limit 20 --json conclusion,createdAt,displayTitle',
+    );
+    expect(reviewScanJob).toContain(
+      'startswith("fork-bridge: fork-signal: PR \\($pr) reviewed by ")',
+    );
+    expect(reviewScanJob).toContain('fork-bridge provenance unverified');
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' && "${FORK_BRIDGE_VERIFIED}" != \'true\' ]]; then',
     );
     expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
     expect(reviewScanJob).toContain('Dispatch refused');
@@ -2784,25 +2892,76 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'cap-refused notice skipped: PAT authenticates as',
     );
+    // Provenance is a GitHub-records check: success conclusion, a title
+    // naming the exact PR (no prefix collisions), and a recent createdAt.
+    // Replay the extracted jq program VERBATIM so a dropped predicate fails
+    // the test, not just a substring.
+    const provenanceJq = reviewScanJob.match(
+      /jq -e --arg pr "\$\{PR\}" --arg cutoff "\$\{BRIDGE_CUTOFF\}" '([\s\S]*?)' <<< "\$\{BRIDGE_RUNS\}"/,
+    )?.[1];
+    expect(provenanceJq).toBeTruthy();
+    const verifies = (runs, pr = '7836', cutoff = '2026-08-07T04:00:00Z') =>
+      spawnSync(
+        'jq',
+        ['-e', '--arg', 'pr', pr, '--arg', 'cutoff', cutoff, provenanceJq],
+        {
+          input: JSON.stringify(runs),
+          encoding: 'utf8',
+        },
+      ).status === 0;
+    const bridgeRun = (displayTitle, over = {}) => ({
+      conclusion: 'success',
+      createdAt: '2026-08-07T10:00:00Z',
+      displayTitle,
+      ...over,
+    });
+    const MATCHING = 'fork-bridge: fork-signal: PR 7836 reviewed by wenshao';
+    expect(verifies([bridgeRun(MATCHING)])).toBe(true);
+    // A different PR's bridge run proves nothing.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 999 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // No prefix collision: PR 78366 is not PR 7836.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 78366 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // Only SUCCESSFUL bridge runs count, and only recent ones.
+    expect(verifies([bridgeRun(MATCHING, { conclusion: 'failure' })])).toBe(
+      false,
+    );
+    expect(
+      verifies([bridgeRun(MATCHING, { createdAt: '2026-08-07T03:00:00Z' })]),
+    ).toBe(false);
+    expect(verifies([])).toBe(false);
     // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
-    // for trusted review submissions). Replay the guard VERBATIM so a
-    // dropped EVENT_NAME condition fails the test, not just a substring: a
-    // dispatch is answered, a review submission is left to the pause notice.
+    // for trusted review submissions) and EXCLUDES only PROVENANCE-VERIFIED
+    // fork-bridge dispatches. Replay the guard VERBATIM so a dropped
+    // condition fails the test, not just a substring: an explicit dispatch
+    // is answered, a verified fork-bridge dispatch stays silent, and a
+    // fork-bridge MARKER without verification is answered like an explicit
+    // dispatch (the replay cannot call the API — verification state rides
+    // FORK_BRIDGE_VERIFIED, set by the jq program replayed above).
     const refusedGuard = reviewScanJob.match(
-      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' && "\$\{FORK_BRIDGE_VERIFIED\}" != 'true' \]\]; then)/,
     )?.[1];
     expect(refusedGuard).toBeTruthy();
-    const refuses = (eventName) =>
+    const refuses = (eventName, forkBridgeVerified = 'false') =>
       execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
         env: {
           ...process.env,
           FORCED_PR: '7836',
           PR: '7836',
           EVENT_NAME: eventName,
+          FORK_BRIDGE_VERIFIED: forkBridgeVerified,
         },
         encoding: 'utf8',
       }).trim();
     expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('workflow_dispatch', 'true')).not.toContain('REFUSED');
     expect(refuses('pull_request_review')).not.toContain('REFUSED');
     // The standard-mode pause and the refusal both point at the actual
     // recovery command as a printf ARG (the takeover variant keeps its
@@ -3381,33 +3540,33 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
-    // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
+    // Extract the forced-PR classifier VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip
     // vetoes even a takeover-labeled PR; closed PRs never pass. A fork PR
     // passes the structural predicate only with maintainer edits allowed — the
     // live write+ author gate is a shell step below (asserted separately),
     // mirroring the scheduled scan's per-candidate fork admission.
-    const okProgram = reviewScanJob.match(
-      /OK="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg take "\$\{TAKEOVER_LABEL\}" --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)'/,
+    const classifier = reviewScanJob.match(
+      /(forced_admission_reason\(\) \{[\s\S]*?\n {10}\})/,
     )?.[1];
-    expect(okProgram).toBeTruthy();
-    const ok = (meta) =>
+    expect(classifier).toBeTruthy();
+    const reason = (meta) =>
       execFileSync(
-        'jq',
+        'bash',
         [
-          '-r',
-          '--arg',
-          'ab',
-          'qwen-code-dev-bot',
-          '--arg',
-          'take',
-          'autofix/takeover',
-          '--arg',
-          'skip',
-          'autofix/skip',
-          okProgram,
+          '-c',
+          `${classifier.replace(/\n {10}/g, '\n')}\nforced_admission_reason`,
         ],
-        { encoding: 'utf8', input: JSON.stringify(meta) },
+        {
+          encoding: 'utf8',
+          input: JSON.stringify(meta),
+          env: {
+            ...process.env,
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            SKIP_LABEL: 'autofix/skip',
+          },
+        },
       ).trim();
     const meta = (author, labels = [], extra = {}) => ({
       state: 'OPEN',
@@ -3417,46 +3576,51 @@ describe('qwen-autofix workflow', () => {
       labels: labels.map((name) => ({ name })),
       ...extra,
     });
-    expect(ok(meta('qwen-code-dev-bot'))).toBe('true');
-    expect(ok(meta('human', ['autofix/takeover']))).toBe('true');
-    expect(ok(meta('human'))).toBe('false');
-    expect(ok(meta('human', ['autofix/takeover', 'autofix/skip']))).toBe(
-      'false',
+    expect(reason(meta('qwen-code-dev-bot'))).toBe('eligible');
+    expect(reason(meta('human', ['autofix/takeover']))).toBe('eligible');
+    expect(reason(meta('human'))).toBe('unmanaged_author');
+    expect(reason(meta('human', ['autofix/takeover', 'autofix/skip']))).toBe(
+      'skip_label',
     );
-    expect(ok(meta('qwen-code-dev-bot', ['autofix/skip']))).toBe('false');
-    expect(ok(meta('human', ['autofix/takeover'], { state: 'CLOSED' }))).toBe(
-      'false',
+    expect(reason(meta('qwen-code-dev-bot', ['autofix/skip']))).toBe(
+      'skip_label',
     );
+    expect(
+      reason(meta('human', ['autofix/takeover'], { state: 'CLOSED' })),
+    ).toBe('not_open');
+    expect(
+      reason(meta('human', ['autofix/takeover'], { baseRefName: 'next' })),
+    ).toBe('wrong_base');
     // Fork PRs: admitted structurally only when maintainer edits are allowed
     // (the bot's own fork or a takeover-labelled fork). The live write+ author
     // check is the shell gate asserted below; without allow-edits a fork still
     // fails closed here.
     expect(
-      ok(
+      reason(
         meta('human', ['autofix/takeover'], {
           isCrossRepository: true,
           maintainerCanModify: true,
         }),
       ),
-    ).toBe('true');
+    ).toBe('eligible');
     expect(
-      ok(
+      reason(
         meta('qwen-code-dev-bot', [], {
           isCrossRepository: true,
           maintainerCanModify: true,
         }),
       ),
-    ).toBe('true');
+    ).toBe('eligible');
     expect(
-      ok(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
-    ).toBe('false');
+      reason(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
+    ).toBe('maintainer_edits_disabled');
     // A missing isCrossRepository fails CLOSED. This case is why the
     // predicate reads `.isCrossRepository == false`: jq's // treats false as
     // empty, so the previous `(.isCrossRepository // true) | not` was false
     // for EVERY input and silently green-no-op'd all forced dispatches.
     const missing = meta('qwen-code-dev-bot');
     delete missing.isCrossRepository;
-    expect(ok(missing)).toBe('false');
+    expect(reason(missing)).toBe('cross_repo_state_missing');
     expect(reviewScanJob).toContain('.isCrossRepository == false');
     expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
     // The forced path queries maintainerCanModify and re-checks a fork author's
@@ -3467,7 +3631,756 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewScanJob).toContain('forced fork PR #${FORCED_PR} admitted');
     expect(reviewScanJob).toContain(
-      'gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission"',
+      'gh api "repos/${REPO}/collaborators/${login}/permission"',
+    );
+  });
+
+  it('recovers transient forced-target reads and reports terminal takeover blocks', () => {
+    const readMeta = reviewScanJob.match(
+      /(read_forced_pr_meta\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const reportBlocked = reviewScanJob.match(
+      /(report_forced_takeover_blocked\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(readMeta).toBeTruthy();
+    expect(readPermission).toBeTruthy();
+    expect(reportBlocked).toBeTruthy();
+
+    const runReader = (reader, command, successOutput) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-admission-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\ncount_file='${dir}/count'\ncount=0\n[[ -f "$count_file" ]] && count="$(cat "$count_file")"\ncount=$((count + 1))\nprintf '%s' "$count" > "$count_file"\nif [[ "$count" -eq 1 ]]; then exit 1; fi\nprintf '%s' '${successOutput}'\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            // Production shell options (defaults.run.shell: bash → `bash
+            // --noprofile --norc -eo pipefail`), with the call made through
+            // `|| exit $?` so errexit is suspended inside the helper exactly
+            // as the `if !` call sites suspend it.
+            [
+              'set -eo pipefail',
+              'sleep() { :; }',
+              reader.replace(/\n {10}/g, '\n'),
+              `${command} || exit $?`,
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return result;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    const meta = JSON.stringify({
+      number: 8320,
+      state: 'OPEN',
+      author: { login: 'qqqys' },
+      headRefName: 'topic',
+      baseRefName: 'main',
+      isCrossRepository: true,
+      labels: [{ name: 'autofix/takeover' }],
+      maintainerCanModify: true,
+    });
+    const metaResult = runReader(readMeta, 'read_forced_pr_meta', meta);
+    expect(metaResult.status).toBe(0);
+    expect(metaResult.stdout).toBe(meta);
+    const permissionResult = runReader(
+      readPermission,
+      'read_live_permission qqqys',
+      'write',
+    );
+    expect(permissionResult.status).toBe(0);
+    expect(permissionResult.stdout).toBe('write');
+
+    const failingDir = mkdtempSync(join(tmpdir(), 'autofix-admission-fail-'));
+    try {
+      writeFileSync(join(failingDir, 'gh'), '#!/bin/bash\nexit 1\n');
+      chmodSync(join(failingDir, 'gh'), 0o755);
+      const failedPermission = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'sleep() { :; }',
+            readPermission.replace(/\n {10}/g, '\n'),
+            'read_live_permission qqqys || exit $?',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${failingDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(failedPermission.status).toBe(1);
+      expect(failedPermission.stderr).toContain('(attempt 3/3)');
+
+      const failedMeta = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'sleep() { :; }',
+            readMeta.replace(/\n {10}/g, '\n'),
+            'read_forced_pr_meta || exit $?',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${failingDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+            FORCED_PR: '8320',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(failedMeta.status).toBe(1);
+      expect(failedMeta.stderr).toContain('(attempt 3/3)');
+    } finally {
+      rmSync(failingDir, { recursive: true, force: true });
+    }
+
+    const reporterDir = mkdtempSync(join(tmpdir(), 'autofix-reporter-'));
+    try {
+      const callsFile = join(reporterDir, 'calls');
+      writeFileSync(
+        join(reporterDir, 'gh'),
+        `#!/bin/bash
+printf '%q ' "$@" >> '${callsFile}'
+printf '\n' >> '${callsFile}'
+if [[ "$1 $2" == 'api user' ]]; then
+  if [[ "\${FAIL_ACTOR_ONCE:-false}" == 'true' && ! -f '${reporterDir}/actor-failed' ]]; then
+    printf '1' > '${reporterDir}/actor-failed'
+    exit 1
+  fi
+  printf '%s' "\${STUB_ACTOR:-qwen-code-dev-bot}"
+  exit 0
+fi
+if [[ "$1 $2" == 'api repos/QwenLM/qwen-code/issues/8320/comments' ]]; then
+  # CONNECTION-level failure: nothing on stdout at all. This is the shape that
+  # needs pipefail — a downstream \`jq -rs\` reads empty input, prints nothing
+  # and exits 0, so without it the caller cannot tell this from success.
+  if [[ "\${FAIL_STATUS_LOOKUP:-false}" == 'true' ]]; then
+    printf 'gh: Server Error (HTTP 502)\\n' >&2
+    exit 1
+  fi
+  # HTTP-level failure: gh puts the error BODY on stdout, so jq chokes on it
+  # and fails on its own. This path never depended on pipefail; pinned so the
+  # two halves stay distinguishable.
+  if [[ "\${FAIL_STATUS_LOOKUP_HTTP:-false}" == 'true' ]]; then
+    printf '%s' '{"message":"Server Error"}'
+    printf 'gh: Server Error (HTTP 502)\\n' >&2
+    exit 1
+  fi
+  [[ "\${NO_STATUS_MARKER:-false}" == 'true' ]] && { printf '%s' '[]'; exit 0; }
+  # A realistic page: gh emits the comment objects, not bare ids, and a
+  # deleted-body comment really does arrive as "body": null.
+  printf '%s' "\${STATUS_PAGE}"
+  exit 0
+fi
+if [[ "$1 $2 $3" == 'api --method PATCH' ]]; then
+  if [[ "\${FAIL_PATCH_ONCE:-false}" == 'true' && ! -f '${reporterDir}/patch-failed' ]]; then
+    printf '1' > '${reporterDir}/patch-failed'
+    exit 1
+  fi
+  exit 0
+fi
+if [[ "$1 $2" == 'pr comment' ]]; then
+  if [[ "\${FAIL_COMMENT_ONCE:-false}" == 'true' && ! -f '${reporterDir}/comment-failed' ]]; then
+    printf '1' > '${reporterDir}/comment-failed'
+    exit 1
+  fi
+  exit 0
+fi
+exit 1
+`,
+      );
+      chmodSync(join(reporterDir, 'gh'), 0o755);
+      // One page carrying a null-bodied comment alongside the real status
+      // comment: the shape the production filter must survive.
+      const statusPage = JSON.stringify([
+        { id: 1, user: { login: 'qwen-code-dev-bot' }, body: null },
+        { id: 2, user: { login: 'wenshao' }, body: 'looks good' },
+        {
+          id: 123,
+          user: { login: 'qwen-code-dev-bot' },
+          body: '<!-- autofix-status -->\n\n🔄 working',
+        },
+      ]);
+      const runReporter = (
+        extraEnv = {},
+        reason = 'permission_lookup_failed',
+        shellOpts = 'set -eo pipefail',
+      ) =>
+        spawnSync(
+          'bash',
+          [
+            '-c',
+            // Production runs this block under `bash --noprofile --norc -eo
+            // pipefail` (defaults.run.shell: bash, pinned below), and every
+            // call site is an `if !` / `||` context, which suspends errexit
+            // inside the call. Reproduce BOTH halves: the harness sets -eo
+            // pipefail and calls the function through `|| exit $?`, exactly as
+            // the gate does. `shellOpts` is overridable so one case can drop
+            // the ambient pipefail and prove the helper carries its own.
+            [
+              shellOpts,
+              'sleep() { :; }',
+              reportBlocked.replace(/\n {10}/g, '\n'),
+              `report_forced_takeover_blocked ${reason} || exit $?`,
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${reporterDir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+              DRY_RUN: 'false',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              GITHUB_RUN_ID: '30778039590',
+              GITHUB_SERVER_URL: 'https://ghes.example.com',
+              STATUS_PAGE: statusPage,
+              META: meta,
+              ...extraEnv,
+            },
+            encoding: 'utf8',
+          },
+        );
+      const reporter = runReporter();
+      expect({ status: reporter.status, stderr: reporter.stderr }).toEqual({
+        status: 0,
+        stderr: '',
+      });
+      const calls = readFileSync(callsFile, 'utf8');
+      // Picking 123 out of a page whose FIRST bot comment has `body: null` is
+      // the whole point: without the `// ""` guard jq aborts the program
+      // (rc=5), gh exits non-zero, all three attempts fail, and the run reds
+      // out without ever posting the blocked status it exists to post.
+      expect(calls).toContain('repos/QwenLM/qwen-code/issues/comments/123');
+      expect(calls).toContain('autofix-status');
+      expect(calls).toContain('AutoFix blocked');
+      expect(calls).toContain('permission_lookup_failed');
+      expect(calls).toContain('A later scheduled scan will retry');
+      // The run link resolves from GITHUB_SERVER_URL like every other status
+      // writer; a hardcoded github.com is the one broken link on GHES.
+      expect(calls).toContain(
+        'https://ghes.example.com/QwenLM/qwen-code/actions/runs/30778039590',
+      );
+      expect(calls).not.toContain('https://github.com/QwenLM');
+
+      writeFileSync(callsFile, '');
+      const transientActorReporter = runReporter({ FAIL_ACTOR_ONCE: 'true' });
+      expect(transientActorReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8').match(/api user/g)).toHaveLength(
+        2,
+      );
+
+      writeFileSync(callsFile, '');
+      const transientPatchReporter = runReporter({ FAIL_PATCH_ONCE: 'true' });
+      expect(transientPatchReporter.status).toBe(0);
+      expect(
+        readFileSync(callsFile, 'utf8').match(/api --method PATCH/g),
+      ).toHaveLength(2);
+
+      writeFileSync(callsFile, '');
+      const transientCommentReporter = runReporter({
+        NO_STATUS_MARKER: 'true',
+        FAIL_COMMENT_ONCE: 'true',
+      });
+      expect(transientCommentReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8').match(/pr comment/g)).toHaveLength(
+        2,
+      );
+
+      writeFileSync(callsFile, '');
+      const maintainerEditsReporter = runReporter(
+        {},
+        'maintainer_edits_disabled',
+      );
+      expect(maintainerEditsReporter.status).toBe(0);
+      const maintainerEditsCalls = readFileSync(callsFile, 'utf8');
+      expect(maintainerEditsCalls).toContain(
+        'Re-enable maintainer edits on the fork PR to resume takeover',
+      );
+      expect(maintainerEditsCalls).not.toContain(
+        'A later scheduled scan will retry',
+      );
+
+      writeFileSync(callsFile, '');
+      const authorPermissionReporter = runReporter(
+        {},
+        'author_permission_read',
+      );
+      expect(authorPermissionReporter.status).toBe(0);
+      const authorPermissionCalls = readFileSync(callsFile, 'utf8');
+      expect(authorPermissionCalls).toContain(
+        'Grant the fork author write access',
+      );
+      expect(authorPermissionCalls).toContain(
+        'remove the autofix/takeover label',
+      );
+      expect(authorPermissionCalls).not.toContain(
+        'A later scheduled scan will retry',
+      );
+
+      writeFileSync(callsFile, '');
+      const botManagedMeta = JSON.stringify({
+        ...JSON.parse(meta),
+        author: { login: 'qwen-code-dev-bot' },
+        labels: [],
+      });
+      const botManagedReporter = runReporter(
+        { META: botManagedMeta },
+        'maintainer_edits_disabled',
+      );
+      expect(botManagedReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8')).toContain('AutoFix blocked');
+
+      writeFileSync(callsFile, '');
+      const failedReporter = runReporter({ FAIL_STATUS_LOOKUP: 'true' });
+      expect(failedReporter.status).toBe(1);
+      // Warnings go to stderr like the two reader helpers, so the reporter is
+      // safe to wrap in $( ) and its warnings never pollute a captured value.
+      expect(failedReporter.stdout).toBe('');
+      expect(failedReporter.stderr).toContain('(attempt 3/3)');
+      expect(failedReporter.stderr).toContain(
+        'Failed to read takeover status comments',
+      );
+      // gh's own diagnosis rides along instead of going to /dev/null — the
+      // rule this same block states for read_live_permission.
+      expect(failedReporter.stderr).toContain('HTTP 502');
+      // Nothing was read, so nothing may be written: a "post a new one" here
+      // would be the duplicate ⛔ comment beside the stale ✅ one.
+      expect(readFileSync(callsFile, 'utf8')).not.toContain('AutoFix blocked');
+
+      // Same connection-level failure with the ambient pipefail REMOVED. The
+      // status read is the one `if` in this helper that tests a PIPELINE, and
+      // `jq -rs` turns gh's empty stdout into a silent exit 0 — so without a
+      // local `set -o pipefail` the loop breaks on attempt 1, status_lookup_ok
+      // goes true on nothing read, and the empty id routes the writer to the
+      // "no status comment yet" branch: a DUPLICATE blocked comment, run green
+      // at exit 0. defaults.run.shell (pinned below) makes production pipefail
+      // today; this case is what keeps the helper correct without it.
+      writeFileSync(callsFile, '');
+      const failedNoPipefail = runReporter(
+        { FAIL_STATUS_LOOKUP: 'true' },
+        'permission_lookup_failed',
+        'set -e',
+      );
+      expect(failedNoPipefail.status).toBe(1);
+      expect(failedNoPipefail.stderr).toContain('(attempt 3/3)');
+      expect(failedNoPipefail.stderr).toContain(
+        'Failed to read takeover status comments',
+      );
+      const noPipefailCalls = readFileSync(callsFile, 'utf8');
+      expect(noPipefailCalls.match(/issues\/8320\/comments/g)).toHaveLength(3);
+      expect(noPipefailCalls).not.toContain('AutoFix blocked');
+
+      // The HTTP-status half of the same failure, also without ambient
+      // pipefail: gh writes the error body to stdout, jq chokes on it and
+      // fails by itself. This path was already correct — pinned so a future
+      // "simplification" cannot conclude the pipefail above is what carries it
+      // and drop it.
+      writeFileSync(callsFile, '');
+      const failedHttpNoPipefail = runReporter(
+        { FAIL_STATUS_LOOKUP_HTTP: 'true' },
+        'permission_lookup_failed',
+        'set -e',
+      );
+      expect(failedHttpNoPipefail.status).toBe(1);
+      expect(failedHttpNoPipefail.stderr).toContain('(attempt 3/3)');
+      expect(
+        readFileSync(callsFile, 'utf8').match(/issues\/8320\/comments/g),
+      ).toHaveLength(3);
+
+      // 'The PAT is not the bot' is the riskiest new branch and had no
+      // coverage in either direction. It is still a hard stop (return 1), so
+      // the mismatch cannot be mistaken for a delivered status comment.
+      writeFileSync(callsFile, '');
+      const wrongActorReporter = runReporter({ STUB_ACTOR: 'some-human' });
+      expect(wrongActorReporter.status).toBe(1);
+      expect(wrongActorReporter.stderr).toContain(
+        "PAT authenticates as 'some-human'",
+      );
+      expect(readFileSync(callsFile, 'utf8')).not.toContain('AutoFix blocked');
+    } finally {
+      rmSync(reporterDir, { recursive: true, force: true });
+    }
+
+    expect(
+      reviewScanJob.match(
+        /report_forced_takeover_blocked "\$\{ADMISSION_REASON\}"/g,
+      ),
+    ).toHaveLength(2);
+    expect(reviewScanJob).toContain('metadata_fetch_failed');
+    expect(reviewScanJob).toContain('permission_lookup_failed');
+    expect(reviewScanJob).toContain(
+      'fleet_row "${FPR}" \'blocked\' "author_permission_${FPERM:-none}"',
+    );
+    expect(reviewScanJob).toContain('report_forced_takeover_blocked');
+    expect(reviewScanJob).toContain('<!-- autofix-status -->');
+    expect(reviewScanJob).toContain('AutoFix blocked');
+    expect(reviewScanJob).toContain('exit 1');
+
+    // The status read is the only `if` in this helper testing a PIPELINE, so
+    // it carries pipefail itself instead of inheriting it. Pinned textually
+    // because the behavioural case above can only observe its ABSENCE by
+    // dropping the ambient option — a reader of the YAML alone would not see
+    // why one command substitution differs from its neighbours.
+    expect(reviewScanJob).toContain(
+      'if status_ids="$(set -o pipefail; gh api "repos/${REPO}/issues/${FORCED_PR}/comments" --paginate',
+    );
+    // And the ambient half: `shell: bash` is what expands to `bash --noprofile
+    // --norc -eo pipefail`, which every other gh|jq pipeline in this file (the
+    // scan's `| jq -s 'add // []'` writers) relies on WITHOUT saying so. Drop
+    // this default and those go silently green on empty input; the harnesses
+    // above would keep passing, since they set the option themselves.
+    expect(workflow).toMatch(/\ndefaults:\n {2}run:\n {4}shell: 'bash'\n/);
+
+    const runBlock = reviewScanJob.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(runBlock).toBeTruthy();
+    const syntax = spawnSync('bash', ['-n'], {
+      encoding: 'utf8',
+      input: runBlock.replace(/^ {10}/gm, ''),
+    });
+    expect({ status: syntax.status, stderr: syntax.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
+  });
+
+  it('answers terminal permission states without retrying them', () => {
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(readPermission).toBeTruthy();
+    // 'none' MUST be in the accepted set. Without it the `case *)` arms that
+    // render author_permission_${FPERM:-none} are unreachable dead code and
+    // every bot/org author falls through to permission_lookup_failed instead.
+    expect(readPermission).toContain(
+      '^(admin|maintain|write|triage|read|none)$',
+    );
+
+    const runPermission = (ghBody, login = 'qqqys') => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-perm-'));
+      try {
+        const callsFile = join(dir, 'calls');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\nprintf 'call\\n' >> '${callsFile}'\n${ghBody}\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -eo pipefail',
+              'sleep() { :; }',
+              readPermission.replace(/\n {10}/g, '\n'),
+              `read_live_permission '${login}' || exit $?`,
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+            },
+            encoding: 'utf8',
+          },
+        );
+        const calls = existsSync(callsFile)
+          ? readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).length
+          : 0;
+        return {
+          status: result.status,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          calls,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Bot-type logins (dependabot[bot], github-actions[bot], renovate[bot])
+    // and org logins answer HTTP 200 with permission 'none' — a definitive
+    // "holds nothing here", settled in ONE call.
+    expect(runPermission("printf '%s' 'none'\nexit 0")).toMatchObject({
+      status: 0,
+      stdout: 'none',
+      calls: 1,
+    });
+    // A login that does not exist answers HTTP 404 — equally definitive.
+    expect(
+      runPermission("printf 'gh: Not Found (HTTP 404)\\n' >&2\nexit 1"),
+    ).toMatchObject({ status: 0, stdout: 'none', calls: 1 });
+    // An empty login can only ever 404, so it is answered without a call.
+    expect(runPermission("printf '%s' 'write'\nexit 0", '')).toMatchObject({
+      status: 0,
+      stdout: 'none',
+      calls: 0,
+    });
+    // Every real grant level passes through verbatim, one call each.
+    for (const permission of ['admin', 'maintain', 'write', 'triage', 'read']) {
+      expect(
+        runPermission(`printf '%s' '${permission}'\nexit 0`),
+      ).toMatchObject({ status: 0, stdout: permission, calls: 1 });
+    }
+    // A genuinely transient answer still burns the full retry budget and
+    // reports failure: collapsing 5xx into 'none' would silently reject an
+    // author who actually holds write.
+    const transient = runPermission(
+      "printf 'gh: Server Error (HTTP 502)\\n' >&2\nexit 1",
+    );
+    expect(transient.status).toBe(1);
+    expect(transient.calls).toBe(3);
+    expect(transient.stderr).toContain('(attempt 3/3)');
+    // gh's own diagnosis rides along instead of being discarded to /dev/null —
+    // a rate limit, an expired PAT and a 5xx are indistinguishable without it.
+    expect(transient.stderr).toContain('HTTP 502');
+  });
+
+  it('wires forced admission end to end: reader, classifier, permission gate, reporter', () => {
+    // The four pieces are unit-pinned above; this runs the ACTUAL gate that
+    // joins them, so a rewiring (wrong reason string, a gate that exits 1 on a
+    // routine rejection, a reporter that never sees the reason) fails here.
+    const readMeta = reviewScanJob.match(
+      /(read_forced_pr_meta\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const classifier = reviewScanJob.match(
+      /(forced_admission_reason\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const reportBlocked = reviewScanJob.match(
+      /(report_forced_takeover_blocked\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const gate = reviewScanJob.match(
+      /(if ! META="\$\(read_forced_pr_meta\)"; then[\s\S]*?\n {14}exit 0\n {12}fi)/,
+    )?.[1];
+    expect(readMeta).toBeTruthy();
+    expect(readPermission).toBeTruthy();
+    expect(classifier).toBeTruthy();
+    expect(reportBlocked).toBeTruthy();
+    expect(gate).toBeTruthy();
+
+    const forkMeta = JSON.stringify({
+      number: 8320,
+      state: 'OPEN',
+      author: { login: 'renovate[bot]' },
+      headRefName: 'topic',
+      baseRefName: 'main',
+      isCrossRepository: true,
+      labels: [{ name: 'autofix/takeover' }],
+      maintainerCanModify: true,
+    });
+
+    const inRepoMeta = JSON.stringify({
+      ...JSON.parse(forkMeta),
+      author: { login: 'qqqys' },
+      isCrossRepository: false,
+    });
+    const statusPage = JSON.stringify([
+      {
+        id: 123,
+        user: { login: 'qwen-code-dev-bot' },
+        body: '<!-- autofix-status -->\n\n🔄 working',
+      },
+    ]);
+
+    // permission 'transient' makes every collaborator lookup answer HTTP 502,
+    // the only input that reaches permission_lookup_failed.
+    const runGate = (permission, metaJson = forkMeta) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-wiring-'));
+      try {
+        const callsFile = join(dir, 'calls');
+        const outputFile = join(dir, 'github-output');
+        writeFileSync(outputFile, '');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+printf '%q ' "$@" >> '${callsFile}'
+printf '\\n' >> '${callsFile}'
+case "$1 $2" in
+  'pr view') printf '%s' '${metaJson}'; exit 0 ;;
+  'api user') printf '%s' 'qwen-code-dev-bot'; exit 0 ;;
+esac
+case "$2" in
+  *collaborators/*/permission)
+    if [[ '${permission}' == 'transient' ]]; then
+      printf 'gh: Server Error (HTTP 502)\\n' >&2
+      exit 1
+    fi
+    printf '%s' '${permission}'; exit 0 ;;
+  */issues/8320/comments) printf '%s' '${statusPage}'; exit 0 ;;
+esac
+[[ "$1 $2 $3" == 'api --method PATCH' ]] && exit 0
+exit 1
+`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            [
+              // Production shell options: `bash --noprofile --norc -eo
+              // pipefail` (defaults.run.shell: bash). The gate runs at top
+              // level there, so errexit is live for it here too.
+              'set -eo pipefail',
+              'sleep() { :; }',
+              readMeta.replace(/\n {10}/g, '\n'),
+              readPermission.replace(/\n {10}/g, '\n'),
+              classifier.replace(/\n {10}/g, '\n'),
+              reportBlocked.replace(/\n {10}/g, '\n'),
+              gate.replace(/\n {12}/g, '\n'),
+              'echo "ADMITTED:${ADMISSION_REASON}"',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+              DRY_RUN: 'false',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              GITHUB_RUN_ID: '30778039590',
+              GITHUB_SERVER_URL: 'https://ghes.example.com',
+              GITHUB_OUTPUT: outputFile,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          status: result.status,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          calls: readFileSync(callsFile, 'utf8'),
+          output: readFileSync(outputFile, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A fork author holding nothing is a ROUTINE rejection: green run, the
+    // reason names the actual permission, and the blocked comment carries the
+    // remedy that can actually clear it. Before 'none' was a terminal answer
+    // this exited 1 and promised a scheduled retry that could never succeed.
+    const rejected = runGate('none');
+    expect(rejected.status).toBe(0);
+    expect(rejected.stdout).toContain('rejected: author_permission_none');
+    expect(rejected.stdout).not.toContain('permission_lookup_failed');
+    expect(rejected.output).toContain('has_targets=false');
+    expect(rejected.calls).toContain('Grant the fork author write access');
+    // The gate never reaches the 'ADMITTED' echo — it exits inside the block.
+    expect(rejected.stdout).not.toContain('ADMITTED:');
+
+    // A write-holding fork author falls through the gate as eligible.
+    const admitted = runGate('write');
+    expect(admitted.status).toBe(0);
+    expect(admitted.stdout).toContain('admitted (author renovate[bot]=write)');
+    expect(admitted.stdout).toContain('ADMITTED:eligible');
+    expect(admitted.calls).not.toContain('--method');
+
+    // In-repo PRs are gated by author/label ALONE — the live-permission call
+    // is fork-only. Without this case, deleting the `isCrossRepository == true`
+    // conjunct keeps the whole suite green while an in-repo takeover PR whose
+    // author was demoted gets rejected as author_permission_read.
+    const inRepo = runGate('read', inRepoMeta);
+    expect(inRepo.status).toBe(0);
+    expect(inRepo.stdout).toContain('ADMITTED:eligible');
+    expect(inRepo.calls).not.toContain('collaborators');
+    expect(inRepo.calls).not.toContain('AutoFix blocked');
+
+    // A genuinely transient permission answer is the ONE path that still reds
+    // the run, and it must post the blocked status before it does. Without
+    // this case, flipping that `exit 1` to `exit 0` ships green and restores
+    // the silent-success failure mode this PR exists to remove.
+    const lookupFailed = runGate('transient');
+    expect(lookupFailed.status).toBe(1);
+    expect(lookupFailed.stdout).not.toContain('ADMITTED:');
+    expect(lookupFailed.calls).toContain('permission_lookup_failed');
+    expect(lookupFailed.calls).toContain('A later scheduled scan will retry');
+    expect(lookupFailed.calls).toContain(
+      'repos/QwenLM/qwen-code/issues/comments/123',
+    );
+  });
+
+  it('serializes forced status writes with the matching address job', () => {
+    // The prefix is a LITERAL on both sides: job-level `concurrency` cannot
+    // read the `env` context, so the two jobs cannot share a constant. Compare
+    // the extracted prefixes instead of pinning two independent literals —
+    // renaming one side alone silently re-opens the lost-update race on the
+    // status comment, and nothing else in the suite would notice.
+    // Either quote style: the scan side is double-quoted because its
+    // expression embeds `'true'`, which Prettier will not leave escaped.
+    const groupOf = (text) =>
+      text.match(/\n {4}concurrency:\n {6}group: ['"]([a-z-]+?)-\$\{\{/)?.[1];
+    const scanLock = groupOf(reviewScanJob);
+    const addressLock = groupOf(reviewAddressJob);
+    expect(scanLock).toBeTruthy();
+    expect(scanLock).toBe(addressLock);
+
+    // Each side must still key the group on the PR number — a shared prefix
+    // with a per-run suffix would serialise nothing.
+    expect(reviewScanJob).toContain(
+      `group: "${scanLock}-\${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"`,
+    );
+    expect(reviewAddressJob).toContain(
+      `group: '${addressLock}-\${{ matrix.target.pr }}'`,
+    );
+    expect(reviewScanJob).toContain('cancel-in-progress: false');
+    expect(reviewAddressJob).toContain('cancel-in-progress: false');
+  });
+
+  // GitHub evaluates concurrency BEFORE the job `if`, so a predicate broader
+  // than the job's own condition lets a run that will only skip take the
+  // shared per-PR slot. `route` emits pr_number unconditionally, so without
+  // the do_review conjunct a `phase: issue` dispatch carrying pr_number: N
+  // queues this skipped job behind PR N's in-flight address round — and
+  // `issue-autofix` needs review-scan, so the dispatched issue phase idles
+  // with only a "queued" badge to explain it.
+  it('keeps the forced-scan lock as narrow as the job condition', () => {
+    const groupLine = reviewScanJob.match(/\n {6}group: ['"].*['"]/)?.[0] ?? '';
+    expect(groupLine).toContain("needs.route.outputs.do_review == 'true'");
+    // A skipped run must fall to a per-run group, never the shared per-PR one.
+    expect(groupLine).toContain('github.run_id');
+    // The gate the group must mirror, matched on the job's own `if:` block so
+    // this stays a comparison and not a restatement of the group line.
+    expect(reviewScanJob).toContain(
+      "if: |-\n      ${{ needs.route.outputs.do_review == 'true' }}",
     );
   });
 
@@ -3665,11 +4578,12 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
-    // Non-main targets are rejected; forks are admitted only under the scan's
-    // own takeover rules (allow-edits + bot fork or takeover label).
+    // Non-main targets are rejected, and so is every fork — this event holds
+    // no repository secrets, so an admitted fork PR reaches a scan that cannot
+    // authenticate. The scheduled scan owns them instead.
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
-    expect(routeStep).toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
     // Must set ROUTE_PR from the event payload.
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
@@ -3680,7 +4594,7 @@ describe('qwen-autofix workflow', () => {
         /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
       )?.[0] ?? '';
     expect(reviewScanStep).toContain('isCrossRepository');
-    expect(reviewScanStep).toContain('(.baseRefName // "") == "main"');
+    expect(reviewScanStep).toContain('(.baseRefName // "") != "main"');
     expect(reviewScanStep).toContain('--base main');
     // review-address must check out trusted base, not PR merge ref.
     expect(workflow).toContain("'Checkout trusted base'");
@@ -3689,13 +4603,18 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('admits managed fork PRs to the real-time review trigger, not just in-repo bot PRs', () => {
-    // The */10 schedule is throttled to 40-70min on this repo, so a takeover PR
-    // that only the scan could pick up waited up to an hour for feedback the
-    // event already carried. Real-time pickup now applies the scan's OWN fork
-    // admission (allow-edits + the bot's own fork or an explicit takeover
-    // label); review-address still re-verifies allow-edits, a live write+
-    // author and a matching head repo before touching the branch.
+  it('declines fork PRs at the real-time review trigger, admits in-repo bot PRs', () => {
+    // Real-time pickup for fork PRs was intended to spare a takeover PR the
+    // 40-70min the throttled */10 schedule really takes — but it could never
+    // work: GitHub gives a run tied to a fork PR NO repository secrets
+    // (`Secret source: None`), so CI_DEV_BOT_PAT was empty and the admitted
+    // PR reached a review-scan that failed three unauthenticated metadata
+    // reads and exited 1 on metadata_fetch_failed. Every review of a fork PR
+    // reddened the workflow while changing nothing.
+    // Route declines here instead, mirroring the pull_request label branch,
+    // which already refuses forks for the same reason. The latency it was
+    // trying to remove comes back until a credentialed lane exists; nothing
+    // that ever functioned is lost.
     const block = routeStep.match(
       /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request_review' \]\]; then[\s\S]*?\n {14}fi/,
     )?.[0];
@@ -3773,41 +4692,80 @@ describe('qwen-autofix workflow', () => {
     expect(run({ headRepo: IN_REPO, author: 'someone' })).toContain(
       'DO_REVIEW=false',
     );
-    // NEW: the bot's own fork, and a takeover-labelled human fork, are admitted
-    // in real time and route to that exact PR.
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'DO_REVIEW=true',
-    );
-    expect(
-      run({ headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] }),
-    ).toContain('DO_REVIEW=true');
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'ROUTE_PR=7259',
-    );
-    // Still rejected: no allow-edits, an unlabelled human fork, a non-main
-    // base, and an untrusted sender.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false }),
-    ).toContain('DO_REVIEW=false');
-    expect(run({ headRepo: FORK, author: 'wenshao' })).toContain(
-      'DO_REVIEW=false',
-    );
+    // Every fork shape is declined now — including the two that used to be
+    // admitted. The bot's own fork and a takeover-labelled human fork were the
+    // whole point of the removed branch, so they are the cases that prove it
+    // is gone rather than merely narrowed.
+    for (const forkCase of [
+      { headRepo: FORK, author: 'qwen-code-dev-bot' },
+      { headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] },
+      { headRepo: FORK, author: 'wenshao' },
+      { headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false },
+    ]) {
+      const out = run(forkCase);
+      expect(out).toContain('DO_REVIEW=false');
+      expect(out).toContain('ROUTE_PR=');
+      expect(out).not.toContain('ROUTE_PR=7259');
+    }
+    // Declined without asking the API anything. The removed branch spent a
+    // `gh pr view` and a collaborator-permission call to reach a verdict this
+    // event can never act on; a decline that still paid for them would be the
+    // same waste with a quieter log.
+    expect(routeStep).not.toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
+    // In-repo routing is untouched: a non-main base and an untrusted sender
+    // are still refused, so this change narrowed the fork case alone.
     expect(
       run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', base: 'release' }),
     ).toContain('DO_REVIEW=false');
     expect(
-      run({
-        headRepo: FORK,
-        author: 'wenshao',
-        labels: ['autofix/takeover'],
-        perm: 'read',
-      }),
+      run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', perm: 'read' }),
     ).toContain('DO_REVIEW=false');
-    // A metadata read failure fails CLOSED: the event is ignored rather than
-    // admitting a fork whose allow-edits/labels could not be verified.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
-    ).toContain('DO_REVIEW=false');
+  });
+
+  it('reds an unauthenticated scan instead of reporting an empty fleet', () => {
+    // Route declines the one event GitHub is known to run without secrets, but
+    // no job `if:` can read the `secrets` context, so a deleted or renamed
+    // CI_DEV_BOT_PAT — or a lane nobody has modelled — is invisible until the
+    // step itself looks. It must stop there: unauthenticated `gh pr list`
+    // answers as if the repository held no PRs, and the scan would read that
+    // as a healthy fleet of zero and stay green while the loop is dead.
+    const credGuard = reviewScanJob.match(
+      /(if \[\[ -z "\$\{GITHUB_TOKEN\}" \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(credGuard).toBeTruthy();
+    // Worthless once an API call has already been made and believed.
+    expect(reviewScanJob.indexOf(credGuard)).toBeLessThan(
+      reviewScanJob.indexOf('gh pr view'),
+    );
+
+    const runGuard = (token) =>
+      spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            credGuard.replace(/\n {10}/g, '\n'),
+            // Reached only by a guard that falls through.
+            'echo SCANNED',
+          ].join('\n'),
+        ],
+        {
+          env: { ...process.env, EVENT_NAME: 'schedule', GITHUB_TOKEN: token },
+          encoding: 'utf8',
+        },
+      );
+
+    const missing = runGuard('');
+    expect(missing.status).toBe(1);
+    expect(missing.stdout).toContain('::error::CI_DEV_BOT_PAT is empty');
+    expect(missing.stdout).not.toContain('SCANNED');
+    // Negative control: a present PAT falls straight through, so the guard
+    // cannot swallow a scan that was going to work.
+    const present = runGuard('ghp_stub');
+    expect(present.status).toBe(0);
+    expect(present.stdout).toContain('SCANNED');
   });
 
   it('refuses a takeover on a non-main base out loud instead of only in the job log', () => {
@@ -5325,7 +6283,19 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
-    expect(workflow).not.toContain("runner.environment == 'self-hosted'");
+    // What this line guarded is the STEP the dedicated-runner design added —
+    // a `command -v node` check gated on `runner.environment == 'self-hosted'`
+    // that duplicated setup-node and was removed in #6261. That step is
+    // pinned out by name on the next line, so guarding the bare expression as
+    // a substring only forbids the `runner` context by accident: this same
+    // test requires `RUNNER_ENVIRONMENT: '${{ runner.environment }}'` below,
+    // and the npm-cache choice reads the same fact. Guard the shape that was
+    // actually reverted — an `if:` that tests that fact — in every spelling:
+    // single-line or block scalar, wrapped `${{ }}`, extra conjuncts, either
+    // operand order, arbitrary spacing.
+    expect(workflow).not.toMatch(
+      /if:\s*(?:\|-\s*)?\$\{\{[^}]*(?:runner\.environment\s*==\s*'self-hosted'|'self-hosted'\s*==\s*runner\.environment)/,
+    );
     expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
     expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
     expect(workflow).toContain(
@@ -5454,15 +6424,22 @@ describe('qwen-autofix workflow', () => {
     // Node bump applied to two of the three jobs) must not ship green.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
-      // Unconditional: re-adding the hosted-only `if` skips setup-node on
-      // every ECS-routed run and leaves the job on whatever Node the pool
-      // image happens to ship, while every recipe assertion stays green.
-      expect(step).not.toContain("runner.environment == 'github-hosted'");
+      // Unconditional: any `if:` skips setup-node on one of the pools and
+      // leaves that job on whatever Node its image happens to ship, while
+      // every recipe assertion stays green.
+      expect(step).not.toMatch(/^\s*if:/m);
       expect(step).toContain(
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
       expect(step).toContain("node-version: '22.x'");
-      expect(step).toContain("cache: 'npm'");
+      // The cache is the one input that is NOT the same on both pools — see
+      // 'does not restore the remote npm cache on the persistent pool'. The
+      // inputs are still identical across the three steps, which is what
+      // this test is for.
+      expect(step).toContain(
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      );
+      expect(step).toContain('package-manager-cache: false');
       expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
@@ -6213,6 +7190,40 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not restore the remote npm cache on the persistent pool', () => {
+    // Measured on one review-address leg: `Set up Node.js` took 339s, of
+    // which Node itself was free (already in the runner tool cache) and
+    // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
+    // an `npm ci` that took 29s in the very next step. Every leg pays it,
+    // up to ten per scan, plus build-cli and issue-autofix.
+    // All three consumers, so a fourth job with a hardcoded cache fails
+    // here rather than quietly paying 2.65 GB per run — counted by step
+    // name, so no choice of inputs can dodge the capture.
+    expect(nodeSetupSteps).toHaveLength(3);
+    for (const step of nodeSetupSteps) {
+      expect(step).toContain(
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      );
+    }
+    // Text pins cannot tell a ternary that works from one that GHA's
+    // operand-value &&/|| semantics defeat — this PR's first attempt read
+    // correctly and still restored the cache on BOTH pools. Evaluate the
+    // pinned expression the way Actions does: '' on the persistent pool,
+    // 'npm' on the ephemeral hosted fallback.
+    const cacheExpression =
+      nodeSetupSteps[0].match(/cache: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
+    for (const [environment, expected] of [
+      ['self-hosted', ''],
+      ['github-hosted', 'npm'],
+    ]) {
+      expect(
+        evalGhaExpression(cacheExpression, {
+          'runner.environment': environment,
+        }),
+      ).toBe(expected);
     }
   });
 

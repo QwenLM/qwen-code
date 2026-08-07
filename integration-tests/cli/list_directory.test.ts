@@ -25,7 +25,6 @@ describe('list_directory', () => {
     await rig.setup('should be able to list a directory');
     rig.createFile('file1.txt', 'file 1 content');
     rig.mkdir('subdir');
-    rig.sync();
 
     await rig.poll(
       () => {
