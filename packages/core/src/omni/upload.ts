@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { openAsBlob } from 'node:fs';
 import path from 'node:path';
 import { combineAbortSignals } from '../utils/abortController.js';
@@ -45,6 +45,26 @@ export interface DashScopeUploaderOptions {
 const DEFAULT_ORIGIN = 'https://dashscope.aliyuncs.com';
 const GET_POLICY_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 15 * 60_000;
+/** Credential reuse window: official policy validity is 300s; 240s keeps
+ * a safety margin for the slowest accepted upload start. */
+const CREDENTIAL_TTL_MS = 240_000;
+
+interface CachedPolicy {
+  policy: Promise<DashScopeUploadPolicy>;
+  fetchedAt: number;
+}
+
+/** Module-level getPolicy cache: uploader instances are created per
+ * delivery, so an instance-level cache would never hit. Keyed by
+ * origin|model; in-flight promises are shared so N concurrent uploads
+ * spawn one credential request (same pattern as the ffmpeg availability
+ * cache). Rejections are evicted immediately. */
+const credentialCache = new Map<string, CachedPolicy>();
+
+/** Test-only. */
+export function resetCredentialCacheForTests(): void {
+  credentialCache.clear();
+}
 
 /** Strip everything but safe filename characters for the OSS object key. */
 function sanitizeFileName(name: string): string {
@@ -95,6 +115,43 @@ function rethrowIfAborted(err: unknown, signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw err;
 }
 
+/** Abort-shaped rejection reason for a caller whose signal fired. */
+function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException('This operation was aborted', 'AbortError')
+  );
+}
+
+/**
+ * Settle with `shared` unless `signal` aborts first. The shared promise is
+ * never cancelled — it keeps running for the other cache consumers — while
+ * this caller rejects with its own abort reason. The abort listener is
+ * removed as soon as the shared promise settles, so racing against a
+ * long-lived caller signal does not accumulate listeners.
+ */
+function raceWithSignal<T>(
+  shared: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return shared;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortReason(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    shared.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 /**
  * Client for DashScope's official temporary upload channel:
  * getPolicy → OSS multipart form POST → `oss://` URL usable as a media
@@ -116,11 +173,49 @@ export class DashScopeUploader {
     this.fetchFn = options.fetchFn ?? fetch;
   }
 
-  /** Fetch a short-lived upload policy bound to `model`. */
+  /** Fetch a short-lived upload policy bound to `model`, reusing a cached
+   * credential within its validity window. */
   async getPolicy(
     model: string,
     signal?: AbortSignal,
   ): Promise<DashScopeUploadPolicy> {
+    // Include the credential identity: two API keys on the same origin
+    // must not share upload policies (each policy scopes an account's
+    // upload_dir).
+    const keyDigest = createHash('sha256')
+      .update(this.apiKey)
+      .digest('hex')
+      .slice(0, 16);
+    const cacheKey = `${this.origin}|${model}|${keyDigest}`;
+    const cached = credentialCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < CREDENTIAL_TTL_MS) {
+      return raceWithSignal(cached.policy, signal);
+    }
+    // The shared fetch runs under the internal timeout only — never a
+    // caller's signal. A caller-owned signal aborting a shared promise
+    // would poison it for every other caller awaiting the same entry;
+    // instead each caller races the shared promise against its own
+    // signal below, so an abort rejects that caller alone.
+    const entry: CachedPolicy = {
+      fetchedAt: Date.now(),
+      policy: this.fetchPolicy(model),
+    };
+    credentialCache.set(cacheKey, entry);
+    entry.policy.catch(() => {
+      // Never cache a failed credential fetch. This handler also keeps an
+      // abandoned shared rejection (all racers already aborted) from
+      // surfacing as an unhandled rejection.
+      if (credentialCache.get(cacheKey) === entry) {
+        credentialCache.delete(cacheKey);
+      }
+    });
+    return raceWithSignal(entry.policy, signal);
+  }
+
+  /** Uncached policy fetch. Runs solely under the internal timeout; caller
+   * signals are handled per-caller in getPolicy so one caller's abort never
+   * contaminates the shared cached promise. */
+  private async fetchPolicy(model: string): Promise<DashScopeUploadPolicy> {
     const url = new URL('/api/v1/uploads', this.origin);
     url.searchParams.set('action', 'getPolicy');
     url.searchParams.set('model', model);
@@ -129,7 +224,7 @@ export class DashScopeUploader {
     // consumed, not just until headers arrive — undici cancels in-flight
     // body reads through the request signal, so cleaning up earlier would
     // leave a stalled body read unabortable (no timeout, no ESC).
-    const combined = combineAbortSignals([signal], {
+    const combined = combineAbortSignals([], {
       timeoutMs: GET_POLICY_TIMEOUT_MS,
     });
     let failureSummary: string | undefined;
@@ -151,7 +246,6 @@ export class DashScopeUploader {
         failureSummary = await summarizeHttpFailure(res);
       }
     } catch (err) {
-      rethrowIfAborted(err, signal);
       throw new Error(
         `DashScope upload getPolicy request failed: ${
           err instanceof Error ? err.message : String(err)

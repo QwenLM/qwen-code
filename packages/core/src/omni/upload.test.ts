@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DashScopeUploader, type FetchFn } from './upload.js';
+import {
+  DashScopeUploader,
+  resetCredentialCacheForTests,
+  type FetchFn,
+} from './upload.js';
 
 const POLICY = {
   policy: 'cG9saWN5',
@@ -40,6 +44,8 @@ async function withTempFile<T>(
     await fs.rm(dir, { recursive: true, force: true });
   }
 }
+
+beforeEach(() => resetCredentialCacheForTests());
 
 describe('DashScopeUploader', () => {
   it('requests a policy bound to the model with bearer auth', async () => {
@@ -212,5 +218,196 @@ describe('DashScopeUploader', () => {
         mimeType: 'video/mp4',
       }),
     ).rejects.toThrow(/Failed to open file for upload/);
+  });
+});
+
+describe('credential cache', () => {
+  beforeEach(() => resetCredentialCacheForTests());
+
+  it('reuses one getPolicy across multiple uploads within the TTL', async () => {
+    const fetchFn = vi.fn<FetchFn>().mockImplementation(async (url) => {
+      if (String(url).includes('getPolicy')) return policyResponse();
+      return new Response('', { status: 200 });
+    });
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    await withTempFile('a', (f) =>
+      uploader.uploadFile({ filePath: f, model: 'm', mimeType: 'video/mp4' }),
+    );
+    await withTempFile('b', (f) =>
+      uploader.uploadFile({ filePath: f, model: 'm', mimeType: 'video/mp4' }),
+    );
+    const policyCalls = fetchFn.mock.calls.filter((c) =>
+      String(c[0]).includes('getPolicy'),
+    );
+    expect(policyCalls).toHaveLength(1);
+  });
+
+  it('separates credentials per model and per origin', async () => {
+    const fetchFn = vi
+      .fn<FetchFn>()
+      .mockImplementation(async () => policyResponse());
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    await uploader.getPolicy('model-a');
+    await uploader.getPolicy('model-b');
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    // Same key + model but a different baseUrl origin must refetch: a
+    // policy is bound to the endpoint that issued it.
+    const intlUploader = new DashScopeUploader({
+      apiKey: 'k',
+      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      fetchFn,
+    });
+    await intlUploader.getPolicy('model-a');
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    const origins = fetchFn.mock.calls.map((c) => new URL(String(c[0])).origin);
+    expect(origins).toEqual([
+      'https://dashscope.aliyuncs.com',
+      'https://dashscope.aliyuncs.com',
+      'https://dashscope-intl.aliyuncs.com',
+    ]);
+  });
+
+  it('separates credentials per API key on the same origin and model', async () => {
+    const fetchFn = vi
+      .fn<FetchFn>()
+      .mockImplementation(async () => policyResponse());
+    const uploaderA = new DashScopeUploader({ apiKey: 'sk-alpha', fetchFn });
+    const uploaderB = new DashScopeUploader({ apiKey: 'sk-beta', fetchFn });
+    await uploaderA.getPolicy('m');
+    await uploaderB.getPolicy('m');
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    const authHeaders = fetchFn.mock.calls.map((c) =>
+      new Headers(c[1]?.headers as HeadersInit).get('authorization'),
+    );
+    expect(authHeaders).toEqual(['Bearer sk-alpha', 'Bearer sk-beta']);
+  });
+
+  it('shares in-flight fetches between concurrent callers', async () => {
+    let resolveIt: (r: Response) => void;
+    const gate = new Promise<Response>((r) => (resolveIt = r));
+    const fetchFn = vi.fn<FetchFn>().mockReturnValue(gate as Promise<Response>);
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    const p1 = uploader.getPolicy('m');
+    const p2 = uploader.getPolicy('m');
+    resolveIt!(policyResponse());
+    await Promise.all([p1, p2]);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a failed credential fetch', async () => {
+    const fetchFn = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }))
+      .mockResolvedValueOnce(policyResponse());
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    await expect(uploader.getPolicy('m')).rejects.toThrow(/HTTP 500/);
+    await expect(uploader.getPolicy('m')).resolves.toMatchObject({
+      upload_dir: POLICY.upload_dir,
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  describe('TTL expiry', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('refetches once the TTL has elapsed', async () => {
+      const fetchFn = vi
+        .fn<FetchFn>()
+        .mockImplementation(async () => policyResponse());
+      const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+      await uploader.getPolicy('m');
+      await vi.advanceTimersByTimeAsync(241_000);
+      await uploader.getPolicy('m');
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('reuses the credential just inside the TTL', async () => {
+      const fetchFn = vi
+        .fn<FetchFn>()
+        .mockImplementation(async () => policyResponse());
+      const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+      await uploader.getPolicy('m');
+      await vi.advanceTimersByTimeAsync(239_000);
+      await uploader.getPolicy('m');
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('measures the TTL from fetch start, not from resolve', async () => {
+      let resolveIt!: (r: Response) => void;
+      const gate = new Promise<Response>((r) => (resolveIt = r));
+      const fetchFn = vi
+        .fn<FetchFn>()
+        .mockReturnValueOnce(gate)
+        .mockImplementation(async () => policyResponse());
+      const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+      const first = uploader.getPolicy('m');
+      // The policy clock starts server-side when the request is issued, so
+      // 30s spent in flight counts against the validity window.
+      await vi.advanceTimersByTimeAsync(30_000);
+      resolveIt(policyResponse());
+      await first;
+      // 211s after resolve = 241s after fetch start: past the 240s TTL
+      // from start, but still inside it if measured from resolve time.
+      await vi.advanceTimersByTimeAsync(211_000);
+      await uploader.getPolicy('m');
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('keeps one caller abort from poisoning the shared in-flight fetch', async () => {
+    let resolveIt!: (r: Response) => void;
+    const gate = new Promise<Response>((r) => (resolveIt = r));
+    const fetchFn = vi.fn<FetchFn>().mockReturnValue(gate);
+    const uploaderA = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    const uploaderB = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    const controllerA = new AbortController();
+
+    const pA = uploaderA.getPolicy('m', controllerA.signal);
+    const pB = uploaderB.getPolicy('m');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    controllerA.abort();
+    const errA = await pA.catch((e: unknown) => e);
+    expect((errA as Error).name).toBe('AbortError');
+
+    resolveIt(policyResponse());
+    await expect(pB).resolves.toMatchObject({
+      upload_dir: POLICY.upload_dir,
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches successfully after an aborted first call', async () => {
+    const controller = new AbortController();
+    const abortError = Object.assign(new Error('This operation was aborted'), {
+      name: 'AbortError',
+    });
+    const fetchFn = vi
+      .fn<FetchFn>()
+      .mockImplementationOnce(async () => {
+        controller.abort();
+        throw abortError;
+      })
+      .mockImplementation(async () => policyResponse());
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+
+    const err = await uploader
+      .getPolicy('m', controller.signal)
+      .catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+
+    // Let the shared fetch's rejection propagate through cache eviction
+    // before retrying.
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(uploader.getPolicy('m')).resolves.toMatchObject({
+      upload_dir: POLICY.upload_dir,
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 });
