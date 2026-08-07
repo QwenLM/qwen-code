@@ -270,6 +270,8 @@ export const Footer: React.FC = () => {
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>
+          {/* Every child of this shrinkable row must keep wrap="truncate", or
+              the footer grows mid-turn once the row overflows (#8667/#8666). */}
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />

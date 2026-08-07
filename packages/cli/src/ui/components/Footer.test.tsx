@@ -11,7 +11,10 @@ import { EventEmitter } from 'node:events';
 import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  type BackgroundApproval,
+} from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
 import * as useStatusLineModule from '../hooks/useStatusLine.js';
 import * as useMCPHealthModule from '../hooks/useMCPHealth.js';
@@ -149,6 +152,32 @@ const runningShellEntry: DialogEntry = {
   outputOffset: 0,
   notified: false,
   abortController: new AbortController(),
+};
+
+const pendingApprovalAgentEntry: DialogEntry = {
+  kind: 'agent',
+  id: 'agent-1',
+  agentId: 'agent-1',
+  description: 'background agent',
+  isBackgrounded: true,
+  status: 'running',
+  startTime: 0,
+  outputFile: '/tmp/agent-1.jsonl',
+  outputOffset: 0,
+  notified: false,
+  abortController: new AbortController(),
+  pendingApprovals: [
+    {
+      callId: 'call-1',
+      name: 'Shell',
+      description: 'run call-1',
+      confirmationDetails: {
+        type: 'exec',
+      } as BackgroundApproval['confirmationDetails'],
+      respond: async () => {},
+      at: 0,
+    },
+  ],
 };
 
 const createBackgroundTaskState = (
@@ -373,6 +402,34 @@ describe('<Footer />', () => {
       }
     },
   );
+
+  it('keeps the hint row on one line at 80 columns when a parked approval shares it with a queued message', () => {
+    // Regression (R5-1 of the #8667 review): the pill's "needs approval"
+    // node renders only for agent/workflow entries with parked approvals,
+    // which the shell-entry case above never exercises. Without
+    // wrap="truncate" on that node, the overflowing row wraps it onto a
+    // second footer line.
+    const { lastFrame, unmount } = renderAtLayoutWidth(
+      80,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        messageQueue: ['queued message'],
+      }),
+      [pendingApprovalAgentEntry],
+    );
+    try {
+      const lines = stripAnsi(lastFrame())
+        .split('\n')
+        .map((line) => line.replace(/[ \t]+$/u, ''));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('⏳ 1');
+      // The approval node is the only `⚠` source in this state, so its
+      // presence proves the node rendered before the row truncated it.
+      expect(lines[0]).toContain('⚠');
+    } finally {
+      unmount();
+    }
+  });
 
   it('uses a distinct badge glyph from the DEFAULT approval indicator', () => {
     // Regression (R2-3 of the #8667 review): the badge reused `⏸`, the
