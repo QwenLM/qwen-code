@@ -379,7 +379,7 @@
         const entry = cards.get(requestId);
         try {
           const res = await fetch(
-            '/rc/session/' +
+            '/session/' +
               encodeURIComponent(sessionId) +
               '/permission/' +
               encodeURIComponent(requestId),
@@ -549,7 +549,7 @@
         }
         try {
           const res = await fetch(
-            '/rc/session/' +
+            '/session/' +
               encodeURIComponent(watchedSessionId) +
               '/idle-suggest-toggle',
             { headers: { Authorization: 'Bearer ' + token() } },
@@ -570,7 +570,7 @@
         cb.disabled = true;
         try {
           const res = await fetch(
-            '/rc/session/' +
+            '/session/' +
               encodeURIComponent(watchedSessionId) +
               '/idle-suggest-toggle',
             {
@@ -601,7 +601,7 @@
         setStatus('sending…');
         try {
           const res = await fetch(
-            '/rc/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
+            '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
             {
               method: 'POST',
               headers: {
@@ -641,7 +641,7 @@
         setStatus('connecting…');
         try {
           const res = await fetch(
-            '/rc/session/' + encodeURIComponent(id) + '/events',
+            '/session/' + encodeURIComponent(id) + '/events',
             {
               headers: { Authorization: 'Bearer ' + token() },
               signal: controller.signal,
@@ -1542,7 +1542,7 @@
       };
 
       // Slash-commands palette (cycle 67): GET /rc/commands list + POST
-      // /rc/session/:id/command/:name invoke (targets the watched #session).
+      // /session/:id/command/:name invoke (targets the watched #session).
       // Commands above the caller's scope are LISTED with invocableByYou:false
       // (grayed + disabled) per the backend's list-don't-hide design.
       // textContent/createElement only (name/description are command-file text).
@@ -1559,7 +1559,7 @@
         note.textContent = ' invoking…';
         try {
           const res = await fetch(
-            '/rc/session/' +
+            '/session/' +
               encodeURIComponent(id) +
               '/command/' +
               encodeURIComponent(name),
@@ -1836,7 +1836,7 @@
         }
       };
 
-      // Fork session (cycle 69): POST /rc/session/:id/fork (WRITE) full-copy
+      // Fork session (cycle 69): POST /session/:id/fork (WRITE) full-copy
       // include mode -> a new daemon-hosted session inheriting the transcript.
       // textContent-only (returned ids are server hex/uuid).
       $('fork-btn').onclick = async () => {
@@ -1854,7 +1854,7 @@
         const forkName = ($('fork-name').value || '').trim();
         try {
           const res = await fetch(
-            '/rc/session/' + encodeURIComponent(id) + '/fork',
+            '/session/' + encodeURIComponent(id) + '/fork',
             {
               method: 'POST',
               headers: {

@@ -74,7 +74,7 @@ function idbGetToken() {
 async function postVote(sessionId, requestId, body, token) {
   try {
     return await fetch(
-      '/rc/session/' +
+      '/session/' +
         encodeURIComponent(sessionId) +
         '/permission/' +
         encodeURIComponent(requestId),
