@@ -8,7 +8,10 @@ import OpenAI from 'openai';
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { resolveRequestTimeout } from '../core/openaiContentGenerator/constants.js';
+import {
+  DEFAULT_DASHSCOPE_BASE_URL,
+  resolveRequestTimeout,
+} from '../core/openaiContentGenerator/constants.js';
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
 import {
   buildRuntimeFetchOptions,
@@ -176,7 +179,9 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
         '    "tools": { "webSearch": { "enabled": true, "model": "qwen3.6-plus" } },\n' +
         '    "modelProviders": {\n' +
         '      "openai": [{ "id": "qwen3.6-plus",\n' +
-        '        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",\n' +
+        '        "baseUrl": "' +
+        DEFAULT_DASHSCOPE_BASE_URL +
+        '",\n' +
         '        "envKey": "DASHSCOPE_API_KEY" }]\n' +
         '    }\n' +
         '  }\n' +

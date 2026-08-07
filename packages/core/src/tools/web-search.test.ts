@@ -230,8 +230,12 @@ describe('evaluateWebSearchGate', () => {
     const settings = example.tools?.webSearch;
     const entries = example.modelProviders?.openai;
     expect(settings).toBeTruthy();
+    expect(settings?.enabled).toBe(true);
     expect(entries).toBeTruthy();
     if (!settings || !entries) return;
+    expect(entries.every((entry) => entry.envKey === 'DASHSCOPE_API_KEY')).toBe(
+      true,
+    );
     const savedKey = process.env['DASHSCOPE_API_KEY'];
     process.env['DASHSCOPE_API_KEY'] = 'sk-test';
     try {
@@ -246,7 +250,9 @@ describe('evaluateWebSearchGate', () => {
           })),
         }),
       );
-      expect(oracle.ok).toBe(true);
+      if (!oracle.ok) {
+        throw new Error(`notice example failed the gate: ${oracle.notice}`);
+      }
     } finally {
       if (savedKey === undefined) {
         delete process.env['DASHSCOPE_API_KEY'];
@@ -254,8 +260,10 @@ describe('evaluateWebSearchGate', () => {
         process.env['DASHSCOPE_API_KEY'] = savedKey;
       }
     }
-    expect(gate.notice).toContain('ENABLE_WEB_SEARCH');
-    expect(gate.notice).toContain('WEB_SEARCH_MODEL');
+    expect(gate.notice).toContain(
+      `ENABLE_WEB_SEARCH=true WEB_SEARCH_MODEL=${settings.model}`,
+    );
+    expect(gate.notice).toContain(`(recommended: ${settings.model})`);
     expect(gate.notice).toContain('WEB_SEARCH_BASE_URL');
     expect(gate.notice).toContain('WEB_SEARCH_API_KEY');
   });
