@@ -1086,6 +1086,8 @@ describe('loadCliConfig', () => {
     const originalNodeEnv = process.env['NODE_ENV'];
     const originalVitest = process.env['VITEST'];
     const originalVitestWorkerId = process.env['VITEST_WORKER_ID'];
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OPENAI_BASE_URL', '');
     process.env['NODE_ENV'] = 'production';
     delete process.env['VITEST'];
     delete process.env['VITEST_WORKER_ID'];
