@@ -1261,9 +1261,12 @@ jobs:
           # effort back on (parse-args), so a docs-only automatic review
           # reports through this single relay instead. The quoted line arrives
           # allowlisted by "Run review" (not-posted disposition shape only) —
-          # this step asserts nothing the run did not print.
+          # this step asserts nothing the run did not print. The marker is
+          # defined ONCE and used for both the body and the upsert lookup —
+          # the two must be byte-identical or the upsert posts duplicates.
+          MARKER='<!-- qwen-review docs-only-medium -->'
           BODY="$(printf '%s\n' \
-            '<!-- qwen-review docs-only-medium -->' \
+            "$MARKER" \
             '' \
             "📄 **Docs-only change** — the automatic review ran at \`--effort medium\` (verified findings, no reverse audit; medium posts no inline comments). Outcome:" \
             '' \
@@ -1288,7 +1291,7 @@ jobs:
           printf '%s' "$BODY" > "${RUNNER_TEMP}/docs-only-relay-body.md"
           if .github/scripts/upsert-bot-comment.sh \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
-            '<!-- qwen-review docs-only-medium -->' \
+            "$MARKER" \
             "${RUNNER_TEMP}/docs-only-relay-body.md"; then
             echo "docs-only medium outcome relayed to PR #${PR_NUMBER}."
           else
@@ -1296,40 +1299,46 @@ jobs:
           fi
 
       - name: 'Supersede stale docs-only badge'
+        # Runs whenever this run determined the PR is NOT (or no longer)
+        # docs-only — including a FAILED full review and an EXPLICIT
+        # requested review: the stale badge misrepresents the PR whether or
+        # not this particular run completed (a failed full review posts its
+        # own failure fallback; an explicit run is the badge's own CTA and
+        # must retire it). `docs_only_medium == 'false'` is the load-bearing
+        # gate: a run that failed before classifying emits nothing (empty !=
+        # 'false'), so a badge is never superseded on ignorance — and the
+        # supersede body is cause-neutral, asserting only what is true on
+        # every path here: the badge described an earlier revision.
         if: |-
+          !cancelled() &&
           steps.context.outputs.should_run == 'true' &&
-          steps.review.outcome == 'success' &&
-          steps.review.outputs.review_completed == 'true' &&
           steps.review.outputs.docs_only_medium == 'false' &&
-          steps.context.outputs.auto_review == 'true' &&
           steps.context.outputs.pr_number != ''
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
         run: |-
           set -euo pipefail
-          # A docs-only badge is upserted only by docs-only runs; when a later
-          # push makes the PR non-docs-only, the full automatic review runs
-          # here — and without this step the stale badge would keep asserting
-          # that the automatic review ran at medium with no reverse audit, a
-          # misrepresentation of the current head's review state that nothing
-          # ever corrects. --update-only makes this a strict no-op on PRs
-          # that never carried the badge; failure is best-effort (the badge
-          # is cosmetic next to the posted full review).
+          # --update-only makes this a strict no-op on PRs that never
+          # carried the badge; a failed lookup exits 1 (never the no-op), so
+          # the warning below fires instead of silently keeping a stale
+          # badge. The marker is defined once and used for both the body and
+          # the lookup — they must be byte-identical.
+          MARKER='<!-- qwen-review docs-only-medium -->'
           BODY="$(printf '%s\n' \
-            '<!-- qwen-review docs-only-medium -->' \
+            "$MARKER" \
             '' \
-            '📄 ~~Docs-only change~~ **(superseded)** — a later push made this PR no longer docs-only; the automatic review for the current head ran the full high-effort pipeline. See the posted review on this PR.' \
+            '📄 ~~Docs-only change~~ **(superseded)** — this badge described an earlier docs-only revision of this PR and no longer reflects the current head. See the latest review activity on this PR.' \
             '' \
             '<details><summary>中文说明</summary>' \
             '' \
-            '📄 ~~纯文档变更~~ **（已失效）** —— 后续推送使本 PR 不再是纯文档变更；当前 head 的自动评审已运行完整 high-effort 流水线，结论见本 PR 上发布的评审。' \
+            '📄 ~~纯文档变更~~ **（已失效）** —— 该徽章描述的是本 PR 更早的纯文档修订，已不再反映当前 head。请以本 PR 上最新的评审动态为准。' \
             '' \
             '</details>')"
           printf '%s' "$BODY" > "${RUNNER_TEMP}/docs-only-supersede-body.md"
           .github/scripts/upsert-bot-comment.sh \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
-            '<!-- qwen-review docs-only-medium -->' \
+            "$MARKER" \
             "${RUNNER_TEMP}/docs-only-supersede-body.md" \
             --update-only \
             || echo "::warning::Could not supersede the stale docs-only badge."

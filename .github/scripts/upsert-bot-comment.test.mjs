@@ -51,9 +51,14 @@ function run(scenario, { updateOnly = false } = {}) {
       'echo "$*" >> "$CALLS"',
       'n=$(grep -c "method GET" "$CALLS" || true)',
       'case "$*" in',
-      '  "api user"*) echo bot ;;',
+      '  "api user"*)',
+      '    if [ "$SCENARIO" = "user-fails" ]; then exit 1; fi',
+      '    echo bot ;;',
       '  *"--method GET"*)',
       '    case "$SCENARIO" in',
+      '      listing-always-fails) exit 1 ;;',
+      '      listing-fails-once)',
+      '        if [ "$n" -le 1 ]; then exit 1; else echo \'[{"id":7,"user":{"login":"bot"},"body":"<!-- test-marker --> old"}]\'; fi ;;',
       '      fresh) echo "[]" ;;',
       '      existing-bot) echo \'[{"id":7,"user":{"login":"bot"},"body":"<!-- test-marker --> old"}]\' ;;',
       '      existing-user) echo \'[{"id":8,"user":{"login":"alice"},"body":"<!-- test-marker --> mine"}]\' ;;',
@@ -136,4 +141,35 @@ test('--update-only is a no-op success when nothing exists', () => {
   assert.doesNotMatch(r.calls, /--method PATCH/);
   // And no POST either: the only api writes would be comment creation.
   assert.doesNotMatch(r.calls, /issues\/42\/comments -f/);
+});
+
+test('a failed listing NEVER falls through to POST (retries, then PATCHes)', () => {
+  // The critical shape: the badge already exists, the first listing GET hits
+  // a transient failure. Conflating that failure with "no match" would POST
+  // a permanent duplicate; the fix retries and PATCHes the real comment.
+  const r = run('listing-fails-once');
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /updated comment 7/);
+  assert.doesNotMatch(r.calls, /issues\/42\/comments -f/);
+});
+
+test('a persistently failing identity lookup exits 1 without writing', () => {
+  const r = run('user-fails');
+  assert.equal(r.code, 1);
+  assert.doesNotMatch(r.calls, /--method PATCH/);
+  assert.doesNotMatch(r.calls, /issues\/42\/comments -f/);
+});
+
+test('--update-only with a failing lookup exits 1, not the no-op success', () => {
+  // The supersede caller's ::warning:: path depends on this: a failed lookup
+  // must not masquerade as "nothing to update".
+  const r = run('listing-always-fails', { updateOnly: true });
+  assert.equal(r.code, 1);
+});
+
+test('--update-only PATCHes an existing bot-authored badge', () => {
+  const r = run('existing-bot', { updateOnly: true });
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /updated comment 7/);
+  assert.match(r.calls, /--method PATCH repos\/o\/r\/issues\/comments\/7/);
 });
