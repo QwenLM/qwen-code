@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { Text } from 'ink';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
@@ -28,6 +29,12 @@ import {
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
   ToolGroupMessage: vi.fn(() => <div />),
+}));
+
+vi.mock('./TerminalImage.js', () => ({
+  TerminalImage: ({ image }: { image: { mimeType: string } }) => (
+    <Text>MockTerminalImage:{image.mimeType}</Text>
+  ),
 }));
 
 vi.mock('../hooks/useMouseEvents.js', () => ({
@@ -93,6 +100,29 @@ describe('<HistoryItemDisplay />', () => {
     expect(output.startsWith('\n')).toBe(true);
     expect(output).toContain('◆\uFE0E Hello');
   });
+
+  it.each(['gemini', 'gemini_content'] as const)(
+    'passes images from a %s history item to the assistant renderer',
+    (type) => {
+      const item: HistoryItem = {
+        id: 1,
+        type,
+        text: '',
+        images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }],
+        omittedImageCount: 2,
+      };
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+
+      expect(lastFrame()).toContain('MockTerminalImage:image/png');
+      expect(lastFrame()).toContain('[+2 more images]');
+    },
+  );
 
   it('renders tool summaries without a leading spacer row', () => {
     const item: HistoryItem = {

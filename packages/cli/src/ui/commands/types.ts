@@ -63,6 +63,8 @@ export interface CommandContext {
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
     clear: () => void;
+    /** Clears transient assistant output before replacing conversation history. */
+    clearPendingState?: () => void;
     /**
      * Sets the transient debug message displayed in the application footer in debug mode.
      */

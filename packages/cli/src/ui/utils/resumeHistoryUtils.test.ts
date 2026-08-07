@@ -21,6 +21,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import type { HistoryItem } from '../types.js';
+import { MAX_INLINE_IMAGES_PER_ITEM } from './inline-image-parts.js';
 
 const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
   ({
@@ -803,6 +804,166 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
     expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+
+  // The current Core recorder flattens assistant output before persistence.
+  // This fixture covers the parser for records written by a compatible writer.
+  it('parses persisted assistant text and images in their original order', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: {
+            parts: [
+              { text: 'before' } as Part,
+              {
+                inlineData: {
+                  data: 'aW1hZ2U=',
+                  mimeType: 'image/png',
+                  displayName: 'chart.png',
+                },
+              } as Part,
+              { text: 'after' } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items).toEqual([
+      {
+        id: 101,
+        type: 'gemini',
+        text: 'before',
+        timestamp: new Date('2026-01-15T19:00:00.000Z').getTime(),
+      },
+      {
+        id: 102,
+        type: 'gemini_content',
+        text: '',
+        images: [
+          {
+            data: 'aW1hZ2U=',
+            mimeType: 'image/png',
+          },
+        ],
+      },
+      { id: 103, type: 'gemini_content', text: 'after' },
+    ]);
+  });
+
+  it('caps persisted assistant images and retains the overflow count', () => {
+    const images = Array.from(
+      { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
+      (_, index) => ({
+        data: Buffer.from(`restored-image-${index}`).toString('base64'),
+        mimeType: 'image/png',
+      }),
+    );
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: {
+            parts: images.map((inlineData) => ({ inlineData })),
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+    ).filter(
+      (item) => item.type === 'gemini' || item.type === 'gemini_content',
+    );
+
+    expect(items.flatMap((item) => item.images ?? [])).toEqual(
+      images.slice(0, MAX_INLINE_IMAGES_PER_ITEM),
+    );
+    expect(items.at(-1)).toMatchObject({
+      type: 'gemini_content',
+      text: '',
+      omittedImageCount: 2,
+    });
+  });
+
+  it('restores images nested in persisted tool response parts', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          message: {
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-image',
+                  name: 'replace',
+                  args: {},
+                },
+              } as unknown as Part,
+            ],
+          },
+        },
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'call-image',
+            resultDisplay: 'Generated chart',
+            status: 'success',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'call-image',
+                  name: 'replace',
+                  response: { output: 'Generated chart' },
+                  parts: [
+                    {
+                      inlineData: {
+                        data: 'dG9vbC1pbWFnZQ==',
+                        mimeType: 'image/webp',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({ replace: mockTool }),
+      200,
+    );
+
+    expect(items).toEqual([
+      {
+        id: 201,
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'call-image',
+            images: [
+              {
+                data: 'dG9vbC1pbWFnZQ==',
+                mimeType: 'image/webp',
+              },
+            ],
+          }),
+        ],
+      },
+    ]);
   });
 
   describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
