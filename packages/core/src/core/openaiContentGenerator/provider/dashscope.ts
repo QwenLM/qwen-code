@@ -54,14 +54,14 @@ export function selectDashScopeThinkingKnob(
     if (layer?.['enable_thinking'] === false) {
       return { source, field: 'enable_thinking', value: false };
     }
-    if (layer?.['reasoning_effort'] !== undefined) {
+    if (layer?.['reasoning_effort'] != null) {
       return {
         source,
         field: 'reasoning_effort',
         value: layer['reasoning_effort'],
       };
     }
-    if (layer?.['thinking_budget'] !== undefined) {
+    if (layer?.['thinking_budget'] != null) {
       return {
         source,
         field: 'thinking_budget',
@@ -82,6 +82,29 @@ export function selectDashScopeThinkingKnob(
         }
       : undefined)
   );
+}
+
+function withoutNullishThinkingKnobs(
+  layer: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!layer) {
+    return undefined;
+  }
+  const hasNullishEffort =
+    'reasoning_effort' in layer && layer['reasoning_effort'] == null;
+  const hasNullishBudget =
+    'thinking_budget' in layer && layer['thinking_budget'] == null;
+  if (!hasNullishEffort && !hasNullishBudget) {
+    return layer;
+  }
+  const sanitized = { ...layer };
+  if (hasNullishEffort) {
+    delete sanitized['reasoning_effort'];
+  }
+  if (hasNullishBudget) {
+    delete sanitized['thinking_budget'];
+  }
+  return sanitized;
 }
 
 /**
@@ -285,17 +308,25 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
-    const extraBody = this.contentGeneratorConfig.extra_body;
+    const isTieredQwenModel = isTieredEffortWireModel(
+      this.resolveWireModel(request.model),
+    );
+    const extraBody = isTieredQwenModel
+      ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
+      : this.contentGeneratorConfig.extra_body;
 
     // qwen3.8-max accepts the unified effort tiers directly. Older qwen hybrid
     // models still expose only the on/off `enable_thinking` switch. User
     // extra_body wins (merged last); the disable path (reasoning: false) is
     // handled upstream in the pipeline.
     const qwenEffortConfig = this.buildQwenEffortConfig(request.model);
-    const requestParams = requestWithTokenLimits as unknown as Record<
+    const rawRequestParams = requestWithTokenLimits as unknown as Record<
       string,
       unknown
     >;
+    const requestParams = isTieredQwenModel
+      ? withoutNullishThinkingKnobs(rawRequestParams)!
+      : rawRequestParams;
     // A request-level reasoning_effort (samplingParams) beats the config
     // tier: dashscopeExtras is spread after requestWithTokenLimits below, so
     // without this copy the tier would clobber the request-level override.
@@ -309,9 +340,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve the
     // highest-priority layer once; when both fields are explicit in that
     // layer, reasoning_effort keeps the pre-existing provider behavior.
-    const isTieredQwenModel = isTieredEffortWireModel(
-      this.resolveWireModel(request.model),
-    );
     const selectedThinkingKnob = isTieredQwenModel
       ? selectDashScopeThinkingKnob(
           this.resolveWireModel(request.model),
@@ -332,7 +360,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...qwenEffortConfig,
       };
       const visionResult: Record<string, unknown> = {
-        ...requestWithTokenLimits,
+        ...requestParams,
         messages,
         ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
@@ -359,7 +387,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...qwenEffortConfig,
     };
     const result: Record<string, unknown> = {
-      ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
+      ...requestParams, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),

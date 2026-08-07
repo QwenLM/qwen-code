@@ -746,6 +746,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         expectedBudget: undefined,
         expectedThinking: undefined,
       },
+      {
+        name: 'null extra_body thinking_budget falls through to configured effort',
+        extraBody: { thinking_budget: null },
+        requestFields: {},
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null extra_body reasoning_effort falls through to configured effort',
+        extraBody: { reasoning_effort: null },
+        requestFields: {},
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null request-level thinking_budget falls through to configured effort',
+        extraBody: undefined,
+        requestFields: { thinking_budget: null },
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'null request-level reasoning_effort falls through to configured effort',
+        extraBody: undefined,
+        requestFields: { reasoning_effort: null },
+        configuredReasoning: true,
+        expectedEffort: 'low',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
     ])('resolves $name', (testCase) => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {
