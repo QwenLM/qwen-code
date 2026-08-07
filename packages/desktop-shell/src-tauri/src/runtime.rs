@@ -44,13 +44,13 @@ impl DesktopRuntime {
     pub fn start(app: &AppHandle, workspace: &Path, log_path: &Path) -> Result<Self, String> {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
         let layout = RuntimeLayout::resolve(app)?;
-        let workspace = resolve_workspace(workspace)?;
+        // Callers pass a workspace already resolved by resolve_workspace.
         let token = random_token();
         let mut command = Command::new(&layout.node);
         command
             .arg(&layout.entry)
-            .args(runtime_arguments(&workspace))
-            .current_dir(&workspace)
+            .args(runtime_arguments(workspace))
+            .current_dir(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
