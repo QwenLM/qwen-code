@@ -1,0 +1,200 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  computePolicyFingerprint,
+  OmniDegradationCache,
+} from './degradation-cache.js';
+
+const ORIGINAL = 'a'.repeat(64);
+const DEGRADED = 'b'.repeat(64);
+
+const ENTRY = {
+  degradedSha256: DEGRADED,
+  extension: '.jpg',
+  disclosure:
+    '原 4096×3072/8.2MB → 1568×1176/0.9MB，质量 75，细节与文字锐度受损',
+  mimeType: 'image/jpeg',
+};
+
+describe('computePolicyFingerprint', () => {
+  it('is stable across key order and identical inputs', () => {
+    const a = computePolicyFingerprint('omni_downsample_image', {
+      maxDimension: 1568,
+      quality: 75,
+    });
+    const b = computePolicyFingerprint('omni_downsample_image', {
+      quality: 75,
+      maxDimension: 1568,
+    });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('ignores the per-invocation io params (inputPath/outputDir)', () => {
+    const bare = computePolicyFingerprint('omni_downsample_image', {
+      quality: 75,
+    });
+    const withIo = computePolicyFingerprint('omni_downsample_image', {
+      quality: 75,
+      inputPath: '/tmp/a/in.png',
+      outputDir: '/tmp/staging/deadbeef',
+    });
+    expect(withIo).toBe(bare);
+  });
+
+  it('ignores undefined values (absent tunable == undefined tunable)', () => {
+    expect(
+      computePolicyFingerprint('t', { quality: 75, maxDimension: undefined }),
+    ).toBe(computePolicyFingerprint('t', { quality: 75 }));
+  });
+
+  it.each([
+    ['tool name', ['other_tool', { quality: 75 }, undefined]],
+    ['argument value', ['t', { quality: 80 }, undefined]],
+    ['argument set', ['t', { quality: 75, maxDimension: 800 }, undefined]],
+    ['tool version', ['t', { quality: 75 }, '2']],
+  ] as Array<[string, [string, Record<string, unknown>, string | undefined]]>)(
+    'changes when the %s changes',
+    (_label, [tool, args, version]) => {
+      const base = computePolicyFingerprint('t', { quality: 75 });
+      expect(computePolicyFingerprint(tool, args, version)).not.toBe(base);
+    },
+  );
+
+  it('sorts keys recursively in nested arguments', () => {
+    expect(
+      computePolicyFingerprint('t', { opts: { b: 2, a: [1, { d: 4, c: 3 }] } }),
+    ).toBe(
+      computePolicyFingerprint('t', { opts: { a: [1, { c: 3, d: 4 }], b: 2 } }),
+    );
+  });
+});
+
+describe('OmniDegradationCache', () => {
+  let root: string;
+  let cache: OmniDegradationCache;
+  const fp = computePolicyFingerprint('omni_downsample_image', {
+    maxDimension: 1568,
+    quality: 75,
+  });
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-degcache-'));
+    cache = new OmniDegradationCache(root);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('round-trips an entry and persists across instances', async () => {
+    await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
+    await cache.put(ORIGINAL, fp, ENTRY);
+    const hit = await cache.get(ORIGINAL, fp);
+    expect(hit).toMatchObject(ENTRY);
+    expect(Date.parse(hit!.createdAt)).not.toBeNaN();
+
+    const second = new OmniDegradationCache(root);
+    await expect(second.get(ORIGINAL, fp)).resolves.toMatchObject(ENTRY);
+  });
+
+  it('writes to policy-cache.json under the omni root', async () => {
+    await cache.put(ORIGINAL, fp, ENTRY);
+    const raw = JSON.parse(
+      await fs.readFile(path.join(root, 'policy-cache.json'), 'utf8'),
+    );
+    expect(raw.version).toBe(1);
+    expect(Object.keys(raw.entries)).toEqual([`${ORIGINAL}|${fp}`]);
+  });
+
+  it('misses on a different fingerprint or original hash', async () => {
+    await cache.put(ORIGINAL, fp, ENTRY);
+    const otherFp = computePolicyFingerprint('omni_downsample_image', {
+      maxDimension: 800,
+    });
+    await expect(cache.get(ORIGINAL, otherFp)).resolves.toBeNull();
+    await expect(cache.get('c'.repeat(64), fp)).resolves.toBeNull();
+  });
+
+  it('re-put for the same key replaces the entry', async () => {
+    await cache.put(ORIGINAL, fp, ENTRY);
+    await cache.put(ORIGINAL, fp, {
+      ...ENTRY,
+      degradedSha256: 'd'.repeat(64),
+    });
+    await expect(cache.get(ORIGINAL, fp)).resolves.toMatchObject({
+      degradedSha256: 'd'.repeat(64),
+    });
+  });
+
+  it('removeByOriginalSha256 drops every policy result for the source', async () => {
+    const fp2 = computePolicyFingerprint('omni_downsample_image', {
+      quality: 50,
+    });
+    await cache.put(ORIGINAL, fp, ENTRY);
+    await cache.put(ORIGINAL, fp2, ENTRY);
+    await cache.put('c'.repeat(64), fp, ENTRY);
+
+    await cache.removeByOriginalSha256(ORIGINAL);
+    await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
+    await expect(cache.get(ORIGINAL, fp2)).resolves.toBeNull();
+    await expect(cache.get('c'.repeat(64), fp)).resolves.not.toBeNull();
+  });
+
+  it('removeByDegradedSha256 drops every entry pointing at the derivative', async () => {
+    await cache.put(ORIGINAL, fp, ENTRY);
+    await cache.put('c'.repeat(64), fp, ENTRY);
+    await cache.put('e'.repeat(64), fp, {
+      ...ENTRY,
+      degradedSha256: 'f'.repeat(64),
+    });
+
+    await cache.removeByDegradedSha256(DEGRADED);
+    await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
+    await expect(cache.get('c'.repeat(64), fp)).resolves.toBeNull();
+    await expect(cache.get('e'.repeat(64), fp)).resolves.not.toBeNull();
+  });
+
+  it('backs up a corrupt cache file and starts fresh (never fatal)', async () => {
+    const filePath = path.join(root, 'policy-cache.json');
+    await fs.writeFile(filePath, '{corrupt');
+    await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
+    const names = await fs.readdir(root);
+    expect(names.some((n) => n.startsWith('policy-cache.json.corrupt-'))).toBe(
+      true,
+    );
+    // And the cache is usable again.
+    await cache.put(ORIGINAL, fp, ENTRY);
+    await expect(cache.get(ORIGINAL, fp)).resolves.toMatchObject(ENTRY);
+  });
+
+  it('writes atomically: no .tmp litter, 0600 file mode', async () => {
+    await cache.put(ORIGINAL, fp, ENTRY);
+    const names = await fs.readdir(root);
+    expect(names.filter((n) => n.includes('.tmp-'))).toEqual([]);
+    if (process.platform !== 'win32') {
+      const stat = await fs.stat(path.join(root, 'policy-cache.json'));
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('serializes concurrent puts without losing entries', async () => {
+    await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        cache.put(ORIGINAL, computePolicyFingerprint('t', { i }), ENTRY),
+      ),
+    );
+    const raw = JSON.parse(
+      await fs.readFile(path.join(root, 'policy-cache.json'), 'utf8'),
+    );
+    expect(Object.keys(raw.entries)).toHaveLength(8);
+  });
+});
