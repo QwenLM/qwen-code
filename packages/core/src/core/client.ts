@@ -1170,6 +1170,44 @@ export class GeminiClient {
     }
   }
 
+  private restoreProxySchemasAfterCompaction(
+    schemas: readonly FunctionDeclaration[],
+  ): void {
+    if (schemas.length === 0 || !this.chat) {
+      return;
+    }
+
+    const history = this.getChat().getHistory();
+    const startupLength = getStartupContextLength(history);
+    const startupContext = history[0];
+    if (startupLength === 0 || !startupContext) {
+      return;
+    }
+
+    const schemaReminder = wrapSystemReminder(
+      'Current schemas for deferred tools restored after context compression:\n\n' +
+        formatFunctionSchemaBlocks(schemas) +
+        '\n\nUse `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
+    );
+    this.getChat().setHistory([
+      {
+        ...startupContext,
+        parts: [...(startupContext.parts ?? []), { text: schemaReminder }],
+      },
+      ...history.slice(1),
+    ]);
+
+    const toolRegistry = this.config.getToolRegistry();
+    for (const schema of schemas) {
+      if (schema.name) {
+        toolRegistry.markProxySchemaPresented({
+          name: schema.name,
+          schemaFingerprint: getFunctionSchemaFingerprint(schema),
+        });
+      }
+    }
+  }
+
   /**
    * Rebuilds the main-session system instruction from the current
    * `userMemory` / model / prompt overrides and re-binds it to the live chat.
@@ -3441,6 +3479,9 @@ export class GeminiClient {
           // compaction inside chat.sendMessageStream may have summarized away
           // the previous merged IDE context.
           if (event.type === GeminiEventType.ChatCompressed) {
+            const presentedProxySchemas = this.config
+              .getToolRegistry()
+              .getPresentedProxySchemas();
             this.clearProxySchemaPresentationsAfterHistoryMutation(
               'auto-compression',
             );
@@ -3450,6 +3491,7 @@ export class GeminiClient {
             // rest of the session (manual /compress gets this via startChat).
             try {
               await this.restoreStartupContextAfterCompaction();
+              this.restoreProxySchemasAfterCompaction(presentedProxySchemas);
             } catch (error) {
               this.config
                 .getDebugLogger()
@@ -4204,6 +4246,9 @@ export class GeminiClient {
   ): Promise<ChatCompressionInfo> {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
+    const presentedProxySchemas = this.config
+      .getToolRegistry()
+      .getPresentedProxySchemas();
     const info = await this.getChat().tryCompress(
       prompt_id,
       force,
@@ -4215,6 +4260,7 @@ export class GeminiClient {
       const chat = this.getChat();
       const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      this.restoreProxySchemasAfterCompaction(presentedProxySchemas);
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&

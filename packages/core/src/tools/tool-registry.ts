@@ -850,6 +850,21 @@ export class ToolRegistry {
     this.proxySchemaPresentations.clear();
   }
 
+  getPresentedProxySchemas(): FunctionDeclaration[] {
+    const schemas: FunctionDeclaration[] = [];
+    for (const name of [...this.proxySchemaPresentations.keys()].sort()) {
+      const tool = this.tools.get(name);
+      if (
+        tool &&
+        this.proxySchemaPresentations.get(name) ===
+          getFunctionSchemaFingerprint(tool.schema)
+      ) {
+        schemas.push(tool.schema);
+      }
+    }
+    return schemas;
+  }
+
   /**
    * Whether a deferred tool is currently hidden from the model's
    * function-declaration list. Returns `true` when the tool:

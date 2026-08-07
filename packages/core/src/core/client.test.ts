@@ -21,7 +21,12 @@ process.env.TZ = 'UTC';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Content, GenerateContentResponse, Part } from '@google/genai';
+import type {
+  Content,
+  FunctionDeclaration,
+  GenerateContentResponse,
+  Part,
+} from '@google/genai';
 import { GeminiClient, SendMessageType, type SteerInput } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
@@ -94,6 +99,7 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { formatFunctionSchemaBlocks } from '../tools/function-schema-rendering.js';
+import { getFunctionSchemaFingerprint } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   __resetActiveGoalStoreForTests,
@@ -540,6 +546,7 @@ describe('Gemini Client (client.ts)', () => {
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      getPresentedProxySchemas: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       clearProxySchemaPresentations: vi.fn(),
       revealDeferredTool: vi.fn(),
@@ -4804,6 +4811,40 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
+    it('restores presented proxy schemas after manual compression', async () => {
+      const schema: FunctionDeclaration = {
+        name: 'deferred_tool',
+        description: 'Deferred tool',
+        parametersJsonSchema: { type: 'object' },
+      };
+      const registry = vi.mocked(mockConfig.getToolRegistry)();
+      vi.mocked(registry.getPresentedProxySchemas).mockReturnValue([schema]);
+      vi.mocked(registry.markProxySchemaPresented).mockClear();
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+      ];
+      const originalChat = client.getChat();
+      vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
+        originalChat.setHistory(compressedHistory);
+        return {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        };
+      });
+
+      await client.tryCompressChat('p4');
+
+      expect(client.getHistory()[0]?.parts?.[1]?.text).toContain(
+        formatFunctionSchemaBlocks([schema]),
+      );
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledWith({
+        name: schema.name,
+        schemaFingerprint: getFunctionSchemaFingerprint(schema),
+      });
+    });
+
     it('preserves Compact SessionStart additionalContext on the new chat', async () => {
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
@@ -5262,6 +5303,59 @@ describe('Gemini Client (client.ts)', () => {
         },
         ...compactedHistory,
       ]);
+    });
+
+    it('restores presented proxy schemas after auto compression', async () => {
+      const schema: FunctionDeclaration = {
+        name: 'deferred_tool',
+        description: 'Deferred tool',
+        parametersJsonSchema: { type: 'object' },
+      };
+      const registry = vi.mocked(mockConfig.getToolRegistry)();
+      vi.mocked(registry.getPresentedProxySchemas).mockReturnValue([schema]);
+      vi.mocked(registry.markProxySchemaPresented).mockClear();
+      let history: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+      ];
+      const setHistory = vi.fn((next: Content[]) => {
+        history = next;
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn(() => history),
+        setHistory,
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-restore-schemas',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(history[0]?.parts?.[1]?.text).toContain(
+        formatFunctionSchemaBlocks([schema]),
+      );
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledWith({
+        name: schema.name,
+        schemaFingerprint: getFunctionSchemaFingerprint(schema),
+      });
     });
   });
 

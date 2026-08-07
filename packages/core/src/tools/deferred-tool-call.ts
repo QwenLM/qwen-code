@@ -57,14 +57,15 @@ export class DeferredToolCallTool extends BaseDeclarativeTool<
     super(
       ToolNames.DEFERRED_TOOL_CALL,
       ToolDisplayNames.DEFERRED_TOOL_CALL,
-      'Calls a deferred tool after its current schema has been fetched with tool_search.',
+      'Calls a deferred tool only after a successful direct tool_search call returned that target\'s full schema in the current active conversation. Call tool_search directly; never set name to "tool_search". If the schema is no longer visible, including after context compression or history replacement, call tool_search again before using this wrapper.',
       Kind.Other,
       {
         type: 'object',
         properties: {
           name: {
             type: 'string',
-            description: 'Exact deferred tool name returned by tool_search.',
+            description:
+              'Exact deferred tool name returned by tool_search in the current active conversation. Never use "tool_search".',
           },
           arguments: {
             type: 'object',

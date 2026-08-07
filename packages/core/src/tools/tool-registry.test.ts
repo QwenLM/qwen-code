@@ -1073,6 +1073,39 @@ describe('ToolRegistry', () => {
         'deferred_tool',
       );
     });
+
+    it('returns current presented proxy schemas in stable order', () => {
+      const registry = new ToolRegistry(config);
+      registry.registerTool(
+        new MockTool({ name: 'zeta_tool', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'alpha_tool', shouldDefer: true }),
+      );
+
+      registry.markProxySchemaPresented(presentationFor(registry, 'zeta_tool'));
+      registry.markProxySchemaPresented(
+        presentationFor(registry, 'alpha_tool'),
+      );
+
+      expect(registry.getPresentedProxySchemas()).toEqual([
+        registry.getTool('alpha_tool')?.schema,
+        registry.getTool('zeta_tool')?.schema,
+      ]);
+
+      const alpha = registry.getTool('alpha_tool');
+      if (!alpha) throw new Error('missing alpha_tool');
+      Object.defineProperty(alpha, 'parameterSchema', {
+        value: {
+          type: 'object',
+          properties: { changed: { type: 'string' } },
+        },
+      });
+
+      expect(registry.getPresentedProxySchemas()).toEqual([
+        registry.getTool('zeta_tool')?.schema,
+      ]);
+    });
   });
 
   describe('getToolsByServer', () => {
