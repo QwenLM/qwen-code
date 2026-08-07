@@ -70,6 +70,10 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
+import {
+  resolveTelemetryClient,
+  resolveTelemetryRuntime,
+} from './runtime-attribution.js';
 import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
@@ -258,6 +262,8 @@ export class QwenLogger {
     const authType = this.config?.getAuthType();
     const version = this.config?.getCliVersion() || 'unknown';
     const osMetadata = this.getOsMetadata();
+    const channel = this.config?.getChannel?.();
+    const client = resolveTelemetryClient(channel);
 
     // Use cached source information
     return {
@@ -288,9 +294,9 @@ export class QwenLogger {
           authType === AuthType.USE_OPENAI
             ? this.config?.getContentGeneratorConfig().baseUrl || ''
             : '',
-        ...(this.config?.getChannel?.()
-          ? { channel: this.config.getChannel() }
-          : {}),
+        ...(channel ? { channel } : {}),
+        runtime: resolveTelemetryRuntime(channel),
+        ...(client ? { client } : {}),
       },
       _v: `qwen-code@${version}`,
     } as RumPayload;

@@ -135,6 +135,9 @@ export function createSpawnChannelFactory(
       childEnvOverrides,
     );
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    // Marks the child as daemon-spawned so default usage statistics can
+    // attribute runtime=daemon (see core telemetry runtime-attribution).
+    childEnv['QWEN_CODE_SERVE'] = '1';
 
     const memoryArgs = getAcpMemoryArgs();
     const execArgs = process.execArgv.filter(
