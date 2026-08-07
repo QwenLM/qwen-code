@@ -57,16 +57,14 @@ export function modelIdsDifferFromDefaults(
 }
 
 /**
- * Returns the API key to prefill when opening a provider's connect form,
- * clearing per-credential-domain drafts so a draft typed for one provider
- * is never restored into another provider's field under a shared env key.
+ * Clears per-credential-domain drafts so a draft typed for one provider is
+ * never restored into another provider's field under a shared env key.
+ * Stored keys never ride along on the catalog wire — the ACP list response
+ * exposes only `hasApiKey` — so the field always starts empty.
  */
-export function initialApiKey(
-  provider: QwenProviderSummary,
-  drafts: Map<string, string>,
-): string {
+export function initialApiKey(drafts: Map<string, string>): string {
   drafts.clear();
-  return provider.existingConfig?.apiKey ?? '';
+  return '';
 }
 
 /**

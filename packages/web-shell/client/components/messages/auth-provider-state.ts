@@ -49,27 +49,29 @@ export function selectedBaseUrlOptionIndex(
   return index >= 0 ? index : 0;
 }
 
+// The daemon derives the custom provider's install-time key from the
+// submitted protocol+baseUrl and never publishes it in the catalog, so for
+// such providers this returns undefined. Fabricating a protocol-scoped key
+// here would show the wrong environment variable in the review preview.
 export function selectedBaseUrlEnvKey(
   provider: DaemonAuthProviderDescriptor,
   baseUrl: string,
-  protocol: string,
-): string {
+): string | undefined {
   if (Array.isArray(provider.baseUrl)) {
     const option = provider.baseUrl.find((item) => item.url === baseUrl);
     if (option?.envKey) return option.envKey;
   }
-  return provider.envKey ?? `${protocol.toUpperCase()}_API_KEY`;
+  return provider.envKey;
 }
 
 export function shouldResetApiKeyAfterBaseUrlChange(
   provider: DaemonAuthProviderDescriptor,
   currentBaseUrl: string,
   nextBaseUrl: string,
-  protocol: string,
 ): boolean {
   return (
-    selectedBaseUrlEnvKey(provider, currentBaseUrl, protocol) !==
-    selectedBaseUrlEnvKey(provider, nextBaseUrl, protocol)
+    selectedBaseUrlEnvKey(provider, currentBaseUrl) !==
+    selectedBaseUrlEnvKey(provider, nextBaseUrl)
   );
 }
 
@@ -83,25 +85,18 @@ export function apiKeyAfterBaseUrlChange(
   currentBaseUrl: string,
   nextBaseUrl: string,
   currentApiKey: string,
-  protocol: string,
   drafts: Map<string, string>,
 ): string {
   if (
-    !shouldResetApiKeyAfterBaseUrlChange(
-      provider,
-      currentBaseUrl,
-      nextBaseUrl,
-      protocol,
-    )
+    !shouldResetApiKeyAfterBaseUrlChange(provider, currentBaseUrl, nextBaseUrl)
   ) {
     return currentApiKey;
   }
-  const currentDomain = selectedBaseUrlEnvKey(
-    provider,
-    currentBaseUrl,
-    protocol,
-  );
-  const nextDomain = selectedBaseUrlEnvKey(provider, nextBaseUrl, protocol);
+  const currentDomain = selectedBaseUrlEnvKey(provider, currentBaseUrl);
+  const nextDomain = selectedBaseUrlEnvKey(provider, nextBaseUrl);
+  // A baseUrl without a known key domain has nothing to stash against — keep
+  // the typed key rather than wiping it unrecoverably.
+  if (!currentDomain || !nextDomain) return currentApiKey;
   drafts.set(currentDomain, currentApiKey);
   return drafts.get(nextDomain) ?? '';
 }

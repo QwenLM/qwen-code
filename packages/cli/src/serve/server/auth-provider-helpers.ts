@@ -41,6 +41,36 @@ function serializeProviderModel(model: ModelSpec): ServeAuthProviderModel {
   };
 }
 
+// A throwing function-form derivation must only cost the broken provider its
+// derived field; an uncaught throw fails the whole catalog map and removes
+// every provider from the serve/Web Shell /auth list. Mirrors
+// resolveProviderEnvKey/resolveProviderDocumentationUrl in acpAgent.ts.
+function resolveDescriptorDocumentationUrl(
+  provider: (typeof ALL_PROVIDERS)[number],
+  baseUrl: string,
+): string | undefined {
+  if (typeof provider.documentationUrl !== 'function') {
+    return provider.documentationUrl;
+  }
+  try {
+    return provider.documentationUrl(baseUrl);
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveDescriptorEnvKey(
+  provider: (typeof ALL_PROVIDERS)[number],
+  baseUrl: string,
+): string | undefined {
+  if (typeof provider.envKey !== 'function') return provider.envKey;
+  try {
+    return provider.envKey(provider.protocol, baseUrl);
+  } catch {
+    return undefined;
+  }
+}
+
 function buildAuthProviderDescriptor(
   provider: (typeof ALL_PROVIDERS)[number],
 ): ServeAuthProviderDescriptor {
@@ -49,21 +79,21 @@ function buildAuthProviderDescriptor(
   );
   const defaultBaseUrl = resolveBaseUrl(provider);
   const models = resolveProviderModels(provider, defaultBaseUrl);
-  const documentationUrl =
-    typeof provider.documentationUrl === 'function'
-      ? provider.documentationUrl(defaultBaseUrl)
-      : provider.documentationUrl;
+  const documentationUrl = resolveDescriptorDocumentationUrl(
+    provider,
+    defaultBaseUrl,
+  );
   const envKey =
     typeof provider.envKey === 'string'
       ? provider.envKey
       : provider.baseUrl !== undefined
-        ? provider.envKey(provider.protocol, defaultBaseUrl)
+        ? resolveDescriptorEnvKey(provider, defaultBaseUrl)
         : undefined;
   const baseUrl = Array.isArray(provider.baseUrl)
     ? provider.baseUrl.map((option) => ({
         ...option,
         ...(typeof provider.envKey === 'function'
-          ? { envKey: provider.envKey(provider.protocol, option.url) }
+          ? { envKey: resolveDescriptorEnvKey(provider, option.url) }
           : { envKey: provider.envKey }),
         ...(option.models
           ? { models: option.models.map(serializeProviderModel) }

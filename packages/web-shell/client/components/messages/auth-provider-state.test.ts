@@ -64,15 +64,49 @@ describe('auth provider endpoint state', () => {
   });
 
   it('uses endpoint-specific environment keys and model defaults', () => {
-    expect(
-      selectedBaseUrlEnvKey(kimi, 'https://api.kimi.com/coding/v1', 'openai'),
-    ).toBe('KIMI_CODE_API_KEY');
-    expect(
-      selectedBaseUrlEnvKey(kimi, 'https://api.moonshot.ai/v1', 'openai'),
-    ).toBe('MOONSHOT_API_KEY');
+    expect(selectedBaseUrlEnvKey(kimi, 'https://api.kimi.com/coding/v1')).toBe(
+      'KIMI_CODE_API_KEY',
+    );
+    expect(selectedBaseUrlEnvKey(kimi, 'https://api.moonshot.ai/v1')).toBe(
+      'MOONSHOT_API_KEY',
+    );
     expect(selectedBaseUrlModelIds(kimi, 'https://api.moonshot.ai/v1')).toBe(
       'kimi-k3',
     );
+  });
+
+  it('leaves the env key unknown when the catalog carries none', () => {
+    const custom: DaemonAuthProviderDescriptor = {
+      id: 'custom-openai-compatible',
+      label: 'Custom Provider',
+      description: 'Manual endpoint',
+      protocol: 'openai',
+      models: [{ id: 'custom-model' }],
+      steps: ['baseUrl', 'apiKey', 'models'],
+    };
+
+    expect(
+      selectedBaseUrlEnvKey(custom, 'https://llm.internal.example/v1'),
+    ).toBeUndefined();
+    expect(
+      shouldResetApiKeyAfterBaseUrlChange(
+        custom,
+        'https://a.example/v1',
+        'https://b.example/v1',
+      ),
+    ).toBe(false);
+
+    const drafts = new Map<string, string>();
+    expect(
+      apiKeyAfterBaseUrlChange(
+        custom,
+        'https://a.example/v1',
+        'https://b.example/v1',
+        'typed-key',
+        drafts,
+      ),
+    ).toBe('typed-key');
+    expect(drafts.size).toBe(0);
   });
 
   it('returns the destination endpoint defaults', () => {
@@ -106,7 +140,6 @@ describe('auth provider endpoint state', () => {
         regionalKimi,
         'https://api.moonshot.cn/v1',
         'https://api.moonshot.ai/v1',
-        'openai',
       ),
     ).toBe(false);
     expect(
@@ -114,7 +147,6 @@ describe('auth provider endpoint state', () => {
         regionalKimi,
         'https://api.moonshot.ai/v1',
         'https://api.kimi.com/coding/v1',
-        'openai',
       ),
     ).toBe(true);
   });
@@ -145,7 +177,6 @@ describe('auth provider endpoint state', () => {
         'https://api.moonshot.cn/v1',
         'https://api.moonshot.ai/v1',
         'typed-key',
-        'openai',
         drafts,
       ),
     ).toBe('typed-key');
@@ -163,7 +194,6 @@ describe('auth provider endpoint state', () => {
         codingUrl,
         apiUrl,
         'typed-code-key',
-        'openai',
         drafts,
       ),
     ).toBe('');
@@ -174,14 +204,13 @@ describe('auth provider endpoint state', () => {
         apiUrl,
         codingUrl,
         'typed-api-key',
-        'openai',
         drafts,
       ),
     ).toBe('typed-code-key');
 
-    expect(
-      apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', 'openai', drafts),
-    ).toBe('typed-api-key');
+    expect(apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', drafts)).toBe(
+      'typed-api-key',
+    );
   });
 
   it('keeps draft direction correct across three credential domains', () => {
@@ -202,44 +231,16 @@ describe('auth provider endpoint state', () => {
     const drafts = new Map<string, string>();
 
     expect(
-      apiKeyAfterBaseUrlChange(
-        provider,
-        urls[0],
-        urls[1],
-        'key-a',
-        'openai',
-        drafts,
-      ),
+      apiKeyAfterBaseUrlChange(provider, urls[0], urls[1], 'key-a', drafts),
     ).toBe('');
     expect(
-      apiKeyAfterBaseUrlChange(
-        provider,
-        urls[1],
-        urls[2],
-        'key-b',
-        'openai',
-        drafts,
-      ),
+      apiKeyAfterBaseUrlChange(provider, urls[1], urls[2], 'key-b', drafts),
     ).toBe('');
     expect(
-      apiKeyAfterBaseUrlChange(
-        provider,
-        urls[2],
-        urls[0],
-        'key-c',
-        'openai',
-        drafts,
-      ),
+      apiKeyAfterBaseUrlChange(provider, urls[2], urls[0], 'key-c', drafts),
     ).toBe('key-a');
     expect(
-      apiKeyAfterBaseUrlChange(
-        provider,
-        urls[0],
-        urls[1],
-        'key-a2',
-        'openai',
-        drafts,
-      ),
+      apiKeyAfterBaseUrlChange(provider, urls[0], urls[1], 'key-a2', drafts),
     ).toBe('key-b');
   });
 
@@ -255,15 +256,11 @@ describe('auth provider endpoint state', () => {
   });
 
   it('falls back to the provider-level env key for options without one', () => {
+    expect(selectedBaseUrlEnvKey(mimo, 'https://api.xiaomimimo.com/v1')).toBe(
+      'MIMO_API_KEY',
+    );
     expect(
-      selectedBaseUrlEnvKey(mimo, 'https://api.xiaomimimo.com/v1', 'openai'),
-    ).toBe('MIMO_API_KEY');
-    expect(
-      selectedBaseUrlEnvKey(
-        mimo,
-        'https://token-plan-cn.xiaomimimo.com/v1',
-        'openai',
-      ),
+      selectedBaseUrlEnvKey(mimo, 'https://token-plan-cn.xiaomimimo.com/v1'),
     ).toBe('MIMO_API_KEY');
   });
 

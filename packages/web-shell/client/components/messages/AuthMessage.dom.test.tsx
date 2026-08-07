@@ -492,6 +492,50 @@ describe('AuthMessage model field preservation', () => {
     expect(textInput().value).toBe('gamma-two-extra');
   });
 
+  it('omits env keys from the review preview when the catalog carries none', async () => {
+    const customProvider: DaemonAuthProviderDescriptor = {
+      id: 'custom-openai-compatible',
+      label: 'Custom Provider',
+      description: 'Manual endpoint',
+      protocol: 'openai',
+      models: [{ id: 'custom-model' }],
+      showAdvancedConfig: true,
+      steps: ['baseUrl', 'apiKey', 'models'],
+    };
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/workspace',
+      providers: [customProvider],
+      groups: [
+        {
+          id: 'custom',
+          label: 'Custom Provider',
+          description: 'Manually connect a local server',
+          providerIds: ['custom-openai-compatible'],
+        },
+      ],
+    });
+    await renderAuthMessage();
+
+    // The Custom group starts the provider flow directly.
+    click(findButtonContaining('Custom Provider'));
+    setInput(textInput(), 'https://llm.internal.example/v1');
+    click(findButtonContaining('next'));
+    setInput(passwordInput(), 'sk-secret');
+    click(findButtonContaining('next'));
+    setInput(textInput(), 'custom-model');
+    click(findButtonContaining('next'));
+
+    // The daemon stores the key under a derived QWEN_CUSTOM_API_KEY_* name
+    // that the catalog cannot carry; the preview must omit the env section
+    // instead of inventing OPENAI_API_KEY.
+    expect(document.body.textContent).toContain(
+      'https://llm.internal.example/v1',
+    );
+    expect(document.body.textContent).not.toContain('OPENAI_API_KEY');
+    expect(document.body.textContent).not.toContain('"env"');
+  });
+
   it('shows the selected endpoint env key in advanced review JSON', async () => {
     const reviewProvider: DaemonAuthProviderDescriptor = {
       ...providerC,

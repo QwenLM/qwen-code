@@ -5,6 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import {
+  ALL_PROVIDERS,
+  AuthType,
+  type ProviderConfig,
+} from '@qwen-code/qwen-code-core';
 import type { ServeAuthProviderBaseUrlOption } from '../types.js';
 import { buildAuthProviderCatalog } from './auth-provider-helpers.js';
 
@@ -67,5 +72,51 @@ describe('buildAuthProviderCatalog', () => {
 
     expect(custom?.baseUrl).toBeUndefined();
     expect(custom?.envKey).toBeUndefined();
+  });
+
+  it('omits derived fields instead of failing the catalog when a provider throws', () => {
+    const throwingProvider: ProviderConfig = {
+      id: 'throwing-provider',
+      label: 'Throwing Provider',
+      description: 'Throws while deriving env key and documentation URL',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'main',
+          label: 'Main',
+          url: 'https://throwing.example/v1',
+        },
+      ],
+      envKey: () => {
+        throw new Error('broken env key');
+      },
+      documentationUrl: () => {
+        throw new Error('broken documentation URL');
+      },
+      modelsEditable: true,
+      modelNamePrefix: 'Throwing',
+      uiGroup: 'third-party',
+    };
+
+    const mutableProviders = ALL_PROVIDERS as ProviderConfig[];
+    mutableProviders.unshift(throwingProvider);
+    try {
+      const catalog = buildAuthProviderCatalog('/workspace');
+
+      const throwing = catalog.providers.find(
+        (provider) => provider.id === 'throwing-provider',
+      );
+      expect(throwing).toBeDefined();
+      expect(throwing?.envKey).toBeUndefined();
+      expect(throwing?.documentationUrl).toBeUndefined();
+      const options = throwing?.baseUrl as ServeAuthProviderBaseUrlOption[];
+      expect(options[0]?.envKey).toBeUndefined();
+
+      // Sibling providers keep their derived fields.
+      const kimi = catalog.providers.find((provider) => provider.id === 'kimi');
+      expect(kimi?.envKey).toBe('KIMI_CODE_API_KEY');
+    } finally {
+      expect(mutableProviders.shift()).toBe(throwingProvider);
+    }
   });
 });

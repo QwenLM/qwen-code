@@ -242,17 +242,16 @@ describe('provider endpoint state', () => {
   });
 
   it('clears endpoint drafts when seeding a new provider form', () => {
-    const drafts = new Map([['SHARED_API_KEY', 'draft-from-provider-a']]);
-
-    expect(initialApiKey(kimi, drafts)).toBe('');
-    expect(drafts.size).toBe(0);
-
-    const withExistingKey: QwenProviderSummary = {
+    // The catalog wire carries `hasApiKey`, never the stored key itself, so
+    // the field starts empty even for a configured provider.
+    const configured: QwenProviderSummary = {
       ...kimi,
-      existingConfig: { apiKey: 'sk-existing' },
+      existingConfig: { hasApiKey: true },
     };
-    drafts.set('SHARED_API_KEY', 'draft-from-provider-a');
-    expect(initialApiKey(withExistingKey, drafts)).toBe('sk-existing');
+    expect(configured.existingConfig?.hasApiKey).toBe(true);
+
+    const drafts = new Map([['SHARED_API_KEY', 'draft-from-provider-a']]);
+    expect(initialApiKey(drafts)).toBe('');
     expect(drafts.size).toBe(0);
   });
 

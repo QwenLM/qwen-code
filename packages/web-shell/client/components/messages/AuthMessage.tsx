@@ -390,6 +390,31 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     [goNext],
   );
 
+  // Endpoint-switch bookkeeping shared by the Next button (activate) and
+  // direct option clicks (activateAtIndex); a single implementation keeps
+  // the two entry points from diverging.
+  const applyBaseUrlOption = useCallback(
+    (selected: DaemonAuthProviderBaseUrlOption | undefined) => {
+      if (!provider || !selected) return;
+      setBaseUrl(selected.url);
+      if (selected.url !== baseUrl) {
+        setApiKey(
+          apiKeyAfterBaseUrlChange(
+            provider,
+            baseUrl,
+            selected.url,
+            apiKey,
+            apiKeyDraftsRef.current,
+          ),
+        );
+        if (!modelsDirty) {
+          setModels(baseUrlOptionModelIds(selected, provider));
+        }
+      }
+    },
+    [apiKey, baseUrl, modelsDirty, provider],
+  );
+
   const activate = useCallback(() => {
     if (view === 'groups') {
       const group = groups[groupIndex];
@@ -436,25 +461,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       return;
     }
     if (currentStep === 'baseUrl' && Array.isArray(provider.baseUrl)) {
-      const selected = provider.baseUrl[optionIndex];
-      if (selected) {
-        setBaseUrl(selected.url);
-        if (selected.url !== baseUrl) {
-          setApiKey(
-            apiKeyAfterBaseUrlChange(
-              provider,
-              baseUrl,
-              selected.url,
-              apiKey,
-              protocol,
-              apiKeyDraftsRef.current,
-            ),
-          );
-          if (!modelsDirty) {
-            setModels(baseUrlOptionModelIds(selected, provider));
-          }
-        }
-      }
+      applyBaseUrlOption(provider.baseUrl[optionIndex]);
       goNext();
       return;
     }
@@ -469,9 +476,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     goNext,
     groupIndex,
     groups,
-    modelsDirty,
     optionIndex,
-    protocol,
     provider,
     providerIndex,
     providers,
@@ -480,8 +485,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     view,
     activateAdvancedOption,
     advancedOptionValues,
-    apiKey,
-    baseUrl,
+    applyBaseUrlOption,
   ]);
 
   const activateAtIndex = useCallback(
@@ -528,25 +532,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         return;
       }
       if (currentStep === 'baseUrl' && Array.isArray(provider.baseUrl)) {
-        const selected = provider.baseUrl[index];
-        if (selected) {
-          setBaseUrl(selected.url);
-          if (selected.url !== baseUrl) {
-            setApiKey(
-              apiKeyAfterBaseUrlChange(
-                provider,
-                baseUrl,
-                selected.url,
-                apiKey,
-                protocol,
-                apiKeyDraftsRef.current,
-              ),
-            );
-            if (!modelsDirty) {
-              setModels(baseUrlOptionModelIds(selected, provider));
-            }
-          }
-        }
+        applyBaseUrlOption(provider.baseUrl[index]);
         goNext();
         return;
       }
@@ -559,12 +545,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       catalog,
       goNext,
       groups,
-      modelsDirty,
-      protocol,
       activateAdvancedOption,
       advancedOptionValues,
-      apiKey,
-      baseUrl,
+      applyBaseUrlOption,
       provider,
       providers,
       save,
@@ -793,7 +776,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
 
   const review = useMemo(() => {
     if (!provider) return '';
-    const envKey = selectedBaseUrlEnvKey(provider, baseUrl, protocol);
+    const envKey = selectedBaseUrlEnvKey(provider, baseUrl);
     const normalizedIds = normalizeModelIds(models);
     const generationConfig: Record<string, unknown> = {};
     if (thinking) generationConfig['extra_body'] = { enable_thinking: true };
@@ -814,13 +797,16 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     const hasGenerationConfig = Object.keys(generationConfig).length > 0;
     return JSON.stringify(
       {
-        env: { [envKey]: maskApiKey(apiKey, t) },
+        // The custom provider's install-time key is derived by the daemon
+        // from the submitted endpoint and is unknown here; omit the env
+        // section rather than show a fabricated variable name.
+        ...(envKey ? { env: { [envKey]: maskApiKey(apiKey, t) } } : {}),
         modelProviders: {
           [protocol]: normalizedIds.map((id) => ({
             id,
             name: id,
             baseUrl: baseUrl.trim(),
-            envKey,
+            ...(envKey ? { envKey } : {}),
             ...(hasGenerationConfig ? { generationConfig } : {}),
           })),
         },

@@ -187,21 +187,18 @@ export function ProviderConnectForm({
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
     setBaseUrl(baseUrl);
-    setApiKey(initialApiKey(provider, apiKeyDraftsRef.current));
+    setApiKey(initialApiKey(apiKeyDraftsRef.current));
     const seededModelIds = initialModelIds(provider, baseUrl);
     const seededDefaults = new Set(defaultModelIds(provider, baseUrl));
     customModelIdsRef.current = seededModelIds.filter(
       (id) => !seededDefaults.has(id),
     );
     setModelIdsText(seededModelIds.join(', '));
-    setModelsEdited(
-      modelIdsDifferFromDefaults(
-        provider,
-        baseUrl,
-        seededModelIds,
-        customModelIdsRef.current,
-      ),
-    );
+    // Persisted model IDs are not an in-session edit — the models Textarea
+    // marks those. Seeding content-based made any saved custom or trimmed
+    // list skip the endpoint-switch rebuild and carry source-endpoint models
+    // onto the new endpoint (the CLI flow seeds modelsDirty=false too).
+    setModelsEdited(false);
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',

@@ -78,12 +78,12 @@ function preflightSetupSignal(
 
 function hasExistingProviderConfig(catalog: {
   providers: Array<{
-    existingConfig?: { apiKey?: string; modelIds?: string[] };
+    existingConfig?: { hasApiKey?: boolean; modelIds?: string[] };
   }>;
 }): boolean {
   return catalog.providers.some((provider) => {
     const config = provider.existingConfig;
-    return !!config?.apiKey || !!config?.modelIds?.length;
+    return config?.hasApiKey === true || !!config?.modelIds?.length;
   });
 }
 

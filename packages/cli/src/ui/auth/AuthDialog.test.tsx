@@ -1271,7 +1271,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           expect(frame?.split('\n')).toHaveLength(22);
           expect(frame).toContain('Authentication failed');
           expect(frame).toContain('DeepSeek API Key');
-          expect(frame).toContain('Kimi');
+          // 'Idealab API Key' is the real last visible row at this height;
+          // Kimi is off-screen and 'Kimi' matched only Idealab's description.
+          expect(frame).toContain('Idealab API Key');
           expect(frame).not.toContain('MiniMax API Key');
           expect(frame).not.toContain('Z.AI API Key');
           expect(frame).toContain('▲');
