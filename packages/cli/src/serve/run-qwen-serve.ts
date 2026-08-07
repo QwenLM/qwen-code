@@ -20,6 +20,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
+import { scrubInheritedLoaderEnv } from '../config/shared-env-keys.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
@@ -2078,6 +2079,11 @@ async function runQwenServeImpl(
         }
       : {}),
   });
+  // The frozen base env keeps loader vars so dev-mode ACP children can still
+  // boot with the harness loader, but the daemon process itself is done with
+  // them: session-shell subprocesses run here with process.env while their
+  // cwd is another workspace.
+  scrubInheritedLoaderEnv(process.env);
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the

@@ -38,3 +38,27 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
 ] as const;
+
+// Loader-affecting variables inherited from the launching shell. A daemon or
+// ACP child needs them only for its own boot (e.g. the dev harness tsx
+// loader); left in process.env they propagate into session subprocesses whose
+// cwd is another workspace and hijack module resolution there. This is the
+// loader subset of RELOAD_EXCLUDED_KEYS (environment.ts), which only guards
+// .env/settings.env reloads — not the inherited launch environment.
+export const INHERITED_LOADER_ENV_KEYS = [
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'LD_PRELOAD',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'BASH_ENV',
+  'ENV',
+] as const;
+
+export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): void {
+  for (const key of INHERITED_LOADER_ENV_KEYS) {
+    delete env[key];
+  }
+}

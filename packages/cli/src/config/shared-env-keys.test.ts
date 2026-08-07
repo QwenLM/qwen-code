@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from './shared-env-keys.js';
+import {
+  INHERITED_LOADER_ENV_KEYS,
+  PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  scrubInheritedLoaderEnv,
+} from './shared-env-keys.js';
 
 describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // Security guard: a project `.env` must never be able to disable TLS
@@ -22,5 +26,50 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'NODE_TLS_REJECT_UNAUTHORIZED',
     );
+  });
+});
+
+describe('scrubInheritedLoaderEnv', () => {
+  // Regression for #8653: loader vars inherited from the daemon's launch
+  // shell must not reach session subprocesses of other workspaces.
+  it('removes every loader-affecting key and keeps the rest', () => {
+    const env: NodeJS.ProcessEnv = {
+      NODE_OPTIONS: '--import file:///other-checkout/register.mjs',
+      NODE_PATH: '/other-checkout/node_modules',
+      LD_PRELOAD: '/evil.so',
+      DYLD_INSERT_LIBRARIES: '/evil.dylib',
+      BASH_ENV: '/tmp/hook.sh',
+      ENV: '/tmp/shrc',
+      PATH: '/other-checkout/node_modules/.bin:/usr/bin',
+      HOME: '/home/user',
+      QWEN_SERVER_TOKEN: 'leave-secret-scrubbing-to-other-layers',
+    };
+
+    scrubInheritedLoaderEnv(env);
+
+    for (const key of INHERITED_LOADER_ENV_KEYS) {
+      expect(env[key]).toBeUndefined();
+    }
+    // PATH/HOME are launch-environment facts the session still needs; only
+    // loader-class keys are scrubbed.
+    expect(env['PATH']).toBe('/other-checkout/node_modules/.bin:/usr/bin');
+    expect(env['HOME']).toBe('/home/user');
+    expect(env['QWEN_SERVER_TOKEN']).toBe(
+      'leave-secret-scrubbing-to-other-layers',
+    );
+  });
+
+  it('pins the exact loader-key list so silent edits fail', () => {
+    expect([...INHERITED_LOADER_ENV_KEYS].sort()).toEqual([
+      'BASH_ENV',
+      'DYLD_INSERT_LIBRARIES',
+      'DYLD_LIBRARY_PATH',
+      'ENV',
+      'LD_AUDIT',
+      'LD_LIBRARY_PATH',
+      'LD_PRELOAD',
+      'NODE_OPTIONS',
+      'NODE_PATH',
+    ]);
   });
 });

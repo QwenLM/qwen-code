@@ -33,6 +33,7 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
+import { scrubInheritedLoaderEnv } from './config/shared-env-keys.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
@@ -665,6 +666,19 @@ export async function main() {
         onUpdateRelaunch,
       });
     }
+  }
+
+  if (isAcpMode) {
+    // An ACP child hosts sessions for arbitrary workspaces. Loader vars from
+    // the parent's launch environment were only needed to boot this process
+    // (e.g. the dev harness tsx loader); left in process.env they propagate
+    // into every session subprocess — shell tool, MCP servers, hooks — and
+    // hijack module resolution across workspace boundaries. Placement is
+    // after the relaunch/sandbox handoff: those respawn this process with
+    // process.env and still need the loader to boot, and the respawned child
+    // re-runs this scrub itself. Only the final process (no relaunch) reaches
+    // here.
+    scrubInheritedLoaderEnv(process.env);
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve

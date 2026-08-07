@@ -13,6 +13,7 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  INHERITED_LOADER_ENV_KEYS,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
 } from './shared-env-keys.js';
 import { publishPendingCompileCache } from './compile-cache.js';
@@ -27,18 +28,10 @@ export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 
 const RELOAD_EXCLUDED_KEYS = new Set([
   ...PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  ...INHERITED_LOADER_ENV_KEYS,
   'QWEN_SERVER_TOKEN',
   'QWEN_CLI_ENTRY',
-  'NODE_OPTIONS',
-  'NODE_PATH',
   'NODE_TLS_REJECT_UNAUTHORIZED',
-  'LD_PRELOAD',
-  'LD_AUDIT',
-  'LD_LIBRARY_PATH',
-  'DYLD_INSERT_LIBRARIES',
-  'DYLD_LIBRARY_PATH',
-  'BASH_ENV',
-  'ENV',
   'PATH',
   'HOME',
   'TMPDIR',

@@ -7128,6 +7128,45 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     });
   });
 
+  // Regression for #8653: the daemon scrubs loader vars from its own
+  // process.env (session subprocesses run here in other workspaces' cwds)
+  // while the frozen base env keeps them so dev-mode ACP children still boot.
+  it('scrubs loader env vars from the daemon process but keeps them for ACP children', async () => {
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousNodePath = process.env['NODE_PATH'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    process.env['NODE_PATH'] = '/other-checkout/node_modules';
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    try {
+      const handle = await bootHandle({ serveWebShell: false });
+      try {
+        expect(process.env['NODE_OPTIONS']).toBeUndefined();
+        expect(process.env['NODE_PATH']).toBeUndefined();
+        const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+          'sourceEnv'
+        ] as NodeJS.ProcessEnv | undefined;
+        expect(sourceEnv?.['NODE_OPTIONS']).toBe(
+          '--import file:///other-checkout/register.mjs',
+        );
+        expect(sourceEnv?.['NODE_PATH']).toBe('/other-checkout/node_modules');
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousNodePath === undefined) {
+        delete process.env['NODE_PATH'];
+      } else {
+        process.env['NODE_PATH'] = previousNodePath;
+      }
+    }
+  });
+
   it('wires the pipe message observer without changing existing pipe stats', async () => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
 
