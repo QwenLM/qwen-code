@@ -363,6 +363,113 @@ describe('McpTransportPool', () => {
       expect(first.toolsSnapshot.every((tool) => !tool.alwaysLoad)).toBe(true);
     });
 
+    it('refreshes only the targeted session on a shared transport', async () => {
+      mockMcpSuccess({ toolNames: ['alpha', 'beta'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const firstRegistries = mkSessionRegistries();
+      const secondRegistries = mkSessionRegistries();
+      const first = await pool.acquire(
+        'srv',
+        {
+          command: 'node',
+          includeTools: ['alpha'],
+          trust: false,
+          alwaysLoadTools: false,
+        } as MCPServerConfig,
+        's1',
+        firstRegistries.tools,
+        firstRegistries.prompts,
+        firstRegistries.resources,
+      );
+      await pool.acquire(
+        'srv',
+        {
+          command: 'node',
+          includeTools: ['beta'],
+          trust: false,
+          alwaysLoadTools: false,
+        } as MCPServerConfig,
+        's2',
+        secondRegistries.tools,
+        secondRegistries.prompts,
+        secondRegistries.resources,
+      );
+
+      const registrySpiesOf = (reg: ReturnType<typeof mkSessionRegistries>) => [
+        reg.tools.registerTool,
+        reg.tools.removeMcpToolsByServer,
+        reg.prompts.registerPrompt,
+        reg.prompts.removePromptsByServer,
+        reg.resources.registerResource,
+        reg.resources.removeResourcesByServer,
+      ];
+      for (const reg of [firstRegistries, secondRegistries]) {
+        for (const registrySpy of registrySpiesOf(reg)) {
+          (registrySpy as ReturnType<typeof vi.fn>).mockClear();
+        }
+      }
+
+      first.updateConfig({
+        command: 'node',
+        includeTools: ['beta'],
+        trust: true,
+        alwaysLoadTools: true,
+      } as MCPServerConfig);
+
+      // Session 1 reprojects with its new metadata.
+      expect(firstRegistries.tools.registerTool).toHaveBeenCalledOnce();
+      expect(firstRegistries.tools.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverToolName: 'beta',
+          trust: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      // Session 2 must see zero registry traffic: a refresh for one
+      // subscriber must not broadcast to siblings (tool loss + trust bleed).
+      for (const registrySpy of registrySpiesOf(secondRegistries)) {
+        expect(registrySpy as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+      }
+    });
+
+    it('rejects updateConfig on terminated entries and detached sessions', async () => {
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
+      mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const registries = mkSessionRegistries();
+      const connection = await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        registries.tools,
+        registries.prompts,
+        registries.resources,
+      );
+
+      const targetId = connectionIdOf('srv', cfg);
+      const entry = (
+        pool as unknown as { entries: Map<string, PoolEntry> }
+      ).entries.get(targetId)!;
+
+      // Detached-session guard: no subscriber is attached under this id.
+      expect(() => entry.updateSessionConfig('never-attached', cfg)).toThrow(
+        /detached session/,
+      );
+
+      // Terminated-entry guard: a silent transport drop flips the active
+      // entry to 'failed' (W120), after which refreshes must fail closed.
+      const mockClient = (entry as unknown as { client: { status: unknown } })
+        .client;
+      mockClient.status = MCPServerStatus.DISCONNECTED;
+      updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
+      expect(entry.currentState).toBe('failed');
+      expect(() => connection.updateConfig(cfg)).toThrow(/in state failed/);
+    });
+
     it('refreshes unpooled metadata while keeping transport identity stable', async () => {
       const mocked = mockMcpSuccess({ toolNames: ['alpha', 'beta'] });
       const pool = new McpTransportPool(

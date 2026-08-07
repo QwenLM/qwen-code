@@ -2972,11 +2972,15 @@ export class McpClientManager {
     }
     const existingConn = this.pooledConnections.get(name);
     if (existingConn && existingConn.transportId === newConnId) {
-      // Same fingerprint — update the Config overlay and session projection
-      // without transport churn.
-      this.cliConfig.addRuntimeMcpServer(name, config);
+      // Same fingerprint — refresh the session projection, then persist the
+      // Config overlay. Refreshing first leaves the overlay untouched when
+      // the refresh throws, mirroring the spawn-failure rollback below.
       existingConn.updateConfig(config);
-      const toolCount = existingConn.toolsSnapshot.length;
+      this.cliConfig.addRuntimeMcpServer(name, config);
+      // Session-visible count, matching the standalone branch below: the
+      // refresh above re-filtered the session, so the unfiltered snapshot
+      // size would misreport what clients can actually invoke.
+      const toolCount = this.toolRegistry.getToolsByServer(name).length;
       return {
         name,
         transport,

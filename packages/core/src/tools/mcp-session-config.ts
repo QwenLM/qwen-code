@@ -11,14 +11,26 @@ export function normalizeMcpIncludeEntry(entry: string): string {
   return paren === -1 ? entry : entry.slice(0, paren);
 }
 
+/**
+ * Filter lists arrive straight from settings files without schema
+ * coercion, so shapes like `excludeTools: "x"` or `includeTools: [123]`
+ * are possible. Coerce to the nearest valid form so the metadata key and
+ * the runtime filter stay total and agree with each other instead of
+ * throwing.
+ */
+export function coerceMcpFilterEntries(entries: unknown): string[] {
+  return (Array.isArray(entries) ? entries : []).filter(
+    (entry): entry is string => typeof entry === 'string',
+  );
+}
+
 function normalizeFilter(
   entries: readonly string[] | undefined,
   stripParenthesizedSuffix: boolean,
 ): string[] {
-  const normalized = (entries ?? []).map((entry) => {
-    if (!stripParenthesizedSuffix) return entry;
-    return normalizeMcpIncludeEntry(entry);
-  });
+  const normalized = coerceMcpFilterEntries(entries).map((entry) =>
+    stripParenthesizedSuffix ? normalizeMcpIncludeEntry(entry) : entry,
+  );
   return [...new Set(normalized)].sort();
 }
 
@@ -34,9 +46,10 @@ export function mcpSessionMetadataKey(config: MCPServerConfig): string {
     trust: config.trust ?? null,
     alwaysLoadTools: config.alwaysLoadTools === true,
     // An absent allowlist accepts every name, while an explicit empty
-    // allowlist accepts none. Preserve that semantic distinction.
+    // allowlist accepts none. JSON `null` is treated as absent because
+    // every runtime filter treats a falsy include list as "allow all".
     includeTools:
-      config.includeTools === undefined
+      config.includeTools == null
         ? null
         : normalizeFilter(config.includeTools, true),
     excludeTools: normalizeFilter(config.excludeTools, false),

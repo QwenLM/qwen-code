@@ -4428,7 +4428,10 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       release: releaseSpyConn1,
       updateConfig,
       on: vi.fn(),
-      id: realId,
+      // Distinct lifecycle id: if the same-fingerprint comparison below
+      // regressed from `transportId` back to `id`, the replace would tear
+      // down and re-acquire the transport, and this test would catch it.
+      id: 'dup-srv::unpooled-0',
       transportId: realId,
       serverName: 'dup-srv',
       entryIndex: 0,
@@ -4447,7 +4450,18 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
 
     const config = mkRuntimeConfig();
-    const manager = mkManager({ config, options: { pool: fakePool } });
+    // The refresh re-filters the session; the reported count must be the
+    // session-visible one, not the unfiltered snapshot size.
+    const sessionTools = [{ name: 'tool-b' }];
+    const toolRegistry = {
+      removeMcpToolsByServer: vi.fn(),
+      getToolsByServer: vi.fn().mockReturnValue(sessionTools),
+    } as unknown as ToolRegistry;
+    const manager = mkManager({
+      config,
+      toolRegistry,
+      options: { pool: fakePool },
+    });
 
     // First add
     await manager.addRuntimeMcpServer('dup-srv', serverConfig, 'client-4');
@@ -4472,10 +4486,20 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
     expect(acquireSpy).not.toHaveBeenCalled();
     expect(updateConfig).toHaveBeenCalledOnce();
     expect(updateConfig).toHaveBeenCalledWith(updatedConfig);
+    // The overlay write persists the refresh across reconciliations, and it
+    // lands AFTER the refresh so a throwing refresh cannot persist config
+    // the session view never received.
+    const addRuntimeSpy = config.addRuntimeMcpServer as ReturnType<
+      typeof vi.fn
+    >;
+    expect(addRuntimeSpy).toHaveBeenLastCalledWith('dup-srv', updatedConfig);
+    expect(updateConfig.mock.invocationCallOrder[0]).toBeLessThan(
+      addRuntimeSpy.mock.invocationCallOrder.at(-1)!,
+    );
     expect(result).toMatchObject({
       name: 'dup-srv',
       replaced: false,
-      toolCount: 3,
+      toolCount: 1,
     });
   });
 

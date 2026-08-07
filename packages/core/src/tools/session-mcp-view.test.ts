@@ -155,6 +155,90 @@ describe('mcpSessionMetadataKey', () => {
       } as MCPServerConfig),
     );
   });
+
+  it('participates trust and excludeTools in the key', () => {
+    const base = { command: 'node' } as MCPServerConfig;
+    // Three-state trust: true, false, and absent must all key distinctly,
+    // or a trust-only settings edit would never re-apply.
+    expect(
+      mcpSessionMetadataKey({
+        command: 'node',
+        trust: true,
+      } as MCPServerConfig),
+    ).not.toBe(mcpSessionMetadataKey(base));
+    expect(
+      mcpSessionMetadataKey({
+        command: 'node',
+        trust: false,
+      } as MCPServerConfig),
+    ).not.toBe(mcpSessionMetadataKey(base));
+    expect(
+      mcpSessionMetadataKey({
+        command: 'node',
+        trust: true,
+      } as MCPServerConfig),
+    ).not.toBe(
+      mcpSessionMetadataKey({
+        command: 'node',
+        trust: false,
+      } as MCPServerConfig),
+    );
+    expect(
+      mcpSessionMetadataKey({
+        command: 'node',
+        excludeTools: ['foo'],
+      } as MCPServerConfig),
+    ).not.toBe(mcpSessionMetadataKey(base));
+  });
+
+  it('keys a JSON null include list as absent, distinct from an explicit empty list', () => {
+    const withNull = {
+      command: 'node',
+      includeTools: null,
+    } as unknown as MCPServerConfig;
+    expect(mcpSessionMetadataKey(withNull)).toBe(
+      mcpSessionMetadataKey({ command: 'node' } as MCPServerConfig),
+    );
+    expect(mcpSessionMetadataKey(withNull)).not.toBe(
+      mcpSessionMetadataKey({
+        command: 'node',
+        includeTools: [],
+      } as MCPServerConfig),
+    );
+  });
+
+  it('coerces malformed filter shapes instead of throwing', () => {
+    const malformed = [
+      { command: 'node', excludeTools: 'x' },
+      { command: 'node', includeTools: 'foo' },
+      { command: 'node', includeTools: [123] },
+      { command: 'node', excludeTools: 42 },
+    ];
+    for (const cfg of malformed) {
+      expect(() =>
+        mcpSessionMetadataKey(cfg as unknown as MCPServerConfig),
+      ).not.toThrow();
+    }
+    // Non-array / non-string entries coerce to the nearest valid form, so
+    // the key stays responsive instead of aborting the reconciliation pass.
+    expect(
+      mcpSessionMetadataKey({
+        command: 'node',
+        includeTools: [123],
+      } as unknown as MCPServerConfig),
+    ).toBe(
+      mcpSessionMetadataKey({
+        command: 'node',
+        includeTools: [],
+      } as MCPServerConfig),
+    );
+    expect(
+      mcpSessionMetadataKey({
+        command: 'node',
+        excludeTools: 'x',
+      } as unknown as MCPServerConfig),
+    ).toBe(mcpSessionMetadataKey({ command: 'node' } as MCPServerConfig));
+  });
 });
 
 describe('SessionMcpView', () => {
@@ -545,6 +629,46 @@ describe('SessionMcpView', () => {
     expect(tools.registerTool).toHaveBeenCalledWith(
       expect.objectContaining({ serverToolName: 'bar' }),
     );
+  });
+
+  it('applyTools stays total on malformed filter shapes, matching the key', () => {
+    // A malformed include list coerces to an empty allowlist (allow none),
+    // exactly as `mcpSessionMetadataKey` keys it — nothing throws.
+    const includeMalformed = {
+      command: 'node',
+      includeTools: [123],
+    } as unknown as MCPServerConfig;
+    const { tools, prompts, resources } = mkRegistries();
+    const view = new SessionMcpView(
+      tools,
+      prompts,
+      resources,
+      'sid',
+      'srv',
+      includeMalformed,
+    );
+    expect(() => view.applyTools([mkTool('srv', 'foo')])).not.toThrow();
+    expect(tools.registerTool).not.toHaveBeenCalled();
+
+    // A malformed exclude list coerces to no exclusions.
+    const excludeMalformed = {
+      command: 'node',
+      excludeTools: 'x',
+    } as unknown as MCPServerConfig;
+    const regs2 = mkRegistries();
+    const view2 = new SessionMcpView(
+      regs2.tools,
+      regs2.prompts,
+      regs2.resources,
+      'sid',
+      'srv',
+      excludeMalformed,
+    );
+    expect(() => view2.applyTools([mkTool('srv', 'x')])).not.toThrow();
+    expect(regs2.tools.registerTool).toHaveBeenCalledTimes(1);
+
+    // updateConfig accepts the same malformed shapes without throwing.
+    expect(() => view.updateConfig(excludeMalformed)).not.toThrow();
   });
 
   it('teardown drops all three registries (idempotent across calls)', () => {

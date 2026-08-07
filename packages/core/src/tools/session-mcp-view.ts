@@ -14,6 +14,7 @@ import type {
 } from './mcp-client.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
 import {
+  coerceMcpFilterEntries,
   mcpSessionMetadataKey,
   normalizeMcpIncludeEntry,
 } from './mcp-session-config.js';
@@ -49,11 +50,19 @@ function compileNameFilter(
   includeTools?: readonly string[],
   excludeTools?: readonly string[],
 ): CompiledNameFilter {
+  // Coerce malformed settings shapes exactly as `mcpSessionMetadataKey`
+  // does: the key commits before this filter runs, so a throw here would
+  // remove registrations and then block every retry with an equal key.
   return {
-    excludeSet: excludeTools ? new Set(excludeTools) : undefined,
-    includeSet: includeTools
-      ? new Set(includeTools.map(normalizeMcpIncludeEntry))
+    excludeSet: excludeTools
+      ? new Set(coerceMcpFilterEntries(excludeTools))
       : undefined,
+    includeSet:
+      includeTools != null
+        ? new Set(
+            coerceMcpFilterEntries(includeTools).map(normalizeMcpIncludeEntry),
+          )
+        : undefined,
   };
 }
 
