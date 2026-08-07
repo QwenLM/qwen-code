@@ -60,7 +60,7 @@ export QQ_APP_SECRET=<your-app-secret>
       "appSecret": "$QQ_APP_SECRET",
       "sandbox": false,
       "senderPolicy": "open",
-      "sessionScope": "user",
+      "sessionScope": "thread",
       "cwd": "/path/to/your/project",
       "instructions": "你是一个通过 QQ Bot 对话的 AI 助手。回复控制在 2000 字符以内。",
       "blockStreaming": "on",
@@ -72,6 +72,8 @@ export QQ_APP_SECRET=<your-app-secret>
   }
 }
 ```
+
+> `sessionScope` defaults to `"thread"`. With `groupPolicy: "disabled"` this is a DM-only setup, where both `"thread"` and `"user"` behave identically — each direct message gets its own context. `"thread"` is shown here for consistency with the [Session Isolation](#session-isolation) section below.
 
 ### QQ-Specific Options
 
@@ -105,6 +107,14 @@ To use the bot in QQ groups:
 3. Group members must **@mention** the bot to trigger a response
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
+
+### Session Isolation
+
+The QQ channel defaults to `sessionScope: "thread"`: members of the same group share a single conversation context keyed by `<channel>:<group_openid>`, while different groups are isolated from each other. Each direct message gets its own context keyed by `<channel>:<user_openid>`.
+
+A group thread session is a **shared session**: every member of the group reads and continues the same conversation history. Session-control commands (`/clear`, `/cancel`) and the `!` host-shell gate act on that shared session — in `"thread"` scope they affect the whole group, restricted to `allowedUsers` members when the list is non-empty. Permission-request answers are gated separately, by **chat + thread**: you can answer a pending permission request only for the same chat and thread you are in, and in a shared group session any member may do so — this gating is independent of `sessionScope`. If group members should not share history or control each other's turns, set `sessionScope: "user"` (each member gets a private session) or restrict membership via `senderPolicy` / `allowedUsers`.
+
+For full-message mode this default is already what you want — with `groupAllPolicy: "all"`, keeping `"thread"` gives you shared context within a group and isolation across groups. If you instead set `sessionScope: "user"`, full-message traffic is fragmented per sender (a separate session for every member), which is not suitable for group full-message scenarios.
 
 See [Group Chats](./overview#group-chats) for full details on group policies and mention gating.
 

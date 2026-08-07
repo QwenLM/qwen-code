@@ -85,6 +85,12 @@ vi.mock('@qwen-code/channel-base', () => ({
     restoreSessions(): Promise<void> {
       return Promise.resolve();
     }
+    getAll(): Array<{ key: string; sessionId: string; target: unknown }> {
+      return [];
+    }
+    removeSessionId(_sessionId: string): boolean {
+      return false;
+    }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
   sanitizeLogText: (text: string, maxLen: number): string => {
@@ -1173,6 +1179,8 @@ describe('群管理事件', () => {
           buffer: string;
           timer: ReturnType<typeof setTimeout> | null;
           retryCount: number;
+          msgId?: string;
+          turn: number;
         }
       >;
 
@@ -1196,12 +1204,16 @@ describe('群管理事件', () => {
         buffer: '',
         timer: null,
         retryCount: 0,
+        msgId: undefined,
+        turn: 1,
       });
       streamState.set('cron-sid-2', {
         chatId: 'group-cron',
         buffer: '',
         timer: null,
         retryCount: 0,
+        msgId: undefined,
+        turn: 1,
       });
 
       const spy = vi.spyOn(globalThis, 'clearTimeout');
@@ -1301,6 +1313,242 @@ describe('群管理事件', () => {
       pvt['handleGroupDelRobot'](evt);
 
       expect(streamState.has('sid-detect')).toBe(false);
+    });
+
+    // B3: full cleanup — reply anchor, msgSeqMap cascade, session sets,
+    // group-level state, onSessionDied
+    it('释放 sessionReplyMsgId 锚点并级联清理 msgSeqMap/会话集/group 级状态', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-full-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyMsgId = chp['replyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const flushingSessions = chp['flushingSessions'] as Set<string>;
+      const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      const botOpenIdByGroup = chp['botOpenIdByGroup'] as Map<string, string>;
+      const _lastKeywordNoMatchLog = chp['_lastKeywordNoMatchLog'] as Map<
+        string,
+        number
+      >;
+
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-xyz', 3);
+      replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-xyz',
+        turn: 1,
+      });
+      // NOTE: no in-flight flush is seeded (no buffer/timer/flushingSessions)
+      // — the release runs FIRST under the fixed ordering, and with nothing
+      // still owning the msgId the orphaned msg_seq counter is cascaded away.
+      // Seeding a live flush here would (correctly, per the wenshao blocking-1
+      // fix) keep the counter until the flush settles instead.
+      pendingStreamDelete.add('sid-1');
+      flushedSessions.add('sid-1');
+      botOpenIdByGroup.set(groupId, 'bot-openid-1');
+      _lastKeywordNoMatchLog.set(groupId, Date.now());
+
+      // mockImplementation: let the real onSessionDied NOT run, so the
+      // assertions below are gated on handleGroupDelRobot's OWN cleanup loop
+      // (the delete/release statements before the call), not on the method
+      // body being re-entered (thread 68).
+      const onSessionDiedSpy = vi
+        .spyOn(ch, 'onSessionDied')
+        .mockImplementation(() => {});
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Reply anchor released (and msgSeqMap entry cascaded away)
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(msgSeqMap.has('msg-xyz')).toBe(false);
+      // Session sets cleaned
+      expect(flushingSessions.has('sid-1')).toBe(false);
+      expect(pendingStreamDelete.has('sid-1')).toBe(false);
+      expect(flushedSessions.has('sid-1')).toBe(false);
+      expect(streamState.has('sid-1')).toBe(false);
+      // Group-level state cleaned
+      expect(botOpenIdByGroup.has(groupId)).toBe(false);
+      expect(_lastKeywordNoMatchLog.has(groupId)).toBe(false);
+      // onSessionDied fired (sessionScope 'user' !== 'single')
+      expect(onSessionDiedSpy).toHaveBeenCalledWith('sid-1');
+
+      onSessionDiedSpy.mockRestore();
+    });
+
+    // B4: msgSeqMap guard — another live session still anchored to the
+    // same msgId keeps the seq counter alive
+    it('其他 session 仍锚定 msg-xyz 时保留 msgSeqMap 计数', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-guard-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyMsgId = chp['replyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      // sid-1 will be cleaned by handleGroupDelRobot; sid-2 is a live
+      // session anchored to the same msgId but routed to another group.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      sessionReplyMsgId.set('sid-2', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-xyz', 3);
+      replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-xyz',
+        turn: 1,
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // sid-1's anchor is released, but sid-2 still anchors msg-xyz so the
+      // msgSeqMap counter is preserved
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.get('sid-2')!.msgId).toBe('msg-xyz');
+      expect(msgSeqMap.get('msg-xyz')).toBe(3);
+    });
+
+    // B5: wenshao §4 — the per-session release must run BEFORE the
+    // streamState/flushingSessions teardown in the cleanup loop, so the
+    // in-flight flush guard inside releaseSessionReplyAnchor can see the live
+    // tail send and keep the msg_seq counter. A delete-then-release order
+    // would drop the counter here and the in-flight send's re-flush would
+    // resolve nextSeq = 1 (QQ dedupes on msg_id + msg_seq and drops the tail).
+    it('releases before teardown while a flush is in flight, keeping the msg_seq counter and clearing turn/orphan state (wenshao §4)', () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-flight-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const flushingSessions = chp['flushingSessions'] as Set<string>;
+      const turnCounter = chp['turnCounter'] as Map<string, number>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<string, string>;
+
+      // A streaming session in this group with its flush in flight: the
+      // entry still holds the msgId, flushingSessions is armed, and msg-X's
+      // counter has been consumed by a previous segment.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-X', 3);
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: 'pending tail',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-X',
+        turn: 1,
+      });
+      flushingSessions.add('sid-1');
+      turnCounter.set('sid-1', 1);
+      orphanBuffer.set('sid-1', 'stray');
+
+      const releaseSpy = vi.spyOn(
+        ch as unknown as { releaseSessionReplyAnchor: (s: string) => void },
+        'releaseSessionReplyAnchor',
+      );
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Under single scope onSessionDied is NOT invoked, so the cleanup
+      // loop's own release is the only one — exactly once per session.
+      expect(releaseSpy).toHaveBeenCalledTimes(1);
+      // The release saw the live entry + flush marker and kept the counter.
+      expect(msgSeqMap.get('msg-X')).toBe(3);
+      // Everything the turn touched is torn down.
+      expect(streamState.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(flushingSessions.has('sid-1')).toBe(false);
+      expect(turnCounter.has('sid-1')).toBe(false);
+      expect(orphanBuffer.has('sid-1')).toBe(false);
+
+      releaseSpy.mockRestore();
     });
   });
 
@@ -1634,6 +1882,71 @@ describe('Gateway message handling', () => {
 
     restoreQQSpy.mockRestore();
     restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY cold start: purgeSingleScopeOrphans clears single-scope orphans, keeps 3-part keys', async () => {
+    // The purge must run as part of the READY restore chain and drop
+    // single-era orphan keys from the router (thread 62 gate: previously the
+    // purge had no wiring-level test).
+    const ch = makeChannel({ sessionScope: 'thread' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    expect(chp['coldStart']).toBe(true);
+
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
+    chp['router'] = {
+      restoreSessions: vi.fn().mockResolvedValue(undefined),
+      getAll: () => [
+        // Single-era orphan (exact-match on this channel's name).
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // User-scope 3-part key under thread scope: kept (ages out).
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Live thread-scope two-part key: never purged.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    // purgeSingleScopeOrphans ran inside the restore chain and removed the
+    // single-scope orphan, keeping the 3-part and live two-part keys.
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-1');
+    expect(chp['_ready']).toBe(true);
+
+    restoreQQSpy.mockRestore();
     ch.disconnect();
   });
 
