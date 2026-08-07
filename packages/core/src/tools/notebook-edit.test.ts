@@ -571,6 +571,47 @@ describe('NotebookEditTool', () => {
     expect(result.llmContent).toContain('has not been fully read');
   });
 
+  it('rejects a notebook edit terminally when the filesystem reports ino 0', async () => {
+    // `ino: 0` (FAT/exFAT, some SMB mounts) makes the prior read
+    // unprovable, and re-reading cannot fix it — so the model gets a
+    // terminal error instead of the "read it first" instruction.
+    const filePath = writeNotebook('zero-inode.ipynb', {
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    fileReadCache.recordRead(filePath, fs.statSync(filePath), {
+      full: true,
+      cacheable: false,
+    });
+    const nativeStat = fs.promises.stat;
+    const stat = vi
+      .spyOn(fs.promises, 'stat')
+      .mockImplementation(async (target: fs.PathLike) => {
+        const stats = await nativeStat(target);
+        if (target === filePath) {
+          Object.defineProperty(stats, 'ino', { value: 0 });
+        }
+        return stats;
+      });
+
+    try {
+      const result = await buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'a',
+        new_source: 'x = 2',
+      }).execute(abortSignal);
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      );
+      expect(result.llmContent).toContain('does not provide a verifiable');
+      expect(result.llmContent).toContain('Use a different mechanism');
+      expect(result.llmContent).not.toContain('has not been fully read');
+    } finally {
+      stat.mockRestore();
+    }
+  });
+
   it('rejects edits after a truncated notebook read', async () => {
     const filePath = writeNotebook('truncated-read.ipynb', {
       cells: [

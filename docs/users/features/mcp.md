@@ -271,7 +271,15 @@ environment. This is kept as an escape hatch for at least one release.
 
 ### Trust (skip confirmations)
 
-- **Server trust** (`trust: true`): bypasses confirmation prompts for that server (use sparingly).
+- **Server trust** (`trust: true`): bypasses confirmation prompts for that server only in a trusted workspace (use sparingly).
+
+### Connection-loss replay
+
+Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
+
+Calls with missing annotations, conflicting annotations, an untrusted server, or an untrusted workspace are not replayed after a connection failure. Qwen Code reports that the result may be unknown because the server could have completed the operation before the response was lost. Verify the outcome before trying again. This conservative behavior can differ from earlier releases that transparently retried unannotated tools.
+
+Annotations are server-provided behavior hints, not permissions or an authorization boundary. Only configure `trust: true` for servers you control and whose annotations you have verified.
 
 ### OAuth authentication
 
@@ -453,7 +461,7 @@ Optional:
 | `env`                  | object                       | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
 | `cwd`                  | string                       | Working directory for Stdio transport                                                                                                                                                                                                                             |
 | `timeout`              | number<br>(default: 600,000) | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
-| `trust`                | boolean<br>(default: false)  | When `true`, bypasses all tool call confirmations for this server (default: `false`)                                                                                                                                                                              |
+| `trust`                | boolean<br>(default: false)  | When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)                                                                                                                                                           |
 | `includeTools`         | array                        | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
 | `excludeTools`         | array                        | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
 | `targetAudience`       | string                       | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
@@ -481,7 +489,7 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 | `-e`, `--env`               | Set environment variables.                                          | —                                      | `-e KEY=value`                                                     |
 | `-H`, `--header`            | Set HTTP headers for SSE and HTTP transports.                       | —                                      | `-H "X-Api-Key: abc123"`                                           |
 | `--timeout`                 | Set connection timeout in milliseconds.                             | —                                      | `--timeout 30000`                                                  |
-| `--trust`                   | Trust the server (bypass all tool call confirmation prompts).       | — (`false`)                            | `--trust`                                                          |
+| `--trust`                   | Trust the server; skip confirmations in trusted workspaces.         | — (`false`)                            | `--trust`                                                          |
 | `--description`             | Set the description for the server.                                 | —                                      | `--description "Local tools"`                                      |
 | `--include-tools`           | A comma-separated list of tools to include.                         | all tools included                     | `--include-tools mytool,othertool`                                 |
 | `--exclude-tools`           | A comma-separated list of tools to exclude.                         | none                                   | `--exclude-tools mytool`                                           |

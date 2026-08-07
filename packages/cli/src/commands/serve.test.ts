@@ -89,6 +89,24 @@ describe('serve command args', () => {
     expect(parsed['initialize-timeout-ms']).toBeUndefined();
   });
 
+  it('defaults external tool guarding to off', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['external-tool-guard-mode']).toBe('off');
+  });
+
+  it('parses required external tool guard options', () => {
+    const parsed = buildParser().parseSync(
+      '--external-tool-guard-mode required ' +
+        '--external-tool-guard-endpoint http://127.0.0.1:8787 ' +
+        '--external-tool-guard-timeout-ms 2500',
+    );
+    expect(parsed['external-tool-guard-mode']).toBe('required');
+    expect(parsed['external-tool-guard-endpoint']).toBe(
+      'http://127.0.0.1:8787',
+    );
+    expect(parsed['external-tool-guard-timeout-ms']).toBe(2500);
+  });
+
   it('parses --experimental-lsp for daemon child opt-in', () => {
     const parsed = buildParser().parseSync('--experimental-lsp');
     expect(parsed['experimentalLsp']).toBe(true);
@@ -211,6 +229,9 @@ describe('serve rate limit env parsing', () => {
     });
   }
 
+  // Call this at most once per test: it waits on `toHaveBeenCalled()`, which a
+  // previous call in the same test already satisfies, so a second invocation
+  // returns before its own args land and assertions read the first call's.
   async function startServeHandlerWithArgs(args: string) {
     const handler = serveCommand.handler;
     if (!handler) throw new Error('serve handler missing');
@@ -321,6 +342,115 @@ describe('serve rate limit env parsing', () => {
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryProjectScope: 'workspace' }),
     );
+  });
+
+  it('passes required guard config and keeps its token daemon-local', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --external-tool-guard-mode required ' +
+        '--external-tool-guard-endpoint http://127.0.0.1:8787 ' +
+        '--external-tool-guard-timeout-ms 2500',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        externalToolGuard: {
+          mode: 'required',
+          endpoint: 'http://127.0.0.1:8787',
+          token: 'guard-secret',
+          timeoutMs: 2500,
+        },
+      }),
+    );
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('does not pass a provider when mode is off even if config exists', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --external-tool-guard-endpoint http://127.0.0.1:8787',
+    );
+
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'externalToolGuard',
+    );
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('passes --memory-pressure-mode to runQwenServe', async () => {
+    // Without this, deleting the `memoryPressureMode` line in the handler
+    // leaves every other suite green: the fast path parses the flag in its
+    // own module, and the status builder supplies the same default itself.
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --memory-pressure-mode off');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryPressureMode: 'off' }),
+    );
+  });
+
+  it('passes --child-heap-mode to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --child-heap-mode off');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'off' }),
+    );
+  });
+
+  it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'observe' }),
+    );
+    // `enforce` is not a value yet, and boot must say so rather than accept
+    // it: applying the partition needs an observation this daemon cannot make.
+    expect(() => buildParser().parseSync('--child-heap-mode enforce')).toThrow(
+      /Invalid values/,
+    );
+  });
+
+  it('defaults the memory pressure mode to observe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryPressureMode: 'observe' }),
+    );
+  });
+
+  it('rejects a memory pressure mode outside the choices', () => {
+    expect(() =>
+      buildParser().parseSync('--memory-pressure-mode enforce'),
+    ).toThrow(/Invalid values/);
   });
 
   it('passes --channel all as an all-channel selection', async () => {

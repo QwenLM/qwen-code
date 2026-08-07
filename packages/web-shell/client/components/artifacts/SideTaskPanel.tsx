@@ -12,7 +12,6 @@ import {
 } from '../../constants/sessions';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
@@ -41,9 +40,9 @@ interface SideTaskPanelProps {
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
+  sessionWorkflowEnabled?: boolean;
 }
 
 const FIRST_PROMPT_RENAME_ATTEMPTS = 3;
@@ -62,6 +61,7 @@ export function SideTaskPanel({
   onRightPanelOpen,
   onArtifactsChange,
   onError,
+  sessionWorkflowEnabled,
 }: SideTaskPanelProps) {
   if (!sessionId) {
     return (
@@ -98,6 +98,7 @@ export function SideTaskPanel({
         onRightPanelOpen={onRightPanelOpen}
         onArtifactsChange={onArtifactsChange}
         onError={onError}
+        sessionWorkflowEnabled={sessionWorkflowEnabled}
       />
     </DaemonSessionProvider>
   );
@@ -189,6 +190,7 @@ function SideTaskSession({
   onRightPanelOpen,
   onArtifactsChange,
   onError,
+  sessionWorkflowEnabled,
 }: Omit<
   SideTaskPanelProps,
   'sessionId' | 'parentSessionId' | 'createSession' | 'onCreated'
@@ -280,6 +282,7 @@ function SideTaskSession({
       }
       onRightPanelOpen={onRightPanelOpen}
       onPaneArtifactsChange={onArtifactsChange}
+      sessionWorkflowEnabled={sessionWorkflowEnabled}
     />
   );
 }

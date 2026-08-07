@@ -298,7 +298,8 @@ export interface ChatRecord {
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
     | 'goal_state'
-    | 'goal_runtime';
+    | 'goal_runtime'
+    | 'realtime_message';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -1391,6 +1392,26 @@ export class ChatRecordingService {
     );
   }
 
+  /**
+   * Durably records a daemon-delivered notification before its sender is
+   * acknowledged. Unlike the ordinary in-process notification path, this
+   * rejects when the writer is unavailable or the append fails.
+   */
+  async recordNotificationStrict(
+    message: PartListUnion,
+    displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
+  ): Promise<void> {
+    await this.appendRecordStrict(
+      this.createNotificationRecord(
+        message,
+        'notification',
+        displayText,
+        backgroundTask,
+      ),
+    );
+  }
+
   private recordNotificationLike(
     message: PartListUnion,
     subtype: 'notification' | 'cron',
@@ -1399,20 +1420,36 @@ export class ChatRecordingService {
     goalContext?: GoalTurnPermit,
   ): void {
     try {
-      const record: ChatRecord = {
-        ...this.createBaseRecord('user'),
+      const record = this.createNotificationRecord(
+        message,
         subtype,
-        provenance: 'system',
-        ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
-        message: createUserContent(message),
-        systemPayload: displayText
-          ? ({ displayText, backgroundTask } as NotificationRecordPayload)
-          : undefined,
-      };
+        displayText,
+        backgroundTask,
+        goalContext,
+      );
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error(`Error saving ${subtype} record:`, error);
     }
+  }
+
+  private createNotificationRecord(
+    message: PartListUnion,
+    subtype: 'notification' | 'cron',
+    displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
+    goalContext?: GoalTurnPermit,
+  ): ChatRecord {
+    return {
+      ...this.createBaseRecord('user'),
+      subtype,
+      provenance: 'system',
+      ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
+      message: createUserContent(message),
+      systemPayload: displayText
+        ? ({ displayText, backgroundTask } as NotificationRecordPayload)
+        : undefined,
+    };
   }
 
   /**
@@ -1457,6 +1494,27 @@ export class ChatRecordingService {
       this.maybeTriggerAutoTitle();
     } catch (error) {
       debugLogger.error('Error saving assistant turn:', error);
+    }
+  }
+
+  async recordRealtimeConversation(
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void> {
+    for (const entry of entries) {
+      const record: ChatRecord = {
+        ...this.createBaseRecord(entry.role),
+        subtype: 'realtime_message',
+        message:
+          entry.role === 'user'
+            ? createUserContent([{ text: entry.text }])
+            : createModelContent([{ text: entry.text }]),
+        ...(entry.role === 'assistant' ? { model } : {}),
+      };
+      await this.appendRecordStrict(record);
     }
   }
 
@@ -1735,7 +1793,8 @@ export class ChatRecordingService {
         record.subtype !== 'goal_runtime' &&
         record.subtype !== 'notification' &&
         record.subtype !== 'cron' &&
-        record.subtype !== 'mid_turn_user_message'
+        record.subtype !== 'mid_turn_user_message' &&
+        record.subtype !== 'realtime_message'
       ) {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.

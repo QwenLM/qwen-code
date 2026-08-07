@@ -43,6 +43,45 @@ const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ),
 };
 
+const GROUP_POLICY_DESCRIPTOR: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: false,
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+  ],
+};
+
+const GITHUB_LOCAL_GH: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+    },
+    {
+      key: 'useLocalGh',
+      label: 'Use Local GitHub CLI Authentication',
+      kind: 'boolean',
+    },
+  ],
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -256,6 +295,40 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain('configured-user');
   });
 
+  it('saves the local GitHub CLI opt-in when the switch is toggled', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_LOCAL_GH, onSave });
+
+    const name = inputByLabel('Instance name');
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    expect(name).not.toBeNull();
+    expect(toggle).not.toBeNull();
+
+    await act(async () => {
+      setInputValue(name!, 'github-bot');
+      toggle!.click();
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('github-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        senderPolicy: 'pairing',
+      },
+      secrets: { token: { operation: 'clear' } },
+    });
+  });
+
   it('does not show the allowlist alert when no users are configured', async () => {
     const pairingNoAllowlist: DaemonChannelInstanceSnapshot = {
       ...INSTANCE,
@@ -265,5 +338,57 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('Pairing approvals');
     expect(document.body.textContent).not.toContain('Configured allowlist');
+  });
+
+  it('shows pairing affordance from a descriptor-driven groupPolicy draft', async () => {
+    const groupPolicyInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        senderPolicy: 'open',
+        groupPolicy: 'open',
+      },
+    };
+    await renderDialog({
+      descriptor: GROUP_POLICY_DESCRIPTOR,
+      instance: groupPolicyInstance,
+    });
+
+    expect(document.body.textContent).not.toContain('Save pairing mode first');
+
+    const trigger = inputByLabel('Group Policy');
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Pairing');
+    expect(option).toBeDefined();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(document.body.textContent).toContain('Save pairing mode first');
+  });
+
+  it('shows pairing management when only group pairing is enabled', async () => {
+    const groupPairingInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        senderPolicy: 'open',
+        groupPolicy: 'pairing',
+      },
+    };
+    const listPairingRequests = vi.fn().mockResolvedValue({ requests: [] });
+
+    await renderDialog({
+      instance: groupPairingInstance,
+      listPairingRequests,
+    });
+
+    expect(document.body.textContent).toContain('Pairing approvals');
+    expect(listPairingRequests).toHaveBeenCalledWith('release-bot');
   });
 });

@@ -6,7 +6,7 @@ import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
-export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
+export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 
@@ -401,6 +401,15 @@ export interface ChannelConfigFieldDescriptor {
 
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
+
+  /**
+   * Cross-field validation applied to the resolved config during managed
+   * upserts, after secret updates. Return an error message to reject the
+   * update, or undefined to accept it.
+   */
+  validateConfig?: (
+    config: Readonly<Record<string, unknown>>,
+  ) => string | undefined;
 }
 
 /**

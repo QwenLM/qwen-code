@@ -47,13 +47,18 @@ import {
 const debugLogger = createDebugLogger('COMPRESSION');
 
 /**
- * Hard cap on compression generation. The cold path disables thinking; the
- * cache-sharing path inherits the main request's cache-sensitive thinking
- * setting while keeping this same provider output ceiling. Mirrors
- * claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY (autoCompact.ts:30), which is
- * based on p99.99 of real compaction outputs.
+ * Hard cap on compression generation. The cold path asks providers to omit
+ * returned thoughts. The cache-sharing path preserves Anthropic's
+ * cache-sensitive thinking setting and makes the same returned-thought request
+ * for Google GenAI. On Google this does not disable thinking or prevent its
+ * tokens from sharing the output budget. Mirrors claude-code's
+ * MAX_OUTPUT_TOKENS_FOR_SUMMARY (autoCompact.ts:30), which is based on p99.99
+ * of real compaction outputs.
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
+
+const COMPRESSION_REQUEST_DIRECTIVE =
+  'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.';
 
 /**
  * Default proportional auto-compaction threshold — the preferred trigger and an
@@ -237,12 +242,10 @@ export interface CompressOptions {
    */
   pendingUserMessage?: Content;
   /**
-   * Pre-computed effective-token count from `estimatePromptTokens()`. When
-   * provided, the cheap-gate skips its own estimation pass (and the
-   * accompanying `chat.getHistoryShallow(true)` clone). Callers that already
-   * computed this value upstream — primarily `sendMessageStream` for the
-   * hard-tier rescue — pass it through to avoid duplicate work.
-   * (review #4168 R1.3 / R1.4)
+   * Pre-computed all-inclusive effective-token count. This is normally from
+   * `estimatePromptTokens()`, or from a provider-reported count after reactive
+   * overflow. When provided, the cheap-gate skips its estimation pass and the
+   * cache-sharing preflight does not add the previous model output again.
    */
   precomputedEffectiveTokens?: number;
   /** Per-request overrides used by the main turn, including transient tools. */
@@ -319,13 +322,18 @@ function buildCompressionSystemPrompt(
 
 function supportsCompressionCacheSharing(config: Config): boolean {
   const provider = config.getContentGeneratorConfig();
+  // Google GenAI prefix caching is implicit. `enableCacheControl` configures
+  // explicit provider cache markers, so it must not disable Gemini/Vertex
+  // cache sharing as an unrelated side effect.
+  if (
+    provider.authType === AuthType.USE_GEMINI ||
+    provider.authType === AuthType.USE_VERTEX_AI
+  ) {
+    return true;
+  }
   if (provider.enableCacheControl === false) return false;
   if (provider.authType === AuthType.USE_ANTHROPIC) return true;
-  return (
-    (provider.authType === AuthType.QWEN_OAUTH ||
-      provider.authType === AuthType.USE_OPENAI) &&
-    supportsOpenAIPrefixCaching(provider)
-  );
+  return supportsOpenAIPrefixCaching(provider);
 }
 
 function hasStateSnapshot(summary: string): boolean {
@@ -363,6 +371,9 @@ export class ChatCompressionService {
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
     const tuning = resolveCompactionTuning(chatCompressionSettings);
+    const contentGeneratorConfig = config.getContentGeneratorConfig();
+    const contextLimit =
+      contentGeneratorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
 
     // Cheap gates first — these don't need the curated history. Forward
     // originalTokenCount on NOOP (matching the threshold-gate branch below)
@@ -384,9 +395,6 @@ export class ChatCompressionService {
       // guarantees `prompt + max_tokens ≤ window`, so no output budget needs
       // to be reserved out of the window here (this replaced the
       // #5957/#6266 reservedOutputTokens machinery).
-      const contextLimit =
-        config.getContentGeneratorConfig()?.contextWindowSize ??
-        DEFAULT_TOKEN_LIMIT;
       const { auto } = computeThresholds(
         contextLimit,
         config.getAutoCompactThreshold(),
@@ -533,18 +541,15 @@ export class ChatCompressionService {
         )
       : 0;
 
-    // Slim the side-query input: replace inlineData with placeholders.
-    // The original history (with images) is preserved separately for
-    // the post-compact image restoration block.
-    const slim = slimCompactionInput(sideQueryHistory);
-    if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
-      config
-        .getDebugLogger()
-        .debug(
-          `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
-            `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
-        );
-    }
+    // Lazy: the cold fallback input is slimmed on demand. The original
+    // history keeps its media: the shared request needs it for cache-prefix
+    // identity, and the post-compact image restoration block reads it
+    // afterwards.
+    let coldInput: ReturnType<typeof slimCompactionInput> | undefined;
+    const getColdInput = () => {
+      coldInput ??= slimCompactionInput(sideQueryHistory);
+      return coldInput;
+    };
 
     // Hoist the system prompt so the guard can include it in the estimate.
     const systemInstruction = buildCompressionSystemPrompt(
@@ -574,7 +579,7 @@ export class ChatCompressionService {
         // prompt + max_tokens <= window, so all three terms count.
         const slimmedTokenEstimate =
           estimateContentTokens(
-            slim.slimmedHistory,
+            getColdInput().slimmedHistory,
             slimmingConfig.imageTokenEstimate,
           ) +
           Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
@@ -595,8 +600,17 @@ export class ChatCompressionService {
 
     const abortSignal = signal ?? new AbortController().signal;
     abortSignal.throwIfAborted();
-    const runColdCompression = () =>
-      runSideQuery(config, {
+    const runColdCompression = () => {
+      const slim = getColdInput();
+      if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
+        config
+          .getDebugLogger()
+          .debug(
+            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
+              `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
+          );
+      }
+      return runSideQuery(config, {
         purpose: 'chat-compression',
         skipOutputLanguagePreference: true,
         model: effectiveCompactionModel,
@@ -620,7 +634,7 @@ export class ChatCompressionService {
             role: 'user',
             parts: [
               {
-                text: 'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
+                text: COMPRESSION_REQUEST_DIRECTIVE,
               },
             ],
           },
@@ -636,14 +650,53 @@ export class ChatCompressionService {
         abortSignal,
         promptId,
       });
+    };
 
     let summaryResult: GenerateTextResult | undefined;
     let usedCacheSharing = false;
-    const canShareCache =
-      effectiveCompactionModel === config.getModel() &&
-      slim.stats.imagesStripped === 0 &&
-      slim.stats.documentsStripped === 0 &&
+    const sharedRequestText =
+      `${systemInstruction}\n\n` +
+      'Do not call tools; tool execution is disabled for this request. ' +
+      COMPRESSION_REQUEST_DIRECTIVE;
+    const sharedPromptTokenCount =
+      opts.precomputedEffectiveTokens ??
+      originalTokenCount + (chat.getLastOutputTokenCount?.() ?? 0);
+    const sharedDirectiveTokenCount = Math.ceil(
+      sharedRequestText.length / CHARS_PER_TOKEN,
+    );
+    const usesMainModel = effectiveCompactionModel === config.getModel();
+    const providerSupportsCacheSharing =
       supportsCompressionCacheSharing(config);
+    // The anchor must be provider-reported, not merely non-zero: an
+    // estimate-derived count misses the ~15-20K system/tools overhead the
+    // shared request actually carries, so `sharedRequestFits` could approve
+    // a request that overflows the window. Estimate-only sessions stay on
+    // the cold path until provider usage arrives.
+    const hasProviderTokenCount =
+      (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
+      chat.isLastPromptTokenCountEstimated?.() !== true;
+    const sharedRequestFits =
+      sharedPromptTokenCount +
+        sharedDirectiveTokenCount +
+        COMPACT_MAX_OUTPUT_TOKENS <=
+      contextLimit;
+    const canShareCache =
+      usesMainModel &&
+      providerSupportsCacheSharing &&
+      hasProviderTokenCount &&
+      sharedRequestFits;
+    if (!canShareCache) {
+      const reason = !usesMainModel
+        ? 'distinct compaction model'
+        : !providerSupportsCacheSharing
+          ? 'provider does not support cache sharing'
+          : !hasProviderTokenCount
+            ? 'no provider-reported token-count anchor'
+            : `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
+              `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
+              `window=${contextLimit}`;
+      debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
+    }
     if (canShareCache) {
       try {
         const generationConfig = {
@@ -653,6 +706,7 @@ export class ChatCompressionService {
         const mainSystemInstruction = generationConfig.systemInstruction;
         delete generationConfig.systemInstruction;
         delete generationConfig.abortSignal;
+        const authType = config.getContentGeneratorConfig().authType;
         const sharedResult = await config.getBaseLlmClient().generateText({
           contents: [
             ...sideQueryHistory,
@@ -660,10 +714,7 @@ export class ChatCompressionService {
               role: 'user',
               parts: [
                 {
-                  text:
-                    `${systemInstruction}\n\n` +
-                    'Do not call tools; tool execution is disabled for this request. ' +
-                    'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
+                  text: sharedRequestText,
                 },
               ],
             },
@@ -672,8 +723,7 @@ export class ChatCompressionService {
           systemInstruction: mainSystemInstruction,
           config: {
             ...generationConfig,
-            ...(config.getContentGeneratorConfig().authType ===
-            AuthType.USE_ANTHROPIC
+            ...(authType === AuthType.USE_ANTHROPIC
               ? {
                   thinkingConfig: {
                     ...generationConfig.thinkingConfig,
@@ -683,13 +733,22 @@ export class ChatCompressionService {
                     thinkingBudget: COMPACT_MAX_OUTPUT_TOKENS - 1,
                   },
                 }
-              : {}),
+              : authType === AuthType.USE_GEMINI ||
+                  authType === AuthType.USE_VERTEX_AI
+                ? {
+                    thinkingConfig: {
+                      ...generationConfig.thinkingConfig,
+                      includeThoughts: false,
+                    },
+                  }
+                : {}),
             maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
           },
           abortSignal,
           promptId,
           stream: true,
           maxAttempts: 1,
+          promptCacheSharing: true,
         });
         if (!sharedResult.hadToolCall && hasStateSnapshot(sharedResult.text)) {
           summaryResult = sharedResult;
@@ -1057,6 +1116,7 @@ export class ChatCompressionService {
         info: {
           originalTokenCount,
           newTokenCount,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
           ...(compactionWarning && { warning: compactionWarning }),

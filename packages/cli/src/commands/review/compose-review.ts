@@ -30,6 +30,11 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import {
+  BUDGET_STOP_PHRASE,
+  budgetStopDisclosure,
+  readBudgetStop,
+} from './lib/deadline.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
 import {
@@ -39,6 +44,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { repositoryContextOf } from './lib/repository-context.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
@@ -54,6 +60,12 @@ import {
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
+import {
+  REVIEW_FOOTER_RE,
+  footerVersion,
+  isFooterSafeModelId,
+  reviewFooter,
+} from './lib/review-footer.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -124,6 +136,18 @@ export interface ComposeReviewInput {
    * whether the diff was read.
    */
   planPath?: string;
+  /**
+   * The cumulative reverse-audit findings file at loop end — the same file
+   * every round's `agent-prompt --findings` received, after the final merge.
+   * compose-review reads it itself for the one fact Step 6's confirmed-only
+   * read is otherwise a model's word on: whether any entry still carries the
+   * `— [unverified]` tag. A surviving tag means no verifier ever ruled on
+   * that entry, and the verdict is capped whether or not the report excluded
+   * it. A path that does not read fails closed — "could not show" and "was
+   * not" read the same to the person the verdict posts at. Omitted, the
+   * check is off: every non-high review, which runs no Step 5.
+   */
+  findingsPath?: string;
   /**
    * Where to look for the harness's records. Defaults to the environment the CLI
    * exported. A test seam only — production never passes it, and a model cannot:
@@ -202,6 +226,15 @@ export interface ComposeReviewResult {
   lowSignal: { agents: number; srcDiffLines: number } | null;
 }
 
+/**
+ * The Step 5 tag, exactly as the loop's merge writes and removes it: an
+ * entry not yet through verification carries it, a confirmed verdict removes
+ * it, and a tag that survives to compose time is an entry no verifier ever
+ * ruled on. Whitespace-tolerant only — the tag is prose the orchestrator
+ * copies, and a re-wrap must not hide it.
+ */
+const UNVERIFIED_FINDING_TAG_RE = /—\s*\[unverified\]/gi;
+
 function withMarker(line: string): string {
   return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
 }
@@ -232,6 +265,10 @@ function toStringList(value: unknown, field: string): string[] {
   // entries are appended to these lists — a programmatic caller that reused one
   // across two calls would find the first call's caps in the second.
   return [...(value as string[])];
+}
+
+function stripReviewFooter(entry: string): string {
+  return entry.replace(REVIEW_FOOTER_RE, '');
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is
@@ -302,7 +339,9 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           line?: unknown;
           body?: unknown;
         }>,
-        toStringList(input.bodyCriticals, 'bodyCriticals'),
+        toStringList(input.bodyCriticals, 'bodyCriticals')
+          .map(stripReviewFooter)
+          .filter((entry) => entry.trim() !== ''),
       ),
     );
   } catch {
@@ -320,7 +359,14 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals');
+  // Stripped per entry, not on the assembled body: these model-written
+  // strings render verbatim as the LAST body part, and a forged footer
+  // relocated into one would post directly above the canonical footer —
+  // the `$`-anchored regex only sees an entry's end, before the footer is
+  // appended.
+  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
@@ -328,7 +374,9 @@ function composeReviewBody(
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
-  );
+  )
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
@@ -351,6 +399,36 @@ function composeReviewBody(
     subjectZh?: string;
     reasonZh?: string;
   }> = [];
+  // The budget-stop marker: when the reverse-audit round builder refused a
+  // round on the review's time budget, it recorded the refusal beside the
+  // prompt records. Synthesizing the disclosure from the marker makes the
+  // verdict cap deterministic — the orchestrator's own copy of the entry
+  // (the stderr instruction asks for one) is a courtesy to the terminal
+  // reader, and a run that drops the sentence still cannot approve past a
+  // truncated audit. Rendered STRUCTURAL, both languages, like every other
+  // coverage entry — the orchestrator's relayed copy is English-only prose,
+  // so the marker's phrase dedups it out and the two channels never say it
+  // twice.
+  // The marker's entry is tracked by reference: its relays are deduped by
+  // the phrase splice here, so the caller-echo filter below must NOT also
+  // prefix-match on its `reverse audit` subject — that shadow silently
+  // dropped every OTHER reverse-audit scope the orchestrator disclosed
+  // (`reverse audit — chunk 2's auditor returned nothing substantive
+  // twice`), in exactly the runs where a partial audit makes such scopes
+  // likeliest.
+  let budgetEntry: (typeof coverageEntries)[number] | undefined;
+  if (input.planPath) {
+    const stop = readBudgetStop(input.planPath);
+    if (stop !== null) {
+      for (let i = unreviewed.length - 1; i >= 0; i--) {
+        if (unreviewed[i].includes(BUDGET_STOP_PHRASE)) {
+          unreviewed.splice(i, 1);
+        }
+      }
+      budgetEntry = budgetStopDisclosure(stop.round ?? undefined);
+      coverageEntries.push(budgetEntry);
+    }
+  }
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -405,12 +483,18 @@ function composeReviewBody(
   // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
   // see `testPlanGate` for why this one neither blocks nor caps.
   const testPlanNotes: string[] = [];
+  // Repository proof boundaries are also disclosures, not findings or permanent
+  // approval caps. The first schema has no validated evidence channel that could
+  // resolve one after a specialist inspects it, so capping here would make every
+  // affected review impossible to approve.
+  const repositoryContextNotes: string[] = [];
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
+    repositoryContextNotes.push(...repositoryContextGate(input.planPath));
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -644,6 +728,56 @@ function composeReviewBody(
       criticalsUnverified = criticalsNeedingVerify >= 1;
     }
   }
+
+  // The pipelined loop's invariant, machine-checked. "The last round's
+  // verification completes before Step 6" used to be STRUCTURAL — the serial
+  // loop could not build round k+1 before round k's verdicts merged — and
+  // pipelining replaced the structure with a tag the orchestrator adds,
+  // removes, and reads by hand. The delivery floor above cannot see the miss:
+  // it asks for ONE clean verify delivery across the whole key family, and
+  // each round's verifier is keyed by that round's findings digest, so round
+  // 1's launch clears the floor while round 5's findings go out unverified.
+  // So the findings file itself is read here: a surviving tag is an entry no
+  // verifier ruled on, and it caps the verdict whether or not Step 6's read
+  // excluded it. The path is a caller-written input like `planPath`; the
+  // check fails CLOSED when it does not read, and fails OPEN when it is
+  // omitted — a medium review runs no Step 5 and has no findings file.
+  let findingsUnverifiedAtCompose = false;
+  let findingsFileUnreadable = false;
+  let unverifiedTagCount = 0;
+  const findingsPath: unknown = input.findingsPath;
+  if (findingsPath !== undefined && findingsPath !== null) {
+    if (typeof findingsPath !== 'string' || findingsPath.trim() === '') {
+      throw new TypeError(
+        `compose-review: findingsPath must be a non-empty string, got ${JSON.stringify(findingsPath)}`,
+      );
+    }
+    try {
+      const findingsContent = readFileSync(findingsPath, 'utf8');
+      unverifiedTagCount = (
+        findingsContent.match(UNVERIFIED_FINDING_TAG_RE) ?? []
+      ).length;
+      findingsUnverifiedAtCompose = unverifiedTagCount > 0;
+      if (findingsUnverifiedAtCompose) {
+        remediation.push(
+          'findings still tagged `— [unverified]`: relaunch the verifier ' +
+            'for each tagged entry (Step 4, `--role verify` with that ' +
+            'entry), apply its verdict in the cumulative findings file, ' +
+            'and run compose-review again with the updated file',
+        );
+      }
+    } catch {
+      findingsFileUnreadable = true;
+      findingsUnverifiedAtCompose = true;
+      remediation.push(
+        'findings file not readable: pass the cumulative reverse-audit ' +
+          "findings file — the one every round's `--findings` received — " +
+          'as `findingsPath` in the state JSON, and run compose-review ' +
+          'again',
+      );
+    }
+  }
+
   const contextUnavailable = toBool(
     input.contextUnavailable,
     'contextUnavailable',
@@ -673,6 +807,13 @@ function composeReviewBody(
       'compose-review: modelId is required (the public footer names the reviewing model)',
     );
   }
+  if (!isFooterSafeModelId(modelId)) {
+    throw new TypeError(
+      'compose-review: modelId is interpolated into the public footer ' +
+        'verbatim — it must be a single line that does not contain the ' +
+        'footer marker',
+    );
+  }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
   // `S` counts every *confirmed* Suggestion — anchored or discarded: the
@@ -697,32 +838,41 @@ function composeReviewBody(
   }
   if (contextUnavailable) cappedBy.push('context-unavailable');
   if (criticalsUnverified) cappedBy.push('criticals-unverified');
+  if (findingsUnverifiedAtCompose) {
+    cappedBy.push('findings-unverified-at-compose');
+  }
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
-  // The ONE cap that reaches a Request changes — because it removes the
-  // premise the never-soften rule stands on. "A REQUEST_CHANGES earned by a
-  // confirmed Critical is never softened" presumes CONFIRMED, and this flag
-  // is precisely the statement that no verifier ever ruled on the blockers.
-  // The header's own principle — an unverified finding must not become a
-  // public blocker (the false "leaks tokens" Critical is the exact harm) —
-  // was mechanics for the Approve row only, and a real bot review shipped
-  // through the gap: a CHANGES_REQUESTED on an external contributor's PR
-  // (#7166) whose one Critical the body itself disclosed as unverified.
-  // The findings still post, disclosed; the review just may not BLOCK on a
-  // claim nobody confirmed. Manipulation check: a run that wants an Approve
-  // gains nothing here (the same flag caps Approve via `unreviewed`), and a
-  // run that wants to block without verifying now cannot.
+  // The caps that reach a Request changes — because they remove the premise
+  // the never-soften rule stands on. "A REQUEST_CHANGES earned by a
+  // confirmed Critical is never softened" presumes CONFIRMED, and these
+  // flags are precisely the statement that the confirmation is missing:
+  // `criticalsUnverified` says no verifier ever ruled (the delivery floor),
+  // `findingsUnverifiedAtCompose` says the findings file itself still
+  // carries `— [unverified]` tags at compose time. The header's own
+  // principle — an unverified finding must not become a public blocker (the
+  // false "leaks tokens" Critical is the exact harm) — was mechanics for
+  // the Approve row only, and a real bot review shipped through the gap: a
+  // CHANGES_REQUESTED on an external contributor's PR (#7166) whose one
+  // Critical the body itself disclosed as unverified. The findings still
+  // post, disclosed; the review just may not BLOCK on a claim nobody
+  // confirmed. Manipulation check: a run that wants an Approve gains
+  // nothing here (the same flags cap Approve), and a run that wants to
+  // block without verifying now cannot.
   // …unless a DETERMINISTIC Critical also rides the review: a `[build]`/
   // `[test]` finding is pre-confirmed, its Request changes is earned with or
   // without a verifier, and softening it alongside its unverified sibling
   // would un-block a confirmed build failure. The unverified ones stay
-  // disclosed either way.
+  // disclosed either way. The tag flag also needs a non-deterministic
+  // Critical in the payload before it softens: when nothing posted owed a
+  // verifier, a tag on an entry the report did not confirm blocks nothing.
   const deterministicBodyCriticals =
     bodyCriticals.length - nonDeterministicBodyCriticals;
   if (
     event === 'REQUEST_CHANGES' &&
-    criticalsUnverified &&
+    (criticalsUnverified ||
+      (findingsUnverifiedAtCompose && criticalsNeedingVerify >= 1)) &&
     deterministicBodyCriticals === 0
   ) {
     event = 'COMMENT';
@@ -763,21 +913,25 @@ function composeReviewBody(
   // keeps its bare Approve — there, finding nothing is the expected outcome.
   let lowSignal: ComposeReviewResult['lowSignal'] = null;
   if (event === 'APPROVE' && input.planPath) {
+    let plan: RosterPlan | undefined;
     try {
-      const plan = JSON.parse(
-        readFileSync(input.planPath, 'utf8'),
-      ) as RosterPlan;
+      plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as RosterPlan;
+    } catch {
+      // Unreadable plan, no disclosure — the coverage gate owns plan validity.
+    }
+    // A malformed repositoryContext inside an otherwise-readable plan is NOT
+    // swallowed here: requiredAgents throws, fail-closed like every other
+    // consumer of the field. On a real APPROVE the coverage gate already
+    // validated it.
+    if (plan) {
       const src = Number(plan.srcDiffLines ?? 0);
       if (src > LOW_SIGNAL_SRC_DIFF_LINES) {
         lowSignal = { agents: requiredAgents(plan).length, srcDiffLines: src };
       }
-    } catch {
-      // Unreachable on a real APPROVE — the coverage gate already read this
-      // plan — and a disclosure must never take the review down.
     }
   }
 
-  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
+  const footer = reviewFooter(modelId, cliVersion);
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -881,8 +1035,15 @@ function composeReviewBody(
   for (const d of unreviewed) {
     if (seenCaller.has(d)) continue; // a caller pasting itself twice
     seenCaller.add(d);
+    // The budget-stop entry never prefix-matches: its relays are already
+    // deduped by the marker phrase above, and letting its `reverse audit`
+    // subject claim the prefix swallowed unrelated reverse-audit scopes the
+    // caller disclosed with their own reasons (a bare subject echo still
+    // dedups).
     const echoesCoverage = covEntries.some(
-      (e) => d === e.subject || d.startsWith(`${e.subject} — `),
+      (e) =>
+        d === e.subject ||
+        (e !== budgetEntry && d.startsWith(`${e.subject} — `)),
     );
     if (!echoesCoverage) callerLeft.push(d);
   }
@@ -1029,6 +1190,35 @@ function composeReviewBody(
       ]
     : [];
 
+  // The findings file's own evidence that the loop ended with verification
+  // outstanding — rendered on every event the cap binds, RC included (a
+  // deterministic blocker beside a tagged entry keeps its Request changes
+  // but not the silence about the tag).
+  const unverifiedTagsBlock: Bi[] = !findingsUnverifiedAtCompose
+    ? []
+    : findingsFileUnreadable
+      ? [
+          {
+            en: '⚠️ The reverse-audit findings file could not be read at compose time, so this run cannot show its findings were verified.',
+            zh: '⚠️ 组合评审时无法读取反向审计发现文件，本次运行无法证明其发现已经过验证。',
+          },
+        ]
+      : [
+          {
+            en: `⚠️ ${unverifiedTagCount} finding(s) still carried the \`— [unverified]\` tag when the loop ended — the verifier never ruled on them, and they are not confirmed.`,
+            zh: `⚠️ 循环结束时仍有 ${unverifiedTagCount} 条发现带着 \`— [unverified]\` 标记——验证者从未对它们作出裁决，它们不算已确认。`,
+          },
+        ];
+
+  const repositoryContextBlock: Bi[] = repositoryContextNotes.length
+    ? [
+        {
+          en: `Repository proof boundary (not a blocker): ${repositoryContextNotes.join('; ')}.`,
+          zh: `仓库验证边界（非阻断）：${repositoryContextNotes.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -1038,8 +1228,10 @@ function composeReviewBody(
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
+      ...unverifiedTagsBlock,
       ...deferredBlock,
       ...testPlanBlock,
+      ...repositoryContextBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -1062,8 +1254,13 @@ function composeReviewBody(
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
           ...deferredBlock,
           ...testPlanBlock,
+          ...repositoryContextBlock,
         ],
-        deferredBlock.length || testPlanBlock.length ? '\n\n' : ' ',
+        deferredBlock.length ||
+          testPlanBlock.length ||
+          repositoryContextBlock.length
+          ? '\n\n'
+          : ' ',
       ),
       baseEvent,
       cappedBy,
@@ -1109,8 +1306,10 @@ function composeReviewBody(
       unreviewed.length + coverageEntries.length === 0 &&
       // A missing receipt caps the event but was left out of certification, so a
       // body could open "Reviewed — no blockers." two lines above "nobody read
-      // them." Nothing nobody read can be certified blocker-free.
-      missingReceipts.length === 0;
+      // them." Nothing nobody read can be certified blocker-free — and neither
+      // can a loop that ended with findings no verifier ever ruled on.
+      missingReceipts.length === 0 &&
+      !findingsUnverifiedAtCompose;
     // The opener may not say "Reviewed." over a disclosure set that denies it.
     // #7268's posted body opened exactly that way — "Reviewed. Suggestions are
     // inline." above two sentences disclosing all 49 chunks — and the author's
@@ -1172,6 +1371,10 @@ function composeReviewBody(
   // 6. Not-reviewed disclosure.
   clauses.push(...notReviewedParts);
 
+  // 6a. Verification outstanding at loop end — the findings file's surviving
+  //     `— [unverified]` tags, machine-read.
+  clauses.push(...unverifiedTagsBlock);
+
   // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
   //     shell actionlint would lint but we do not yet trust.
   clauses.push(...deferredBlock);
@@ -1179,6 +1382,10 @@ function composeReviewBody(
   // 6c. Test Plan rulings (non-capping) — a claim in the PR description that
   //     the reviewed tree does not bear out.
   clauses.push(...testPlanBlock);
+
+  // 6d. Repository proof boundaries (non-capping) — dimensions the context
+  //     planner recommends disclosing without claiming the code is defective.
+  clauses.push(...repositoryContextBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
@@ -1291,6 +1498,37 @@ const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
   );
   return (JSON.parse(json) as { body?: string }).body ?? '';
 };
+
+export function repositoryContextGate(planPath: string): string[] {
+  let plan: RosterPlan;
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8')) as RosterPlan;
+  } catch {
+    // An unreadable plan has nothing to disclose; the coverage gate owns plan
+    // validity and already fails closed on it.
+    return [];
+  }
+  // A PRESENT-but-invalid context is a corrupted plan, and every consumer of
+  // this field fails closed on one — coverage throws, the roster throws; the
+  // disclosure cannot be the one place that silently shrugs.
+  const context = repositoryContextOf(plan);
+  const dimensions = context?.unverifiedDimensions ?? [];
+  // The same cap discipline testPlanGate applies: unbounded entries joined
+  // into one disclosure drown the verdict they ride on — and at the schema
+  // bounds (128 x 512 chars) the paragraph outruns the review body's own
+  // budget before any other content gets a word in.
+  const MAX_DIMENSIONS = 5;
+  const disclosed = dimensions
+    .slice(0, MAX_DIMENSIONS)
+    .map(
+      (dimension) =>
+        `${mdField(dimension)} — the repository context marks this proof boundary as unverified`,
+    );
+  if (dimensions.length > MAX_DIMENSIONS) {
+    disclosed.push(`and ${dimensions.length - MAX_DIMENSIONS} more`);
+  }
+  return disclosed;
+}
 
 /**
  * Read the script-lint report the orchestrator wrote and turn it into verdict
@@ -1725,7 +1963,10 @@ export const composeReviewCommand: CommandModule = {
         ...countInlineFindings(drafted),
         draftedComments: drafted,
       },
-      await getCliVersion(),
+      // Same pin as `submit`: the startup stamp, not a version resolved at
+      // compose time — a shared runner can rewrite the install mid-session.
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+        (await getCliVersion()),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
@@ -1871,6 +2112,8 @@ export function verdictLine(r: ComposeReviewResult): string {
     'uncoverable-chunk': 'part of the diff cannot be read at all',
     'unreviewed-dimension': 'a dimension nobody reviewed',
     'context-unavailable': "the PR's existing discussion could not be read",
+    'findings-unverified-at-compose':
+      'findings were still unverified when the loop ended',
   };
   let line = `Verdict: ${label[r.event]}`;
   // Why an Approve was not available — but only when one would otherwise have been.
@@ -1884,19 +2127,24 @@ export function verdictLine(r: ComposeReviewResult): string {
   // A coverage cap never softens a Request changes — a confirmed blocker earned
   // that, and naming a constraint that did not bind would send the reader
   // looking for an effect that is not there — so the Approve clause is gated on
-  // the base having been an Approve at all. The unverified-blockers cap is the
-  // one exception, because it says the confirmation never happened, and its
-  // sentence must name what the reader would otherwise chase: a Comment posted
-  // over visible **[Critical]** comments reads as a contradiction until the
-  // line says why.
+  // the base having been an Approve at all. The unverified family is the
+  // exception — the delivery floor and the findings file's surviving tags both
+  // say the confirmation never happened — and the sentence must name what the
+  // reader would otherwise chase: a Comment posted over visible **[Critical]**
+  // comments reads as a contradiction until the line says why.
   if (
     r.baseEvent === 'REQUEST_CHANGES' &&
     r.event === 'COMMENT' &&
-    r.cappedBy.includes('criticals-unverified')
+    (r.cappedBy.includes('criticals-unverified') ||
+      r.cappedBy.includes('findings-unverified-at-compose'))
   ) {
     line +=
-      ' — a Request changes was NOT available: its blockers were never ' +
-      'verified (they are posted, disclosed as unverified)';
+      ' — a Request changes was NOT available: ' +
+      (r.cappedBy.includes('criticals-unverified')
+        ? 'its blockers were never verified (they are posted, disclosed as ' +
+          'unverified)'
+        : 'findings were still unverified when the loop ended (they are ' +
+          'posted, disclosed)');
   } else if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
     const reasons = r.cappedBy.map((c) => why[c] ?? c);
     if (r.downgraded) reasons.push('a presubmit check failed');

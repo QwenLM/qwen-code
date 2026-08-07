@@ -83,7 +83,6 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
-import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -448,6 +447,7 @@ export class GeminiClient {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
           resumeTokenCounts.outputTokenCount,
+          resumeTokenCounts.isEstimated,
         );
       } else {
         chat.setLastPromptTokenCount(
@@ -1825,7 +1825,6 @@ export class GeminiClient {
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
           threshold: AUTO_SKILL_THRESHOLD,
-          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
@@ -2026,12 +2025,21 @@ export class GeminiClient {
           m.pendingToolResultChars && m.pendingToolResultChars > 0
             ? ` (+${m.pendingToolResultChars} pending)`
             : '';
+        const virtualAfter =
+          (m.toolResultCharsAfter ?? 0) + (m.pendingToolResultChars ?? 0);
+        const targetNote =
+          m.toolResultsLowWatermark !== undefined
+            ? `, target ${m.toolResultsLowWatermark}` +
+              (virtualAfter > m.toolResultsLowWatermark
+                ? ' (soft-exceeded)'
+                : '')
+            : '';
         debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
             `tool result(s) (~${m.tokensSaved} tokens), history now ` +
-            `${m.toolResultCharsAfter}${pendingNote}, kept ${m.toolsKept} ` +
-            `tool result(s)`,
+            `${m.toolResultCharsAfter}${pendingNote}${targetNote}, kept ` +
+            `${m.toolsKept} tool result(s)`,
         );
       } else {
         debugLogger.info(
@@ -3947,15 +3955,16 @@ export class GeminiClient {
   ): Promise<ChatCompressionInfo> {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
-    const info = await this.getChat().tryCompress(
+    const previousChat = this.getChat();
+    const info = await previousChat.tryCompress(
       prompt_id,
       force,
       signal,
       customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      const chat = this.getChat();
-      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
+      const compressedHistory =
+        previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       if (
         !this.lastSessionStartContext &&
@@ -3975,7 +3984,10 @@ export class GeminiClient {
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
-      this.getChat().setLastPromptTokenCount(info.newTokenCount);
+      this.getChat().setLastPromptTokenCount(
+        info.newTokenCount,
+        info.newTokenCountIsEstimated ?? true,
+      );
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.

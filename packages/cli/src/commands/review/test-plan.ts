@@ -30,11 +30,12 @@
 // A third kind — **a test count** — is the one that motivated this command and
 // is deliberately NOT ruled as a contradiction. A count is only falsifiable
 // against the suite the author meant, and a Test Plan almost never says which
-// one; `build-test` runs the subset of workspaces the diff touched, which is
-// frequently a different set. Ruling "471 ≠ 472, contradiction" off that
-// mismatch would file a defect on arithmetic the command cannot do, and this
-// skill's one design philosophy is that a wrong comment costs more than a
-// missing one. So a count claim is reported as `differs`: both numbers, side by
+// one; `build-test` runs the workspaces the diff touches plus the workspaces
+// that depend on them, which is frequently a different set. Ruling
+// "471 ≠ 472, contradiction" off that mismatch would file a defect on
+// arithmetic the command cannot do, and this skill's one design philosophy is
+// that a wrong comment costs more than a missing one. So a count claim is
+// reported as `differs`: both numbers, side by
 // side, framed as claimed-vs-observed. That is what the finding was worth in the
 // first place — a note to the author, never a blocker.
 //
@@ -51,7 +52,11 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { git } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
-import { readWorkspacePackages } from './lib/workspaces.js';
+import {
+  hasUnmodeledWorkspaceGlob,
+  readWorkspaceGlobs,
+  readWorkspacePackages,
+} from './lib/workspaces.js';
 import type { BuildTestReport } from './build-test.js';
 import type { FileMetric } from './lib/report.js';
 
@@ -644,8 +649,25 @@ function ruleCommand(
     // No readable root manifest; workspace packages may still define scripts.
   }
   const defined = new Set<string>(rootScripts);
-  for (const pkg of readWorkspacePackages(worktree)) {
+  const { packages, skipped } = readWorkspacePackages(worktree);
+  for (const pkg of packages) {
     for (const s of pkg.scripts) defined.add(s);
+  }
+  // A skipped dir whose manifest still PARSES — no usable `name`, or shadowed
+  // by a later glob — has a fully readable scripts table (scripts need no
+  // `name` to enumerate), and discarding it would rule `unchecked` on evidence
+  // this check actually holds. Merge those scripts; reserve `unchecked` for
+  // the genuinely unreadable manifests.
+  const unreadable: string[] = [];
+  for (const dir of skipped) {
+    try {
+      const pkg = JSON.parse(
+        readFileSync(join(worktree, dir, 'package.json'), 'utf8'),
+      ) as { scripts?: Record<string, unknown> } | null;
+      for (const s of Object.keys(pkg?.scripts ?? {})) defined.add(s);
+    } catch {
+      unreadable.push(dir);
+    }
   }
   // No manifest could be read at all (a tree this command cannot inspect):
   // absent evidence, not evidence of absence.
@@ -657,20 +679,48 @@ function ruleCommand(
       note: 'no package manifest could be read',
     };
   }
-  return defined.has(script)
-    ? {
-        kind: 'command',
-        text,
-        verdict: 'reproduces',
-        note: `\`${script}\` is a defined script`,
-      }
-    : {
-        kind: 'command',
-        text,
-        verdict: 'contradicted',
-        observed: 'no package defines this script',
-        note: 'the Test Plan tells the reviewer to run a script that does not exist at the reviewed commit',
-      };
+  if (defined.has(script)) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'reproduces',
+      note: `\`${script}\` is a defined script`,
+    };
+  }
+  // A workspace layout this check cannot model (`packages/**`, an inner or
+  // prefix star) hides whole packages from the walker — they land in NEITHER
+  // `packages` nor `skipped`, so the script table may be silently incomplete.
+  // Absent evidence, not evidence of absence.
+  if (hasUnmodeledWorkspaceGlob(readWorkspaceGlobs(worktree))) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'unchecked',
+      note:
+        'the workspace globs use a shape this check does not model, so the ' +
+        'script table may be incomplete',
+    };
+  }
+  // A member the graph could not read may still define it — the same rule as
+  // the total absence above: absent evidence, not evidence of absence.
+  if (unreadable.length > 0) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'unchecked',
+      note:
+        `${unreadable.join(', ')} ${unreadable.length === 1 ? 'has' : 'have'} a ` +
+        'package.json this check could not read, so the script table may be ' +
+        'incomplete',
+    };
+  }
+  return {
+    kind: 'command',
+    text,
+    verdict: 'contradicted',
+    observed: 'no package defines this script',
+    note: 'the Test Plan tells the reviewer to run a script that does not exist at the reviewed commit',
+  };
 }
 
 function ruleCount(text: string, observed: number[]): TestPlanClaim {
