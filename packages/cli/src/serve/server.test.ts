@@ -5082,6 +5082,10 @@ describe('createServeApp', () => {
       expect(missingConsent.status).toBe(400);
       expect(missingConsent.body.error).toContain('explicit consent');
 
+      const denied = await upload('filename=demo.zip&consent=false');
+      expect(denied.status).toBe(400);
+      expect(denied.body.error).toContain('explicit consent');
+
       const unsupported = await upload('filename=demo.tgz&consent=true');
       expect(unsupported.status).toBe(400);
       expect(unsupported.body.error).toContain('.zip or .tar.gz');
@@ -5093,6 +5097,7 @@ describe('createServeApp', () => {
         'filename=..%5Cevil.zip&consent=true',
         'filename=bad%01name.zip&consent=true',
         `filename=${encodeURIComponent(`${'a'.repeat(252)}.zip`)}&consent=true`,
+        `filename=${encodeURIComponent(`${'é'.repeat(128)}.zip`)}&consent=true`,
       ]) {
         const invalid = await upload(query);
         expect(invalid.status).toBe(400);

@@ -7,7 +7,7 @@
 export const REDACTED_URL_CREDENTIAL = '***REDACTED***';
 
 const URL_CREDENTIALS_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)(?:[^/\s]+@)+/gi;
-const UPLOAD_IDENTITY_PATTERN = /\bupload:v1:[^:\s]+:/gu;
+const UPLOAD_IDENTITY_PATTERN = /\bupload:v1:[0-9a-fA-F-]+:/gu;
 
 /**
  * Redacts userinfo credentials and opaque upload identity tokens from

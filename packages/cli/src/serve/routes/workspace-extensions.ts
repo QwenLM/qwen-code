@@ -90,6 +90,24 @@ const parseExtensionArchiveFilename = (
   return null;
 };
 
+// Runs before the body parser so invalid uploads are rejected without
+// buffering up to the full archive limit.
+const extensionArchiveUploadMetadata: RequestHandler = (req, res, next) => {
+  if (req.query['consent'] !== 'true') {
+    res.status(400).json({
+      error: 'Extension installation requires explicit consent',
+    });
+    return;
+  }
+  if (!parseExtensionArchiveFilename(req.query['filename'])) {
+    res.status(400).json({
+      error: '`filename` must name a .zip or .tar.gz archive',
+    });
+    return;
+  }
+  next();
+};
+
 const parseExtensionScope = (
   body: Record<string, unknown>,
   res: Response,
@@ -701,6 +719,7 @@ export function registerWorkspaceExtensionRoutes(
     app.post(
       `${base}/install-archive`,
       mutate({ strict: true }),
+      extensionArchiveUploadMetadata,
       extensionArchiveBodyParser,
       async (req, res) => {
         const ctrl = resolve(req, res, true);
@@ -713,21 +732,9 @@ export function registerWorkspaceExtensionRoutes(
           ) {
             return;
           }
-          if (req.query['consent'] !== 'true') {
-            res.status(400).json({
-              error: 'Extension installation requires explicit consent',
-            });
-            return;
-          }
           const archiveName = parseExtensionArchiveFilename(
             req.query['filename'],
-          );
-          if (!archiveName) {
-            res.status(400).json({
-              error: '`filename` must name a .zip or .tar.gz archive',
-            });
-            return;
-          }
+          )!;
           if (!req.is('application/octet-stream')) {
             res.status(415).json({
               error:
