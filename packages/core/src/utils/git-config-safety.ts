@@ -110,11 +110,12 @@ const SECTION_HEADER = /^([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/;
 
 /**
  * Minimal git config parser: enough to identify section/key pairs and raw
- * values. Understands `[section]` and `[section "subsection"]` headers
- * (including the inline `[section] key = value` form), `key = value` lines,
- * continuations, and `#` / `;` comments. Includes are not resolved —
- * `include` / `includeIf` entries make the probe fail closed instead,
- * because their targets can live outside `.git` (e.g. tracked files).
+ * values. Understands `[section]`, `[section "subsection"]`, and the
+ * deprecated `[section.subsection]` headers (including the inline
+ * `[section] key = value` form), `key = value` lines, continuations, and
+ * `#` / `;` comments. Includes are not resolved — `include` / `includeIf`
+ * entries make the probe fail closed instead, because their targets can
+ * live outside `.git` (e.g. tracked files).
  */
 function parseGitConfig(content: string): ConfigEntry[] {
   const entries: ConfigEntry[] = [];
@@ -180,6 +181,17 @@ function parseGitConfig(content: string): ConfigEntry[] {
       }
       section = match[1]!.toLowerCase();
       subsection = match[2] ?? null;
+      if (subsection === null) {
+        // Deprecated `[section.subsection]` header: git splits at the
+        // FIRST dot and case-folds the subsection (the quoted form is
+        // case-sensitive instead). `section` is already lowercased, so
+        // the slice carries both behaviors.
+        const dot = section.indexOf('.');
+        if (dot > 0) {
+          subsection = section.slice(dot + 1);
+          section = section.slice(0, dot);
+        }
+      }
       // Inline form: `[section] key = value` on the same line.
       const rest = line.slice(close + 1).trim();
       if (rest) recordEntry(rest);
@@ -336,6 +348,10 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
           return true;
         }
         break;
+      case 'pager':
+        // Dotted `[pager.<cmd>]` headers only reach this branch via the
+        // dot-form split above; keep the flat-section catch-all's verdict.
+        return true;
       default:
         break;
     }

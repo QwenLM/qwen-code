@@ -109,6 +109,46 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
 
+  it.each([
+    ['[diff.evil]\n\tcommand = /tmp/evil\n', 'dot-diff-command'],
+    ['[diff.evil]\n\ttextconv = /tmp/evil\n', 'dot-diff-textconv'],
+    ['[filter.evil]\n\tclean = /tmp/evil\n', 'dot-filter-clean'],
+    ['[gpg.ssh]\n\tprogram = /tmp/evil\n', 'dot-gpg-program'],
+    [
+      '[remote.origin]\n\turl = .\n\tuploadpack = /tmp/evil\n',
+      'dot-remote-uploadpack',
+    ],
+    ['[pager.log]\n\trun = /tmp/evil\n', 'dot-pager'],
+    ['[DIFF.EVIL]\n\tCOMMAND = /tmp/evil\n', 'dot-case'],
+  ] as Array<[string, string]>)(
+    'flags deprecated dot-form subsection header %s',
+    (config, label) => {
+      const repo = makeRepo(label, config);
+      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+    },
+  );
+
+  it('splits dot-form headers at the first dot only', () => {
+    // git keeps the remaining dots in the subsection
+    // (`[diff.evil.suffix]` === `[diff "evil.suffix"]`); a last-dot split
+    // would leave section `diff.evil` and miss the attack.
+    const repo = makeRepo(
+      'dot-first-dot',
+      '[diff.evil.suffix]\n\tcommand = /tmp/evil\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('does not flag benign dot-form subsections', () => {
+    // Old git versions wrote branch/remote sections in the deprecated dot
+    // form; they must not start prompting.
+    const repo = makeRepo(
+      'dot-benign',
+      '[branch.main]\n\tremote = origin\n\tmerge = refs/heads/main\n[remote.origin]\n\turl = https://example.com/repo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+  });
+
   it('does not flag core.fsmonitor booleans (built-in daemon / disabled)', () => {
     const enabled = makeRepo('fsm-true', '[core]\n\tfsmonitor = true\n');
     expect(gitConfigMayExecutePrograms(enabled)).toBe(false);
