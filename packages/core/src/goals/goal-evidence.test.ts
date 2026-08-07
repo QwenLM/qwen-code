@@ -237,6 +237,37 @@ describe('Goal evidence catalog', () => {
     });
   });
 
+  it('keeps the catalog whole when a whitespace-only record sits past the entry cap', () => {
+    const records = [
+      record('cursor', 'system', {
+        provenance: 'goal_control',
+        subtype: 'goal_state',
+      }),
+      record('whitespace-only', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        text: ' \t\n ',
+      }),
+      ...Array.from({ length: 100 }, (_, index) =>
+        record(`evidence-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: `output ${index}`,
+        }),
+      ),
+    ];
+    const input = { records, goal: goal(), permit: permit() };
+
+    // A whitespace-only record trims to an empty preview, so catalogEvidence
+    // can never admit it; the truncation probe must agree and must not flag
+    // the catalog truncated on that record alone.
+    expect(buildGoalEvidenceCatalog(input).truncated).toBe(false);
+    expect(buildGoalEvidenceCheckpointWindow(input)).toMatchObject({
+      truncated: false,
+      shouldCheckpoint: true,
+    });
+  });
+
   it('fails closed when truncation evicts a repeated blocker turn', () => {
     const checkpointGoal: GoalRecord = {
       ...goal('checkpoint-1'),

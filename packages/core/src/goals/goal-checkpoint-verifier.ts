@@ -24,6 +24,12 @@ import {
 const GOAL_CHECKPOINT_VERIFIER_TIMEOUT_MS = 30_000;
 const GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
 
+// Core assigns each claim id during materialization and counts those bytes
+// against the cap, but the model cannot anticipate them. Advertise a
+// conservative budget so compliant output clears the enforced cap.
+export const GOAL_CHECKPOINT_ADVERTISED_CLAIM_BYTES =
+  GOAL_CHECKPOINT_CLAIM_MAX_BYTES - 2_048;
+
 const GOAL_CHECKPOINT_VERIFIER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -64,7 +70,7 @@ const GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT = `You are an independent Goal Evid
 
 Each output claim must cite one or more input IDs in sourceRefs. Preserve evidence semantics exactly: never change a source proofKind, and do not combine sources with different proofKind values into one claim. "delivered_output" proves only that content was delivered, "external_fact" supports external facts, and "user_input" supports what the user actually said or authorized.
 
-previousClaims are already verified checkpoint claims. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. The combined UTF-8 size of all output claims must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes, so compress the sources into dense claims. Do not make a terminal decision.
+previousClaims are already verified checkpoint claims; to carry one forward, cite its id in sourceRefs. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. The combined UTF-8 size of all output claims must stay within ${GOAL_CHECKPOINT_ADVERTISED_CLAIM_BYTES} bytes, so compress the sources into dense claims. Do not make a terminal decision.
 
 Return exactly one JSON object with a non-empty claims array. Each claim must contain exactly proofKind, claim, and sourceRefs. Include no markdown fence, preamble, extra key, or commentary.`;
 
@@ -92,7 +98,6 @@ function verifierContents(input: GoalCheckpointVerifierInput): Content[] {
       id: claim.id,
       proofKind: claim.proofKind,
       claim: claim.claim,
-      sourceRefs: [...claim.sourceRefs],
     })),
     evidence: input.evidence.map((record) => ({
       uuid: record.uuid,

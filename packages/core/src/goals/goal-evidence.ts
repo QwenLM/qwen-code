@@ -597,7 +597,11 @@ function hasCatalogEligibleEvidence(
     return false;
   }
   for (const part of record.message?.parts ?? []) {
-    if (part.thought !== true && typeof part.text === 'string' && part.text) {
+    if (
+      part.thought !== true &&
+      typeof part.text === 'string' &&
+      part.text.trim()
+    ) {
       return true;
     }
     if (
