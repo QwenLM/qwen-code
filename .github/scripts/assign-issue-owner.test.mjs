@@ -260,7 +260,7 @@ describe('assign-issue-owner: workflow invariants', () => {
   });
 
   it('fires on label changes without cancelling an in-flight assignment', () => {
-    assert.deepEqual(doc.on.issues.types, ['labeled', 'reopened']);
+    assert.deepEqual(doc.on.issues.types, ['labeled']);
     assert.equal(doc.concurrency['cancel-in-progress'], false);
   });
 });

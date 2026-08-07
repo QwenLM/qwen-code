@@ -19,7 +19,7 @@ name: 'Assign issue owner'
 
 on:
   issues:
-    types: ['labeled', 'reopened']
+    types: ['labeled']
   workflow_dispatch:
     inputs:
       number:
