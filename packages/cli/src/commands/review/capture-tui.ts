@@ -603,14 +603,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     for (const s of REAP_SIGNALS) process.removeListener(s, onSignal);
   };
   // The success tail after the reap is synchronous (freeze render up to its
-  // belt, two writes): a signal landing there is QUEUED, and removing the
-  // listeners before the loop turns swallows it — the process then exits 0
-  // as if nothing happened (measured on the bundled runtime: SIGTERM during
-  // a fake render → exit 0, handler never ran). One turn of the loop lets
-  // the queued signal dispatch to the handler — which reaps (a no-op by
-  // then) and re-raises — BEFORE the listeners go away.
+  // belt, two writes): a signal landing there is QUEUED in libuv's self-pipe,
+  // and removing the listeners before that pipe is read swallows it — the
+  // process then exits 0 as if nothing happened (measured on the bundled
+  // runtime: SIGTERM during a fake render → exit 0, handler never ran).
+  // setImmediate, NOT a 0ms timer: signals dispatch in the poll phase, and
+  // the check phase (setImmediate) is the only one that runs AFTER poll in
+  // the same iteration. A timer runs in the timers phase BEFORE poll — when
+  // ≥1ms elapses between its creation and the next iteration (a loaded
+  // runner), it fires first and releases the listeners with the signal still
+  // in the pipe (measured: 12–16% of SIGTERMs during a blocked sync section
+  // swallowed with sleep(0), 0% with setImmediate).
   const drainSignalsThenRelease = async (): Promise<void> => {
-    await sleep(0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     releaseSignals();
   };
   function onSignal(sig: NodeJS.Signals): void {
