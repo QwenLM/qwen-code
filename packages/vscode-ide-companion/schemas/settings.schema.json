@@ -3350,7 +3350,7 @@
               }
             },
             "policyTools": {
-              "description": "Per-tool overrides keyed by policy tool name: settings (default arguments), runtime (timeoutMs, maxConcurrency), and modelAccess (enabled, defaultArguments, lockedArguments, parameterSchema, output).",
+              "description": "Per-tool overrides keyed by policy tool name: settings (default arguments), runtime (timeoutMs), and modelAccess (enabled, defaultArguments, lockedArguments, parameterSchema, output).",
               "type": "object",
               "additionalProperties": true
             }

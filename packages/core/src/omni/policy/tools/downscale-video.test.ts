@@ -80,6 +80,7 @@ describe('OmniDownscaleVideoTool', () => {
     expect(tool.name).toBe(OMNI_DOWNSCALE_VIDEO_TOOL_NAME);
     expect(tool.mediaPolicyDescriptor).toEqual({
       kind: 'media_policy',
+      version: '1',
       inputMediaTypes: ['video'],
       outputs: [
         {

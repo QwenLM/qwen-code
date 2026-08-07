@@ -36,8 +36,10 @@ const TMP_GRACE_MS = 3600_000;
  * delete the live invocation's work directory out from under its tool.
  * One hour comfortably exceeds the 10-minute default policy-tool timeout
  * (a directory's mtime is set at creation), so anything older is a crash
- * leftover, not an in-flight run. */
-const STAGING_GRACE_MS = 3600_000;
+ * leftover, not an in-flight run. Exported so config validation can cap
+ * `policyTools.<tool>.runtime.timeoutMs` below it — a timeout the sweep
+ * could outrun would let a live invocation's staging be deleted. */
+export const STAGING_GRACE_MS = 3600_000;
 /** Default retention for quarantined invocations (storage design §7). */
 const QUARANTINE_RETENTION_DAYS = 7;
 /** Default size budget for the quarantine area (storage design §7). */

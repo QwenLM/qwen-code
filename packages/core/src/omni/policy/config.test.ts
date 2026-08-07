@@ -419,12 +419,69 @@ describe('normalizeOmniProcessingConfig', () => {
           p: {
             mediaTypes: ['image'],
             toolName: 'omni_downsample_image',
+            origins: ['user', 'tool', 'policy'],
             output: { source: 'keep', reprocessMedia: true },
           },
         },
       });
       const p = config.fixedPolicies.find((x) => x.id === 'p');
       expect(p?.output).toEqual({ reprocessMedia: true, source: 'keep' });
+    });
+
+    it('rejects reprocessMedia when no policy in the set accepts origin "policy"', () => {
+      // Derivatives re-enter matching with origin 'policy'; with no policy
+      // accepting that origin, reprocessMedia can never take effect.
+      expect(() =>
+        normalize({
+          fixedPolicies: {
+            p: {
+              mediaTypes: ['image'],
+              toolName: 'omni_downsample_image',
+              output: { source: 'keep', reprocessMedia: true },
+            },
+          },
+        }),
+      ).toThrow(
+        'omni.processing.fixedPolicies: "p" sets output.reprocessMedia, ' +
+          'but no policy in this set accepts origin "policy"',
+      );
+    });
+
+    it('accepts reprocessMedia when ANOTHER policy in the set accepts origin "policy"', () => {
+      expect(() =>
+        normalize({
+          fixedPolicies: {
+            p: {
+              mediaTypes: ['image'],
+              toolName: 'omni_downsample_image',
+              output: { source: 'keep', reprocessMedia: true },
+            },
+            q: {
+              mediaTypes: ['image'],
+              toolName: 'omni_downsample_image',
+              origins: ['policy'],
+            },
+          },
+        }),
+      ).not.toThrow();
+    });
+
+    it('applies the inert-reprocessMedia check to the transport-guard set independently', () => {
+      expect(() =>
+        normalize({
+          transportGuardPolicies: {
+            g: {
+              mediaTypes: ['image'],
+              toolName: 'omni_downsample_image',
+              output: { reprocessMedia: true },
+            },
+          },
+        }),
+      ).toThrow(
+        'omni.processing.transportGuard.policies: "g" sets ' +
+          'output.reprocessMedia, but no policy in this set accepts ' +
+          'origin "policy"',
+      );
     });
 
     it('rejects invalid when-conditions via the shared validator (§13 #5)', () => {

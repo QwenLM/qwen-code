@@ -27,6 +27,7 @@ import {
   ToolNames,
   buildSkillLlmContent,
   computeThresholds,
+  isMediaPolicyToolHiddenFromModel,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -150,6 +151,13 @@ export async function collectContextData(
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
     if (toolRegistry?.isDeferredAndHidden(tool.name)) {
+      continue;
+    }
+    // Same alignment rule for omni media-policy tools: fixed-only tools
+    // (declared descriptor, modelAccess not enabled) are stripped from
+    // getFunctionDeclarations() and cost the model zero prompt tokens, so
+    // listing them here would make the breakdown sum exceed allToolsTokens.
+    if (isMediaPolicyToolHiddenFromModel(config, tool)) {
       continue;
     }
     const toolJsonStr = JSON.stringify(tool.schema);

@@ -3860,7 +3860,7 @@ const SETTINGS_SCHEMA = {
             default: {} as Record<string, Record<string, unknown> | null>,
             description:
               'Per-tool overrides keyed by policy tool name: settings ' +
-              '(default arguments), runtime (timeoutMs, maxConcurrency), ' +
+              '(default arguments), runtime (timeoutMs), ' +
               'and modelAccess (enabled, defaultArguments, lockedArguments, ' +
               'parameterSchema, output).',
             showInDialog: false,

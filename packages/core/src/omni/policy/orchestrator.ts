@@ -350,6 +350,23 @@ async function runFixedPoliciesUnbounded(
   for (let i = 0; i < items.length && !budgetExhausted; i++) {
     const item = items[i];
     if (!item.process) continue;
+    // D9: animated images (frameCount > 1) never enter image-policy
+    // matching — sharp multi-frame re-encoding is out of scope, and a
+    // silent single-frame flattening must be impossible. An over-limit
+    // animated image is handled by the transport guard's explicit
+    // fail-closed omission instead. Still images are unaffected: probes
+    // report no frameCount for them, which reads as a single frame.
+    if (
+      item.recognized.modality === 'image' &&
+      (item.recognized.metadata.frameCount ?? 1) > 1
+    ) {
+      debugLogger.debug(
+        `animated image ${item.label} ` +
+          `(${item.recognized.metadata.frameCount} frames) excluded from ` +
+          `policy matching (D9)`,
+      );
+      continue;
+    }
     for (const policy of policies) {
       if (!policy.mediaTypes.includes(item.recognized.modality)) continue;
       if (!policy.origins.includes(item.origin)) continue;
@@ -547,40 +564,54 @@ async function executePolicy(
   const fingerprint = computePolicyFingerprint(
     policy.toolName,
     effectiveArguments,
+    descriptor.version,
   );
   const hit = await cache.get(item.sha256, fingerprint);
   if (hit) {
-    const objectPath = store.objectPathFor(hit.degradedSha256, hit.extension);
-    const stat = await fs.lstat(objectPath).catch(() => undefined);
-    if (stat?.isFile() && !stat.isSymbolicLink()) {
-      // Content verification before reuse: the cache file lives in the
-      // workspace and is only shape-validated on load, so the bytes at
-      // the addressed path must actually hash to the entry's identity —
-      // otherwise a poisoned cache (or a corrupted store) would silently
-      // substitute foreign media as "the degraded derivative".
-      const actualSha256 = await hashFileSha256(objectPath, signal);
-      if (actualSha256 === hit.degradedSha256) {
-        const recognized = await recognizeMediaFile(objectPath, { signal });
-        debugLogger.debug(
-          `degradation cache hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}…`,
-        );
-        return {
-          outcome: 'cache_hit',
-          derived: [
-            {
-              filePath: objectPath,
-              recognized,
-              sha256: hit.degradedSha256,
-              disclosure: hit.disclosure,
-              degraded: true,
-            },
-          ],
-        };
+    try {
+      const objectPath = store.objectPathFor(hit.degradedSha256, hit.extension);
+      const stat = await fs.lstat(objectPath).catch(() => undefined);
+      if (stat?.isFile() && !stat.isSymbolicLink()) {
+        // Content verification before reuse: the cache file lives in the
+        // workspace and is only shape-validated on load, so the bytes at
+        // the addressed path must actually hash to the entry's identity —
+        // otherwise a poisoned cache (or a corrupted store) would silently
+        // substitute foreign media as "the degraded derivative".
+        const actualSha256 = await hashFileSha256(objectPath, signal);
+        if (actualSha256 === hit.degradedSha256) {
+          const recognized = await recognizeMediaFile(objectPath, { signal });
+          debugLogger.debug(
+            `degradation cache hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}…`,
+          );
+          return {
+            outcome: 'cache_hit',
+            derived: [
+              {
+                filePath: objectPath,
+                recognized,
+                sha256: hit.degradedSha256,
+                disclosure: hit.disclosure,
+                degraded: true,
+              },
+            ],
+          };
+        }
       }
+    } catch (err) {
+      // Verification errors (hash/probe I/O races, a hostile entry whose
+      // components objectPathFor rejects) must not abort the run: the
+      // entry is dropped below and the policy re-transcodes from source.
+      // A caller abort is not a verification failure — propagate it.
+      if (signal?.aborted) throw err;
+      debugLogger.debug(
+        `degradation cache hit could not be verified for policy=${policy.id}: ` +
+          `${err instanceof Error ? err.message : String(err)}; ` +
+          `dropping the entry and re-transcoding`,
+      );
     }
-    // Stale or mismatching: the derivative left the store (GC, manual
-    // deletion) or its bytes no longer match the entry. Drop every entry
-    // pointing at it and re-transcode.
+    // Stale, mismatching, or unverifiable: the derivative left the store
+    // (GC, manual deletion) or its bytes no longer match the entry. Drop
+    // every entry pointing at it and re-transcode.
     await cache.removeByDegradedSha256(hit.degradedSha256);
   }
 

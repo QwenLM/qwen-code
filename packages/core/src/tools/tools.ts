@@ -184,6 +184,13 @@ export interface MediaPolicyToolDescriptor {
   outputs: MediaPolicyToolOutputSpec[];
   /** JSON schema for `omni.processing.policyTools.<name>.settings`. */
   settingsSchema?: object;
+  /**
+   * Transform-semantics version, part of the degradation-cache
+   * fingerprint (decision D2). Bump it whenever the tool starts producing
+   * different bytes for the same input and arguments (encoder change,
+   * default pipeline change), so stale cached derivatives are not reused.
+   */
+  version?: string;
 }
 
 /**

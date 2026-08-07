@@ -7,6 +7,7 @@
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
 import type { OmniModality } from '../recognition.js';
+import { STAGING_GRACE_MS } from '../recovery.js';
 import { validateFixedPolicyCondition } from './conditions.js';
 import type { FixedPolicyCondition } from './conditions.js';
 import type {
@@ -565,6 +566,17 @@ function validatePolicyTools(
       const timeoutMs = entry['runtime']['timeoutMs'];
       if (timeoutMs !== undefined) {
         requirePositiveInteger(timeoutMs, `${where}.runtime.timeoutMs`);
+        // §5 staging lifecycle: the startup sweep treats staging entries
+        // older than STAGING_GRACE_MS as crash leftovers. A tool allowed
+        // to run longer than the grace window could have its live staging
+        // directory deleted out from under it by another process.
+        if ((timeoutMs as number) >= STAGING_GRACE_MS) {
+          fail(
+            `${where}.runtime.timeoutMs: must be below the staging sweep ` +
+              `grace window (${STAGING_GRACE_MS}ms) so a live invocation's ` +
+              `staging directory is never reclaimed mid-run`,
+          );
+        }
       }
     }
 
@@ -717,6 +729,27 @@ export function normalizeOmniProcessingConfig(
         `${uncovered.join(', ')} — the merged set must cover image, video, ` +
         `and audio`,
     );
+  }
+
+  // `output.reprocessMedia` re-enters derivatives into matching with
+  // origin 'policy'. Within a set where no policy accepts that origin the
+  // flag can never take effect — a silent misconfiguration, so it fails
+  // like every other contradictory setting. Each stage runs with its own
+  // policy set, so the check is per set.
+  for (const [where, set] of [
+    ['omni.processing.fixedPolicies', fixedPolicies],
+    ['omni.processing.transportGuard.policies', transportGuardPolicies],
+  ] as const) {
+    const inert = set.filter((p) => p.output.reprocessMedia);
+    if (inert.length > 0 && !set.some((p) => p.origins.includes('policy'))) {
+      fail(
+        `${where}: ${inert.map((p) => `"${p.id}"`).join(', ')} sets ` +
+          `output.reprocessMedia, but no policy in this set accepts ` +
+          `origin "policy" — derivatives would re-enter matching and ` +
+          `never match. Add "policy" to some policy's origins or drop ` +
+          `reprocessMedia.`,
+      );
+    }
   }
 
   return { fixedPolicies, transportGuardPolicies, limits };

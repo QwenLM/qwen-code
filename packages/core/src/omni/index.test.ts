@@ -1076,6 +1076,61 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(result.disclosure).toBe('downsampled to 1568px');
   });
 
+  it('chains preprocessing and guard disclosures instead of replacing (D8)', async () => {
+    // Preprocessing degrades once (disclosure A) but the derivative is
+    // still over the byte cap; the guard degrades AGAIN (disclosure B).
+    // Both lossy steps must reach the model — a replaced disclosure would
+    // silently hide the first degradation.
+    const preprocessedPath = path.join(tmpDir, 'objects', 'pre.jpg');
+    const guardedPath = path.join(tmpDir, 'objects', 'guarded.jpg');
+    const runMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: preprocessedPath,
+            recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+            sha256: 'b'.repeat(64),
+            disclosure: 'downsampled to 1568px',
+            degraded: true,
+          },
+        ],
+        records: [],
+      })
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: guardedPath,
+            recognized: DEGRADED_RECOGNIZED,
+            sha256: 'c'.repeat(64),
+            disclosure: 're-encoded at quality 60',
+            degraded: true,
+          },
+        ],
+        records: [],
+      });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [IMG_GUARD],
+      }),
+    );
+
+    expect(runMock).toHaveBeenCalledTimes(2);
+    // Guard pass ran on the PREPROCESSED derivative, not the source.
+    expect(runMock.mock.calls[1][1]).toMatchObject({
+      filePath: preprocessedPath,
+    });
+    expect(result.omission).toBeUndefined();
+    expect(result.disclosure).toBe(
+      'downsampled to 1568px；re-encoded at quality 60',
+    );
+    expect(result.degraded).toBe(true);
+    expect(result.sha256).toBe('c'.repeat(64));
+  });
+
   it('stops after maxTransportPasses passes and omits when still violating', async () => {
     let call = 0;
     const runMock = vi.fn().mockImplementation(async () => {

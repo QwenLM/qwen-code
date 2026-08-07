@@ -75,6 +75,7 @@ describe('OmniDownsampleAudioTool', () => {
     expect(tool.name).toBe(OMNI_DOWNSAMPLE_AUDIO_TOOL_NAME);
     expect(tool.mediaPolicyDescriptor).toEqual({
       kind: 'media_policy',
+      version: '1',
       inputMediaTypes: ['audio'],
       outputs: [
         {

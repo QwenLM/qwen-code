@@ -377,6 +377,113 @@ describe('runFixedPolicies', () => {
     expect(entry?.degradedSha256).toBe(sha256Of(DEGRADED_BYTES));
   });
 
+  it('drops an unverifiable cache entry (probe throws) and re-executes instead of failing', async () => {
+    const plantedBytes = 'previously-degraded-bytes';
+    const plantedSha = sha256Of(plantedBytes);
+    const plantedPath = store.objectPathFor(plantedSha, '.jpg');
+    await fs.mkdir(path.dirname(plantedPath), { recursive: true });
+    await fs.writeFile(plantedPath, plantedBytes);
+    const cache = new OmniDegradationCache(store.getOmniRootDir());
+    const fingerprint = computePolicyFingerprint('omni_downsample_image', {
+      maxDimension: 1568,
+    });
+    await cache.put(sha256Of(SOURCE_BYTES), fingerprint, {
+      degradedSha256: plantedSha,
+      extension: '.jpg',
+      disclosure: 'cached disclosure',
+      mimeType: 'image/jpeg',
+    });
+    // The cached derivative's bytes hash correctly but its probe fails
+    // (corrupted container, ffprobe I/O race). Verification must drop the
+    // entry and fall through to a fresh transcode — not abort the run.
+    recognizeMediaFileMock.mockImplementation(async (filePath: string) => {
+      if (filePath === plantedPath) throw new Error('probe failed');
+      if (filePath.endsWith('.jpg')) return DEGRADED_RECOGNIZED;
+      return recognizedImage();
+    });
+    mockToolSuccess();
+
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+    expect(records).toEqual([
+      expect.objectContaining({ outcome: 'succeeded' }),
+    ]);
+    expect(deliveries[0].sha256).toBe(sha256Of(DEGRADED_BYTES));
+    // Self-heal: the unverifiable entry was dropped and re-written with
+    // the fresh derivative's identity.
+    const entry = await cache.get(sha256Of(SOURCE_BYTES), fingerprint);
+    expect(entry?.degradedSha256).toBe(sha256Of(DEGRADED_BYTES));
+  });
+
+  it('keys the degradation cache with the descriptor version (D2)', async () => {
+    config = makeConfig({
+      omni_downsample_image: { ...DESCRIPTOR, version: '7' },
+    });
+    mockToolSuccess();
+    await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    const cache = new OmniDegradationCache(store.getOmniRootDir());
+    // The entry lives under the versioned fingerprint only: bumping the
+    // tool version must invalidate derivatives produced by older code.
+    await expect(
+      cache.get(
+        sha256Of(SOURCE_BYTES),
+        computePolicyFingerprint(
+          'omni_downsample_image',
+          { maxDimension: 1568 },
+          '7',
+        ),
+      ),
+    ).resolves.toMatchObject({ degradedSha256: sha256Of(DEGRADED_BYTES) });
+    await expect(
+      cache.get(
+        sha256Of(SOURCE_BYTES),
+        computePolicyFingerprint('omni_downsample_image', {
+          maxDimension: 1568,
+        }),
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it('excludes animated images (frameCount > 1) from policy matching (D9)', async () => {
+    source = {
+      ...source,
+      recognized: recognizedImage({
+        metadata: { width: 4000, height: 3000, frameCount: 12 },
+      }),
+    };
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    expect(executeToolCallMock).not.toHaveBeenCalled();
+    expect(records).toEqual([]);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].filePath).toBe(sourcePath);
+    expect(deliveries[0].degraded).toBeUndefined();
+  });
+
+  it('still matches a single-frame image with an explicit frameCount of 1', async () => {
+    source = {
+      ...source,
+      recognized: recognizedImage({
+        metadata: { width: 4000, height: 3000, frameCount: 1 },
+      }),
+    };
+    mockToolSuccess();
+    const { records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+    expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+  });
+
   it('treats a hash-identical output as a no-op: source delivered, nothing cached', async () => {
     mockToolSuccess({ bytes: SOURCE_BYTES });
     // Identical bytes hash identically even though the mock labels the
@@ -593,6 +700,126 @@ describe('runFixedPolicies', () => {
     });
     expect(records[0]).toMatchObject({ outcome: 'failed' });
     expect(records[0].error).toContain('lossy but carries no omniDisclosure');
+  });
+
+  it('fails the run when the tool succeeds but returns no policy artifacts', async () => {
+    executeToolCallMock.mockImplementation(
+      async (_config: Config, request: ToolCallRequestInfo) => ({
+        callId: request.callId,
+        responseParts: [],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        // No policyArtifacts at all — e.g. a tool that "succeeded" without
+        // emitting through the artifact protocol.
+        policyArtifacts: undefined,
+      }),
+    );
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    expect(records[0]).toMatchObject({ outcome: 'failed' });
+    expect(records[0].error).toContain('produced no policy artifacts');
+    expect(deliveries[0].filePath).toBe(sourcePath);
+  });
+
+  it('rejects an artifact whose recognized media type is not declared by the descriptor', async () => {
+    // The tool writes a GIF, but the descriptor only declares image/jpeg
+    // outputs. Recognition of the actual bytes is authoritative — the
+    // artifact's own declared mimeType never enters the check.
+    recognizeMediaFileMock.mockImplementation(async (filePath: string) => {
+      if (filePath.endsWith('.gif')) {
+        return {
+          modality: 'image' as const,
+          detectedMimeType: 'image/gif',
+          sizeBytes: DEGRADED_BYTES.length,
+          metadata: {},
+        };
+      }
+      return recognizedImage();
+    });
+    mockToolSuccess({ fileName: 'out.gif' });
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    expect(records[0]).toMatchObject({ outcome: 'failed' });
+    expect(records[0].error).toContain('undeclared media type image/gif');
+    expect(deliveries[0].filePath).toBe(sourcePath);
+  });
+
+  it('rejects an artifact whose declared kind mismatches the recognized content', async () => {
+    // Bytes recognize as image/jpeg (declared by the descriptor), but the
+    // artifact claims to be audio — the cross-check must fail closed.
+    executeToolCallMock.mockImplementation(
+      async (_config: Config, request: ToolCallRequestInfo) => {
+        const outputDir = request.args['outputDir'] as string;
+        await fs.writeFile(path.join(outputDir, 'out.jpg'), DEGRADED_BYTES);
+        return {
+          callId: request.callId,
+          responseParts: [],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          policyArtifacts: {
+            toolName: request.name,
+            invocationId: request.callId,
+            executionOrigin: request.executionOrigin,
+            artifacts: [
+              {
+                kind: 'audio',
+                storage: 'workspace',
+                title: 'out.jpg',
+                workspacePath: 'out.jpg',
+                metadata: { omniDisclosure: 'x' },
+              },
+            ],
+          },
+        };
+      },
+    );
+    const { records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+    expect(records[0]).toMatchObject({ outcome: 'failed' });
+    expect(records[0].error).toContain(
+      'declares kind audio but contains image content',
+    );
+  });
+
+  it('fails the run when a required media output was not produced (§5 completeness)', async () => {
+    // Descriptor: jpeg is required, png is an optional lossless extra. The
+    // tool only produces the png — it validates fine on its own, so only
+    // assertRequiredOutputsPresent can catch the missing jpeg.
+    const twoOutputDescriptor: MediaPolicyToolDescriptor = {
+      kind: 'media_policy',
+      inputMediaTypes: ['image'],
+      outputs: [
+        {
+          kind: 'media',
+          mimeTypes: ['image/jpeg'],
+          required: true,
+          lossy: true,
+        },
+        { kind: 'media', mimeTypes: ['image/png'], required: false },
+      ],
+    };
+    const twoOutputConfig = makeConfig({
+      omni_downsample_image: twoOutputDescriptor,
+    });
+    mockToolSuccess({ fileName: 'out.png', disclosure: undefined });
+    const { deliveries, records } = await runFixedPolicies(
+      twoOutputConfig,
+      source,
+      { store, policies: [makePolicy()] },
+    );
+    expect(records[0]).toMatchObject({ outcome: 'failed' });
+    expect(records[0].error).toContain(
+      'did not produce its required image/jpeg output',
+    );
+    expect(deliveries[0].filePath).toBe(sourcePath);
   });
 
   it('rejects a tool without a media-policy descriptor', async () => {

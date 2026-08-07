@@ -19,6 +19,7 @@ import type {
   ChatRecordingService,
   ToolArtifact,
   PolicyArtifactBatch,
+  ToolExecutionOrigin,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
@@ -1382,11 +1383,22 @@ export class CoreToolScheduler {
   private async processToolResultImages(
     responseParts: Part[],
     signal: AbortSignal,
+    executionOrigin?: ToolExecutionOrigin,
   ): Promise<{
     responseParts: Part[];
     modelOverride?: string;
     visionBridgeNotice?: string;
   }> {
+    // A fixed_policy invocation's result never feeds the model — the
+    // orchestrator consumes `policyArtifacts` directly — so the image
+    // funnel (omni re-delivery + vision bridge) must not run on it: it
+    // would re-enter media processing from inside a policy run, wasting
+    // work and re-acquiring the per-root resource gate this very run may
+    // already hold (self-deadlock at concurrency 1). Applies to every
+    // call site (success, timeout, tool error) via this single check.
+    if (executionOrigin?.kind === 'fixed_policy') {
+      return { responseParts };
+    }
     let modelOverride: string | undefined;
     const notices: string[] = [];
     // Omni second normalization trigger point: convert inline tool-result
@@ -4159,10 +4171,15 @@ export class CoreToolScheduler {
         // prompt, bounce the tool into the existing awaiting_approval flow
         // instead of denying it. 'denied'/'stop' (and 'ask' in a
         // non-interactive/background context where we cannot prompt) keep
-        // the original deny-as-error behavior.
+        // the original deny-as-error behavior. A fixed_policy invocation
+        // never bounces: the orchestrator awaits it headlessly behind the
+        // scheduler, so an awaiting_approval entry would sit unanswerable
+        // (the confirmation UI belongs to the outer tool call) — an 'ask'
+        // on a fixed-policy call fails closed as a deny instead.
         if (
           preHookResult.blockType === 'ask' &&
           !signal.aborted &&
+          scheduledCall.request.executionOrigin?.kind !== 'fixed_policy' &&
           this.canPromptForAskBounce()
         ) {
           // Mirror the confirmation-phase abort re-check: never open a
@@ -4803,6 +4820,7 @@ export class CoreToolScheduler {
         const processedImages = await this.processToolResultImages(
           convertedResponse,
           signal,
+          scheduledCall.request.executionOrigin,
         );
         const response = processedImages.responseParts;
         if (response !== convertedResponse) {
@@ -4993,6 +5011,7 @@ export class CoreToolScheduler {
           const processedImages = await this.processToolResultImages(
             responseParts,
             signal,
+            scheduledCall.request.executionOrigin,
           );
           responseParts = processedImages.responseParts;
 
@@ -5106,6 +5125,7 @@ export class CoreToolScheduler {
           const processedImages = await this.processToolResultImages(
             imageErrorParts,
             signal,
+            scheduledCall.request.executionOrigin,
           );
           const bridgedErrorParts = processedImages.responseParts;
           if (

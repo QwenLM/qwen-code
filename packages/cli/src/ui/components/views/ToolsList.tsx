@@ -35,6 +35,12 @@ export const ToolsList: React.FC<ToolsListProps> = ({
             <Text bold color={theme.text.accent}>
               {tool.displayName}
               {showDescriptions ? ` (${tool.name})` : ''}
+              {tool.fixedOnly && (
+                <Text bold={false} color={theme.text.secondary}>
+                  {' '}
+                  {t('[fixed-only: runs via media policies, not the model]')}
+                </Text>
+              )}
             </Text>
             {showDescriptions && tool.description && (
               <MarkdownDisplay

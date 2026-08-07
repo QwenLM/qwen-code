@@ -467,7 +467,20 @@ export async function processMediaForOmniDelivery(
         // further passes would repeat the same work.
         break;
       }
+      // Chain the disclosures instead of replacing: when preprocessing
+      // already degraded the resource and the guard degrades it AGAIN,
+      // the model must be told about both steps (decision D8 — every
+      // lossy step is disclosed, not just the last one).
+      const priorDisclosure = final.disclosure;
       final = deliveries[0];
+      if (priorDisclosure && final.disclosure) {
+        final = {
+          ...final,
+          disclosure: `${priorDisclosure}；${final.disclosure}`,
+        };
+      } else if (priorDisclosure) {
+        final = { ...final, disclosure: priorDisclosure };
+      }
       guard = evaluateTransportLimits(config, final.recognized, displayName);
     }
   }

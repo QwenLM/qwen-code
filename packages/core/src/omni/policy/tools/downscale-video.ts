@@ -91,6 +91,7 @@ const TUNABLE_SCHEMA_PROPERTIES = {
 
 const DESCRIPTOR: MediaPolicyToolDescriptor = {
   kind: 'media_policy',
+  version: '1',
   inputMediaTypes: ['video'],
   outputs: [
     {
