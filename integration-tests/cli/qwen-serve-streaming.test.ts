@@ -53,6 +53,7 @@ import {
 } from '../fake-openai-server.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, '../..');
 // Match the rest of the integration suite: prefer `TEST_CLI_PATH`
 // from `globalSetup.ts` (root `dist/cli.js` bundle), fall back to
 // the per-package output for direct vitest invocations. See the same
@@ -95,31 +96,40 @@ function findExternalReadBase(): string | undefined {
     process.env['QWEN_TEST_EXTERNAL_READ_BASE'],
     '/var/tmp',
   ].filter((value): value is string => Boolean(value));
+  // Carry each rejection reason into the diagnostics below. A bare `catch {}`
+  // here cannot tell "no /var/tmp on this image" (expected) from a bug in this
+  // function (not expected), and the latter reads as a green skip.
+  const rejections: string[] = [];
   for (const candidate of candidates) {
     try {
       const resolved = realpathSync(candidate);
       accessSync(resolved, constants.W_OK);
       if (
-        !isPathWithinRoot(resolved, realpathSync('/tmp')) &&
-        !isPathWithinRoot(resolved, realpathSync(REPO_ROOT))
+        isPathWithinRoot(resolved, realpathSync('/tmp')) ||
+        isPathWithinRoot(resolved, realpathSync(REPO_ROOT))
       ) {
-        return resolved;
+        rejections.push(`${candidate}: inside the /tmp read root or the repo`);
+        continue;
       }
-    } catch {
-      // Try the next candidate.
+      return resolved;
+    } catch (error) {
+      rejections.push(`${candidate}: ${error}`);
     }
   }
   // Skipping is acceptable on a developer box, but on CI a silently disabled
   // security regression test is indistinguishable from a passing one. Fail
   // loudly instead and let the operator point QWEN_TEST_EXTERNAL_READ_BASE at
   // a writable directory outside both the workspace and the /tmp read root.
+  const diagnostics = `no usable external-read fixture base (${rejections.join('; ')})`;
   if (process.env['CI']) {
     throw new Error(
-      `No usable external-read fixture base (tried: ${candidates.join(', ')}). ` +
-        'Set QWEN_TEST_EXTERNAL_READ_BASE to a writable directory outside the ' +
-        'repo and outside /tmp.',
+      `${diagnostics}. Set QWEN_TEST_EXTERNAL_READ_BASE to a writable ` +
+        'directory outside the repo and outside /tmp.',
     );
   }
+  console.warn(
+    `[qwen-serve-streaming] skipping external read tests: ${diagnostics}`,
+  );
   return undefined;
 }
 
@@ -564,7 +574,11 @@ describePOSIX('qwen serve — same-host external text reads', () => {
     pendingReadSentinel = sentinel;
 
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      // The daemon is bound to `workspaceDir` by `beforeAll`, so any other
+      // value is rejected with 400 Workspace mismatch. The read under test is
+      // external because `externalReadDir` sits outside this workspace, not
+      // because the session claims a wider one.
+      workspaceCwd: workspaceDir,
       sessionScope: 'thread',
     });
     await client.setSessionApprovalMode(session.sessionId, 'default');
