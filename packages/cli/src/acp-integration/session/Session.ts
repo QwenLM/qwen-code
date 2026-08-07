@@ -140,10 +140,10 @@ import {
   isShellProgressData,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
-  ADAPTIVE_CAP_HARD_MULTIPLIER,
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
   getToolCallRepeatKey,
+  shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   LoopDetectedEvent,
   LoopType,
@@ -526,35 +526,37 @@ function recordDaemonToolCalls(
       loopState.maxToolCallKeyRepeat = count;
     }
   }
-  // Same per-turn cap semantics as the core LoopDetectionService's
-  // checkTurnToolCallCap (getMaxToolCallsPerTurn resolves
-  // model.maxToolCallsPerTurn to an effective value, Infinity when disabled):
-  // an explicitly configured value is a hard cap; the default is adaptive —
-  // once past the soft cap, a productive turn (diverse calls) continues
-  // until the stuck-repetition signal (the same
-  // maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD condition core's cap
-  // uses) or the hard backstop. Unlike core there is no in-session disable
-  // check — that flag is only set by the interactive loop-detection dialog,
-  // which has no ACP equivalent — and this runs once per batch rather than
-  // per call, so a turn can overshoot the cap by at most one batch. No
-  // retry rollback is needed for these counters: on RETRY / MODEL_FALLBACK
-  // the daemon stream loops discard the failed attempt's accumulated calls
+  // Same per-turn cap semantics as the core LoopDetectionService — the
+  // shouldHaltOnTurnToolCallCap predicate is shared with core's
+  // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
+  // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
+  // past the soft cap a productive turn continues until the
+  // stuck-repetition signal or the hard backstop). Unlike core there is
+  // no in-session disable check — that flag is only set by the interactive
+  // loop-detection dialog, which has no ACP equivalent — and this runs
+  // once per batch, before execution: a batch that would cross the cap
+  // check is skipped whole, so a turn never executes past an explicit cap
+  // or the hard backstop (it can halt up to one batch short), while the
+  // adaptive soft cap is exceeded by design, up to the backstop. No retry
+  // rollback is needed for these counters: on RETRY / MODEL_FALLBACK the
+  // daemon stream loops discard the failed attempt's accumulated calls
   // (functionCalls.length = 0) before re-streaming, so a failed attempt's
   // calls never reach this function to be double-counted.
-  const cap = config.getMaxToolCallsPerTurn();
-  if (loopState.totalToolCalls > cap) {
-    const explicitHardCap = config.isMaxToolCallsPerTurnExplicit();
-    const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
-    const stuck = loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
-    if (explicitHardCap || loopState.totalToolCalls > hardCap || stuck) {
-      return recordDaemonLoopDetected(
-        config,
-        promptId,
-        LoopType.TURN_TOOL_CALL_CAP,
-        `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
-        loopState,
-      );
-    }
+  if (
+    shouldHaltOnTurnToolCallCap(
+      loopState.totalToolCalls,
+      loopState.maxToolCallKeyRepeat,
+      config.getMaxToolCallsPerTurn(),
+      config.isMaxToolCallsPerTurnExplicit(),
+    )
+  ) {
+    return recordDaemonLoopDetected(
+      config,
+      promptId,
+      LoopType.TURN_TOOL_CALL_CAP,
+      `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
+      loopState,
+    );
   }
   // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
   // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
@@ -563,7 +565,10 @@ function recordDaemonToolCalls(
   // re-run the same build/test/read), so it ships off by default, and its
   // false positives would land hardest on exactly the long turns this
   // adaptive cap exists to enable. The cap's stuck signal above stays
-  // always-on regardless.
+  // always-on regardless. "Off by default" depends on the CLI layer: core's
+  // Config defaults skipLoopDetection to false and loadCliConfig applies
+  // `?? true` (cli config.ts), so a Config constructed without that layer
+  // would ship this halt on.
   if (
     !config.getSkipLoopDetection() &&
     loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
@@ -7409,16 +7414,15 @@ export class Session implements SessionContext {
     // Only agent-only batches reach here (the batcher above groups only
     // agent calls into concurrent batches), so no invalid-params serial
     // defence is needed: an invalid agent call fails in build() before any
-    // side effect. Batches wider than the concurrency cap are still
-    // observed incrementally — the Promise.race loop check and the
-    // near-threshold check below stop the turn mid-batch. Narrower batches
-    // start every call at once; a loop firing mid-batch lets the in-flight
-    // calls finish (results kept) before the turn reports the stop.
+    // side effect. Batches wider than the cap run in windows; once a
+    // window's race observes a loop, the unstarted tail is skipped. A loop
+    // firing mid-batch never aborts in-flight calls regardless of batch
+    // width — they settle and their results are kept before the turn
+    // reports the stop, so no executed output is discarded either way.
     const runBounded = async (
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
       onStopAfterPermissionCancel?: () => void,
-      onStopAfterLoopDetected?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
       const maxConcurrency = parsePositiveIntegerEnv(
@@ -7491,7 +7495,6 @@ export class Session implements SessionContext {
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
           if (results.some((result) => result?.loopDetected)) {
-            onStopAfterLoopDetected?.();
             await Promise.all(executing);
             await fillLoopSkippedFrom(idx + 1);
             return results;
@@ -7504,7 +7507,6 @@ export class Session implements SessionContext {
           if (invalidToolErrorNearThreshold && executing.size > 0) {
             await Promise.all(executing);
             if (results.some((result) => result?.loopDetected)) {
-              onStopAfterLoopDetected?.();
               await fillLoopSkippedFrom(idx + 1);
               return results;
             }
@@ -7562,7 +7564,6 @@ export class Session implements SessionContext {
               batch.calls,
               batchAbortController.signal,
               stopBatchAfterPermissionCancel,
-              () => batchAbortController.abort('loop_detected'),
               () => batchStopAfterPermissionCancel,
             );
           } finally {

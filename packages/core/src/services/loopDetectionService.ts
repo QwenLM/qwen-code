@@ -18,7 +18,7 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
-import { ToolNamesMigration } from '../tools/tool-names.js';
+import { canonicalToolName } from '../tools/tool-names.js';
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
@@ -128,11 +128,32 @@ function canonicalizeForHash(value: unknown): unknown {
  * turn-loop guard (ACP Session) so both runtimes key repeats the same way.
  */
 export function getToolCallRepeatKey(toolName: string, args: unknown): string {
-  const canonicalName =
-    (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
   const argsString = JSON.stringify(canonicalizeForHash(args));
-  const keyString = `${canonicalName}:${argsString}`;
+  const keyString = `${canonicalToolName(toolName)}:${argsString}`;
   return createHash('sha256').update(keyString).digest('hex');
+}
+
+/**
+ * Halt predicate of the per-turn tool-call cap, shared with the daemon's
+ * turn-loop guard (ACP Session's recordDaemonToolCalls) so both runtimes
+ * decide identically and cannot drift. `cap` is the resolved effective cap
+ * from getMaxToolCallsPerTurn (Infinity when disabled); `maxKeyRepeat` is
+ * the turn's running max count of any single (tool, args) repeat key.
+ * Returns true when a turn that has emitted `totalCalls` calls must halt:
+ * always past an explicit cap (the released hard-cap contract), and past
+ * the adaptive default cap only on a stuck-repetition signal or at the
+ * hard backstop (see checkTurnToolCallCap).
+ */
+export function shouldHaltOnTurnToolCallCap(
+  totalCalls: number,
+  maxKeyRepeat: number,
+  cap: number,
+  isExplicitCap: boolean,
+): boolean {
+  if (totalCalls <= cap) return false;
+  const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
+  const stuck = maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
+  return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
 /**
@@ -904,25 +925,22 @@ export class LoopDetectionService {
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    const cap = this.config.getMaxToolCallsPerTurn();
-    if (this.turnToolCallTotal <= cap) {
+    if (
+      !shouldHaltOnTurnToolCallCap(
+        this.turnToolCallTotal,
+        this.capMaxKeyRepeat,
+        this.config.getMaxToolCallsPerTurn(),
+        this.config.isMaxToolCallsPerTurnExplicit(),
+      )
+    ) {
       return false;
     }
-
-    // Over the configured cap. An explicit value is a hard cap; the default is
-    // adaptive (allow productive turns, halt on stuck or the hard backstop).
-    const explicitHardCap = this.config.isMaxToolCallsPerTurnExplicit();
-    const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
-    const stuck = this.capMaxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
-    if (explicitHardCap || this.turnToolCallTotal > hardCap || stuck) {
-      this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
-      );
-      return true;
-    }
-    return false;
+    this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
+    );
+    return true;
   }
 
   /**
