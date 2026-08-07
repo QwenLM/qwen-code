@@ -707,8 +707,14 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             value={models}
             placeholder={defaultIds || t('auth.modelsPlaceholder')}
             onChange={(event) => {
-              setModels(event.target.value);
-              setModelsDirty(true);
+              const value = event.target.value;
+              setModels(value);
+              const ids = normalizeModelIds(value);
+              const defaults = normalizeModelIds(defaultIds ?? '');
+              setModelsDirty(
+                ids.length !== defaults.length ||
+                  ids.some((id, index) => id !== defaults[index]),
+              );
               setError(null);
             }}
             onKeyDown={(event) => {

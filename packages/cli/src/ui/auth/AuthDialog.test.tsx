@@ -406,6 +406,11 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
         },
         {
+          id: 'x-shared-env',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
           id: 'y-alias',
           baseUrl: 'https://y.example/v1/',
           envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
@@ -1195,7 +1200,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(
         settings,
-        { authError: 'Authentication failed' },
+        { authError: `Authentication failed: ${'x'.repeat(200)}` },
         {},
         undefined,
         undefined,

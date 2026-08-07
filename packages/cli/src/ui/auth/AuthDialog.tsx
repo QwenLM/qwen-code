@@ -447,7 +447,9 @@ export function AuthDialog({
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{authError || errorMessage}</Text>
+          <Text color={theme.status.error} wrap="truncate">
+            {authError || errorMessage}
+          </Text>
         </Box>
       )}
 

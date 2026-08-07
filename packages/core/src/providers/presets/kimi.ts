@@ -6,6 +6,7 @@
 
 import { AuthType } from '../../core/contentGenerator.js';
 import type { ProviderConfig, ProviderModelConfig } from '../types.js';
+import { normalizeBaseUrlForMatching } from '../provider-config.js';
 
 export const KIMI_API_ENV_KEY = 'MOONSHOT_API_KEY';
 export const KIMI_CODE_BASE_URL = 'https://api.kimi.com/coding/v1';
@@ -65,7 +66,10 @@ const KIMI_API_MODELS = [
 ];
 
 function isKimiCode(baseUrl: string): boolean {
-  return baseUrl === KIMI_CODE_BASE_URL;
+  return (
+    normalizeBaseUrlForMatching(baseUrl) ===
+    normalizeBaseUrlForMatching(KIMI_CODE_BASE_URL)
+  );
 }
 
 function ownsKimiModel(model: ProviderModelConfig): boolean {

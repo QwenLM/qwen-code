@@ -115,6 +115,92 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('api-model, code-model');
   });
 
+  it('keeps seeded custom ids that collide with a destination built-in across a round trip', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'collision-provider',
+      label: 'Collision Provider',
+      description: 'Provider with colliding endpoint model IDs',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-default' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'shared-id' }],
+        },
+      ],
+      envKey: () => 'COLLISION_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Collision',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider, undefined, undefined, ['shared-id']);
+    });
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    expect(result.current.state.modelIds).toBe('shared-id');
+
+    act(() => {
+      result.current.selectBaseUrl(firstUrl);
+    });
+    expect(result.current.state.modelIds).toBe('first-default, shared-id');
+  });
+
+  it('rebuilds endpoint defaults after a net-zero model edit', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'net-zero-provider',
+      label: 'Net Zero Provider',
+      description: 'Provider with endpoint defaults',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-default' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-default' }],
+        },
+      ],
+      envKey: () => 'NET_ZERO_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Net Zero',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider);
+    });
+    act(() => {
+      result.current.changeModelIds('temporary');
+    });
+    act(() => {
+      result.current.changeModelIds('first-default');
+    });
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('second-default');
+  });
+
   it('does not resurrect deselected defaults after an endpoint round trip', () => {
     const firstUrl = 'https://first.example/v1';
     const secondUrl = 'https://second.example/v1';
@@ -361,6 +447,10 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.apiKey).toBe('sk-stored');
 
     act(() => {
+      result.current.changeApiKey('sk-new-rotated');
+    });
+
+    act(() => {
       result.current.selectProtocol(AuthType.USE_OPENAI);
     });
     expect(result.current.state.baseUrl).toBe('');
@@ -373,7 +463,7 @@ describe('useProviderSetupFlow', () => {
     });
     expect(result.current.state.baseUrl).toBe('https://my-proxy.example/v1');
     expect(result.current.state.baseUrlPlaceholder).toBe('');
-    expect(result.current.state.apiKey).toBe('sk-stored');
+    expect(result.current.state.apiKey).toBe('sk-new-rotated');
   });
 
   it('does not leak API key drafts into the next provider flow', () => {

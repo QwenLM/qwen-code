@@ -36,6 +36,7 @@ import {
   defaultModelIds,
   initialApiKey,
   initialModelIds,
+  modelIdsDifferFromDefaults,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
 } from './provider-state';
@@ -193,7 +194,9 @@ export function ProviderConnectForm({
       (id) => !seededDefaults.has(id),
     );
     setModelIdsText(seededModelIds.join(', '));
-    setModelsEdited(false);
+    setModelsEdited(
+      modelIdsDifferFromDefaults(provider, baseUrl, seededModelIds),
+    );
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
@@ -507,8 +510,11 @@ export function ProviderConnectForm({
           <Textarea
             value={modelIdsText}
             onChange={(event) => {
-              setModelIdsText(event.target.value);
-              setModelsEdited(true);
+              const value = event.target.value;
+              setModelIdsText(value);
+              setModelsEdited(
+                modelIdsDifferFromDefaults(selectedProvider, baseUrl, value),
+              );
             }}
             placeholder={t('providerConnect.modelsPlaceholder')}
             className="min-h-20"

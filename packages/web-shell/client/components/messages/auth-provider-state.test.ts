@@ -184,6 +184,65 @@ describe('auth provider endpoint state', () => {
     ).toBe('typed-api-key');
   });
 
+  it('keeps draft direction correct across three credential domains', () => {
+    const urls = [
+      'https://a.example/v1',
+      'https://b.example/v1',
+      'https://c.example/v1',
+    ];
+    const provider = {
+      ...kimi,
+      baseUrl: urls.map((url, index) => ({
+        id: `domain-${index}`,
+        label: `Domain ${index}`,
+        url,
+        envKey: `DOMAIN_${index}_API_KEY`,
+      })),
+    } satisfies DaemonAuthProviderDescriptor;
+    const drafts = new Map<string, string>();
+
+    expect(
+      apiKeyAfterBaseUrlChange(
+        provider,
+        urls[0],
+        urls[1],
+        'key-a',
+        'openai',
+        drafts,
+      ),
+    ).toBe('');
+    expect(
+      apiKeyAfterBaseUrlChange(
+        provider,
+        urls[1],
+        urls[2],
+        'key-b',
+        'openai',
+        drafts,
+      ),
+    ).toBe('');
+    expect(
+      apiKeyAfterBaseUrlChange(
+        provider,
+        urls[2],
+        urls[0],
+        'key-c',
+        'openai',
+        drafts,
+      ),
+    ).toBe('key-a');
+    expect(
+      apiKeyAfterBaseUrlChange(
+        provider,
+        urls[0],
+        urls[1],
+        'key-a2',
+        'openai',
+        drafts,
+      ),
+    ).toBe('key-b');
+  });
+
   it('falls back to provider-level models for options without endpoint models', () => {
     const option = Array.isArray(mimo.baseUrl) ? mimo.baseUrl[0] : undefined;
     expect(option).toBeDefined();

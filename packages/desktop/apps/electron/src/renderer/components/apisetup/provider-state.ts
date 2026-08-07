@@ -38,6 +38,19 @@ export function initialModelIds(
     : defaultModelIds(provider, baseUrl);
 }
 
+export function modelIdsDifferFromDefaults(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+  value: string | readonly string[],
+): boolean {
+  const ids = typeof value === 'string' ? parseModelIds(value) : [...value];
+  const defaults = defaultModelIds(provider, baseUrl);
+  return (
+    ids.length !== defaults.length ||
+    ids.some((id, index) => id !== defaults[index])
+  );
+}
+
 /**
  * Returns the API key to prefill when opening a provider's connect form,
  * clearing per-credential-domain drafts so a draft typed for one provider
@@ -116,11 +129,7 @@ export function apiKeyAfterBaseUrlChange(
   drafts: Map<string, string>,
 ): string {
   if (
-    !shouldResetApiKeyAfterBaseUrlChange(
-      provider,
-      currentBaseUrl,
-      nextBaseUrl,
-    )
+    !shouldResetApiKeyAfterBaseUrlChange(provider, currentBaseUrl, nextBaseUrl)
   ) {
     return currentApiKey;
   }

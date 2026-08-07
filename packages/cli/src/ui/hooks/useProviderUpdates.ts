@@ -246,7 +246,7 @@ export function useProviderUpdates(
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
         const defaultIds = getDefaultModelIds(providerCfg, resolved);
-        const builtInIds = new Set(getDefaultModelIds(providerCfg, resolved));
+        const builtInIds = new Set(defaultIds);
         const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
           (id) => !builtInIds.has(id),
         );

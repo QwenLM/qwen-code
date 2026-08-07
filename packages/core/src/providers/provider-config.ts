@@ -351,7 +351,7 @@ export function resolveBaseUrl(
 export function normalizeBaseUrlForMatching(
   baseUrl: string | undefined,
 ): string {
-  if (baseUrl === undefined) return '';
+  if (typeof baseUrl !== 'string') return '';
   let end = baseUrl.length;
   while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
     end--;

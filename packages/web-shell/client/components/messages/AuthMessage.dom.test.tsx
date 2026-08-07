@@ -323,6 +323,26 @@ async function renderAuthMessage() {
 }
 
 describe('AuthMessage model field preservation', () => {
+  it('rebuilds endpoint defaults after a net-zero model edit', async () => {
+    actions.getAuthProviders.mockResolvedValue(gammaCatalog);
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Gamma'));
+    click(findButtonContaining('Gamma Two'));
+    setInput(passwordInput(), 'sk-test');
+    click(findButtonContaining('next'));
+    setInput(textInput(), 'temporary');
+    setInput(textInput(), 'gamma-two-default, gamma-two-extra');
+
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Gamma One'));
+    click(findButtonContaining('next'));
+
+    expect(textInput().value).toBe('gamma-one-default');
+  });
+
   it('keeps the selected endpoint after navigating backward and forward', async () => {
     actions.getAuthProviders.mockResolvedValue(gammaCatalog);
     actions.installAuthProvider.mockResolvedValue({
@@ -350,6 +370,7 @@ describe('AuthMessage model field preservation', () => {
       expect.objectContaining({
         providerId: 'provider-c',
         baseUrl: 'https://c-two.example/v1',
+        apiKey: 'sk-test',
         modelIds: ['gamma-two-default', 'gamma-two-extra'],
       }),
     );
@@ -417,5 +438,32 @@ describe('AuthMessage model field preservation', () => {
     click(findButtonContaining('Gamma One'));
     click(findButtonContaining('next'));
     expect(textInput().value).toBe('gamma-two-extra');
+  });
+
+  it('shows the selected endpoint env key in advanced review JSON', async () => {
+    const reviewProvider: DaemonAuthProviderDescriptor = {
+      ...providerC,
+      showAdvancedConfig: true,
+      baseUrl: Array.isArray(providerC.baseUrl)
+        ? providerC.baseUrl.map((option) =>
+            option.id === 'c-two' ? { ...option, envKey: 'C_TWO_KEY' } : option,
+          )
+        : providerC.baseUrl,
+    };
+    actions.getAuthProviders.mockResolvedValue({
+      ...gammaCatalog,
+      providers: [reviewProvider],
+    });
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Gamma'));
+    click(findButtonContaining('Gamma Two'));
+    setInput(passwordInput(), 'sk-test');
+    click(findButtonContaining('next'));
+    click(findButtonContaining('next'));
+
+    expect(document.body.textContent).toContain('C_TWO_KEY');
+    expect(document.body.textContent).not.toContain('C_SHARED_KEY');
   });
 });

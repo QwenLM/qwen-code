@@ -19,6 +19,7 @@ import {
   findProviderById,
   getAllProviderBaseUrls,
   kimiProvider,
+  normalizeBaseUrlForMatching,
   resolveProviderModels,
 } from '@qwen-code/qwen-code-core';
 
@@ -76,6 +77,20 @@ const apiModels = [
 ];
 
 describe('kimiProvider', () => {
+  it('normalizes malformed and trailing-slash endpoint values safely', () => {
+    expect(normalizeBaseUrlForMatching(null as unknown as string)).toBe('');
+
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: `${KIMI_CODE_BASE_URL}/`,
+      apiKey: 'sk-kimi-code',
+      modelIds: ['k3-256k'],
+    });
+    expect(plan.env).toEqual({ [KIMI_CODE_ENV_KEY]: 'sk-kimi-code' });
+    expect(plan.modelProviders?.[0]?.models?.[0]?.envKey).toBe(
+      KIMI_CODE_ENV_KEY,
+    );
+  });
+
   it('offers one provider with Coding Plan and regional API choices', () => {
     expect(kimiProvider).toMatchObject({
       id: 'kimi',

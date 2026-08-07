@@ -11211,6 +11211,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               baseUrl: 'https://second.example/v1',
               envKey: 'SECOND_API_KEY',
             },
+            {
+              id: 'wrong-url-shared-env',
+              baseUrl: 'https://second.example/v1',
+              envKey: 'FIRST_API_KEY',
+            },
           ],
         },
       },

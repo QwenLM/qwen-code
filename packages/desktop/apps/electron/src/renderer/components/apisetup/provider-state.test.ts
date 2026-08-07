@@ -5,6 +5,7 @@ import {
   defaultModelIds,
   initialApiKey,
   initialModelIds,
+  modelIdsDifferFromDefaults,
   modelIdsAfterBaseUrlChange,
   shouldResetApiKeyAfterBaseUrlChange,
 } from './provider-state';
@@ -97,6 +98,33 @@ describe('provider endpoint state', () => {
     );
     expect(modelIds).toEqual(['kimi-k3']);
     expect(customModelIds).toEqual([]);
+  });
+
+  it('treats persisted default trimming as an authoritative model edit', () => {
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: 'https://api.kimi.com/coding/v1',
+          models: [{ id: 'k3-256k' }, { id: 'k3' }],
+        },
+      ],
+    };
+
+    expect(
+      modelIdsDifferFromDefaults(provider, 'https://api.kimi.com/coding/v1', [
+        'k3-256k',
+      ]),
+    ).toBe(true);
+    expect(
+      modelIdsDifferFromDefaults(
+        provider,
+        'https://api.kimi.com/coding/v1',
+        'k3-256k, k3',
+      ),
+    ).toBe(false);
   });
 
   it('resets API keys only when the endpoint key domain changes', () => {
@@ -203,15 +231,58 @@ describe('provider endpoint state', () => {
     const apiUrl = 'https://api.moonshot.ai/v1';
 
     expect(
-      apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, 'typed-code-key', drafts),
+      apiKeyAfterBaseUrlChange(
+        kimi,
+        codingUrl,
+        apiUrl,
+        'typed-code-key',
+        drafts,
+      ),
     ).toBe('');
 
     expect(
-      apiKeyAfterBaseUrlChange(kimi, apiUrl, codingUrl, 'typed-api-key', drafts),
+      apiKeyAfterBaseUrlChange(
+        kimi,
+        apiUrl,
+        codingUrl,
+        'typed-api-key',
+        drafts,
+      ),
     ).toBe('typed-code-key');
 
+    expect(apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', drafts)).toBe(
+      'typed-api-key',
+    );
+  });
+
+  it('keeps draft direction correct across three credential domains', () => {
+    const urls = [
+      'https://a.example/v1',
+      'https://b.example/v1',
+      'https://c.example/v1',
+    ];
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: urls.map((url, index) => ({
+        id: `domain-${index}`,
+        label: `Domain ${index}`,
+        url,
+        envKey: `DOMAIN_${index}_API_KEY`,
+      })),
+    };
+    const drafts = new Map<string, string>();
+
     expect(
-      apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', drafts),
-    ).toBe('typed-api-key');
+      apiKeyAfterBaseUrlChange(provider, urls[0], urls[1], 'key-a', drafts),
+    ).toBe('');
+    expect(
+      apiKeyAfterBaseUrlChange(provider, urls[1], urls[2], 'key-b', drafts),
+    ).toBe('');
+    expect(
+      apiKeyAfterBaseUrlChange(provider, urls[2], urls[0], 'key-c', drafts),
+    ).toBe('key-a');
+    expect(
+      apiKeyAfterBaseUrlChange(provider, urls[0], urls[1], 'key-a2', drafts),
+    ).toBe('key-b');
   });
 });
