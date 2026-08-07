@@ -103,4 +103,21 @@ describe('CompletionCategoryMouseController', () => {
 
     expect(onSelectCategory).not.toHaveBeenCalled();
   });
+
+  it('uses terminal height when the composited frame overflows', () => {
+    vi.mocked(layoutRowForEvent).mockImplementation(
+      (_node, terminalRow, terminalHeight) =>
+        terminalRow - 1 - Math.min(0, terminalHeight - 45),
+    );
+    vi.mocked(measureElementPosition).mockImplementation((node) => {
+      const index = categoryNodes.indexOf(node);
+      return { x: 2 + index * 8, y: 9, width: 6, height: 1 };
+    });
+    const handler = mountAndGetHandler();
+
+    handler(makeEvent({ name: 'left-press', col: 19, row: 5 }));
+
+    expect(layoutRowForEvent).toHaveBeenCalledWith(containerNode, 5, 40);
+    expect(onSelectCategory).toHaveBeenCalledWith('session');
+  });
 });

@@ -138,4 +138,26 @@ describe('SuggestionsDisplay mouse wiring', () => {
 
     expect(CompletionCategoryMouseController).not.toHaveBeenCalled();
   });
+
+  it('does not mount the category controller without a selection callback', () => {
+    render(
+      <SuggestionsDisplay
+        suggestions={[
+          { label: 'a.ts', value: 'a.ts', category: 'file' },
+          { label: 'Session', value: 'session:1', category: 'session' },
+        ]}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        mouseEnabled
+        activeCategory="all"
+        availableCategories={['all', 'file', 'session']}
+      />,
+    );
+
+    expect(CompletionCategoryMouseController).not.toHaveBeenCalled();
+  });
 });

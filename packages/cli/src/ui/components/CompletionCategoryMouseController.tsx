@@ -14,6 +14,7 @@ import {
   measureElementPosition,
 } from '../utils/measure-element-position.js';
 import { type SuggestionCategory } from '../utils/suggestions.js';
+import { pointInViewport } from '../selection/selection-coords.js';
 
 type CompletionCategory = SuggestionCategory | 'all';
 
@@ -24,6 +25,15 @@ interface CompletionCategoryMouseControllerProps {
   onSelectCategory: (category: CompletionCategory) => void;
 }
 
+/**
+ * Headless click layer for the completion category tabs.
+ *
+ * Coordinates assume the alternate-screen virtual viewport used by the owning
+ * suggestion UI. Ink bottom-pins an overflowing frame, so terminal rows must
+ * pass through `layoutRowForEvent` before they are compared with layout-space
+ * tab rectangles. Inline mode is intentionally unsupported; mount this only
+ * behind the owning surface's `mouseEnabled` gate.
+ */
 export function CompletionCategoryMouseController({
   containerRef,
   categoryRefs,
@@ -50,10 +60,7 @@ export function CompletionCategoryMouseController({
         if (
           rect.width > 0 &&
           rect.height > 0 &&
-          col >= rect.x &&
-          col < rect.x + rect.width &&
-          row >= rect.y &&
-          row < rect.y + rect.height
+          pointInViewport({ x: col, y: row }, rect)
         ) {
           onSelectCategory(categories[i]);
           return;
