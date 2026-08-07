@@ -3,23 +3,26 @@ name: 'Qwen Autofix Fork Signal'
 # GitHub hands NO repository secrets to a workflow run tied to a pull request
 # whose head lives in a fork — the run header reads `Secret source: None` — so
 # `secrets.CI_DEV_BOT_PAT` arrives empty and the review lane in
-# `qwen-autofix.yml` cannot authenticate. That lane now skips itself for those
-# PRs (see route's `secretless` output) instead of failing three API calls and
-# reddening the run, which leaves a fork PR's review unanswered until the next
-# scheduled scan — up to ten minutes.
+# `qwen-autofix.yml` cannot authenticate. Merging this bridge REQUIRES #8671
+# first: that PR adds route's `secretless` output so the direct
+# `pull_request_review` lane skips fork PRs instead of failing three API calls
+# and reddening the run. Until #8671 lands the premise below is not yet true
+# and a managed fork PR's review fires BOTH lanes, the direct one still
+# red-ing out on the empty PAT — hence the merge ordering in the PR body.
 #
 # This is the credential-free half of the standard `workflow_run` bridge that
-# closes the gap. It records WHICH PR was reviewed and nothing else;
-# `qwen-autofix-fork-bridge.yml` then runs in the base context, where the
-# secrets and `actions: write` do exist, and starts the real scan.
+# closes the gap. It records nothing — its only job is to complete `success`
+# EXACTLY for the reviews the direct lane cannot serve, so the base-context
+# half (`qwen-autofix-fork-bridge.yml`) can resolve the PR from this run's
+# head SHA and start the real scan where the secrets and `actions: write` do
+# exist.
 #
-# The recorded number cannot be forged from a fork. `pull_request_review` runs
-# the workflow file from the BASE branch, not the PR head — verified on run
-# 31152873061, whose PR branch predates a main-only change to
-# `qwen-autofix.yml` and which still executed the NEW file — so a fork cannot
-# edit what is written here, and the value itself comes from GitHub's event
-# payload rather than from repository content. The bridge re-binds it to
-# `workflow_run.head_sha` regardless.
+# Fork-triggered runs execute the workflow file from the BASE branch, not the
+# PR head — verified on run 31152873061, whose PR branch predates a main-only
+# change to `qwen-autofix.yml` and which still executed the NEW file — so a
+# fork cannot edit this gate, and every conjunct is re-checked downstream
+# anyway: the bridge re-reads live PR state and review-scan re-derives
+# admission, so this gate decides WHEN, never whether.
 #
 # Deliberately powerless: `permissions: {}`, no checkout, and no repository
 # code executed, so a fork-triggered run holds nothing worth stealing. For the
@@ -37,44 +40,49 @@ defaults:
   run:
     shell: 'bash'
 
+# Trusted reviews coalesce PER PR (two reviews seconds apart signal once);
+# everything else gets a run-unique group. The group is entered BEFORE the job
+# `if:` runs, so without the trust split an arbitrary reviewer's submission
+# would cancel a queued or in-flight trusted signal and then skip its own job
+# — silently dropping the maintainer's review, the exact gap this bridge
+# exists to close. Mirrors route's trust-keyed pattern; the literals mirror
+# qwen-autofix.yml's TRUSTED_ASSOC / REVIEW_BOT and are pinned to them by
+# scripts/tests/qwen-autofix-fork-bridge-workflow.test.js.
 concurrency:
-  group: 'qwen-autofix-fork-signal-${{ github.event.pull_request.number }}'
+  group: >-
+    ${{ (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-fork-signal-pr-{0}', github.event.pull_request.number) || format('qwen-autofix-fork-signal-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
   signal:
-    name: 'Record the reviewed fork PR'
+    name: 'Signal the reviewed fork PR'
     # In-repo PRs keep their secrets and reach the review lane directly, so
-    # signalling them would only dispatch a duplicate scan. The trust and base
-    # gates mirror route's so an untrusted review does not spend a bridge run.
-    # Every one of these is re-checked downstream — the bridge re-reads the PR
-    # and review-scan re-derives admission from live API state — so this gate
-    # is an optimisation, never the authorisation.
+    # signalling them would only dispatch a duplicate scan. The remaining
+    # conjuncts MIRROR route's fork admission (qwen-autofix.yml's
+    # pull_request_review path): maintainer edits on, and the PR bot-authored
+    # or takeover-labeled — so an ordinary contributor's fork PR burns no
+    # signal/bridge/dispatched runs per review, and a takeover PR whose
+    # author turned maintainer edits off is never pushed into the credentialed
+    # lane. The association list mirrors TRUSTED_ASSOC, the review-bot login
+    # mirrors REVIEW_BOT, the takeover label mirrors TAKEOVER_LABEL, and the
+    # bot-author fallback mirrors AUTOFIX_BOT — all pinned by the fork-bridge
+    # workflow test.
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code'
       && github.event.pull_request.head.repo.full_name != github.repository
       && github.event.pull_request.base.ref == 'main'
       && github.event.pull_request.state == 'open'
+      && github.event.pull_request.maintainer_can_modify == true
+      && (github.event.pull_request.user.login == (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot')
+      || contains(toJSON(github.event.pull_request.labels.*.name), '"autofix/takeover"'))
       && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
       || github.event.review.user.login == 'qwen-code-ci-bot') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     steps:
-      - name: 'Record the PR number'
+      - name: 'Complete so the bridge fires'
         env:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
-          printf '%s\n' "${PR_NUMBER}" > pr-number.txt
           echo "🔔 signalling fork PR #${PR_NUMBER} for the autofix review lane"
-
-      - name: 'Upload the signal'
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'qwen-autofix-fork-signal'
-          path: 'pr-number.txt'
-          # The bridge reads this within seconds; nothing else ever wants it.
-          retention-days: 1
-          # A signal run that uploads nothing would complete `success` and send
-          # the bridge looking for an artifact that does not exist. Fail here,
-          # where the cause is visible, rather than there.
-          if-no-files-found: 'error'
+          echo "The bridge resolves the PR from this run's head SHA; nothing is uploaded."

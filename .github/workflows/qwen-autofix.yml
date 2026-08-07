@@ -83,6 +83,10 @@ on:
         required: false
         type: 'boolean'
         default: false
+      source:
+        description: 'Dispatch-origin marker (fork-bridge = the fork-review bridge); routing metadata only, never changes what may be touched'
+        required: false
+        type: 'string'
 
 defaults:
   run:
@@ -237,7 +241,9 @@ jobs:
       #     apart route once — the old shared group's one useful side effect,
       #     kept, without letting events on OTHER PRs cancel this one)
       #   • issue events coalesce PER issue
-      #   • dispatches are unique per run and are never cancelled
+      #   • dispatches are unique per run and are never cancelled — EXCEPT
+      #     fork-bridge dispatches, which coalesce per PR like review events
+      #     (a review burst on a fork PR must not serialize N full scans)
       # The old single shared cancel-in-progress group let ANY newer event kill
       # pending full scans while route jobs sat queued behind runner backlog —
       # observed as hours of scan starvation during review-event storms.
@@ -261,11 +267,13 @@ jobs:
       # a burst of trusted command comments coalesces to at most two runs
       # with latest-intent semantics, never touching review routes;
       # issues → per-issue; anything else (dispatch) → unique per run_id,
-      # never cancelled.
+      # never cancelled, except fork-bridge dispatches (source=fork-bridge),
+      # which take a per-PR group with cancel-in-progress so a burst of
+      # bridged fork-PR reviews coalesces exactly like review events.
       group: >-
-        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-label-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-label-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || (github.event_name == 'workflow_dispatch' && inputs.source == 'fork-bridge' && inputs.pr_number != '' && format('qwen-autofix-forkbridge-pr-{0}', inputs.pr_number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
-        ${{ github.event_name != 'workflow_dispatch' }}
+        ${{ github.event_name != 'workflow_dispatch' || inputs.source == 'fork-bridge' }}
     permissions:
       contents: 'read'
     outputs:
@@ -1904,6 +1912,7 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
+          DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
@@ -2693,8 +2702,15 @@ jobs:
               # #7836, so review submissions stay covered by the
               # once-per-window pause notice below. No dedup on the dispatch
               # itself: the shepherd sends at most one per head, and a human
-              # asking twice deserves two answers.
-              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
+              # asking twice deserves two answers. fork-bridge dispatches are
+              # the one dispatch-shaped exception: they are fork-PR reviews
+              # laundered into dispatch form (a fork's review event carries no
+              # secrets), not an explicit human/shepherd dispatch — answering
+              # each one loudly would post one refusal per review on a capped
+              # fork PR, the exact #7836 spam this gate exists to prevent.
+              # They stay silent like review submissions, covered by the
+              # once-per-window pause notice below.
+              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' && "${DISPATCH_SOURCE}" != 'fork-bridge' ]]; then
                 if [[ "${DRY_RUN}" == "true" ]]; then
                   echo "🧪 DRY-RUN: would post cap-refused notice on #${PR}"
                 else

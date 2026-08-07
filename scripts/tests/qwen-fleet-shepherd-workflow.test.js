@@ -271,6 +271,81 @@ describe('fleet shepherd workflow', () => {
     );
   });
 
+  it('behaviorally proves liveness attribution refuses an ambiguous dispatch window', () => {
+    // The fork-review bridge dispatches autonomously at arbitrary times, so
+    // the "newest dispatch since T0 is ours" window can hold TWO dispatches.
+    // Extract the correlation loop VERBATIM (drift fails the test) and
+    // replay it with a PATH-stubbed gh: exactly one candidate is attributed,
+    // an ambiguous window records run=none instead of tracking a foreign
+    // run, and dispatches older than T0 do not count.
+    expect(workflow).toContain('if [[ "${COUNT}" == "1" ]]; then');
+    expect(workflow).toContain('attribution ambiguous');
+    const loop = workflow.match(
+      /(for _ in 1 2 3 4 5; do\n[\s\S]*?\n {16}done)/,
+    )?.[1];
+    expect(loop).toBeTruthy();
+    const runCorrelation = (dispatches) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shepherd-corr-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+if [[ "$1" == 'run' && "$2" == 'list' ]]; then
+  printf '%s' '${JSON.stringify(dispatches)}'
+  exit 0
+fi
+exit 1
+`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        // The loop logs an ambiguity note to stdout; the VALUE under test
+        // is the recorded run id, printed last.
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail
+sleep() { :; }
+${loop.replace(/\n {16}/g, '\n')}
+printf '%s' "${'$'}{LIVENESS_RUN_OUT:-}"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              ACTIONS_TOKEN: 'x',
+              REPO: 'QwenLM/qwen-code',
+              DISPATCH_T0: '2026-08-07T08:00:00Z',
+              DRY_RUN: 'false',
+            },
+            encoding: 'utf8',
+          },
+        )
+          .split('\n')
+          .at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const run = (databaseId, createdAt) => ({ databaseId, createdAt });
+    // Exactly one dispatch in the window → ours, attributed by id.
+    expect(runCorrelation([run(900001, '2026-08-07T08:00:05Z')])).toBe(
+      '900001',
+    );
+    // Two dispatches in the window (the bridge raced us) → run=none; the
+    // heuristic must not attribute a run it cannot prove is its own.
+    expect(
+      runCorrelation([
+        run(900001, '2026-08-07T08:00:05Z'),
+        run(900002, '2026-08-07T08:00:06Z'),
+      ]),
+    ).toBe('');
+    // Only dispatches older than T0 → nothing attributed.
+    expect(runCorrelation([run(899999, '2026-08-07T07:59:00Z')])).toBe('');
+    // Nothing at all → the polling loop exhausts and records nothing.
+    expect(runCorrelation([])).toBe('');
+  });
+
   it('behaviorally proves a failed jobs read yields unknown busy-state, not an empty busy-set', () => {
     // Extract the busy-set walk VERBATIM (drift fails the test) and replay it
     // with a PATH-stubbed gh: one live run whose jobs read fails must flip

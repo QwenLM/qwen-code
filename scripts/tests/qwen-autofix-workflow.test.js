@@ -1842,7 +1842,10 @@ describe('qwen-autofix workflow', () => {
     // Per-TARGET keys: cron ticks coalesce with each other; review events
     // coalesce per PR (near-simultaneous reviews on one PR route once, without
     // events on OTHER PRs cancelling this one); issue events per issue;
-    // dispatches unique and never cancelled.
+    // dispatches unique and never cancelled — EXCEPT fork-bridge dispatches
+    // (source=fork-bridge), which are review submissions laundered into
+    // dispatch form and coalesce per PR with cancellation, so a review burst
+    // on a fork PR cannot serialize N full scans behind the per-PR lock.
     expect(routeJob).toContain("'qwen-autofix-route-cron'");
     expect(routeJob).toContain(
       "format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
@@ -1854,7 +1857,10 @@ describe('qwen-autofix workflow', () => {
       "format('qwen-autofix-route-{0}', github.run_id)",
     );
     expect(routeJob).toContain(
-      "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
+      "format('qwen-autofix-forkbridge-pr-{0}', inputs.pr_number)",
+    );
+    expect(routeJob).toContain(
+      "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' || inputs.source == 'fork-bridge' }}",
     );
     expect(routeJob).not.toContain("group: 'qwen-autofix-route'");
     // The per-PR group is entered BEFORE any step runs, so only reviews whose
@@ -2780,9 +2786,16 @@ describe('qwen-autofix workflow', () => {
     // spammed 7 refusals on #7836 — those stay covered by the
     // once-per-window pause notice. No dedup on the dispatch itself: the
     // shepherd sends at most one per head, and a human asking twice
-    // deserves two answers.
+    // deserves two answers. fork-bridge dispatches are the one
+    // dispatch-shaped exception — they are fork-PR reviews laundered into
+    // dispatch form, so answering each one loudly would post one refusal
+    // per review on a capped fork PR (the exact #7836 spam this gate
+    // prevents); they stay silent like review submissions.
     expect(reviewScanJob).toContain(
-      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+      "DISPATCH_SOURCE: \"${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}\"",
+    );
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' && "${DISPATCH_SOURCE}" != \'fork-bridge\' ]]; then',
     );
     expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
     expect(reviewScanJob).toContain('Dispatch refused');
@@ -2791,24 +2804,30 @@ describe('qwen-autofix workflow', () => {
       'cap-refused notice skipped: PAT authenticates as',
     );
     // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
-    // for trusted review submissions). Replay the guard VERBATIM so a
-    // dropped EVENT_NAME condition fails the test, not just a substring: a
-    // dispatch is answered, a review submission is left to the pause notice.
+    // for trusted review submissions) and EXCLUDES fork-bridge dispatches
+    // (reviews laundered into dispatch form). Replay the guard VERBATIM so a
+    // dropped condition fails the test, not just a substring: an explicit
+    // dispatch is answered, a review submission and a fork-bridge dispatch
+    // are left to the pause notice.
     const refusedGuard = reviewScanJob.match(
-      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' && "\$\{DISPATCH_SOURCE\}" != 'fork-bridge' \]\]; then)/,
     )?.[1];
     expect(refusedGuard).toBeTruthy();
-    const refuses = (eventName) =>
+    const refuses = (eventName, dispatchSource = '') =>
       execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
         env: {
           ...process.env,
           FORCED_PR: '7836',
           PR: '7836',
           EVENT_NAME: eventName,
+          DISPATCH_SOURCE: dispatchSource,
         },
         encoding: 'utf8',
       }).trim();
     expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('workflow_dispatch', 'fork-bridge')).not.toContain(
+      'REFUSED',
+    );
     expect(refuses('pull_request_review')).not.toContain('REFUSED');
     // The standard-mode pause and the refusal both point at the actual
     // recovery command as a printf ARG (the takeover variant keeps its
