@@ -280,6 +280,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   isEstimated,
   showDetails = false,
 }) => {
+  const hasTokenCount = totalTokens > 0;
   const percentage =
     contextWindowSize > 0 ? (totalTokens / contextWindowSize) * 100 : 0;
   const isOverLimit = percentage > 100;
@@ -314,7 +315,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
       </Text>
       <Box height={1} />
 
-      {isEstimated ? (
+      {!hasTokenCount ? (
         <>
           {/* No API data yet — show hint instead of progress bar */}
           <Box marginBottom={1}>
@@ -349,6 +350,15 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
               </Text>
             </Box>
           </Box>
+          {isEstimated && (
+            <Box marginBottom={1}>
+              <Text color={theme.status.warning} italic>
+                {t(
+                  'Token usage is estimated until provider usage is received.',
+                )}
+              </Text>
+            </Box>
+          )}
           {/* Progress bar — three segments: used | free | buffer */}
           <Box width={CONTENT_WIDTH}>
             <ProgressBar
@@ -439,8 +449,8 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
         contextWindowSize={contextWindowSize}
         symbolColor={theme.text.accent}
       />
-      {/* Only show Messages when we have real API data */}
-      {!isEstimated && (
+      {/* Show Messages whenever a numeric token count is available. */}
+      {hasTokenCount && (
         <CategoryRow
           symbol={FILLED}
           label={t('Messages')}
