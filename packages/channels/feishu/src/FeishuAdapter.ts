@@ -84,6 +84,12 @@ interface CardSessionState {
 
 /** Track seen message IDs to deduplicate retried events. */
 const DEDUP_TTL_MS = 5 * 60 * 1000;
+/**
+ * Runtime label/lookup caches are bounded like the persisted observed-contact
+ * registry (500 observations) so a long-running daemon does not retain every
+ * user/chat/thread ID it ever sees.
+ */
+const OBSERVED_LABEL_CACHE_LIMIT = 500;
 
 /** Minimum interval between card updates (ms) to avoid API rate limiting. */
 const CARD_UPDATE_INTERVAL_MS = 1500;
@@ -637,13 +643,15 @@ export class FeishuChannel extends ChannelBase {
     return text.trim() || undefined;
   }
 
-  private async getTenantAccessToken(): Promise<string | undefined> {
+  private async getTenantAccessToken(options?: {
+    silent?: boolean;
+  }): Promise<string | undefined> {
     if (this.tokenCache && Date.now() < this.tokenCache.expiresAt) {
       return this.tokenCache.token;
     }
 
     if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
-    this.tokenRefreshPromise = this.refreshToken();
+    this.tokenRefreshPromise = this.refreshToken(options);
     try {
       return await this.tokenRefreshPromise;
     } finally {
@@ -651,7 +659,12 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
-  private async refreshToken(): Promise<string | undefined> {
+  private async refreshToken(options?: {
+    silent?: boolean;
+  }): Promise<string | undefined> {
+    // Best-effort label enrichment must stay silent on failure; core delivery
+    // paths keep logging token errors.
+    const silent = options?.silent === true;
     try {
       const resp = await fetch(
         `${BASE_URL}/auth/v3/tenant_access_token/internal`,
@@ -667,9 +680,11 @@ export class FeishuChannel extends ChannelBase {
       );
 
       if (!resp.ok) {
-        process.stderr.write(
-          `[Feishu:${this.name}] getTenantAccessToken failed: HTTP ${resp.status}\n`,
-        );
+        if (!silent) {
+          process.stderr.write(
+            `[Feishu:${this.name}] getTenantAccessToken failed: HTTP ${resp.status}\n`,
+          );
+        }
         if (resp.status === 401) this.tokenCache = undefined;
         return undefined;
       }
@@ -685,9 +700,11 @@ export class FeishuChannel extends ChannelBase {
       };
       return this.tokenCache.token;
     } catch (err) {
-      process.stderr.write(
-        `[Feishu:${this.name}] getTenantAccessToken error: ${err}\n`,
-      );
+      if (!silent) {
+        process.stderr.write(
+          `[Feishu:${this.name}] getTenantAccessToken error: ${err}\n`,
+        );
+      }
       return undefined;
     }
   }
@@ -697,21 +714,46 @@ export class FeishuChannel extends ChannelBase {
     this.hydratedObservedNames = true;
     const graph = this.persistedObservedContacts();
     if (!graph) return;
-    const hydrate = (
-      cache: Map<string, string>,
+    // Select the newest non-ID label per contact so an older observation
+    // (for example a stale group membership) cannot overwrite a more recent
+    // one during the traversal.
+    const newestUser = new Map<string, { label: string; at: string }>();
+    const newestChat = new Map<string, { label: string; at: string }>();
+    const consider = (
+      best: Map<string, { label: string; at: string }>,
       id: string,
       label: string,
+      at: string,
     ): void => {
-      if (label !== id) cache.set(id, label);
+      if (label === id) return;
+      const current = best.get(id);
+      if (!current || at >= current.at) best.set(id, { label, at });
     };
     for (const user of graph.users) {
-      hydrate(this.observedUserNames, user.id, user.label);
+      consider(newestUser, user.id, user.label, user.lastObservedAt);
     }
     for (const group of graph.groups) {
-      hydrate(this.observedChatNames, group.id, group.label);
+      consider(newestChat, group.id, group.label, group.lastObservedAt);
       for (const member of group.users) {
-        hydrate(this.observedUserNames, member.id, member.label);
+        consider(newestUser, member.id, member.label, member.lastObservedAt);
       }
+    }
+    for (const [id, entry] of newestUser) {
+      this.observedUserNames.set(id, entry.label);
+    }
+    for (const [id, entry] of newestChat) {
+      this.observedChatNames.set(id, entry.label);
+    }
+    this.capObservedCache(this.observedUserNames);
+    this.capObservedCache(this.observedChatNames);
+  }
+
+  /** Evicts the oldest-inserted entries once a runtime cache exceeds the cap. */
+  private capObservedCache(cache: Map<string, unknown>): void {
+    while (cache.size > OBSERVED_LABEL_CACHE_LIMIT) {
+      const oldest = cache.keys().next();
+      if (oldest.done) break;
+      cache.delete(oldest.value);
     }
   }
 
@@ -777,7 +819,7 @@ export class FeishuChannel extends ChannelBase {
 
     const lookup = (async () => {
       try {
-        const token = await this.getTenantAccessToken();
+        const token = await this.getTenantAccessToken({ silent: true });
         if (!token) {
           options.lookups.delete(options.id);
           return undefined;
@@ -797,12 +839,14 @@ export class FeishuChannel extends ChannelBase {
         const label = sanitizeSenderName(name);
         if (label === 'unknown') return undefined;
         options.names.set(options.id, label);
+        this.capObservedCache(options.names);
         return label;
       } catch {
         return undefined;
       }
     })();
     options.lookups.set(options.id, lookup);
+    this.capObservedCache(options.lookups);
     return lookup;
   }
 
@@ -811,6 +855,7 @@ export class FeishuChannel extends ChannelBase {
       senderName: envelope.senderName,
       chatName: envelope.chatName,
     });
+    this.capObservedCache(this.observedContactWrites);
     void this.enrichObservedContact(envelope).catch(() => {});
   }
 
@@ -844,6 +889,7 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
     this.observedContactWrites.set(key, nextLabels);
+    this.capObservedCache(this.observedContactWrites);
     await this.recordObservedContact({
       ...envelope,
       ...(senderName ? { senderName } : {}),

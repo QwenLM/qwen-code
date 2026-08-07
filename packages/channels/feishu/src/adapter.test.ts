@@ -1086,6 +1086,129 @@ describe('FeishuChannel', () => {
         fetchSpy.mockRestore();
       }
     });
+
+    it('keeps enrichment silent when tenant token acquisition fails', async () => {
+      const observe = vi.fn();
+      const { channel, bridge } = createObservedContactChannel(observe);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: undefined,
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/auth/v3/tenant_access_token/internal')) {
+            throw new Error('token endpoint unavailable');
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('prefers the newest persisted label when hydrating overlapping contacts', async () => {
+      const observe = vi.fn();
+      const list = vi.fn(
+        (): ObservedChannelContactGraph => ({
+          users: [
+            {
+              channelName: 'test',
+              id: 'ou_user',
+              label: 'New Name',
+              lastObservedAt: '2026-02-01T00:00:00.000Z',
+            },
+          ],
+          groups: [
+            {
+              channelName: 'test',
+              id: 'oc_group',
+              label: 'Project Group',
+              lastObservedAt: '2026-01-01T00:00:00.000Z',
+              users: [
+                {
+                  id: 'ou_user',
+                  label: 'Old Name',
+                  lastObservedAt: '2026-01-01T00:00:00.000Z',
+                },
+              ],
+              topics: [],
+            },
+          ],
+        }),
+      );
+      const { channel, bridge } = createObservedContactChannel(observe, list);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(jsonResponse('rate limited', 429));
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining('[New Name]'),
+          expect.anything(),
+        );
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'New Name' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('bounds runtime label caches to the observed-contact retention cap', () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const capObservedCache = getPrivateMethod<
+        (cache: Map<string, unknown>) => void
+      >(channel, 'capObservedCache').bind(channel);
+      const cache = new Map<string, string>();
+      for (let i = 0; i < 525; i++) {
+        cache.set(`id_${i}`, `label_${i}`);
+      }
+
+      capObservedCache(cache);
+
+      expect(cache.size).toBe(500);
+      expect(cache.has('id_0')).toBe(false);
+      expect(cache.has('id_24')).toBe(false);
+      expect(cache.has('id_25')).toBe(true);
+      expect(cache.has('id_524')).toBe(true);
+    });
   });
 
   describe('extractCardText', () => {
