@@ -394,6 +394,7 @@ describe('Session', () => {
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordUserMessage: ReturnType<typeof vi.fn>;
+    recordCronPrompt: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
@@ -623,6 +624,7 @@ describe('Session', () => {
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
+      recordCronPrompt: vi.fn(),
       recordMidTurnUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
@@ -13435,7 +13437,7 @@ describe('Session', () => {
         }
       });
 
-      it('leaves a non-sentinel cron prompt untouched (no loop.md expansion)', async () => {
+      it('persists a non-sentinel cron prompt and keeps the session interactive', async () => {
         const scheduler = {
           size: 1,
           hasPendingWork: true,
@@ -13456,6 +13458,7 @@ describe('Session', () => {
         mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
         mockChat.sendMessageStream = vi
           .fn()
+          .mockResolvedValueOnce(createEmptyStream())
           .mockResolvedValueOnce(createEmptyStream())
           .mockResolvedValueOnce(createEmptyStream());
 
@@ -13484,6 +13487,30 @@ describe('Session', () => {
           expect(sentToModel()).toContain('do the normal cron thing');
         });
         expect(sentToModel()).not.toContain('# /loop tick');
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledWith(
+          [{ text: 'do the normal cron thing' }],
+          'do the normal cron thing',
+        );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+        await vi.waitFor(() =>
+          expect(
+            (session as unknown as { cronProcessing: boolean }).cronProcessing,
+          ).toBe(false),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'follow-up' }],
+        });
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'follow-up',
+        );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
       });
 
       it('re-expands the full loop.md block after an auto-compaction resets the resolver cache', async () => {

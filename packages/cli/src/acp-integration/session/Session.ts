@@ -6174,6 +6174,9 @@ export class Session implements SessionContext {
                   { text: modelText },
                 ],
               };
+              this.config
+                .getChatRecordingService()
+                ?.recordCronPrompt([{ text: modelText }], echoText);
               const toolLoopState = createDaemonToolLoopState('off');
 
               while (nextMessage !== null) {
