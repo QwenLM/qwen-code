@@ -26,6 +26,9 @@ interface QuestionRecord {
   unsubscribe?: () => void;
   responding?: boolean;
   ignoreResponseProjection?: boolean;
+  /** The claim callback response already delivered the terminal card, so
+   *  projectTerminal must not re-patch it or post a fallback beside it. */
+  terminalDeliveredByClaim?: boolean;
   terminalState?: TerminalState;
   terminalAnswers?: Record<string, string>;
   projection?: Promise<void>;
@@ -182,6 +185,7 @@ export class FeishuQuestionCardController {
       };
     }
     this.markClaimed(record);
+    record.terminalDeliveredByClaim = true;
     return {
       kind: 'handled',
       response: {
@@ -288,6 +292,9 @@ export class FeishuQuestionCardController {
       return;
     }
     if (record.ignoreResponseProjection) return;
+    // A response settling not-accepted must not flip the terminal state
+    // cancelRun already projected (已取消 → 已过期) or re-patch the card.
+    if (terminalState === 'expired' && record.terminalState) return;
     record.terminalState = terminalState;
     await this.projectTerminal(record);
   }
@@ -297,6 +304,7 @@ export class FeishuQuestionCardController {
     messageId = record.messageId,
   ): Promise<void> {
     if (!messageId || !record.terminalState) return Promise.resolve();
+    if (record.terminalDeliveredByClaim) return Promise.resolve();
     const terminalState = record.terminalState;
     const answers = record.terminalAnswers;
     const card = buildQuestionTerminalCard(

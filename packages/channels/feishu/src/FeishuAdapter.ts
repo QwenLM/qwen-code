@@ -66,9 +66,12 @@ interface CardSessionState {
   accumulatedText: string;
   lastUpdateAt: number;
   pendingUpdateTimer?: ReturnType<typeof setTimeout>;
-  /** In-flight throttled streaming PATCH; finalization awaits it so the final
-   *  patch is always the last card update Feishu applies. */
+  /** In-flight throttled streaming PATCH chain; finalization awaits it so the
+   *  final patch is always the last card update Feishu applies. */
   pendingUpdatePromise?: Promise<void>;
+  /** Set when a throttled update fires while a run is already in flight or
+   *  queued; the chain re-runs once so the latest buffer still goes out. */
+  updateQueued?: boolean;
   /** Captured before cleanup so the creating→stopped callback retains the @sender prefix. */
   atPrefix?: string;
   /** Set by onResponseComplete to prevent concurrent updateCard from pendingUpdateTimer callback. */
@@ -959,11 +962,9 @@ export class FeishuChannel extends ChannelBase {
       return { messageId, success: true };
     } catch (err) {
       if (err instanceof FeishuCardDeliveryError) {
-        if (err.status !== undefined) {
-          process.stderr.write(
-            `[Feishu:${this.name}] createStreamingCard failed: ${err.detail ?? err.message}\n`,
-          );
-        }
+        process.stderr.write(
+          `[Feishu:${this.name}] createStreamingCard failed: ${err.detail ?? err.message}\n`,
+        );
         return { messageId: '', success: false };
       }
       process.stderr.write(
@@ -1177,16 +1178,27 @@ export class FeishuChannel extends ChannelBase {
         cs.pendingUpdateTimer = undefined;
         if (cs.stopped || cs.finalizing) return;
         cs.lastUpdateAt = Date.now();
-        cs.pendingUpdatePromise = (
-          cs.pendingUpdatePromise ?? Promise.resolve()
-        ).then(() => this.runThrottledCardUpdate(inboundMsgId, cs));
+        if (cs.pendingUpdatePromise) {
+          // A run is already in flight or queued — coalesce instead of
+          // stacking a burst of PATCHes; the trailing run picks up the
+          // latest accumulated buffer.
+          cs.updateQueued = true;
+          return;
+        }
+        cs.pendingUpdatePromise = this.runThrottledCardUpdate(
+          inboundMsgId,
+          cs,
+        ).then(() => {
+          cs.pendingUpdatePromise = undefined;
+        });
       }, delay);
     }
   }
 
-  /** Runs one throttled streaming PATCH. Serialized behind
-   *  `pendingUpdatePromise` so finalization can drain every in-flight update
-   *  before sending the final patch. */
+  /** Runs one throttled streaming PATCH, then re-runs once when timer fires
+   *  coalesced behind it (`updateQueued`) so the latest buffer still goes out.
+   *  `pendingUpdatePromise` covers the whole chain so finalization can drain
+   *  every in-flight update before sending the final patch. */
   private async runThrottledCardUpdate(
     inboundMsgId: string,
     cs: CardSessionState,
@@ -1210,6 +1222,10 @@ export class FeishuChannel extends ChannelBase {
       }
     } catch (err) {
       process.stderr.write(`[Feishu:${this.name}] card update error: ${err}\n`);
+    }
+    if (cs.updateQueued) {
+      cs.updateQueued = false;
+      await this.runThrottledCardUpdate(inboundMsgId, cs);
     }
   }
 
@@ -1258,6 +1274,17 @@ export class FeishuChannel extends ChannelBase {
     inboundMsgId: string,
     cardState: CardSessionState,
   ): Promise<void> {
+    // Stop owns the card once the user clicks it: handleStop refuses to race
+    // a finalizing card, so finalizing here would render 已完成 over a stopped
+    // run and drop the stop label. Leave the card to the stop wind-down paths.
+    if (
+      cardState.cancelling ||
+      cardState.stopped ||
+      this.stoppedMessages.has(inboundMsgId)
+    ) {
+      return;
+    }
+
     const atPrefix = this.msgToSenderName.get(inboundMsgId);
     const text = cardState.accumulatedText || cardState.boundaryText || '';
     const displayText = atPrefix
@@ -1282,6 +1309,18 @@ export class FeishuChannel extends ChannelBase {
         }
         let updated = false;
         try {
+          // Stop may settle during the drain above; mirror onResponseComplete
+          // and hand the card to the stop path instead of labelling a stopped
+          // run 已完成.
+          if (
+            await this.finalizeStoppedCardUpdate(
+              inboundMsgId,
+              cardState,
+              chatId,
+            )
+          ) {
+            return;
+          }
           updated = await this.updateCard(
             cardState.messageId,
             this.truncateCardText(displayText),
@@ -1303,6 +1342,16 @@ export class FeishuChannel extends ChannelBase {
               inboundMsgId,
               this.statusLabelFor('completed'),
             );
+          }
+          // Stop may also settle during the patch awaits above.
+          if (
+            await this.finalizeStoppedCardUpdate(
+              inboundMsgId,
+              cardState,
+              chatId,
+            )
+          ) {
+            return;
           }
         } catch (error) {
           process.stderr.write(
@@ -1452,27 +1501,14 @@ export class FeishuChannel extends ChannelBase {
 
     // Prepend greeting with sender name
     const atSender = this.msgToSenderName.get(inboundMsgId);
-    let displayText = atSender ? `${atSender}\n\n${fullText}` : fullText;
     const completedLabel = this.statusLabelFor('completed');
     const completedSuffix = `\n\n---\n*${completedLabel}*`;
-    // Enforce card size limit to avoid wasted API round-trips
-    const MAX_FINAL_CARD_CHARS = 20_000;
-    if (displayText.length + completedSuffix.length > MAX_FINAL_CARD_CHARS) {
-      const prefix = atSender ? `${atSender}\n\n` : '';
-      const suffix = '\n\n_(内容过长，已截断早期内容)_';
-      const fenceReserve = 4; // potential '```\n' prepend for fence rebalancing
-      const maxBody =
-        MAX_FINAL_CARD_CHARS -
-        prefix.length -
-        suffix.length -
-        completedSuffix.length -
-        fenceReserve;
-      displayText = prefix + fullText.slice(-maxBody) + suffix;
-      // Re-balance code fences after truncation (line-by-line, handles indented fences)
-      if (this.countFences(displayText) % 2 === 1) {
-        displayText = '```\n' + displayText;
-      }
-    }
+    const atPrefix = atSender ? `${atSender}\n\n` : '';
+    // Enforce card size limit to avoid wasted API round-trips; reserve room
+    // for the greeting prefix and the completed status block.
+    const displayText =
+      atPrefix +
+      this.truncateCardText(fullText, atPrefix.length + completedSuffix.length);
 
     // Mark as finalizing to prevent concurrent updates/create from timers
     if (cardState) cardState.finalizing = true;
@@ -2051,14 +2087,18 @@ export class FeishuChannel extends ChannelBase {
     return result.join('\n');
   }
 
-  /** Truncate card content to the Feishu card size limit, keeping the tail. */
-  private truncateCardText(text: string): string {
+  /** Truncate card content to the Feishu card size limit, keeping the tail.
+   *  `reservedChars` covers content rendered alongside the text (greeting
+   *  prefix, status block) that must fit the same limit. */
+  private truncateCardText(text: string, reservedChars = 0): string {
     const MAX_CARD_CHARS = 20_000;
-    if (text.length <= MAX_CARD_CHARS) return text;
+    if (text.length + reservedChars <= MAX_CARD_CHARS) return text;
     const marker = '\n\n_(内容过长，已截断早期内容)_';
     const fenceReserve = 4; // potential '```\n' prepend for fence rebalancing
     let truncated =
-      text.slice(-(MAX_CARD_CHARS - marker.length - fenceReserve)) + marker;
+      text.slice(
+        -(MAX_CARD_CHARS - marker.length - fenceReserve - reservedChars),
+      ) + marker;
     // Re-balance code fences after truncation
     if (this.countFences(truncated) % 2 === 1) {
       truncated = '```\n' + truncated;
@@ -2105,9 +2145,13 @@ export class FeishuChannel extends ChannelBase {
       messageId: '',
       created: false,
       creating: false,
-      stopped: false,
+      // Carry a settled user stop (not the abandoned-creation marker) so a
+      // late-settled stop cannot flip onPromptEnd into a contradictory
+      // terminal message.
+      stopped: cardState.stopped && !cardState.abandoned,
       accumulatedText: '',
       lastUpdateAt: Date.now(),
+      userStopped: cardState.userStopped,
       terminalStatus: cardState.terminalStatus,
     });
   }
