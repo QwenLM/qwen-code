@@ -55,19 +55,3 @@ controls remain available; the new value applies to the next request.
 
 Older daemons that do not advertise `session_reasoning_control` keep the
 existing model-only popover.
-
-## Local mock environment
-
-The WebShell Playwright mock daemon includes a reasoning-options scenario, so
-the UI can be exercised without credentials or a real model request:
-
-```bash
-cd packages/web-shell
-npm run dev:reasoning-options
-```
-
-The command opens a headed browser with the stable model named
-`qwen3.8-max`, installs the mock daemon, opens the model popover, and pauses so
-Thinking and Effort can be changed manually. Run the stable flow plus the
-preview-model and old-daemon fallback cases headlessly with
-`npm run test:e2e:reasoning`.

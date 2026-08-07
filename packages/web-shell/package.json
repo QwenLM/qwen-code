@@ -26,8 +26,6 @@
     "test:ci": "vitest run --config vitest.config.ts --coverage",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:e2e:smoke": "playwright test --config playwright.config.ts --grep @smoke",
-    "test:e2e:reasoning": "playwright test --config playwright.config.ts client/e2e/web-shell.reasoning-options.spec.ts",
-    "dev:reasoning-options": "cross-env PLAYWRIGHT_INTERACTIVE_DEMO=1 playwright test --config playwright.config.ts client/e2e/web-shell.reasoning-options.spec.ts --project=chromium --headed --grep \"updates qwen3.8-max Thinking and Effort\"",
     "test:e2e": "playwright test --config playwright.config.ts",
     "test:e2e:visuals": "playwright test --config playwright.visuals.config.ts",
     "test:e2e:report": "playwright show-report client/e2e/playwright-report",
