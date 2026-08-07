@@ -26,7 +26,7 @@ focused upstream command is:
 npx playwright test --config packages/web-shell/playwright.config.ts packages/web-shell/client/e2e/web-shell.smoke.spec.ts --grep 'anchors the empty mobile composer'
 ```
 
-After the repair, the focused upstream run passed (`1 passed`, 4.5s). The
+After the repair, the focused upstream run passed (`3 passed`). The
 embedded extension-host browser verification also passed in Chrome on macOS
 using the naturally narrow Data Agent sidebar: the welcome content stayed
 centered, the composer aligned with the sidebar bottom, the dot field remained

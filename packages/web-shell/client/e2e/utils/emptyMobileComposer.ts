@@ -51,6 +51,30 @@ export async function gotoEmptyMobileWelcomeHarness(
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
 }
 
+export async function expectEmptyMobileWelcomeChromeVisible(
+  page: Page,
+  options: EmptyMobileComposerLayoutOptions = {},
+): Promise<void> {
+  const composer = page.locator(emptyMobileComposerSelectors.composerSurface);
+  const welcomeHeader = page.locator(
+    emptyMobileComposerSelectors.welcomeHeader,
+  );
+  const dotField = page.locator(emptyMobileComposerSelectors.dotField);
+
+  await expect(composer).toBeVisible();
+  await expect(welcomeHeader).toBeVisible();
+  if (options.requireWelcomeFooter !== false) {
+    await expect(
+      page.locator(`${emptyMobileComposerSelectors.welcomeFooter}:visible`),
+    ).toBeVisible();
+  } else {
+    await expect(
+      page.locator(emptyMobileComposerSelectors.welcomeFooter),
+    ).toHaveCount(0);
+  }
+  await expect(dotField.locator('canvas')).toBeVisible();
+}
+
 export async function emptyMobileComposerLayout(
   page: Page,
   options: EmptyMobileComposerLayoutOptions = {},

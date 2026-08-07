@@ -21,8 +21,8 @@ import {
 } from './utils/mockDaemon';
 import {
   emptyMobileComposerLayout,
-  emptyMobileComposerSelectors,
   expectEmptyMobileComposerAnchored,
+  expectEmptyMobileWelcomeChromeVisible,
   gotoEmptyMobileWelcomeHarness,
 } from './utils/emptyMobileComposer';
 
@@ -51,21 +51,9 @@ test('anchors the empty mobile composer with the textarea backend', async ({
 
   await gotoEmptyMobileWelcomeHarness(page);
   const textarea = page.locator(COMPOSER_TEXTAREA);
-  const composer = page.locator(emptyMobileComposerSelectors.composerSurface);
-  const welcomeHeader = page.locator(
-    emptyMobileComposerSelectors.welcomeHeader,
-  );
-  const welcomeFooter = page.locator(
-    `${emptyMobileComposerSelectors.welcomeFooter}:visible`,
-  );
-  const dotField = page.locator(emptyMobileComposerSelectors.dotField);
-
   await expect(textarea).toBeVisible();
   await expect(page.locator('.cm-editor')).toHaveCount(0);
-  await expect(composer).toBeVisible();
-  await expect(welcomeHeader).toBeVisible();
-  await expect(welcomeFooter).toBeVisible();
-  await expect(dotField.locator('canvas')).toBeVisible();
+  await expectEmptyMobileWelcomeChromeVisible(page);
 
   const layout = await emptyMobileComposerLayout(page);
   expectEmptyMobileComposerAnchored(layout);
