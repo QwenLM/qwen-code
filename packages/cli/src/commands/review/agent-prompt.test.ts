@@ -3665,3 +3665,49 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(msg).toContain('CONVERGED');
   });
 });
+
+describe('the tool budget in the briefs', () => {
+  const budgetPlan = {
+    ...PLAN,
+    budget: {
+      inlineAngles: 4,
+      sweep: true,
+      specialistCap: 2,
+      verifyShard: 8,
+      agentToolBudget: 42,
+    },
+  } as never;
+
+  it('bakes the soft ceiling into finder and chunk briefs', () => {
+    expect(buildChunkAgentPrompt(budgetPlan, 13)).toContain(
+      'About **42 tool calls**',
+    );
+    for (const role of ['1a', '2', '6b', 'reverse-audit'] as const) {
+      expect(buildRoleBrief(budgetPlan, role)).toContain(
+        'About **42 tool calls**',
+      );
+    }
+  });
+
+  it('never budgets the verifier or Build & Test', () => {
+    // The verifier's per-finding re-trace is the one walk that must not stop
+    // early (verifyShard governs its load); Agent 7 runs deterministic
+    // commands.
+    for (const role of ['verify', '7'] as const) {
+      expect(buildRoleBrief(budgetPlan, role)).not.toContain('Tool budget');
+    }
+  });
+
+  it('a plan without the field falls back to no ceiling — more coverage, never less', () => {
+    expect(buildChunkAgentPrompt(PLAN as never, 13)).not.toContain(
+      'Tool budget',
+    );
+    expect(buildRoleBrief(PLAN as never, '1a')).not.toContain('Tool budget');
+  });
+
+  it('restates the recall rule so the ceiling cannot read as a reporting cap', () => {
+    expect(buildRoleBrief(budgetPlan, '1a')).toContain(
+      'never suppresses a finding',
+    );
+  });
+});

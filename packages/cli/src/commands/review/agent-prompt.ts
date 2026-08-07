@@ -277,6 +277,40 @@ function chunkFrom(
 }
 
 /**
+ * The soft tool-call ceiling for finder/auditor briefs (see
+ * lib/budget.ts, `agentToolBudget`). Empty when the plan predates the
+ * field — an old plan fails toward more coverage, exactly like the
+ * pre-budget fallback the skill documents — and empty for the roles whose
+ * load is governed elsewhere: the verifier (verifyShard) and Build & Test
+ * (deterministic commands).
+ *
+ * The wording is deliberate on two points. "Stop exploring" is aimed at the
+ * measured pathology — the slowest agent of a wave is reliably one that
+ * kept walking the tree past any recall gain (two runs of the same
+ * 14-agent wave: 11.7 vs 41 minutes) — and the recall rule is restated
+ * inline because a budget that reads as a reporting cap would suppress
+ * exactly the low-confidence candidates the pipeline's later stages exist
+ * to judge.
+ */
+function toolBudgetBlock(report: PlanReport): string[] {
+  const budget = report.budget?.agentToolBudget;
+  if (typeof budget !== 'number' || budget <= 0) return [];
+  return [
+    '',
+    '## Tool budget',
+    '',
+    `About **${budget} tool calls** for this whole review — reads, greps, shell, ` +
+      'everything — as a soft ceiling. At the ceiling: stop exploring, write your ' +
+      'findings from the evidence already in hand, and name what you did not get ' +
+      'to in your return (`did not get to: <the check>`) — a disclosed gap is ' +
+      'actionable; a silent crawl only slows the review. The budget never ' +
+      'suppresses a finding: a candidate you can already name goes in your ' +
+      'return regardless (at `Confidence: low` if the budget stopped you before ' +
+      'verifying it), exactly as the recall rule requires.',
+  ];
+}
+
+/**
  * The launch prompt for the agent that owns `chunk`.
  *
  * Exported for the tests, which assert the properties that were missing from
@@ -384,6 +418,8 @@ export function buildChunkAgentPrompt(
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
   }
+
+  parts.push(...toolBudgetBlock(report));
 
   // Deliberately NOT included: a sentence for the agent to recite when it finds
   // nothing. Every real launch handed the agent its own receipt text — `If you
@@ -830,6 +866,12 @@ export function buildRoleBrief(
   }
 
   parts.push('## Your dimension', '', brief.brief);
+  // Not the verifier (verifyShard governs its load, and its per-finding
+  // re-tracing is the one walk that must not stop early) and not Build & Test
+  // (deterministic commands, already self-budgeted).
+  if (role !== 'verify' && role !== '7') {
+    parts.push(...toolBudgetBlock(report));
+  }
   const repositoryContext = repositoryContextOf(report);
   if (role === '7') {
     if (repositoryContext) {

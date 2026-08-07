@@ -130,3 +130,33 @@ describe('reviewBudget — garbled input fails toward the cheap end, never throw
     }
   });
 });
+
+describe('reviewBudget — the agent tool budget', () => {
+  it('floors at 30 on a small diff', () => {
+    expect(
+      reviewBudget({ srcDiffLines: 40, diffLines: 60 }).agentToolBudget,
+    ).toBe(32);
+    expect(
+      reviewBudget({ srcDiffLines: 0, diffLines: 0 }).agentToolBudget,
+    ).toBe(30);
+  });
+
+  it('earns a call per twenty effective lines', () => {
+    expect(
+      reviewBudget({ srcDiffLines: 300, diffLines: 400 }).agentToolBudget,
+    ).toBe(45);
+  });
+
+  it('caps at 60 — a wanderer must not out-earn the ceiling', () => {
+    expect(
+      reviewBudget({ srcDiffLines: 5000, diffLines: 6000 }).agentToolBudget,
+    ).toBe(60);
+  });
+
+  it('a large all-prose diff earns budget at the coarse effective rate', () => {
+    // effective = max(src, total/8): prose still has lines to walk.
+    expect(
+      reviewBudget({ srcDiffLines: 0, diffLines: 3200 }).agentToolBudget,
+    ).toBe(50);
+  });
+});

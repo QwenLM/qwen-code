@@ -81,6 +81,22 @@ export interface ReviewBudget {
    * its list, which is a fact about the verifier and not about the diff.
    */
   verifyShard: number;
+  /**
+   * Soft tool-call ceiling baked into every finder/auditor brief — not the
+   * verifier, whose load `verifyShard` already governs, and not Build & Test,
+   * whose calls are deterministic commands.
+   *
+   * A fan-out wave's wall clock is its slowest agent, and the slowest agent
+   * is reliably a wanderer: two measured runs of the SAME 14-agent wave took
+   * 11.7 and 41 minutes, the difference being individual agents spending
+   * 40-100 model calls exploring the tree, while healthy agents on
+   * comparable diffs settle in the 25-45 range. The ceiling is SOFT: the
+   * brief tells the agent to stop exploring at the budget, write its
+   * findings from the evidence in hand, and disclose what it did not get to
+   * — a disclosed gap feeds the whiff and receipt machinery; an undisclosed
+   * crawl only feeds the wall clock.
+   */
+  agentToolBudget: number;
 }
 
 /**
@@ -98,6 +114,17 @@ const LINES_PER_ANGLE = 60;
 export const MIN_INLINE_ANGLES = 3;
 export const MAX_INLINE_ANGLES = 6;
 export const VERIFY_SHARD = 8;
+
+/**
+ * The floor is what a small diff's walk legitimately needs (brief + chunk
+ * reads + a handful of enclosing-function reads and greps); the ceiling sits
+ * above every healthy per-agent count measured on real reviews (25-45) and
+ * below the wandering pathology (40-100+). One extra call per twenty
+ * effective lines lets a larger territory earn a longer walk.
+ */
+export const MIN_AGENT_TOOL_BUDGET = 30;
+export const MAX_AGENT_TOOL_BUDGET = 60;
+const LINES_PER_TOOL_CALL = 20;
 
 /**
  * The review budget for a plan.
@@ -133,6 +160,11 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
     sweep: effective >= SWEEP_FLOOR,
     specialistCap: src >= SPECIALIST_FLOOR ? 2 : 0,
     verifyShard: VERIFY_SHARD,
+    agentToolBudget: clamp(
+      MIN_AGENT_TOOL_BUDGET + Math.floor(effective / LINES_PER_TOOL_CALL),
+      MIN_AGENT_TOOL_BUDGET,
+      MAX_AGENT_TOOL_BUDGET,
+    ),
   };
 }
 
