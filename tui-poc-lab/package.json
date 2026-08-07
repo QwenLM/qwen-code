@@ -1,0 +1,23 @@
+{
+  "name": "@qwen-code/tui-poc",
+  "version": "0.0.1",
+  "private": true,
+  "description": "POC: qwen-code TUI on OpenTUI renderer (flicker-free + mouse-first)",
+  "type": "module",
+  "scripts": {
+    "poc": "bun src/main.tsx",
+    "poc:node": "node --experimental-ffi --no-warnings src/main.tsx",
+    "ink-ref": "bun src-ink/ink-demo.tsx"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.1",
+    "@opentui/react": "0.5.1",
+    "ink": "7.0.3",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}
