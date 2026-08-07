@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { DEFAULT_CONTEXT_FILENAME } from './const.js';
 import { isAllowedMemoryPath } from './memory-scoped-agent-config.js';
 import {
   rebuildManagedAutoMemoryIndex,
@@ -89,6 +90,25 @@ export function didWriteManagedMemory(
     (candidate) =>
       classifyWrittenMemoryScope(candidate, projectRoot) !== undefined,
   );
+}
+
+export function didWriteProjectContextFile(
+  candidates: readonly MemoryWriteCandidate[],
+  projectRoot: string,
+): boolean {
+  const contextFilePath = path.resolve(projectRoot, DEFAULT_CONTEXT_FILENAME);
+
+  return candidates.some((candidate) => {
+    if (!isSuccessfulWrite(candidate)) {
+      return false;
+    }
+
+    const filePath = candidateFilePath(candidate.args);
+    return (
+      filePath !== undefined &&
+      resolveCandidatePath(filePath, projectRoot) === contextFilePath
+    );
+  });
 }
 
 async function rebuildWrittenMemoryIndexes(

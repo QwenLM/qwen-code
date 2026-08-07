@@ -33,6 +33,26 @@ vi.mock('./refresh.js', () => ({
   refreshMemoryInstruction: vi.fn().mockResolvedValue(undefined),
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForMockCall(mock: { mock: { calls: unknown[] } }) {
+  for (let i = 0; i < 10; i++) {
+    if (mock.mock.calls.length > 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error('Expected mock to be called');
+}
+
 describe('auto-memory extraction', () => {
   let tempDir: string;
   let projectRoot: string;
@@ -88,6 +108,7 @@ describe('auto-memory extraction', () => {
 
     expect(first.touchedTopics).toEqual([]);
     expect(second.touchedTopics).toEqual([]);
+    expect(refreshMemoryInstruction).not.toHaveBeenCalled();
 
     const cursor = JSON.parse(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
@@ -225,6 +246,7 @@ describe('auto-memory extraction', () => {
     });
 
     it('refreshes the live instruction after touched topics are indexed', async () => {
+      const projectRebuild = deferred<string>();
       vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
         touchedTopics: ['project'],
         touchedProjectScope: true,
@@ -232,22 +254,58 @@ describe('auto-memory extraction', () => {
         hasToolActivity: true,
         systemMessage: undefined,
       });
+      vi.mocked(rebuildManagedAutoMemoryIndex).mockReturnValueOnce(
+        projectRebuild.promise,
+      );
 
-      await runAutoMemoryExtract({
+      const extractPromise = runAutoMemoryExtract({
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
         history: [...newHistory],
       });
+      await waitForMockCall(vi.mocked(rebuildManagedAutoMemoryIndex));
+
+      expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+
+      projectRebuild.resolve('');
+      await extractPromise;
 
       expect(refreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
         logContext: 'managed auto-memory extraction',
       });
-      expect(
-        vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[0],
-      ).toBeLessThan(
-        vi.mocked(refreshMemoryInstruction).mock.invocationCallOrder[0],
+    });
+
+    it('refreshes user-scope-only updates after the user index is rebuilt', async () => {
+      const userRebuild = deferred<string>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['user'],
+        touchedProjectScope: false,
+        touchedUserScope: true,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+      vi.mocked(rebuildUserAutoMemoryIndex).mockReturnValueOnce(
+        userRebuild.promise,
       );
+
+      const extractPromise = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      });
+      await waitForMockCall(vi.mocked(rebuildUserAutoMemoryIndex));
+
+      expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+      expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+
+      userRebuild.resolve('');
+      await extractPromise;
+
+      expect(refreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'managed auto-memory extraction',
+      });
     });
   });
 

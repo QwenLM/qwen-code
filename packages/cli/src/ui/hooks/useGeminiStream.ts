@@ -66,7 +66,7 @@ import {
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
-  DEFAULT_CONTEXT_FILENAME,
+  didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   finalizeToolResponses,
@@ -206,34 +206,6 @@ function sharedGoalPermit(
     throw new Error('ToolResult batch has mixed Goal contexts');
   }
   return { ...first };
-}
-
-function didWriteProjectContextFile(
-  tools: readonly TrackedCompletedToolCall[],
-  projectRoot: string,
-): boolean {
-  const contextFilePath = path.resolve(projectRoot, DEFAULT_CONTEXT_FILENAME);
-
-  return tools.some((toolCall) => {
-    if (toolCall.status !== 'success') {
-      return false;
-    }
-    if (
-      toolCall.request.name !== ToolNames.WRITE_FILE &&
-      toolCall.request.name !== ToolNames.EDIT
-    ) {
-      return false;
-    }
-
-    const args = toolCall.request.args as Record<string, unknown> | undefined;
-    const filePath =
-      args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
-
-    return (
-      typeof filePath === 'string' &&
-      path.resolve(projectRoot, filePath) === contextFilePath
-    );
-  });
 }
 
 /**
@@ -3902,26 +3874,35 @@ export const useGeminiStream = (
             'runtime',
           );
       }
-      const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
-        config,
-        completedAndReadyToSubmitTools.map((toolCall) => ({
+      const memoryWriteCandidates = completedAndReadyToSubmitTools.map(
+        (toolCall) => ({
           toolName: toolCall.request.name,
           args: toolCall.request.args as Record<string, unknown>,
           status: toolCall.status,
-        })),
+        }),
+      );
+      const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
+        config,
+        memoryWriteCandidates,
         { logContext: 'interactive memory tool batch' },
       );
-      if (
-        refreshContextFilesOnWriteRef.current &&
-        didWriteProjectContextFile(
-          completedAndReadyToSubmitTools,
+      if (refreshContextFilesOnWriteRef.current) {
+        const matchedContextFileWrite = didWriteProjectContextFile(
+          memoryWriteCandidates,
           config.getProjectRoot(),
-        )
-      ) {
-        await refreshMemoryInstruction(config, {
-          logContext: 'interactive context-file memory tool batch',
-        });
-        refreshContextFilesOnWriteRef.current = false;
+        );
+        debugLogger.debug(
+          `Checked marked context-file memory tool batch; matched=${matchedContextFileWrite}`,
+        );
+        if (matchedContextFileWrite) {
+          debugLogger.debug(
+            'Refreshing memory after context-file memory write',
+          );
+          await refreshMemoryInstruction(config, {
+            logContext: 'interactive context-file memory tool batch',
+          });
+          refreshContextFilesOnWriteRef.current = false;
+        }
       }
       if (newSuccessfulMemorySaves.length > 0) {
         if (!didRefreshManagedMemory) {

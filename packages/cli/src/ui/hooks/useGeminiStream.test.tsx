@@ -8441,27 +8441,32 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('refreshes context-file instructions after bare remember writes QWEN.md', async () => {
-      const completedToolCall: TrackedCompletedToolCall = {
+    function createCompletedFileWrite(options: {
+      toolName?: string;
+      filePath: string;
+      status?: TrackedCompletedToolCall['status'];
+    }): TrackedCompletedToolCall {
+      const toolName = options.toolName ?? 'write_file';
+      return {
         request: {
           callId: 'write-context-call-1',
-          name: 'write_file',
-          args: { file_path: '/test/dir/QWEN.md' },
+          name: toolName,
+          args: { file_path: options.filePath },
           isClientInitiated: false,
           prompt_id: 'prompt-id-bare-remember',
         },
-        status: 'success',
+        status: options.status ?? 'success',
         responseSubmittedToGemini: false,
         response: {
           callId: 'write-context-call-1',
-          responseParts: [{ text: 'Wrote QWEN.md' }],
-          resultDisplay: 'Wrote QWEN.md',
+          responseParts: [{ text: `Ran ${toolName}` }],
+          resultDisplay: `Ran ${toolName}`,
           error: undefined,
           errorType: undefined,
         },
         tool: {
-          name: 'write_file',
-          displayName: 'write_file',
+          name: toolName,
+          displayName: toolName,
           description: 'Writes files',
           build: vi.fn(),
         } as any,
@@ -8469,15 +8474,25 @@ describe('useGeminiStream', () => {
           getDescription: () => `Mock description`,
         } as unknown as AnyToolInvocation,
       };
+    }
+
+    async function submitSlashCommandAndCompleteTool(
+      completedToolCall: TrackedCompletedToolCall,
+      refreshContextFilesOnWrite?: boolean,
+    ) {
       mockHandleSlashCommand.mockResolvedValue({
         type: 'submit_prompt',
-        content: 'remember this',
-        refreshContextFilesOnWrite: true,
+        content: refreshContextFilesOnWrite ? 'remember this' : 'write docs',
+        ...(refreshContextFilesOnWrite
+          ? { refreshContextFilesOnWrite: true }
+          : {}),
       });
 
       const { result } = renderTestHook();
       await act(async () => {
-        await result.current.submitQuery('/remember fact');
+        await result.current.submitQuery(
+          refreshContextFilesOnWrite ? '/remember fact' : '/write-docs',
+        );
       });
       const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
         | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -8485,55 +8500,59 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await onComplete?.([completedToolCall]);
       });
+    }
+
+    it('refreshes context-file instructions after bare remember writes QWEN.md', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
+        true,
+      );
 
       expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
         logContext: 'interactive context-file memory tool batch',
       });
     });
 
-    it('does not refresh context-file instructions for ordinary QWEN.md writes', async () => {
-      const completedToolCall: TrackedCompletedToolCall = {
-        request: {
-          callId: 'write-context-call-1',
-          name: 'write_file',
-          args: { file_path: '/test/dir/QWEN.md' },
-          isClientInitiated: false,
-          prompt_id: 'prompt-id-ordinary',
-        },
-        status: 'success',
-        responseSubmittedToGemini: false,
-        response: {
-          callId: 'write-context-call-1',
-          responseParts: [{ text: 'Wrote QWEN.md' }],
-          resultDisplay: 'Wrote QWEN.md',
-          error: undefined,
-          errorType: undefined,
-        },
-        tool: {
-          name: 'write_file',
-          displayName: 'write_file',
-          description: 'Writes files',
-          build: vi.fn(),
-        } as any,
-        invocation: {
-          getDescription: () => `Mock description`,
-        } as unknown as AnyToolInvocation,
-      };
-      mockHandleSlashCommand.mockResolvedValue({
-        type: 'submit_prompt',
-        content: 'write docs',
-      });
+    it('refreshes context-file instructions after bare remember edits QWEN.md', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({
+          toolName: 'edit',
+          filePath: '/test/dir/QWEN.md',
+        }),
+        true,
+      );
 
-      const { result } = renderTestHook();
-      await act(async () => {
-        await result.current.submitQuery('/write-docs');
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'interactive context-file memory tool batch',
       });
-      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | undefined;
-      await act(async () => {
-        await onComplete?.([completedToolCall]);
-      });
+    });
+
+    it('does not refresh context-file instructions for failed QWEN.md writes', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({
+          filePath: '/test/dir/QWEN.md',
+          status: 'error',
+        }),
+        true,
+      );
+
+      expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh context-file instructions for other file writes', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({ filePath: '/test/dir/notes.md' }),
+        true,
+      );
+
+      expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh context-file instructions for ordinary QWEN.md writes', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
+        false,
+      );
 
       expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
     });

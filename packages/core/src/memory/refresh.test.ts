@@ -20,6 +20,7 @@ import {
 } from './indexer.js';
 import {
   didWriteManagedMemory,
+  didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
 } from './refresh.js';
@@ -142,6 +143,69 @@ describe('managed memory refresh helper', () => {
         projectRoot,
       ),
     ).toBe(true);
+  });
+
+  it('detects successful project context file writes only', () => {
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: path.join(projectRoot, 'QWEN.md') },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'edit',
+            args: { file_path: 'QWEN.md' },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'replace',
+            args: { target_file: 'QWEN.md' },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: path.join(projectRoot, 'QWEN.md') },
+            status: 'error',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: path.join(projectRoot, 'notes.md') },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
   });
 
   it('rebuilds touched indexes before refreshing the live instruction', async () => {
