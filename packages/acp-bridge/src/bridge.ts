@@ -21,6 +21,7 @@ import type {
 import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
+  TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
@@ -29,6 +30,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -112,6 +114,7 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  BridgeTurnStatus,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -1268,6 +1271,73 @@ function extractPromptText(
     }
   }
   return hasImage ? '[image]' : '';
+}
+
+/**
+ * Project a live pending-prompt entry into the pollable turn status shape
+ * (`queued` while waiting on the FIFO, `running` once dispatched).
+ */
+function liveTurnStatus(
+  sessionId: string,
+  pending: PendingPromptEntry,
+): BridgeTurnStatus {
+  // Mirror the settled-record contract: `promptText` is capped at
+  // TURN_RESULT_TEXT_MAX_CHARS with the paired truncation flag, so the
+  // same promptId reports a consistent shape before and after settle.
+  const promptTextTruncated = pending.text.length > TURN_RESULT_TEXT_MAX_CHARS;
+  return {
+    sessionId,
+    state: pending.state === 'running' ? 'running' : 'queued',
+    promptId: pending.promptId,
+    promptText: promptTextTruncated
+      ? pending.text.slice(0, TURN_RESULT_TEXT_MAX_CHARS)
+      : pending.text,
+    ...(promptTextTruncated ? { promptTextTruncated: true } : {}),
+    queuedAt: pending.queuedAt,
+    ...(pending.startedAt !== undefined
+      ? { startedAt: pending.startedAt }
+      : {}),
+    ...(pending.originatorClientId !== undefined
+      ? { originatorClientId: pending.originatorClientId }
+      : {}),
+  };
+}
+
+/**
+ * Project a persisted `turn_result` record into the pollable turn status
+ * shape. The record's `state` is already settled (`completed` /
+ * `cancelled` / `error`).
+ */
+function settledTurnStatus(
+  sessionId: string,
+  record: TurnResultRecordPayload,
+): BridgeTurnStatus {
+  return {
+    sessionId,
+    state: record.state,
+    promptId: record.promptId,
+    ...(record.stopReason !== undefined
+      ? { stopReason: record.stopReason }
+      : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+    ...(record.promptText !== undefined
+      ? { promptText: record.promptText }
+      : {}),
+    ...(record.promptTextTruncated !== undefined
+      ? { promptTextTruncated: record.promptTextTruncated }
+      : {}),
+    ...(record.resultText !== undefined
+      ? { resultText: record.resultText }
+      : {}),
+    ...(record.resultTruncated !== undefined
+      ? { resultTruncated: record.resultTruncated }
+      : {}),
+    ...(record.originatorClientId !== undefined
+      ? { originatorClientId: record.originatorClientId }
+      : {}),
+  };
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
@@ -5233,6 +5303,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         text: extractPromptText(req.prompt),
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
+        ...(!isQueued ? { startedAt: Date.now() } : {}),
       };
       entry.pendingPromptList.push(pendingEntry);
       // DAEMON-003: absolute wallclock deadline. Armed at admission (the
@@ -5357,6 +5428,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (pendingEntry.state === 'queued') {
             entry.todoStopGuardAwaitingQueuedPrompt = false;
             pendingEntry.state = 'running';
+            pendingEntry.startedAt = Date.now();
             entry.events.publish({
               type: 'pending_prompt_started',
               promptId: pendingEntry.promptId,
@@ -7305,6 +7377,46 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ? { originatorClientId: p.originatorClientId }
             : {}),
         }));
+    },
+
+    async getSessionTurnStatus(sessionId, context, promptId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against this session — mirrors /prompt and
+      // getPendingPrompts.
+      resolveTrustedClientId(entry, context?.clientId);
+
+      // Live state wins: a prompt on the pending list has not settled yet,
+      // so no `turn_result` record can exist for it.
+      const live = entry.pendingPromptList.filter((p) => !p.removed);
+      if (promptId !== undefined) {
+        const match = live.find((p) => p.promptId === promptId);
+        if (match) return liveTurnStatus(sessionId, match);
+      } else {
+        const running = live.find((p) => p.state === 'running');
+        if (running) return liveTurnStatus(sessionId, running);
+        const queuedHead = live.find((p) => p.state === 'queued');
+        if (queuedHead) return liveTurnStatus(sessionId, queuedHead);
+      }
+
+      // Settled state is durable: read the agent's persisted `turn_result`
+      // records. This survives daemon restarts (the pending list does not).
+      const result = await requestSessionStatus<{
+        v: number;
+        sessionId: string;
+        turnResult: TurnResultRecordPayload | null;
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        ...(promptId !== undefined ? { promptId } : {}),
+      });
+      if (result.turnResult) {
+        return settledTurnStatus(sessionId, result.turnResult);
+      }
+      if (promptId !== undefined) {
+        // Neither the live queue nor the transcript knows this prompt.
+        return undefined;
+      }
+      // No live prompt and no settled outcome on record: idle.
+      return { sessionId, state: 'idle' as const };
     },
 
     removePendingPrompt(sessionId, promptId, context) {

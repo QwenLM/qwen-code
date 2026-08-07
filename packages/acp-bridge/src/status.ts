@@ -166,6 +166,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
+  /**
+   * Read a settled turn's persisted `turn_result` record from the session
+   * transcript. Live queued/running state comes from the bridge's pending
+   * prompt list instead; this is the durable source for completed /
+   * cancelled / error outcomes. Params: `{ sessionId, promptId? }`; result:
+   * `{ v: 1, sessionId, turnResult: TurnResultRecordPayload | null }` where
+   * `null` means no matching settled turn was found.
+   */
+  sessionTurnStatus: 'qwen/control/session/turn_status',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',

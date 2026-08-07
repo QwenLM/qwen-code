@@ -102,6 +102,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_launch_prompt',
   'file_history_snapshot',
   'session_source',
+  'turn_result',
   ...ARTIFACT_RECORD_SUBTYPES,
 ]);
 

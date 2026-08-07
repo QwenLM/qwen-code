@@ -42,6 +42,7 @@ import type {
   VisionBridgeResult,
   MemoryWriteCandidate,
   InvocationContextV1,
+  TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -153,6 +154,7 @@ import {
   getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
+  TURN_RESULT_TEXT_MAX_CHARS,
   runWithRuntimeContentGenerator,
   runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
@@ -643,6 +645,62 @@ function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
   return content.some((part) => part.type === 'image' || part.type === 'audio');
 }
 
+/**
+ * Extract the prompt text recorded in a `turn_result` record. Mirrors the
+ * bridge's pending-prompt `extractPromptText`: first non-empty text block,
+ * an image placeholder for image-only prompts, else empty.
+ */
+function extractTurnPromptText(content: ContentBlock[]): string {
+  let hasImage = false;
+  for (const block of content) {
+    if (block.type === 'image') {
+      hasImage = true;
+    }
+    if (block.type === 'text' && block.text.length > 0) {
+      return block.text;
+    }
+  }
+  return hasImage ? '[image]' : '';
+}
+
+type InFlightTurnRecording = {
+  promptId: string;
+  originatorClientId?: string;
+  startedAt: number;
+  promptText: string;
+  promptTextTruncated: boolean;
+  resultText: string;
+  resultTruncated: boolean;
+};
+
+function truncateTurnText(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
+    return { text, truncated: false };
+  }
+  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+}
+
+function turnResultErrorPayload(error: unknown): {
+  message: string;
+  code?: string;
+} {
+  const message =
+    error instanceof Error && error.message.length > 0
+      ? error.message
+      : String(error);
+  const code = (error as { code?: unknown })?.code;
+  if (typeof code === 'string' && code.length > 0) {
+    return { message, code };
+  }
+  if (typeof code === 'number') {
+    return { message, code: String(code) };
+  }
+  return { message };
+}
+
 function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
   if (items.length <= MAX_MID_TURN_DRAIN_ITEMS) return items;
 
@@ -1096,6 +1154,14 @@ export async function buildAvailableCommandsSnapshot(
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  /**
+   * In-flight `turn_result` accumulation for the turn whose model loop is
+   * currently streaming (only prompts carrying an invocation context).
+   * Assigned when the turn's loop starts, not at admission, so an
+   * overlapping successor cannot redirect this turn's chunks. Settled into
+   * the transcript at turn end; `null` when no pollable turn is streaming.
+   */
+  #turnRecording: InFlightTurnRecording | null = null;
   /**
    * Tracks the completion of the current prompt so that the next prompt
    * can await it.  This prevents a new prompt from reading chat history
@@ -1991,7 +2057,9 @@ export class Session implements SessionContext {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
     await this.assertCanStartTurn();
+    const turnRecording = this.#beginTurnRecording(params, invocationContext);
     if (admissionCancellation?.aborted) {
+      this.#settleTurnRecording('cancelled', turnRecording);
       return { stopReason: 'cancelled' };
     }
     const todoStopGuardPreparation =
@@ -2070,6 +2138,7 @@ export class Session implements SessionContext {
     if (pendingSend.signal.aborted) {
       releasePendingSend();
       this.todoStopGuard.suspend();
+      this.#settleTurnRecording('cancelled', turnRecording);
       return { stopReason: 'cancelled' };
     }
 
@@ -2088,11 +2157,23 @@ export class Session implements SessionContext {
       resolveCompletion = resolve;
     });
 
+    // Publish this turn's recording only now that the predecessor turn has
+    // settled and this turn's model loop is about to start. Publishing at
+    // admission would let an overlapping successor (DAEMON-003 deadline
+    // overlap) redirect this turn's still-streaming chunks into the
+    // successor's record.
+    this.#turnRecording = turnRecording;
+
     try {
       const result = await this.#executePrompt(
         params,
         pendingSend,
         invocationContext,
+      );
+      this.#settleTurnRecording(
+        result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
+        turnRecording,
+        result,
       );
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
@@ -2101,6 +2182,18 @@ export class Session implements SessionContext {
       this.#maybeEmitFollowupSuggestion(result);
       return result;
     } catch (error) {
+      // An explicit user cancel can surface as a non-AbortError (e.g. the
+      // provider SDK's "Request was aborted."), so classify the recording
+      // by the cancel reason instead of the error shape.
+      const userCancelled =
+        pendingSend.signal.aborted &&
+        pendingSend.signal.reason === USER_CANCEL_ABORT_REASON;
+      this.#settleTurnRecording(
+        userCancelled ? 'cancelled' : 'error',
+        turnRecording,
+        undefined,
+        error,
+      );
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
@@ -3635,12 +3728,114 @@ export class Session implements SessionContext {
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
+    this.#accumulateTurnResultText(update);
     const params: SessionNotification = {
       sessionId: this.sessionId,
       update,
     };
 
     await this.client.sessionUpdate(params);
+  }
+
+  /**
+   * Start accumulating the `turn_result` record for this prompt. Only
+   * daemon-admitted prompts carry an invocation context (promptId); internal
+   * turns (cron, notifications, TUI) are not pollable, so nothing records.
+   */
+  #beginTurnRecording(
+    params: PromptRequest,
+    invocationContext: InvocationContextV1 | undefined,
+  ): InFlightTurnRecording | null {
+    if (!invocationContext) {
+      return null;
+    }
+    const { text, truncated } = truncateTurnText(
+      extractTurnPromptText(params.prompt),
+    );
+    return {
+      promptId: invocationContext.promptId,
+      ...(invocationContext.originatorClientId !== undefined
+        ? { originatorClientId: invocationContext.originatorClientId }
+        : {}),
+      startedAt: Date.now(),
+      promptText: text,
+      promptTextTruncated: truncated,
+      resultText: '',
+      resultTruncated: false,
+    };
+  }
+
+  /**
+   * Accumulate streamed agent text into the in-flight turn record. Only
+   * `agent_message_chunk` text counts — tool output and thought chunks are
+   * excluded by design (the result is the assistant's own words).
+   */
+  #accumulateTurnResultText(update: SessionUpdate): void {
+    const recording = this.#turnRecording;
+    if (!recording || update.sessionUpdate !== 'agent_message_chunk') {
+      return;
+    }
+    const content = update.content;
+    if (content.type !== 'text' || content.text.length === 0) {
+      return;
+    }
+    if (recording.resultText.length >= TURN_RESULT_TEXT_MAX_CHARS) {
+      recording.resultTruncated = true;
+      return;
+    }
+    const remaining = TURN_RESULT_TEXT_MAX_CHARS - recording.resultText.length;
+    if (content.text.length > remaining) {
+      recording.resultText += content.text.slice(0, remaining);
+      recording.resultTruncated = true;
+    } else {
+      recording.resultText += content.text;
+    }
+  }
+
+  /**
+   * Write the turn's captured `turn_result` record into the transcript.
+   * Settles the exact recording captured at turn start — never the current
+   * slot — so an overlapping turn cannot steal or lose this settlement.
+   * Best-effort: recording failures must never break turn settlement.
+   */
+  #settleTurnRecording(
+    state: 'completed' | 'cancelled' | 'error',
+    recording: InFlightTurnRecording | null,
+    response?: PromptResponse,
+    error?: unknown,
+  ): void {
+    if (recording !== null && this.#turnRecording === recording) {
+      this.#turnRecording = null;
+    }
+    if (recording === null) {
+      return;
+    }
+    const payload: TurnResultRecordPayload = {
+      promptId: recording.promptId,
+      state,
+      ...(response?.stopReason !== undefined
+        ? { stopReason: response.stopReason }
+        : {}),
+      ...(state === 'error' ? { error: turnResultErrorPayload(error) } : {}),
+      startedAt: recording.startedAt,
+      endedAt: Date.now(),
+      promptText: recording.promptText,
+      ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
+      ...(recording.resultText.length > 0
+        ? { resultText: recording.resultText }
+        : {}),
+      ...(recording.resultTruncated ? { resultTruncated: true } : {}),
+      ...(recording.originatorClientId !== undefined
+        ? { originatorClientId: recording.originatorClientId }
+        : {}),
+    };
+    try {
+      this.config.getChatRecordingService()?.recordTurnResult(payload);
+    } catch (recordError) {
+      debugLogger.warn(
+        `Failed to record turn result: ${this.#formatError(recordError)}`,
+      );
+    }
   }
 
   #getCurrentChat(): GeminiChat {
