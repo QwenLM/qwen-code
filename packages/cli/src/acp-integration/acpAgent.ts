@@ -73,6 +73,8 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
+  findBoundaryAtOrBefore,
+  isReplayTurnStartType,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -718,7 +720,37 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
 }
 
 function isHistoryTurnStart(record: ChatRecord): boolean {
-  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
+  return isReplayTurnStartType(record.type, record.subtype);
+}
+
+// A bulk page can safely start at a turn start or at the assistant record
+// owning any following tool results, mirroring the core reader's page-start
+// rule. Realtime records interleave at wall-clock time and own no tool
+// results, so the pair walk passes through them instead of splitting them.
+function isHistoryPageStart(record: ChatRecord): boolean {
+  return (
+    record.subtype !== 'realtime_message' &&
+    (record.type === 'assistant' || isHistoryTurnStart(record))
+  );
+}
+
+// True when the first tool_result in records[start, end) lost its owning
+// call below `start`, i.e. the selection begins mid-pair. Only the first
+// result needs checking: later results belong to calls at or after it, all
+// inside the page once the first pair is whole.
+function historyOrphansToolResult(
+  records: ChatRecord[],
+  start: number,
+  end: number,
+): boolean {
+  for (let i = start; i < end; i++) {
+    if (records[i]!.type !== 'tool_result') continue;
+    for (let owner = i - 1; owner >= start; owner--) {
+      if (isHistoryPageStart(records[owner]!)) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function selectRecentHistoryRecords(
@@ -735,8 +767,39 @@ function selectRecentHistoryRecords(
       break;
     }
   }
-  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
-    start--;
+  // Turn-boundary alignment may expand the page past the requested window,
+  // but never without bound: a history dominated by a single long in-flight
+  // turn would otherwise replay the WHOLE history in one payload and report
+  // hasMore=false, leaving the client unable to page backward. Allow at
+  // most one extra window of expansion, and only when it reaches a real
+  // turn start; otherwise keep the requested window so pages inside a long
+  // turn stay bounded and chainable.
+  const expansionFloor = Math.max(0, records.length - 2 * pageSize);
+  const aligned = findBoundaryAtOrBefore(
+    records,
+    start,
+    expansionFloor,
+    isHistoryTurnStart,
+  );
+  if (isHistoryTurnStart(records[aligned]!)) {
+    start = aligned;
+  }
+  // Backward replay renders each page independently, so a page that starts
+  // mid-pair (on a tool_result whose owning call lies below) would show the
+  // completed call as failed and its result as an orphan block. When the
+  // bounded selection starts on an orphaned tool_result, extend down to the
+  // owning record within one further window, mirroring the core reader.
+  if (start > 0 && historyOrphansToolResult(records, start, records.length)) {
+    const pairFloor = Math.max(0, start - pageSize);
+    const owner = findBoundaryAtOrBefore(
+      records,
+      start,
+      pairFloor,
+      isHistoryPageStart,
+    );
+    if (isHistoryPageStart(records[owner]!)) {
+      start = owner;
+    }
   }
   return { records: records.slice(start), hasMore: start > 0 };
 }
