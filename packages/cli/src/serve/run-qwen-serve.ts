@@ -92,9 +92,11 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CAPABILITIES_SCHEMA_VERSION,
@@ -2809,6 +2811,9 @@ async function runQwenServeImpl(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
     [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+    [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]: externalToolGuardHandler
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      : undefined,
   };
 
   const cliVersionPromise = getCliVersion();

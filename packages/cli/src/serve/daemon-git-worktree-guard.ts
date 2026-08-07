@@ -4,34 +4,110 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpath } from 'node:fs/promises';
+import { realpath, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { parse } from 'shell-quote';
+import {
+  isWithinRoot,
+  realpathNearestExisting,
+  splitCommands,
+} from '@qwen-code/qwen-code-core';
+import { EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS } from '@qwen-code/acp-bridge/externalToolGuard';
 import type {
   ExternalToolGuardHandler,
   ExternalToolGuardPrepareRequest,
   ExternalToolGuardPrepareResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 
-const READ_ONLY_GIT_SUBCOMMANDS = new Set([
-  'blame',
+// Git subcommands allowed even when relocated outside the session working
+// directory. Limited to subcommands verified to neither write files nor
+// execute programs configured by the target repository on the managed
+// (non-tty) output path. `diff`/`log`/`show`/`blame` are excluded: `--output`
+// writes files and textconv drivers run commands from target-repository
+// config.
+const RELOCATED_READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'cat-file',
   'describe',
-  'diff',
   'grep',
-  'log',
   'ls-files',
   'rev-parse',
-  'show',
   'status',
 ]);
 
+// Git global options whose next argv entry is consumed as a value (mirrors
+// core shell.ts GIT_GLOBAL_FLAGS_TAKES_VALUE).
 const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set([
-  '-c',
-  '--config-env',
+  '--exec-path',
+  '--list-cmds',
   '--namespace',
   '--super-prefix',
 ]);
 
+// `-c`/`--config-env` keys whose values git executes through a shell. A
+// relocated mutation can be embedded in such a value with no relocation in
+// the outer argv, so these mark a mutating invocation unresolved.
+const GIT_COMMAND_CONFIG_KEY_PATTERNS = [
+  /^alias\./,
+  /^core\.(editor|pager|fsmonitor)$/,
+  /^credential\.helper$/,
+  /^difftool\./,
+  /^filter\./,
+  /^mergetool\./,
+];
+
+// Environment assignments that redirect git's repository selection (mirrors
+// core shell.ts GIT_ENV_SHIFTS_REPO).
+const GIT_DIR_ENV_KEYS = new Set(['GIT_COMMON_DIR', 'GIT_DIR']);
+const GIT_WORK_TREE_ENV_KEYS = new Set(['GIT_INDEX_FILE', 'GIT_WORK_TREE']);
+
+const SHELL_WRAPPER_PROGRAMS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
+const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
+
+// `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
+// argv entry as the payload. `-o`/`-O` take values, so either one earlier in
+// the bundle consumes the rest of it and `-c` is not present.
+function shellBundleRequestsCommand(flag: string): boolean {
+  if (!flag.startsWith('-') || flag.startsWith('--')) return false;
+  for (const character of flag.slice(1)) {
+    if (character === 'o' || character === 'O') return false;
+    if (character === 'c') return true;
+  }
+  return false;
+}
+
+const ENV_CHDIR_FLAGS = new Set(['-C', '--chdir']);
+const ENV_VALUE_FLAGS = new Set(['-S', '--split-string', '-u', '--unset']);
+const ENV_KNOWN_FLAG_ONLY = new Set(['-', '-0', '-i', '-v']);
+
+// Union of core shell-utils/shell.ts value-taking sudo options.
+const SUDO_VALUE_FLAGS = new Set([
+  '-C',
+  '-D',
+  '-T',
+  '-g',
+  '-h',
+  '-p',
+  '-r',
+  '-t',
+  '-u',
+  '--chdir',
+  '--close-from',
+  '--command-timeout',
+  '--group',
+  '--host',
+  '--prompt',
+  '--role',
+  '--type',
+  '--user',
+]);
+const SUDO_CHDIR_FLAGS = new Set(['-D', '--chdir']);
+
+const TIMEOUT_VALUE_FLAGS = new Set(['-k', '-s', '--kill-after', '--signal']);
+
+// Pinned to ToolNames.AGENT/WORKFLOW/CREATE_SUB_SESSION/SEND_MESSAGE in
+// @qwen-code/qwen-code-core. The literals keep this module free of a core
+// barrel import for this one set; daemon-git-worktree-guard.test.ts asserts
+// the values match so a rename cannot silently desync this set.
 const EXTERNAL_GUARD_UNSUPPORTED_TOOLS = new Set([
   'agent',
   'workflow',
@@ -39,163 +115,912 @@ const EXTERNAL_GUARD_UNSUPPORTED_TOOLS = new Set([
   'send_message',
 ]);
 
+const DYNAMIC_RELOCATION_DENIAL =
+  'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
+const UNPARSEABLE_COMMAND_DENIAL =
+  'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const UNRESOLVED_TARGET_DENIAL_PREFIX =
+  'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
+const OUTSIDE_TARGET_DENIAL_PREFIX =
+  'Daemon shell guard denied a mutating Git command outside the session working directory: ';
+
+const MAX_PAYLOAD_RECURSION_DEPTH = 3;
+
 interface TrustedDaemonToolGuardRequest
   extends ExternalToolGuardPrepareRequest {
   readonly workspaceCwd: string;
   readonly effectiveCwd: string;
 }
 
-interface GitInvocation {
-  readonly relocations: Array<{
-    readonly target: string;
-    readonly kind: 'cwd' | 'git-dir' | 'work-tree';
-  }>;
-  readonly subcommand?: string;
-  readonly unresolvedRelocation: boolean;
+interface GuardToken {
+  readonly text: string;
+  readonly dynamic: boolean;
 }
 
-async function canonicalize(candidate: string): Promise<string> {
-  const resolved = path.resolve(candidate);
-  let current = resolved;
-  const suffix: string[] = [];
-  while (true) {
-    try {
-      return path.join(await realpath(current), ...suffix.reverse());
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return resolved;
-      suffix.push(path.basename(current));
-      current = parent;
-    }
-  }
+interface GitEnvRelocation {
+  readonly target: string;
+  readonly kind: 'cwd' | 'git-dir' | 'work-tree';
 }
 
-function isWithin(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
+interface PrefixState {
+  readonly relocations: GitEnvRelocation[];
+  unresolved: boolean;
+}
+
+type GuardDenial = { allowed: false; reason: string };
+
+function sanitizeDenialPath(value: string, prefix: string): string {
+  // Mirror containsUnsafeExternalToolGuardControlCharacter: control
+  // characters would convert a clean denial into an invalid guard result.
+  const stripped = [...value]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return (
+        code >= 0x20 &&
+        !(code >= 0x7f && code <= 0x9f) &&
+        code !== 0x2028 &&
+        code !== 0x2029
+      );
+    })
+    .join('');
+  const budget = EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS - prefix.length;
+  if (stripped.length <= budget) return stripped;
+  return `${stripped.slice(0, Math.max(1, budget - 1))}…`;
+}
+
+function denyDynamicRelocation(): GuardDenial {
+  return { allowed: false, reason: DYNAMIC_RELOCATION_DENIAL };
+}
+
+function denyTarget(prefix: string, target: string): GuardDenial {
+  return {
+    allowed: false,
+    reason: `${prefix}${sanitizeDenialPath(target, prefix)}`,
+  };
+}
+
+function isDynamicPathValue(token: GuardToken | undefined): boolean {
   return (
-    relative === '' ||
-    (!relative.startsWith('..') && !path.isAbsolute(relative))
+    token === undefined ||
+    token.dynamic ||
+    token.text.includes('`') ||
+    token.text.startsWith('~')
   );
 }
 
-function readGitInvocation(tokens: string[]): GitInvocation | null {
-  const relocations: GitInvocation['relocations'] = [];
-  let unresolvedRelocation = false;
+function leadingEnvAssignmentKey(token: string): string | null {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token);
+  return match ? match[1]! : null;
+}
+
+function executableBaseName(token: GuardToken): string {
+  const base = token.text.split(/[\\/]/).pop() ?? token.text;
+  return base.toLowerCase().replace(/\.exe$/i, '');
+}
+
+const REDIRECT_OPERATORS = new Set([
+  '<',
+  '>',
+  '>>',
+  '<<',
+  '<<<',
+  '<>',
+  '>&',
+  '<&',
+  '>|',
+  '&>',
+  '&>>',
+]);
+
+function tokenizeSegment(segment: string): GuardToken[][] | null {
+  let parsed: ReturnType<typeof parse>;
+  try {
+    parsed = parse(segment, (key) => `$${key}`);
+  } catch {
+    return null;
+  }
+  const runs: GuardToken[][] = [[]];
+  let skipRedirectOperand = false;
+  for (let index = 0; index < parsed.length; index++) {
+    const token = parsed[index];
+    if (typeof token === 'string') {
+      if (skipRedirectOperand) {
+        skipRedirectOperand = false;
+        continue;
+      }
+      // A `$(...)` substitution arrives as a string ending in `$` followed
+      // by an `(` operator. Consume the whole body as one opaque dynamic
+      // token so the assignment/flag it belongs to keeps its place instead
+      // of being severed into a separate run.
+      if (token.endsWith('$')) {
+        const next = parsed[index + 1];
+        if (
+          next !== null &&
+          typeof next === 'object' &&
+          'op' in next &&
+          next.op === '('
+        ) {
+          let depth = 0;
+          index++;
+          for (; index < parsed.length; index++) {
+            const inner = parsed[index];
+            if (inner !== null && typeof inner === 'object' && 'op' in inner) {
+              if (inner.op === '(') depth++;
+              else if (inner.op === ')') {
+                depth--;
+                if (depth === 0) break;
+              }
+            }
+          }
+          runs.at(-1)!.push({ text: token, dynamic: true });
+          skipRedirectOperand = false;
+          continue;
+        }
+      }
+      runs.at(-1)!.push({
+        text: token,
+        dynamic: token.includes('$') || token.includes('`'),
+      });
+      continue;
+    }
+    if (token === null || typeof token !== 'object') return null;
+    if ('comment' in token) break;
+    if (!('op' in token)) return null;
+    const op = token.op;
+    skipRedirectOperand = false;
+    if (op === 'glob') {
+      // Glob expansion is resolved by the shell at runtime; the daemon
+      // cannot evaluate it statically.
+      const pattern =
+        'pattern' in token && typeof token.pattern === 'string'
+          ? token.pattern
+          : '';
+      runs.at(-1)!.push({ text: pattern, dynamic: true });
+      continue;
+    }
+    if (op === '(' || op === ')') {
+      runs.push([]);
+      continue;
+    }
+    if (REDIRECT_OPERATORS.has(op)) {
+      skipRedirectOperand = true;
+      continue;
+    }
+    runs.push([]);
+  }
+  return runs.filter((run) => run.length > 0);
+}
+
+function joinTokenTexts(tokens: GuardToken[]): string {
+  return tokens.map((token) => token.text).join(' ');
+}
+
+function hasGitRelocationMarker(tokens: GuardToken[]): boolean {
+  return tokens.some((token) => {
+    if (token.text === '-C' || token.text.startsWith('-C')) return true;
+    if (/^--(?:git-dir|work-tree)(?:=|$)/.test(token.text)) return true;
+    const key = leadingEnvAssignmentKey(token.text);
+    return (
+      key !== null &&
+      (GIT_DIR_ENV_KEYS.has(key) || GIT_WORK_TREE_ENV_KEYS.has(key))
+    );
+  });
+}
+
+function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
+  const key = leadingEnvAssignmentKey(token.text);
+  if (key === null) return;
+  if (!GIT_DIR_ENV_KEYS.has(key) && !GIT_WORK_TREE_ENV_KEYS.has(key)) return;
+  const value = token.text.slice(token.text.indexOf('=') + 1);
+  if (token.dynamic || isDynamicPathValue({ text: value, dynamic: false })) {
+    state.unresolved = true;
+    return;
+  }
+  state.relocations.push({
+    target: value,
+    // GIT_COMMON_DIR and GIT_INDEX_FILE cannot be mapped onto a repository
+    // root the way `--git-dir` targets are; checking the concrete path they
+    // name is the conservative approximation.
+    kind: GIT_WORK_TREE_ENV_KEYS.has(key) ? 'work-tree' : 'git-dir',
+  });
+}
+
+function attachedChdirValue(
+  flag: string,
+  set: ReadonlySet<string>,
+): string | undefined {
+  for (const candidate of set) {
+    if (candidate.startsWith('--') && flag.startsWith(`${candidate}=`)) {
+      return flag.slice(candidate.length + 1);
+    }
+    if (
+      candidate.length === 2 &&
+      flag.startsWith(candidate) &&
+      flag.length > candidate.length
+    ) {
+      return flag.slice(candidate.length);
+    }
+  }
+  return undefined;
+}
+
+function recordChdirValue(
+  value: GuardToken | undefined,
+  state: PrefixState,
+): void {
+  if (isDynamicPathValue(value)) {
+    state.unresolved = true;
+    return;
+  }
+  state.relocations.push({ target: value!.text, kind: 'cwd' });
+}
+
+interface WrapperScan {
+  next: number;
+  payload?: string;
+}
+
+function consumeEnvWrapper(
+  run: GuardToken[],
+  start: number,
+  state: PrefixState,
+): WrapperScan {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.dynamic) {
+      state.unresolved = true;
+      index++;
+      continue;
+    }
+    if (token.text === '--') {
+      index++;
+      break;
+    }
+    if (ENV_KNOWN_FLAG_ONLY.has(token.text)) {
+      index++;
+      continue;
+    }
+    if (ENV_CHDIR_FLAGS.has(token.text)) {
+      recordChdirValue(run[index + 1], state);
+      index += 2;
+      continue;
+    }
+    const attached = attachedChdirValue(token.text, ENV_CHDIR_FLAGS);
+    if (attached !== undefined) {
+      recordChdirValue({ text: attached, dynamic: false }, state);
+      index++;
+      continue;
+    }
+    if (token.text === '-S' || token.text === '--split-string') {
+      const payloadToken = run[index + 1];
+      if (payloadToken === undefined) return { next: run.length };
+      const rest = joinTokenTexts(run.slice(index + 2));
+      return {
+        next: run.length,
+        payload: rest ? `${payloadToken.text} ${rest}` : payloadToken.text,
+      };
+    }
+    if (ENV_VALUE_FLAGS.has(token.text)) {
+      index += 2;
+      continue;
+    }
+    if (leadingEnvAssignmentKey(token.text) !== null) {
+      recordEnvAssignment(token, state);
+      index++;
+      continue;
+    }
+    if (token.text.startsWith('-')) {
+      // Unrecognized env option before the program: fail closed rather than
+      // guess whether it consumes the next token.
+      state.unresolved = true;
+      index++;
+      continue;
+    }
+    break;
+  }
+  return { next: index };
+}
+
+function consumeSudoWrapper(
+  run: GuardToken[],
+  start: number,
+  state: PrefixState,
+): WrapperScan {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.dynamic) {
+      state.unresolved = true;
+      index++;
+      continue;
+    }
+    if (leadingEnvAssignmentKey(token.text) !== null) {
+      recordEnvAssignment(token, state);
+      index++;
+      continue;
+    }
+    if (!token.text.startsWith('-')) break;
+    if (SUDO_CHDIR_FLAGS.has(token.text)) {
+      recordChdirValue(run[index + 1], state);
+      index += 2;
+      continue;
+    }
+    const attached = attachedChdirValue(token.text, SUDO_CHDIR_FLAGS);
+    if (attached !== undefined) {
+      recordChdirValue({ text: attached, dynamic: false }, state);
+      index++;
+      continue;
+    }
+    if (SUDO_VALUE_FLAGS.has(token.text)) {
+      index += 2;
+      continue;
+    }
+    index++;
+  }
+  return { next: index };
+}
+
+function consumeTimeoutWrapper(run: GuardToken[], start: number): number {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (!token.text.startsWith('-')) break;
+    if (TIMEOUT_VALUE_FLAGS.has(token.text) && !token.text.includes('=')) {
+      index += 2;
+      continue;
+    }
+    index++;
+  }
+  // The duration operand.
+  if (index < run.length) index++;
+  return index;
+}
+
+function shellWrapperPayload(
+  run: GuardToken[],
+  payloadToken: GuardToken | undefined,
+): string | undefined {
+  if (payloadToken === undefined || payloadToken.dynamic) return undefined;
+  return payloadToken.text;
+}
+
+function consumeShellWrapper(
+  run: GuardToken[],
+  start: number,
+): string | undefined {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.text === '-c' || shellBundleRequestsCommand(token.text)) {
+      return shellWrapperPayload(run, run[index + 1]);
+    }
+    if (token.dynamic) return undefined;
+    if (token.text.startsWith('+')) {
+      index++;
+      continue;
+    }
+    if (!token.text.startsWith('-')) return undefined;
+    if (token.text === '--') return undefined;
+    index += SHELL_WRAPPER_VALUE_FLAGS.has(token.text) ? 2 : 1;
+  }
+  return undefined;
+}
+
+type RunAnalysis =
+  | { kind: 'git'; tokens: GuardToken[]; state: PrefixState }
+  | {
+      kind: 'payload';
+      payload: string;
+      state: PrefixState;
+      propagatesCwd: boolean;
+    }
+  | {
+      kind: 'cd';
+      variant: 'cd' | 'popd' | 'pushd';
+      target?: GuardToken;
+    }
+  | { kind: 'dynamic-program'; rest: GuardToken[]; state: PrefixState }
+  | { kind: 'other'; state: PrefixState };
+
+function analyzeRun(run: GuardToken[]): RunAnalysis {
+  const state: PrefixState = { relocations: [], unresolved: false };
+  let index = 0;
+  while (
+    index < run.length &&
+    (run[index]!.text === '{' || run[index]!.text === '!')
+  ) {
+    index++;
+  }
+  while (index < run.length) {
+    const token = run[index]!;
+    if (leadingEnvAssignmentKey(token.text) !== null) {
+      recordEnvAssignment(token, state);
+      index++;
+      continue;
+    }
+    if (token.dynamic) {
+      return { kind: 'dynamic-program', rest: run.slice(index), state };
+    }
+    const program = executableBaseName(token);
+    if (program === 'command') {
+      index++;
+      while (index < run.length && run[index]!.text.startsWith('-')) index++;
+      continue;
+    }
+    if (program === 'env') {
+      const scan = consumeEnvWrapper(run, index, state);
+      if (scan.payload !== undefined) {
+        return {
+          kind: 'payload',
+          payload: scan.payload,
+          state,
+          propagatesCwd: false,
+        };
+      }
+      index = scan.next;
+      continue;
+    }
+    if (program === 'sudo') {
+      index = consumeSudoWrapper(run, index, state).next;
+      continue;
+    }
+    if (program === 'timeout') {
+      index = consumeTimeoutWrapper(run, index);
+      continue;
+    }
+    if (program === 'eval') {
+      const payloadTokens = run.slice(index + 1);
+      if (payloadTokens.some((payloadToken) => payloadToken.dynamic)) {
+        return { kind: 'dynamic-program', rest: payloadTokens, state };
+      }
+      return {
+        kind: 'payload',
+        payload: joinTokenTexts(payloadTokens),
+        state,
+        // `eval` runs in the current shell, so a `cd` inside the payload
+        // relocates subsequent commands in this run's scope.
+        propagatesCwd: true,
+      };
+    }
+    if (SHELL_WRAPPER_PROGRAMS.has(program)) {
+      const payload = consumeShellWrapper(run, index);
+      if (payload === undefined) return { kind: 'other', state };
+      return { kind: 'payload', payload, state, propagatesCwd: false };
+    }
+    if (program === 'nohup' || program === 'exec') {
+      index++;
+      continue;
+    }
+    if (program === 'git') {
+      return { kind: 'git', tokens: run.slice(index), state };
+    }
+    if (program === 'cd' || program === 'pushd' || program === 'popd') {
+      return { kind: 'cd', variant: program, target: run[index + 1] };
+    }
+    return { kind: 'other', state };
+  }
+  return { kind: 'other', state };
+}
+
+interface GitInvocation {
+  readonly cwdTargets: GuardToken[];
+  readonly gitDirTargets: GuardToken[];
+  readonly workTreeTargets: GuardToken[];
+  readonly subcommand?: string;
+  readonly unresolved: boolean;
+  readonly dangerousConfig: boolean;
+  readonly hasOutputFlag: boolean;
+}
+
+function readGitInvocation(tokens: GuardToken[]): GitInvocation {
+  const cwdTargets: GuardToken[] = [];
+  const gitDirTargets: GuardToken[] = [];
+  const workTreeTargets: GuardToken[] = [];
+  let subcommand: string | undefined;
+  let unresolved = false;
+  let dangerousConfig = false;
+
+  const recordConfigAssignment = (value: string): void => {
+    const separator = value.indexOf('=');
+    const key = separator >= 0 ? value.slice(0, separator) : value;
+    const assignment = separator >= 0 ? value.slice(separator + 1) : '';
+    if (
+      GIT_COMMAND_CONFIG_KEY_PATTERNS.some((pattern) => pattern.test(key)) ||
+      assignment.trimStart().startsWith('!')
+    ) {
+      dangerousConfig = true;
+    }
+  };
+  const pushRelocation = (
+    kind: 'cwd' | 'git-dir' | 'work-tree',
+    value: GuardToken | undefined,
+    emptyIsNoop: boolean,
+  ): boolean => {
+    if (value === undefined) {
+      unresolved = true;
+      return false;
+    }
+    if (value.text === '' && !value.dynamic) {
+      if (emptyIsNoop) return true;
+      unresolved = true;
+      return false;
+    }
+    if (isDynamicPathValue(value)) {
+      unresolved = true;
+      return true;
+    }
+    if (kind === 'cwd') cwdTargets.push(value);
+    else if (kind === 'git-dir') gitDirTargets.push(value);
+    else workTreeTargets.push(value);
+    return true;
+  };
+
   let index = 1;
   while (index < tokens.length) {
     const token = tokens[index]!;
-    if (token === '-C' || token === '--git-dir' || token === '--work-tree') {
-      const value = tokens[index + 1];
-      if (!value) return null;
-      if (value.includes('$')) {
-        unresolvedRelocation = true;
-      } else {
-        relocations.push({
-          target: value,
-          kind:
-            token === '-C'
-              ? 'cwd'
-              : token === '--git-dir'
-                ? 'git-dir'
-                : 'work-tree',
-        });
-      }
-      index += 2;
-      continue;
-    }
-    if (token.length > 2 && token.startsWith('-C')) {
-      const value = token.slice(2);
-      if (value.includes('$')) {
-        unresolvedRelocation = true;
-      } else {
-        relocations.push({ target: value, kind: 'cwd' });
-      }
+    if (token.dynamic) {
+      unresolved = true;
       index++;
       continue;
     }
-    if (token.startsWith('--git-dir=') || token.startsWith('--work-tree=')) {
-      const separator = token.indexOf('=');
-      const value = token.slice(separator + 1);
-      if (!value) return null;
-      if (value.includes('$')) {
-        unresolvedRelocation = true;
-      } else {
-        relocations.push({
-          target: value,
-          kind: token.startsWith('--git-dir=') ? 'git-dir' : 'work-tree',
-        });
-      }
-      index++;
+    if (token.text === '-C') {
+      // Git treats an empty `-C` value as a no-op chdir.
+      if (!pushRelocation('cwd', tokens[index + 1], true)) break;
+      index += 2;
       continue;
     }
-    if (GIT_GLOBAL_OPTIONS_WITH_VALUES.has(token)) {
+    if (token.text === '--git-dir' || token.text === '--work-tree') {
+      const kind = token.text === '--git-dir' ? 'git-dir' : 'work-tree';
+      if (!pushRelocation(kind, tokens[index + 1], false)) break;
       index += 2;
+      continue;
+    }
+    if (token.text.length > 2 && token.text.startsWith('-C')) {
+      if (
+        !pushRelocation(
+          'cwd',
+          { text: token.text.slice(2), dynamic: false },
+          false,
+        )
+      ) {
+        break;
+      }
+      index++;
       continue;
     }
     if (
-      token.startsWith('--config-env=') ||
-      token.startsWith('--exec-path=') ||
-      token.startsWith('--namespace=') ||
-      token.startsWith('--super-prefix=')
+      token.text.startsWith('--git-dir=') ||
+      token.text.startsWith('--work-tree=')
     ) {
+      const kind = token.text.startsWith('--git-dir=')
+        ? 'git-dir'
+        : 'work-tree';
+      const value = token.text.slice(token.text.indexOf('=') + 1);
+      if (!pushRelocation(kind, { text: value, dynamic: false }, false)) {
+        break;
+      }
       index++;
       continue;
     }
-    if (token.startsWith('-')) {
+    if (token.text === '-c' || token.text === '--config-env') {
+      const value = tokens[index + 1];
+      if (value === undefined) break;
+      if (value.dynamic) dangerousConfig = true;
+      else recordConfigAssignment(value.text);
+      index += 2;
+      continue;
+    }
+    if (token.text.startsWith('--config-env=')) {
+      recordConfigAssignment(token.text.slice('--config-env='.length));
       index++;
       continue;
     }
-    return relocations.length > 0 || unresolvedRelocation
-      ? { relocations, subcommand: token, unresolvedRelocation }
-      : null;
+    if (
+      token.text.length > 2 &&
+      token.text.startsWith('-c') &&
+      !token.text.startsWith('--')
+    ) {
+      recordConfigAssignment(token.text.slice(2));
+      index++;
+      continue;
+    }
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUES.has(token.text)) {
+      if (tokens[index + 1] === undefined) break;
+      index += 2;
+      continue;
+    }
+    if (token.text.startsWith('-')) {
+      index++;
+      continue;
+    }
+    subcommand = token.text;
+    break;
   }
-  return relocations.length > 0 || unresolvedRelocation
-    ? { relocations, unresolvedRelocation }
-    : null;
+
+  const hasOutputFlag = tokens.some(
+    (token) => token.text === '--output' || token.text.startsWith('--output='),
+  );
+  return {
+    cwdTargets,
+    gitDirTargets,
+    workTreeTargets,
+    subcommand,
+    unresolved,
+    dangerousConfig,
+    hasOutputFlag,
+  };
 }
 
-let shellQuotePromise: Promise<typeof import('shell-quote')> | undefined;
+/**
+ * Resolve a `--git-dir`/`GIT_DIR` target to the repository git operates on,
+ * following git's own indirections: a `.git` gitfile redirect (`gitdir:`
+ * line) and per-worktree administrative directories (their `gitdir` file
+ * points at the linked worktree checkout). Canonicalization happens BEFORE
+ * any basename handling so a symlink named `.git` resolves to its real
+ * target. Throws when an indirection cannot be resolved.
+ */
+async function resolveGitDirRepository(
+  canonicalGitDir: string,
+): Promise<string> {
+  let current = canonicalGitDir;
+  for (let depth = 0; depth < 3; depth++) {
+    const stats = await stat(current);
+    if (stats.isFile()) {
+      const [firstLine] = (await readFile(current, 'utf8')).split(/\r?\n/);
+      const match = /^gitdir:\s*(.+)$/.exec(firstLine ?? '');
+      if (!match) throw new Error('unrecognized gitfile');
+      current = path.resolve(path.dirname(current), match[1]!.trim());
+      continue;
+    }
+    if (path.basename(current) === '.git') {
+      return path.dirname(current);
+    }
+    if (/[/\\]\.git[/\\]worktrees[/\\][^/\\]+$/.test(current)) {
+      const worktreeGitPointer = (
+        await readFile(path.join(current, 'gitdir'), 'utf8')
+      ).trim();
+      if (!worktreeGitPointer) throw new Error('empty worktree gitdir file');
+      return path.dirname(path.resolve(current, worktreeGitPointer));
+    }
+    return current;
+  }
+  throw new Error('gitdir indirection too deep');
+}
 
-async function readCommandSegments(command: string): Promise<string[][]> {
-  const segments: string[][] = [];
-  try {
-    shellQuotePromise ??= import('shell-quote');
-    const { parse } = await shellQuotePromise;
-    for (const line of command.split(/\r?\n/)) {
-      const parsed = parse(line, (key) => `$${key}`);
-      segments.push([]);
-      for (const token of parsed) {
-        if (typeof token === 'string') {
-          segments.at(-1)!.push(token);
-        } else if ('op' in token) {
-          segments.push([]);
-        } else {
-          return [];
+interface GuardEvaluationContext {
+  readonly canonicalEffectiveCwd: string;
+  readonly ambientRelocations: readonly GitEnvRelocation[];
+  readonly ambientUnresolved: boolean;
+}
+
+async function evaluateGitInvocation(
+  invocation: GitInvocation,
+  state: PrefixState,
+  basisCwd: string | undefined,
+  entryCwd: string | undefined,
+  context: GuardEvaluationContext,
+): Promise<GuardDenial | undefined> {
+  if (
+    RELOCATED_READ_ONLY_GIT_SUBCOMMANDS.has(invocation.subcommand ?? '') &&
+    !invocation.hasOutputFlag
+  ) {
+    return undefined;
+  }
+  if (
+    invocation.unresolved ||
+    invocation.dangerousConfig ||
+    state.unresolved ||
+    context.ambientUnresolved
+  ) {
+    return denyDynamicRelocation();
+  }
+
+  const cwdRelocations: GitEnvRelocation[] = [];
+  const repositoryRelocations: GitEnvRelocation[] = [];
+  for (const relocation of [
+    ...context.ambientRelocations,
+    ...state.relocations,
+  ]) {
+    if (relocation.kind === 'cwd') cwdRelocations.push(relocation);
+    else repositoryRelocations.push(relocation);
+  }
+  for (const target of invocation.cwdTargets) {
+    cwdRelocations.push({ target: target.text, kind: 'cwd' });
+  }
+  for (const target of invocation.gitDirTargets) {
+    repositoryRelocations.push({ target: target.text, kind: 'git-dir' });
+  }
+  for (const target of invocation.workTreeTargets) {
+    repositoryRelocations.push({ target: target.text, kind: 'work-tree' });
+  }
+
+  // Ambient relocations recorded here are git-level relocations from an
+  // enclosing wrapper (e.g. `GIT_DIR=… sh -c '…'`); they make the payload
+  // invocation relocated even when the payload itself carries no flags.
+  const relocated =
+    basisCwd === undefined ||
+    basisCwd !== entryCwd ||
+    cwdRelocations.length > 0 ||
+    repositoryRelocations.length > 0;
+  if (!relocated) return undefined;
+
+  let gitCwd = basisCwd;
+  for (const relocation of cwdRelocations) {
+    if (path.isAbsolute(relocation.target)) {
+      gitCwd = relocation.target;
+      continue;
+    }
+    if (gitCwd === undefined) break;
+    gitCwd = path.resolve(gitCwd, relocation.target);
+  }
+  if (gitCwd === undefined) {
+    return denyDynamicRelocation();
+  }
+
+  // Git applies `-C` during option parsing and resolves relative
+  // `--git-dir`/`--work-tree` against the post-`-C` cwd, so every relative
+  // target resolves against the final cwd regardless of argv order.
+  const checkedTargets: Array<{
+    target: string;
+    kind: 'cwd' | 'git-dir' | 'work-tree';
+  }> = [];
+  for (const relocation of repositoryRelocations) {
+    checkedTargets.push({
+      target: path.isAbsolute(relocation.target)
+        ? relocation.target
+        : path.resolve(gitCwd, relocation.target),
+      kind: relocation.kind,
+    });
+  }
+  if (
+    basisCwd === undefined ||
+    basisCwd !== entryCwd ||
+    cwdRelocations.length > 0
+  ) {
+    checkedTargets.push({ target: gitCwd, kind: 'cwd' });
+  }
+
+  for (const { target, kind } of checkedTargets) {
+    const canonicalTarget = realpathNearestExisting(target);
+    let repositoryTarget: string;
+    if (kind === 'git-dir') {
+      try {
+        repositoryTarget = await resolveGitDirRepository(canonicalTarget);
+      } catch {
+        // Missing or unreadable indirection: containment cannot be proven
+        // before execution.
+        return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, canonicalTarget);
+      }
+    } else {
+      try {
+        // A target that does not fully exist at decision time may still be
+        // created as an outward symlink before git runs.
+        await realpath(canonicalTarget);
+        repositoryTarget = canonicalTarget;
+      } catch {
+        return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, canonicalTarget);
+      }
+    }
+    repositoryTarget = realpathNearestExisting(repositoryTarget);
+    if (!isWithinRoot(repositoryTarget, context.canonicalEffectiveCwd)) {
+      return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, repositoryTarget);
+    }
+  }
+  return undefined;
+}
+
+interface CommandEvaluation {
+  readonly denial?: GuardDenial;
+  readonly cwdAfter: string | undefined;
+}
+
+async function evaluateCommandWithCwd(
+  command: string,
+  entryCwd: string | undefined,
+  context: GuardEvaluationContext,
+  depth: number,
+): Promise<CommandEvaluation> {
+  let trackedCwd = entryCwd;
+  for (const segment of splitCommands(command)) {
+    const runs = tokenizeSegment(segment);
+    if (runs === null) {
+      return {
+        denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+        cwdAfter: trackedCwd,
+      };
+    }
+    for (const run of runs) {
+      const analysis = analyzeRun(run);
+      switch (analysis.kind) {
+        case 'cd': {
+          const target = analysis.target;
+          if (
+            analysis.variant === 'popd' ||
+            target === undefined ||
+            (analysis.variant === 'pushd' && /^[-+]/.test(target.text))
+          ) {
+            // `popd`, bare `cd` ($HOME), and dir-stack rotations land the
+            // shell somewhere the daemon cannot resolve statically.
+            trackedCwd = undefined;
+            break;
+          }
+          if (target.text === '-' || isDynamicPathValue(target)) {
+            trackedCwd = undefined;
+            break;
+          }
+          if (path.isAbsolute(target.text)) {
+            trackedCwd = target.text;
+            break;
+          }
+          trackedCwd =
+            trackedCwd === undefined
+              ? undefined
+              : path.resolve(trackedCwd, target.text);
+          break;
+        }
+        case 'payload': {
+          if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
+            return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
+          }
+          const ambient: GuardEvaluationContext = {
+            canonicalEffectiveCwd: context.canonicalEffectiveCwd,
+            ambientRelocations: [
+              ...context.ambientRelocations,
+              ...analysis.state.relocations,
+            ],
+            ambientUnresolved:
+              context.ambientUnresolved || analysis.state.unresolved,
+          };
+          const nested = await evaluateCommandWithCwd(
+            analysis.payload,
+            trackedCwd,
+            ambient,
+            depth + 1,
+          );
+          if (nested.denial) {
+            return { denial: nested.denial, cwdAfter: trackedCwd };
+          }
+          if (analysis.propagatesCwd) {
+            trackedCwd = nested.cwdAfter;
+          }
+          break;
+        }
+        case 'git': {
+          const invocation = readGitInvocation(analysis.tokens);
+          const denial = await evaluateGitInvocation(
+            invocation,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            context,
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
+          break;
+        }
+        case 'dynamic-program': {
+          if (
+            analysis.state.unresolved ||
+            analysis.state.relocations.length > 0 ||
+            context.ambientUnresolved ||
+            context.ambientRelocations.length > 0 ||
+            hasGitRelocationMarker(analysis.rest)
+          ) {
+            return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
+          }
+          break;
+        }
+        case 'other':
+          break;
+        default: {
+          const exhaustive: never = analysis;
+          void exhaustive;
+          break;
         }
       }
     }
-    return segments.filter((segment) => segment.length > 0);
-  } catch {
-    return [];
   }
-}
-
-function findGitInvocationStart(tokens: string[]): number {
-  let index = 0;
-  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index] ?? '')) index++;
-  if (tokens[index] === 'command') {
-    index++;
-    while (tokens[index]?.startsWith('-')) index++;
-  } else if (tokens[index] === 'env') {
-    index++;
-    while (
-      tokens[index]?.startsWith('-') ||
-      /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index] ?? '')
-    ) {
-      index++;
-    }
-  }
-  return tokens[index] === 'git' ? index : -1;
+  return { cwdAfter: trackedCwd };
 }
 
 async function evaluateBuiltInGuard(
@@ -210,52 +1035,19 @@ async function evaluateBuiltInGuard(
     typeof startDirectoryValue === 'string'
       ? startDirectoryValue
       : request.effectiveCwd;
-  const canonicalEffectiveCwd = await canonicalize(request.effectiveCwd);
+  const canonicalEffectiveCwd = realpathNearestExisting(request.effectiveCwd);
 
-  for (const segment of await readCommandSegments(command)) {
-    const invocationStart = findGitInvocationStart(segment);
-    if (invocationStart < 0) continue;
-    const invocation = readGitInvocation(segment.slice(invocationStart));
-    if (
-      !invocation ||
-      READ_ONLY_GIT_SUBCOMMANDS.has(invocation.subcommand ?? '')
-    ) {
-      continue;
-    }
-    if (invocation.unresolvedRelocation) {
-      return {
-        allowed: false,
-        reason:
-          'Daemon shell guard denied a mutating Git command with a dynamic repository location.',
-      };
-    }
-
-    let gitCwd = startDirectory;
-    const repositoryTargets: string[] = [];
-    for (const relocation of invocation.relocations) {
-      const target = path.resolve(gitCwd, relocation.target);
-      if (relocation.kind === 'cwd') {
-        gitCwd = target;
-        continue;
-      }
-      repositoryTargets.push(
-        relocation.kind === 'git-dir' && path.basename(target) === '.git'
-          ? path.dirname(target)
-          : target,
-      );
-    }
-    repositoryTargets.push(gitCwd);
-
-    for (const repositoryTarget of repositoryTargets) {
-      const canonicalTarget = await canonicalize(repositoryTarget);
-      if (isWithin(canonicalTarget, canonicalEffectiveCwd)) continue;
-      return {
-        allowed: false,
-        reason: `Daemon shell guard denied a mutating Git command outside the session working directory: ${canonicalTarget}`,
-      };
-    }
-  }
-  return { allowed: true };
+  const { denial } = await evaluateCommandWithCwd(
+    command,
+    startDirectory,
+    {
+      canonicalEffectiveCwd,
+      ambientRelocations: [],
+      ambientUnresolved: false,
+    },
+    0,
+  );
+  return denial ?? { allowed: true };
 }
 
 export function createDaemonToolGuard(

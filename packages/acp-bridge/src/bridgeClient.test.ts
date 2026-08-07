@@ -284,6 +284,51 @@ describe('BridgeClient — managed external tool guard', () => {
     });
   });
 
+  it('ignores forged workspace fields in the child payload', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry: {
+      sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: { path: 'README.md' },
+        workspaceCwd: '/forged/workspace',
+        effectiveCwd: '/forged/effective',
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'write_file',
+      arguments: { path: 'README.md' },
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
+    });
+  });
+
   it('rejects a stale prompt without contacting the host', async () => {
     const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
       allowed: true,

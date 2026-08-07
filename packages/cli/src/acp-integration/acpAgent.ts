@@ -304,6 +304,7 @@ import {
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   isValidExternalToolGuardDenialReason,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   parseSessionSource,
@@ -2796,8 +2797,22 @@ export async function deliverClientMcpMessage(
  */
 export function createManagedExternalToolGuard(
   connection: AgentSideConnection,
+  options: { externalProviderAttached: boolean } = {
+    externalProviderAttached: false,
+  },
 ): ToolInvocationGuard {
   return async (context) => {
+    // With only the daemon's built-in policy attached there is no external
+    // provider to consult: every non-shell tool is structurally allowed,
+    // so resolve locally instead of paying a serialized child-daemon-child
+    // round trip on every tool call. `run_shell_command` still goes to the
+    // daemon because that is the only tool the built-in policy inspects.
+    if (
+      !options.externalProviderAttached &&
+      context.toolName !== 'run_shell_command'
+    ) {
+      return { allowed: true };
+    }
     const invocation = context.invocationContext;
     if (!invocation) {
       throw new Error(
@@ -2981,6 +2996,7 @@ export async function runAcpAgent(
   options?: {
     privateParentCapability?: string;
     externalToolGuardRequired?: boolean;
+    externalToolGuardProviderAttached?: boolean;
   },
 ) {
   // Freeze the restart-required writer protocol before the first await.
@@ -2996,8 +3012,11 @@ export async function runAcpAgent(
       : options.privateParentCapability;
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const externalToolGuardRequired = options?.externalToolGuardRequired === true;
+  const externalToolGuardProviderAttached =
+    options?.externalToolGuardProviderAttached === true;
   if (externalToolGuardRequired && privateParentCapability === undefined) {
     throw new Error(
       'Required external tool guard is available only to a private managed ACP parent.',
@@ -3125,7 +3144,9 @@ export async function runAcpAgent(
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
       const managedToolInvocationGuard = externalToolGuardRequired
-        ? createManagedExternalToolGuard(conn)
+        ? createManagedExternalToolGuard(conn, {
+            externalProviderAttached: externalToolGuardProviderAttached,
+          })
         : undefined;
       agentInstance = new QwenAgent(
         config,
@@ -3135,6 +3156,7 @@ export async function runAcpAgent(
         privateParentCapability,
         sessionWriterLeaseEnabledAtStartup,
         managedToolInvocationGuard,
+        externalToolGuardProviderAttached,
       );
       return agentInstance;
     }, stream);
@@ -3647,7 +3669,10 @@ class QwenAgent implements Agent {
   }
 
   private rejectUnsupportedGuardedHiddenAgent(operation: string): void {
-    if (this.managedToolInvocationGuard) {
+    if (
+      this.managedToolInvocationGuard &&
+      this.externalToolGuardProviderAttached
+    ) {
       throw RequestError.invalidParams(
         undefined,
         `Managed external tool guard v1 does not support ${operation}.`,
@@ -4381,6 +4406,7 @@ class QwenAgent implements Agent {
     private readonly expectedPrivateParentCapability?: string,
     private readonly sessionWriterLeaseEnabledAtStartup = false,
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
+    private readonly externalToolGuardProviderAttached = false,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -8140,8 +8166,10 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
           available:
-            !this.managedToolInvocationGuard &&
-            this.config.isManagedMemoryAvailable(),
+            !(
+              this.managedToolInvocationGuard &&
+              this.externalToolGuardProviderAttached
+            ) && this.config.isManagedMemoryAvailable(),
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember: {
         this.rejectUnsupportedGuardedHiddenAgent(
@@ -9975,7 +10003,10 @@ class QwenAgent implements Agent {
         return { sessionId, answer: result.text || null };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
-        if (this.managedToolInvocationGuard) {
+        if (
+          this.managedToolInvocationGuard &&
+          this.externalToolGuardProviderAttached
+        ) {
           throw RequestError.invalidParams(
             undefined,
             'Managed external tool guard v1 does not support /fork.',

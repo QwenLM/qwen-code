@@ -3546,7 +3546,33 @@ describe('runQwenServe runtime startup failures', () => {
         QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
         QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD: 'required-v1',
       });
-      expect(bridgeOptions?.externalToolGuard).toEqual(expect.any(Function));
+      // No external provider is configured in this test: the child must see
+      // the guard plumbing marker but NOT the provider-attached marker.
+      expect(bridgeOptions?.childEnvOverrides).toHaveProperty(
+        'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER',
+        undefined,
+      );
+      expect(createBridge.mock.calls.length).toBeGreaterThan(0);
+      for (const call of createBridge.mock.calls) {
+        const options = call[0] as { externalToolGuard?: unknown };
+        expect(options.externalToolGuard).toEqual(expect.any(Function));
+      }
+      const daemonGuard = bridgeOptions?.externalToolGuard as (
+        request: Record<string, unknown>,
+      ) => Promise<{ allowed: boolean; reason?: string }>;
+      await expect(
+        daemonGuard({
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: {
+            command: `git -C ${path.join(os.tmpdir(), 'outside-repo')} reset --hard`,
+          },
+          workspaceCwd: tmpDir,
+          effectiveCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ allowed: false });
     } finally {
       if (originalClientMcpOverWs === undefined) {
         delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];

@@ -22,12 +22,29 @@ and receives the same request only after the built-in policy allows it.
 
 ## Policy
 
-The built-in guard inspects `run_shell_command` calls only. It recognizes Git
-invocations whose repository location is changed by literal forms of:
+The built-in guard inspects `run_shell_command` calls only. Command splitting
+reuses core `splitCommands`; containment reuses core `realpathNearestExisting`
+and `isWithinRoot`. It recognizes Git invocations whose repository location is
+changed by literal forms of:
 
 - `git -C <path>` and `git -C<path>`
 - `git --work-tree <path>` and `git --work-tree=<path>`
 - `git --git-dir <path>` and `git --git-dir=<path>`
+- leading `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, or `GIT_INDEX_FILE`
+  assignments
+- directory-shifting wrapper flags `env -C`/`--chdir` and `sudo -D`/`--chdir`
+- `cd`, `pushd`, or `popd` builtins earlier in the same command chain, whose
+  targets become the containment basis for later Git invocations in that chain
+
+Wrapper prefixes are unwrapped before Git detection: leading env assignments,
+`command`, `env` (with its value-taking flags), `sudo` (with its value-taking
+flags), `nohup`, `exec`, `timeout <duration>`, `sh|bash|dash|zsh|ksh -c`
+payloads (analyzed recursively), `eval` payloads (analyzed recursively, with
+cwd changes propagated because `eval` runs in the current shell),
+path-qualified Git binaries by basename, and leading `{`/`!` shell syntax.
+A segment whose program token cannot be classified (shell expansions) fails
+closed when the segment also carries a Git relocation marker or a recorded
+relocation.
 
 Relative targets resolve from the command's effective starting directory:
 `arguments.directory` when present, otherwise the session's current effective
@@ -35,7 +52,10 @@ working directory. The bridge supplies both that current directory and the
 immutable bound workspace from trusted session state. The current effective
 working directory is the allowed execution boundary so a session moved through
 the controlled daemon `/cd` flow can operate in its selected worktree without
-being mistaken for an escape from the original storage owner.
+being mistaken for an escape from the original storage owner. Git applies `-C`
+during option parsing and resolves relative `--git-dir`/`--work-tree` against
+the post-`-C` cwd, so relative targets resolve against the final cwd of the
+`-C` chain regardless of argv order.
 
 A statically resolved Git relocation is denied when both of the following
 hold:
@@ -44,21 +64,48 @@ hold:
    canonical path resolution;
 2. its Git subcommand is mutating or cannot be classified as read-only.
 
-Read-only relocated Git commands remain allowed. Commands with no recognized
-Git relocation retain existing behavior. Dynamic relocation targets are denied
-for mutating or unknown subcommands because the daemon cannot prove that the
+Relocated commands whose subcommand is in a small verified read-only set
+(`status`, `rev-parse`, `ls-files`, `grep`, `describe`, `cat-file`) remain
+allowed. `diff`, `log`, `show`, and `blame` are excluded from that set:
+`--output` writes files, and textconv-style drivers execute programs
+configured by the target repository. Any `--output` flag demotes an
+invocation. Commands with no recognized relocation retain existing behavior.
+Dynamic relocation targets (`$` expansions, backticks, leading `~`, globs)
+and command-executing `-c`/`--config-env` assignments (`alias.*`,
+`core.editor`, `core.pager`, `credential.helper`, `filter.*`, `difftool.*`,
+`mergetool.*`, `core.fsmonitor`, or values starting with `!`) are denied for
+mutating or unknown subcommands because the daemon cannot prove that the
 target remains inside the effective working directory.
 
-`--git-dir` is evaluated by its repository directory. A target ending in
-`.git` uses its parent as the repository target; linked-worktree administrative
-paths are still outside the bound workspace and are denied for mutations.
+`--git-dir` is evaluated by the repository git operates on, with
+canonicalization before basename handling: a target whose canonical form ends
+in `.git` uses its parent; a `.git` gitfile is followed through its `gitdir:`
+redirect; a per-worktree administrative directory
+(`<repo>/.git/worktrees/<name>`) is resolved through its `gitdir` file to the
+linked worktree checkout. Unresolvable indirections fail closed.
 
 ## Failure semantics
 
 Malformed managed guard requests, stale session or prompt ownership, missing
 trusted workspace context, policy exceptions, and malformed external-provider
-responses fail closed before execution. A built-in denial is final and is not
-sent to the optional provider.
+responses fail closed before execution. Unparseable commands, dangling
+relocation options, relocation targets that do not fully exist at decision
+time (a missing target can still become an outward symlink before git runs),
+and unreadable Git indirections are denied for mutating or unclassifiable
+subcommands. A built-in denial is final and is not sent to the optional
+provider. Denial reasons are length-clamped and control-character-stripped so
+they always satisfy the guard result validation.
+
+The managed guard plumbing is active for every daemon ACP child because the
+built-in policy needs it. The child-side v1 restrictions (`/fork` and
+agent-backed workspace memory remember/dream) key on the external provider
+being attached, not on the plumbing's mere presence: under the built-in guard
+alone, hidden-agent tool calls traverse the same managed guard and are
+inspected by the same daemon-side policy. Without a provider the child also
+resolves every non-shell tool call locally (the built-in policy allows them
+structurally) instead of paying a child-daemon-child round trip per call;
+`run_shell_command` always makes the round trip. With a provider attached
+every call still makes it.
 
 ## Non-goals
 
@@ -66,5 +113,10 @@ sent to the optional provider.
   `PermissionManager`, `evaluatePermissionFlow`, or `CoreToolScheduler`.
 - No new confirmation flow or linked-worktree exception.
 - No restriction on direct user-entered daemon shell commands.
-- No general shell interpreter or environment-variable analysis.
+- No general shell interpreter or environment-variable analysis: script files
+  run by `bash script.sh` or `source` are not read, and variable values are
+  not tracked across commands.
+- No heredoc body analysis: Git-shaped text inside a heredoc is scanned as
+  executable lines and can be denied even though the shell never executes it
+  (a fail-closed false positive, not a bypass).
 - No attempt to correlate a denial with a previous tool call.

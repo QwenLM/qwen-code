@@ -22,9 +22,11 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
 import fs from 'node:fs';
@@ -365,6 +367,12 @@ export async function main() {
       ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
       : undefined;
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  const privateExternalToolGuardProvider =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV] ===
+    EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -391,6 +399,12 @@ export async function main() {
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
+                ...(privateExternalToolGuardProvider
+                  ? {
+                      [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]:
+                        privateExternalToolGuardProvider,
+                    }
+                  : {}),
               }
             : {}),
         }
@@ -1042,6 +1056,11 @@ export async function main() {
           isAcpMode &&
           privateAcpParentCapability !== undefined &&
           privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+        externalToolGuardProviderAttached:
+          isAcpMode &&
+          privateAcpParentCapability !== undefined &&
+          privateExternalToolGuardProvider ===
+            EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
       });
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
