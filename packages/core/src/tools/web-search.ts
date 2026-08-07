@@ -170,7 +170,17 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     return {
       ok: false,
       notice:
-        'WebSearch is enabled but no search model is configured. Set tools.webSearch.model (or WEB_SEARCH_MODEL) to a model declared under modelProviders.',
+        'WebSearch is enabled but no search model is configured.\n' +
+        'Add a search model to settings.json (recommended: qwen3.6-plus):\n' +
+        '  {\n' +
+        '    "tools": { "webSearch": { "enabled": true, "model": "qwen3.6-plus" } },\n' +
+        '    "modelProviders": {\n' +
+        '      "openai": [{ "id": "qwen3.6-plus",\n' +
+        '        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",\n' +
+        '        "envKey": "DASHSCOPE_API_KEY" }]\n' +
+        '    }\n' +
+        '  }\n' +
+        'Or via env: WEB_SEARCH_MODEL=qwen3.6-plus (plus WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY).',
     };
   }
 
