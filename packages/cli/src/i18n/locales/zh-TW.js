@@ -1660,6 +1660,7 @@ export default {
     'Ctrl+Q 排到下一輪 · ↑ 編輯排隊消息',
   'Enter to steer · Ctrl+Q to queue':
     'Enter 追加到目前任務 · Ctrl+Q 排到下一輪',
+  '{{count}} queued': '{{count}} 條已排隊',
   'Queue message for the next turn': '將消息排到下一輪',
   'No MCP servers configured.': '未配置 MCP servers',
   '◌ MCP servers are starting up ({{count}} initializing)...':

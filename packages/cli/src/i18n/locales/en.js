@@ -1892,6 +1892,7 @@ export default {
   'Ctrl+Q to queue · ↑ to edit queued messages':
     'Ctrl+Q to queue · ↑ to edit queued messages',
   'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  '{{count}} queued': '{{count}} queued',
   'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================

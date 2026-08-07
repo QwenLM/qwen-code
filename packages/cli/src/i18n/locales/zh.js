@@ -1810,6 +1810,7 @@ export default {
     'Ctrl+Q 排到下一轮 · ↑ 编辑排队消息',
   'Enter to steer · Ctrl+Q to queue':
     'Enter 追加到当前任务 · Ctrl+Q 排到下一轮',
+  '{{count}} queued': '{{count}} 条已排队',
   'Queue message for the next turn': '将消息排到下一轮',
 
   // ============================================================================

@@ -6,6 +6,7 @@
 
 import { render } from 'ink-testing-library';
 import { render as inkRender } from 'ink';
+import stripAnsi from 'strip-ansi';
 import { EventEmitter } from 'node:events';
 import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -124,10 +125,6 @@ const renderWithWidth = (
     </SettingsContext.Provider>,
   );
 };
-
-const stripAnsi = (s: string): string =>
-  // eslint-disable-next-line no-control-regex
-  s.replace(/\u001b\[[0-9;]*m/g, '');
 
 // ink-testing-library hardcodes a 100-column layout buffer regardless of the
 // mocked useTerminalSize, so width-sensitive layout regressions cannot be
@@ -268,24 +265,41 @@ describe('<Footer />', () => {
   });
 
   it.each([ApprovalMode.AUTO, ApprovalMode.DEFAULT])(
-    'keeps the hint row on one line at 80 columns with %s and a queued message',
+    'keeps the hint row on one line at 80 columns with %s, a queued message, and a pending skill review',
     (mode) => {
       // Regression (R2-1/R2-2 of the #8667 review): with Responding + the
       // approval-mode indicator + a non-empty queue, the badge had no `wrap`
       // prop, so the shrinkable hint row wrapped and the badge's tail dangled
-      // on a second footer line, varying the footer height mid-turn.
+      // on a second footer line, varying the footer height mid-turn. The
+      // skill-pending indicator shares the row and needs the same guard
+      // (R3-1 of the #8667 review).
       const { lastFrame, unmount } = renderAtLayoutWidth(
         80,
         createMockUIState({
           streamingState: StreamingState.Responding,
           showAutoAcceptIndicator: mode,
           messageQueue: ['queued message'],
+          skillReviewPending: {
+            taskId: 'test-task',
+            skills: [
+              {
+                name: 'test-skill',
+                description: 'a skill awaiting review',
+                stagedManifestPath: '/tmp/test-skill/SKILL.md',
+              },
+            ],
+          },
         }),
       );
       try {
-        const lines = stripAnsi(lastFrame()).replace(/\s+$/u, '').split('\n');
+        // Trim trailing spaces/tabs per line only: `\s` also matches `\n`,
+        // which would absorb a trailing blank row and mask height growth.
+        const lines = stripAnsi(lastFrame())
+          .split('\n')
+          .map((line) => line.replace(/[ \t]+$/u, ''));
         expect(lines).toHaveLength(1);
         expect(lines[0]).toContain('Enter to steer · Ctrl+Q to queue');
+        expect(lines[0]).toContain('⏳ 1');
       } finally {
         unmount();
       }

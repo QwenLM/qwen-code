@@ -282,7 +282,7 @@ export const Footer: React.FC = () => {
           )}
           {!uiState.isSkillReviewDialogOpen &&
             (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
-              <Text color={theme.status.warning}>
+              <Text color={theme.status.warning} wrap="truncate">
                 {` ⚠ ${t('{{count}} skill(s) pending review', {
                   count: String(uiState.skillReviewPending!.skills.length),
                 })}`}
