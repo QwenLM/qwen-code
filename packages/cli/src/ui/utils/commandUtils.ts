@@ -100,6 +100,13 @@ export const isBtwCommand = (query: string): boolean => {
 
 const debugLogger = createDebugLogger('COMMAND_UTILS');
 
+const formatCommandFailure = (error: unknown, command: string): string =>
+  error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ? `${command} not found`
+    : error instanceof Error
+      ? error.message
+      : String(error);
+
 // Copies a string snippet to the clipboard for different platforms
 export const copyToClipboard = async (text: string): Promise<void> => {
   let wlCopyError: unknown;
@@ -177,11 +184,7 @@ export const copyToClipboard = async (text: string): Promise<void> => {
           const wlCopyFailure =
             wlCopyError === undefined
               ? ''
-              : `wl-copy failed ("${
-                  wlCopyError instanceof Error
-                    ? wlCopyError.message
-                    : String(wlCopyError)
-                }"); `;
+              : `wl-copy failed ("${formatCommandFailure(wlCopyError, 'wl-copy')}"); `;
           if (xclipNotFound && xselNotFound) {
             // Neither xclip nor xsel available — try OSC 52 escape sequence
             // (works over SSH without X11 display server).
@@ -193,20 +196,8 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             return;
           }
 
-          let primaryMsg =
-            primaryError instanceof Error
-              ? primaryError.message
-              : String(primaryError);
-          if (xclipNotFound) {
-            primaryMsg = `xclip not found`;
-          }
-          let fallbackMsg =
-            fallbackError instanceof Error
-              ? fallbackError.message
-              : String(fallbackError);
-          if (xselNotFound) {
-            fallbackMsg = `xsel not found`;
-          }
+          const primaryMsg = formatCommandFailure(primaryError, 'xclip');
+          const fallbackMsg = formatCommandFailure(fallbackError, 'xsel');
 
           // Tools exist but failed — try OSC 52 before giving up
           if (writeOsc52(text)) return;

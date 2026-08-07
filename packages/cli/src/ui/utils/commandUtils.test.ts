@@ -43,6 +43,15 @@ interface MockChildProcess extends EventEmitter {
   stderr: EventEmitter;
 }
 
+const createMockChild = (): MockChildProcess =>
+  Object.assign(new EventEmitter(), {
+    stdin: Object.assign(new EventEmitter(), {
+      write: vi.fn(),
+      end: vi.fn(),
+    }),
+    stderr: new EventEmitter(),
+  }) as MockChildProcess;
+
 describe('commandUtils', () => {
   let mockSpawn: Mock;
   let mockChild: MockChildProcess;
@@ -54,13 +63,7 @@ describe('commandUtils', () => {
     mockSpawn = spawn as Mock;
 
     // Create mock child process with stdout/stderr emitters
-    mockChild = Object.assign(new EventEmitter(), {
-      stdin: Object.assign(new EventEmitter(), {
-        write: vi.fn(),
-        end: vi.fn(),
-      }),
-      stderr: new EventEmitter(),
-    }) as MockChildProcess;
+    mockChild = createMockChild();
 
     mockSpawn.mockReturnValue(mockChild as unknown as ReturnType<typeof spawn>);
   });
@@ -297,13 +300,7 @@ describe('commandUtils', () => {
         let callCount = 0;
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount++ === 0) {
@@ -345,13 +342,7 @@ describe('commandUtils', () => {
         let callCount = 0;
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             child.emit('close', callCount++ === 0 ? 1 : 0);
@@ -392,17 +383,14 @@ describe('commandUtils', () => {
         });
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             const currentCall = callCount++;
             if (currentCall === 0) {
+              const error = new Error('spawn wl-copy ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
               child.emit('close', 1);
               return;
             }
@@ -418,7 +406,52 @@ describe('commandUtils', () => {
 
         try {
           await expect(copyToClipboard('failure')).rejects.toThrow(
-            /wl-copy failed \("'wl-copy' exited with code 1"\); xclip\/xsel not found/,
+            /wl-copy failed \("wl-copy not found"\); xclip\/xsel not found/,
+          );
+          expect(mockSpawn).toHaveBeenCalledTimes(3);
+        } finally {
+          Object.defineProperty(process.stdout, 'isTTY', {
+            value: originalStdoutIsTTY,
+            configurable: true,
+          });
+          Object.defineProperty(process.stderr, 'isTTY', {
+            value: originalStderrIsTTY,
+            configurable: true,
+          });
+        }
+      });
+
+      it('should preserve wl-copy diagnostics when X11 fallbacks also fail', async () => {
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        const originalStdoutIsTTY = process.stdout.isTTY;
+        const originalStderrIsTTY = process.stderr.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        Object.defineProperty(process.stderr, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+          setTimeout(() => {
+            const currentCall = callCount++;
+            if (currentCall === 0) {
+              child.emit('close', 1);
+              return;
+            }
+            child.stderr.emit('data', "Error: Can't open display:");
+            child.emit('close', 1);
+          }, 0);
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        try {
+          await expect(copyToClipboard('failure')).rejects.toThrow(
+            /wl-copy failed \("'wl-copy' exited with code 1"\); xclip\/xsel failed \(/,
           );
           expect(mockSpawn).toHaveBeenCalledTimes(3);
         } finally {
@@ -462,13 +495,7 @@ describe('commandUtils', () => {
         };
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -518,13 +545,7 @@ describe('commandUtils', () => {
         });
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -585,13 +606,7 @@ describe('commandUtils', () => {
           .mockReturnValue(true);
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -636,13 +651,7 @@ describe('commandUtils', () => {
         const exitCode = 1;
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             // e.g., cannot connect to X server
@@ -700,13 +709,7 @@ describe('commandUtils', () => {
         const exitCode = 1;
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             // e.g., cannot connect to X server
