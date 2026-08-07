@@ -3676,6 +3676,8 @@ describe('Settings Loading and Merging', () => {
         SettingScope.User,
         'model.name',
         'manually-added-model',
+        undefined,
+        { throwOnWriteFailure: true },
       );
 
       const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
@@ -3686,6 +3688,27 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent.modelProviders.openai).toEqual(
         externallyModifiedUserSettingsContent.modelProviders.openai,
       );
+    });
+
+    it('throws without mutating when a surgical update cannot be written', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValueOnce(false);
+
+      expect(() =>
+        settings.setValue(
+          SettingScope.User,
+          'general.language',
+          'zh',
+          undefined,
+          { throwOnWriteFailure: true },
+        ),
+      ).toThrow(
+        /saveSettings: updateSettingsFilePreservingFormat returned false/,
+      );
+      expect(settings.user.settings.general?.language).toBeUndefined();
     });
 
     it('strips a runtime snapshot prefix before persisting model.name', () => {
