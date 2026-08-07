@@ -879,6 +879,113 @@ describe('extension tests', () => {
       expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
     });
 
+    it('should retain the recorded commit when a marketplace plugin lives in the marketplace repo', async () => {
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(sourcePath, '.claude-plugin', 'marketplace.json'),
+          JSON.stringify({
+            name: 'sample-marketplace',
+            owner: { name: 'Example', email: 'example@example.com' },
+            plugins: [
+              { name: 'sample-plugin', source: './plugins/sample-plugin' },
+            ],
+          }),
+        );
+        const pluginConfigDir = path.join(
+          sourcePath,
+          'plugins',
+          'sample-plugin',
+          '.claude-plugin',
+        );
+        fs.mkdirSync(pluginConfigDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(pluginConfigDir, 'plugin.json'),
+          JSON.stringify({ name: 'sample-plugin', version: '1.0.0' }),
+        );
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-marketplace' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-marketplace',
+          pluginName: 'sample-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Claude');
+      expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
+    });
+
+    it('should drop the recorded commit when a marketplace plugin resolves from an external source', async () => {
+      let cloneCalls = 0;
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        cloneCalls += 1;
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        if (cloneCalls === 1) {
+          fs.writeFileSync(
+            path.join(sourcePath, '.claude-plugin', 'marketplace.json'),
+            JSON.stringify({
+              name: 'sample-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [
+                {
+                  name: 'sample-plugin',
+                  source: { source: 'github', repo: 'example/nested-plugin' },
+                },
+              ],
+            }),
+          );
+        } else {
+          fs.writeFileSync(
+            path.join(sourcePath, '.claude-plugin', 'plugin.json'),
+            JSON.stringify({ name: 'sample-plugin', version: '1.0.0' }),
+          );
+        }
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-marketplace' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-marketplace',
+          pluginName: 'sample-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Claude');
+      expect(extension.installMetadata?.gitCommit).toBeUndefined();
+    });
+
     it('should emit mutation lifecycle events around install', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
       fs.writeFileSync(archivePath, 'not used by mocked extractor');

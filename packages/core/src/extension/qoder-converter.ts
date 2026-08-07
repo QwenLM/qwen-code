@@ -145,12 +145,8 @@ function resolveMcpServers(
   if (typeof configured === 'string') {
     return loadMcpServersFile(extensionDir, configured, false);
   }
-  if (configured !== undefined) {
-    if (
-      typeof configured !== 'object' ||
-      configured === null ||
-      Array.isArray(configured)
-    ) {
+  if (configured !== undefined && configured !== null) {
+    if (typeof configured !== 'object' || Array.isArray(configured)) {
       throw new Error('Qoder plugin mcpServers must be an object or file path');
     }
     return normalizeMcpServers(

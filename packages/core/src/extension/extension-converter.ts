@@ -37,10 +37,15 @@ export async function convertCompatibleExtension(
   pluginName?: string,
   networkPolicy?: ExtensionNetworkPolicy,
   signal?: AbortSignal,
-): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
+): Promise<{
+  extensionDir: string;
+  originSource: ExtensionOriginSource;
+  externalContent: boolean;
+}> {
   signal?.throwIfAborted();
   let newExtensionDir = extensionDir;
   let originSource: ExtensionOriginSource = 'QwenCode';
+  let externalContent = false;
   const configFilePath = path.join(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[0],
@@ -55,15 +60,15 @@ export async function convertCompatibleExtension(
     newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
     originSource = 'Qoder';
   } else if (pluginName) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(
-        extensionDir,
-        pluginName,
-        networkPolicy,
-        signal,
-      )
-    ).convertedDir;
+    const converted = await convertClaudePluginPackage(
+      extensionDir,
+      pluginName,
+      networkPolicy,
+      signal,
+    );
+    newExtensionDir = converted.convertedDir;
     originSource = 'Claude';
+    externalContent = converted.externalContent;
   } else if (
     fs.existsSync(path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]))
   ) {
@@ -72,5 +77,5 @@ export async function convertCompatibleExtension(
     originSource = 'Claude';
   }
   signal?.throwIfAborted();
-  return { extensionDir: newExtensionDir, originSource };
+  return { extensionDir: newExtensionDir, originSource, externalContent };
 }

@@ -1810,12 +1810,13 @@ export class ExtensionManager {
       signal?.throwIfAborted();
       try {
         const sourceBeforeConversion = localSourcePath;
-        const { extensionDir, originSource } = await convertCompatibleExtension(
-          sourceBeforeConversion,
-          installMetadata.pluginName,
-          installMetadata.networkPolicy,
-          signal,
-        );
+        const { extensionDir, originSource, externalContent } =
+          await convertCompatibleExtension(
+            sourceBeforeConversion,
+            installMetadata.pluginName,
+            installMetadata.networkPolicy,
+            signal,
+          );
         signal?.throwIfAborted();
 
         if (extensionDir !== sourceBeforeConversion) {
@@ -1823,6 +1824,12 @@ export class ExtensionManager {
         }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
+        if (externalContent) {
+          // The commit recorded above belongs to the outer clone (e.g. the
+          // marketplace repo), not plugin content fetched from a nested
+          // source; drop it so update checks don't compare the wrong repo.
+          installMetadata.gitCommit = undefined;
+        }
 
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,

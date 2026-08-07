@@ -628,23 +628,26 @@ describe('git extension helpers', () => {
       ]);
     });
 
-    it('does not update-check legacy Qoder Git installs without a recorded commit', async () => {
-      const extension = createExtension({
-        installMetadata: {
-          type: 'git',
-          source: 'https://github.com/example/sample-qoder-plugin',
-          originSource: 'Qoder',
-        },
-      });
+    it.each(['Qoder', 'Claude'] as const)(
+      'does not update-check legacy %s Git installs without a recorded commit',
+      async (originSource) => {
+        const extension = createExtension({
+          installMetadata: {
+            type: 'git',
+            source: 'https://github.com/example/sample-qoder-plugin',
+            originSource,
+          },
+        });
 
-      const result = await checkForExtensionUpdate(
-        extension,
-        mockExtensionManager,
-      );
+        const result = await checkForExtensionUpdate(
+          extension,
+          mockExtensionManager,
+        );
 
-      expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
-      expect(mockGit.listRemote).not.toHaveBeenCalled();
-    });
+        expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+        expect(mockGit.listRemote).not.toHaveBeenCalled();
+      },
+    );
 
     it('pins public Git update checks and disables redirects and proxies', async () => {
       vi.spyOn(dns, 'lookup').mockResolvedValue([
@@ -820,6 +823,7 @@ describe('git extension helpers', () => {
         const result = await checkForExtensionUpdate(extension, mockManager);
 
         expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(await fs.readdir(tempDir)).toEqual(['.qoder-plugin']);
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }

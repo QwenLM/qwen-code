@@ -231,6 +231,39 @@ describe('convertQoderPlugin', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
+  it('treats null mcpServers as absent and falls back to the root MCP file', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      mcpServers: null,
+    });
+    fs.writeFileSync(
+      path.join(root, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          sample: { type: 'http', url: 'https://example.com/mcp' },
+        },
+      }),
+      'utf-8',
+    );
+
+    const result = await convertQoderPlugin(root);
+
+    expect(Object.keys(result.config.mcpServers ?? {})).toEqual(['sample']);
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('treats null mcpServers without a root MCP file as absent', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      mcpServers: null,
+    });
+
+    const result = await convertQoderPlugin(root);
+
+    expect(result.config.mcpServers).toBeUndefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
   it('rejects malformed root MCP config', async () => {
     writeManifest({ name: 'sample-qoder-plugin' });
     fs.writeFileSync(path.join(root, '.mcp.json'), '\u001b[31m{', 'utf-8');
