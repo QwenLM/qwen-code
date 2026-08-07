@@ -146,8 +146,8 @@ search-only; write semantics are deliberately provider-specific.
 
 ### Tool contract
 
-The default extension manifest and every v1 configuration without the strict
-`write: { enabled: true }` block register exactly one tool:
+The default extension manifest and every valid v1 configuration with no
+`write` block register exactly one tool:
 
 ```ts
 context_search({ query: string });

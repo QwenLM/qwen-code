@@ -171,7 +171,7 @@ describe('<VirtualizedList />', () => {
   it('collapses after measuring changed content at full viewport height', async () => {
     const liveItems = [{ id: -1, label: 'live' }];
 
-    const { lastFrame, rerender } = render(
+    const { frames, lastFrame, rerender } = render(
       <VirtualizedList<Item>
         data={liveItems}
         renderItem={renderItem}
@@ -206,6 +206,7 @@ describe('<VirtualizedList />', () => {
     const longConfirmationItems = [
       { id: -1, label: ['confirm', 'line 2', 'line 3'].join('\n') },
     ];
+    const frameCountBeforeLongContent = frames.length;
     rerender(
       <VirtualizedList<Item>
         data={longConfirmationItems}
@@ -222,6 +223,9 @@ describe('<VirtualizedList />', () => {
     );
     await act(async () => {});
 
+    expect(
+      frames.slice(frameCountBeforeLongContent).map((frame) => frame.trimEnd()),
+    ).not.toContain('confirm');
     expect(lastFrame()?.split('\n')).toEqual(['confirm', 'line 2', 'line 3']);
   });
 

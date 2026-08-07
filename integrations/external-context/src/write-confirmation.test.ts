@@ -46,6 +46,11 @@ describe('write confirmation Hook', () => {
   it.each([
     ['wrong event', validInput({ hook_event_name: 'PostToolUse' })],
     ['wrong tool', validInput({ tool_name: 'context_remember' })],
+  ])('passes through %s', (_name, input) => {
+    expect(runWriteConfirmation(input)).toEqual({});
+  });
+
+  it.each([
     ['missing input', validInput({ tool_input: undefined })],
     ['non-string content', validInput({ content: 42 })],
     ['whitespace content', validInput({ content: ' \t\n' })],
@@ -54,7 +59,7 @@ describe('write confirmation Hook', () => {
     ['unpaired low surrogate', validInput({ content: '\udc00' })],
     ['oversized content', validInput({ content: '🙂'.repeat(4001) })],
     ['non-object input', null],
-  ])('denies %s', (_name, input) => {
+  ])('denies invalid matching request: %s', (_name, input) => {
     const result = runWriteConfirmation(input);
 
     expect(result.hookSpecificOutput).toEqual({

@@ -895,7 +895,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           truncateDescription={
             status === ToolCallStatus.Confirming &&
             confirmationDetails?.type === 'info' &&
-            confirmationDetails.renderPromptAsPlainText === true
+            confirmationDetails.renderPromptAsPlainText === true &&
+            isDescriptionRepeatedInPrompt(
+              description,
+              confirmationDetails.prompt,
+            )
           }
         />
         {shouldShowFocusHint && (
@@ -1017,6 +1021,39 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     </Box>
   );
 };
+
+function isDescriptionRepeatedInPrompt(
+  description: string,
+  prompt: string,
+): boolean {
+  try {
+    const parsed: unknown = JSON.parse(description);
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed)
+    ) {
+      return false;
+    }
+    const stringValues = Object.values(parsed).filter(
+      (value): value is string => typeof value === 'string',
+    );
+    const promptValues = prompt.split('\n').flatMap((line) => {
+      try {
+        const value: unknown = JSON.parse(line);
+        return typeof value === 'string' ? [value] : [];
+      } catch {
+        return [];
+      }
+    });
+    return (
+      stringValues.length > 0 &&
+      stringValues.every((value) => promptValues.includes(value))
+    );
+  } catch {
+    return false;
+  }
+}
 
 type ToolInfo = {
   name: string;

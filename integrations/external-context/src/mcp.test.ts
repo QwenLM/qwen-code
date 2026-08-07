@@ -335,6 +335,79 @@ describe('external context MCP server', () => {
     expect(JSON.stringify(result)).not.toContain('secret upstream');
   });
 
+  it('aborts the memory writer when the client cancels the request', async () => {
+    let writerSignal: AbortSignal | undefined;
+    let signalReceived: (() => void) | undefined;
+    const received = new Promise<void>((resolve) => {
+      signalReceived = resolve;
+    });
+    const remember = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          writerSignal = signal;
+          signalReceived?.();
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const client = await connect({
+      config: writeConfig(),
+      provider: searchProvider(),
+      writer: { remember },
+    });
+    const controller = new AbortController();
+
+    const result = client.callTool(
+      {
+        name: 'context_remember',
+        arguments: { content: 'cancel this memory write' },
+      },
+      undefined,
+      { signal: controller.signal },
+    );
+    await received;
+    controller.abort();
+
+    await expect(result).rejects.toThrow();
+    await vi.waitFor(() => expect(writerSignal?.aborted).toBe(true));
+    expect(remember).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts the memory writer at the configured timeout', async () => {
+    let writerSignal: AbortSignal | undefined;
+    const remember = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<RememberResult>((resolve) => {
+          writerSignal = signal;
+          signal.addEventListener(
+            'abort',
+            () => resolve({ status: 'unknown' }),
+            { once: true },
+          );
+        }),
+    );
+    const client = await connect({
+      config: writeConfig(20),
+      provider: searchProvider(),
+      writer: { remember },
+    });
+
+    const result = await client.callTool({
+      name: 'context_remember',
+      arguments: { content: 'time out this memory write' },
+    });
+
+    expect(result.isError).toBe(true);
+    const text = result.content[0];
+    expect(text).toMatchObject({ type: 'text' });
+    const body = JSON.parse(text.type === 'text' ? text.text : '{}');
+    expect(body).toMatchObject({ status: 'unknown' });
+    expect(body.message).toContain('Do not retry automatically.');
+    expect(writerSignal?.aborted).toBe(true);
+    expect(remember).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ['whitespace', ' \t\n '],
     ['control and format characters', '\u0000\u001f\u200b\u202e'],
@@ -427,10 +500,10 @@ function config(): ExternalContextConfigV1 {
   };
 }
 
-function writeConfig(): ExternalContextConfigV1 {
+function writeConfig(timeoutMs = 1000): ExternalContextConfigV1 {
   return {
     version: 1,
-    timeoutMs: 1000,
+    timeoutMs,
     write: { enabled: true },
     provider: {
       type: 'mem0-platform-v3',

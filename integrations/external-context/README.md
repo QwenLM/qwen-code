@@ -168,15 +168,17 @@ another copy of the same content.
 4. Start Qwen with an administrator-owned copy of
    `examples/managed-mem0-write-mcp.json`. The default extension manifest stays
    search-only and does not enable `context_remember`. Register this managed
-   MCP server under exactly `external-context`; both the Hook matcher and its
-   fail-closed tool-name check use
-   `mcp__external-context__context_remember`, so another server name would
-   prevent the content confirmation from running.
+   MCP server under exactly `external-context`; the Hook matcher uses
+   `mcp__external-context__context_remember`, and the command ignores other
+   tools if a matcher is accidentally broadened. Another server name would
+   therefore prevent the content confirmation from running.
 5. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
-   of `examples/managed-mem0-write-system-settings.json`. Put the applicable
-   POSIX or Windows managed write user-settings example in a dedicated
-   administrator-controlled `QWEN_HOME/settings.json`. System settings cannot
-   install the confirmation Hook.
+   of `examples/managed-mem0-write-system-settings.json`. The provided system
+   settings deliberately omit the Hook. Put the applicable POSIX or Windows
+   managed write user-settings example in a dedicated administrator-controlled
+   `QWEN_HOME/settings.json`. User-scope Hooks take precedence over legacy
+   merged Hooks, but a system-scope Hook can still run when user Hooks are
+   absent, so audit both scopes and avoid additional matchers for this command.
 6. Use the same fixed-path, no-user-arguments, environment-allowlist launcher
    requirements as the read-only profile. In addition, pin the Hook and
    dedicated `QWEN_HOME`; refuse headless, ACP, `serve`, resume/continue, and
@@ -370,10 +372,13 @@ Provider audit or access logs may still be retained. See
 ## Rollout and rollback
 
 Start with the pinned read-only on-demand MCP for one workspace and validate
-search quality and provenance. For writes, progress from a fake Mem0 service
-to an isolated temporary Project, one trusted repository, and then a small
-team. Enable auto-recall only after the administrator accepts automatic query
-forwarding. Do not run auto-recall and an on-demand MCP in one process.
+search quality and provenance. For writes, first run the repository's
+interactive fake-Mem0 test harness, then progress through an isolated temporary
+Mem0 Project, one trusted repository, and a small team. The shipped Mem0
+configuration always targets Mem0 Platform; only the test harness injects a
+local endpoint. Enable auto-recall only after the administrator accepts
+automatic query forwarding. Do not run auto-recall and an on-demand MCP in one
+process.
 
 Removing the pinned MCP or auto-recall Hook from the managed launcher rolls
 back the Qwen integration; local on-demand trials can instead disable or remove

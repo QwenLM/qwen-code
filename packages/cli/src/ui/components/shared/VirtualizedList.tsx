@@ -118,8 +118,11 @@ const VirtualizedListItem = memo(
     onHeightChangeRef.current = onHeightChange;
 
     useLayoutEffect(() => {
-      if (hasMeasured && height > 0) {
-        onHeightChangeRef.current(itemKey, height);
+      const measuredHeight = itemRef.current
+        ? measureElementPosition(itemRef.current).height
+        : height;
+      if (hasMeasured && measuredHeight > 0) {
+        onHeightChangeRef.current(itemKey, measuredHeight);
       }
     }, [itemKey, height, hasMeasured, content]);
 

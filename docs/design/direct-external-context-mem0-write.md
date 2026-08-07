@@ -144,8 +144,10 @@ selectors or metadata to the Provider request.
 
 The confirmation Hook validates the same content contract and reads at most
 1 MiB from stdin. It requires the exact `PreToolUse` event and fully qualified
-MCP tool name. `default`, `auto`, `auto_edit`, `auto-edit`, and `yolo` return
-`ask`; `plan`, unknown modes, or invalid input return `deny`. The Hook accepts
+MCP tool name. Other events and tool names pass through so an accidentally
+broad matcher cannot deny unrelated tools. `default`, `auto`, `auto_edit`,
+`auto-edit`, and `yolo` return `ask`; matching requests with `plan`, unknown
+modes, or invalid input return `deny`. The Hook accepts
 both Auto Edit spellings because the Hook contract uses `auto_edit` while the
 interactive scheduler currently forwards the `auto-edit` approval-mode value.
 Extra tool arguments are ignored by both the Hook and MCP schema and never

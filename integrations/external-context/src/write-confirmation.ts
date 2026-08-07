@@ -22,13 +22,15 @@ const ASK_PERMISSION_MODES = new Set([
   'yolo',
 ]);
 
-interface HookOutput {
+interface HookDecisionOutput {
   hookSpecificOutput: {
     hookEventName: 'PreToolUse';
     permissionDecision: 'ask' | 'deny';
     permissionDecisionReason: string;
   };
 }
+
+type HookOutput = HookDecisionOutput | Record<string, never>;
 
 type HookInputStream = AsyncIterable<string | Uint8Array> & {
   destroy?(): void;
@@ -42,11 +44,15 @@ export function runWriteConfirmation(value: unknown): HookOutput {
   if (!isRecord(value)) {
     return denyInvalid();
   }
+  if (
+    value['hook_event_name'] !== 'PreToolUse' ||
+    value['tool_name'] !== REMEMBER_TOOL_NAME
+  ) {
+    return {};
+  }
   const toolInput = value['tool_input'];
   const permissionMode = value['permission_mode'];
   if (
-    value['hook_event_name'] !== 'PreToolUse' ||
-    value['tool_name'] !== REMEMBER_TOOL_NAME ||
     typeof permissionMode !== 'string' ||
     !isRecord(toolInput) ||
     typeof toolInput['content'] !== 'string' ||
@@ -82,11 +88,11 @@ export async function runWriteConfirmationCli(
   outputStream.write(JSON.stringify(runWriteConfirmation(input)));
 }
 
-function denyInvalid(): HookOutput {
+function denyInvalid(): HookDecisionOutput {
   return deny('External context memory write confirmation request is invalid.');
 }
 
-function deny(reason: string): HookOutput {
+function deny(reason: string): HookDecisionOutput {
   return {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
