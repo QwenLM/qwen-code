@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as path from 'node:path';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -14,7 +15,7 @@ import {
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 
-const WS_BOUND = '/work/bound';
+const WS_BOUND = path.resolve('/work/bound');
 
 function makeBridge(
   sessionCount = 0,
@@ -52,6 +53,7 @@ describe('createServeApp default bridge wiring', () => {
 
   it('wires the internally-created bridge lifecycle into the workspace registry', async () => {
     let sessionLifecycle: BridgeOptions['sessionLifecycle'];
+    let bridgeOptions: BridgeOptions | undefined;
     const liveSessionIds = new Set<string>();
     const bridge = makeBridge(0, liveSessionIds);
     vi.doMock('./acp-session-bridge.js', async () => {
@@ -61,6 +63,7 @@ describe('createServeApp default bridge wiring', () => {
       return {
         ...actual,
         createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
+          bridgeOptions = opts;
           sessionLifecycle = opts.sessionLifecycle;
           return bridge;
         }),
@@ -79,6 +82,9 @@ describe('createServeApp default bridge wiring', () => {
     const locals = app.locals as { workspaceRegistry?: WorkspaceRegistry };
 
     expect(sessionLifecycle).toBeDefined();
+    expect(bridgeOptions).toMatchObject({
+      delegateReadTextFileToClient: false,
+    });
     liveSessionIds.add('session-indexed');
     sessionLifecycle!({
       type: 'registered',

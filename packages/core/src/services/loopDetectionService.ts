@@ -18,6 +18,7 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
+import { canonicalToolName } from '../tools/tool-names.js';
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
@@ -58,8 +59,9 @@ const SHELL_COMMAND_STAGNATION_THRESHOLD = STAGNATION_THRESHOLD;
 
 // Global tool call duplicate tracking: how many times the same (tool, args)
 // pair must appear across the entire turn (not necessarily consecutively)
-// before it is treated as a loop.
-const GLOBAL_DUPLICATE_THRESHOLD = 6;
+// before it is treated as a loop. Exported so the daemon's turn-loop guard
+// (ACP Session) applies the same stuck-repetition signal as this service.
+export const GLOBAL_DUPLICATE_THRESHOLD = 6;
 
 // Alternating pattern detection: number of complete AB cycles needed to
 // trip the detector (3 cycles = 6 calls: A B A B A B).
@@ -113,6 +115,44 @@ function canonicalizeForHash(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+/**
+ * Stable identity of a (tool, args) call for repeat tracking: a sha256 over
+ * the canonicalized name and args (legacy aliases resolved, sorted object
+ * keys, preserved array order), so identical calls that differ only in
+ * field order — or in a legacy alias such as `task` vs `agent` — hash to
+ * the same key, and large payloads (e.g. write_file content) are retained
+ * as a fixed-size digest rather than the raw JSON. Shared with the daemon's
+ * turn-loop guard (ACP Session) so both runtimes key repeats the same way.
+ */
+export function getToolCallRepeatKey(toolName: string, args: unknown): string {
+  const argsString = JSON.stringify(canonicalizeForHash(args));
+  const keyString = `${canonicalToolName(toolName)}:${argsString}`;
+  return createHash('sha256').update(keyString).digest('hex');
+}
+
+/**
+ * Halt predicate of the per-turn tool-call cap, shared with the daemon's
+ * turn-loop guard (ACP Session's recordDaemonToolCalls) so both runtimes
+ * decide identically and cannot drift. `cap` is the resolved effective cap
+ * from getMaxToolCallsPerTurn (Infinity when disabled); `maxKeyRepeat` is
+ * the turn's running max count of any single (tool, args) repeat key.
+ * Returns true when a turn that has emitted `totalCalls` calls must halt:
+ * always past an explicit cap (the released hard-cap contract), and past
+ * the adaptive default cap only on a stuck-repetition signal or at the
+ * hard backstop (see checkTurnToolCallCap).
+ */
+export function shouldHaltOnTurnToolCallCap(
+  totalCalls: number,
+  maxKeyRepeat: number,
+  cap: number,
+  isExplicitCap: boolean,
+): boolean {
+  if (totalCalls <= cap) return false;
+  const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
+  const stuck = maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
+  return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
 /**
@@ -226,9 +266,7 @@ export class LoopDetectionService {
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
-    const argsString = JSON.stringify(canonicalizeForHash(toolCall.args));
-    const keyString = `${toolCall.name}:${argsString}`;
-    return createHash('sha256').update(keyString).digest('hex');
+    return getToolCallRepeatKey(toolCall.name, toolCall.args);
   }
 
   /**
@@ -532,11 +570,23 @@ export class LoopDetectionService {
     // reset tracking to avoid analyzing content that spans across different element boundaries.
     const numFences = (content.match(/```/g) ?? []).length;
     const hasTable = /(^|\n)\s*(\|.*\||[|+-]{3,})/.test(content);
+    // The `-` is placed first in both classes below so it is a literal member
+    // rather than a range endpoint. Written mid-class it silently became one:
+    // `[*-+]` was the range U+002A-U+002B, i.e. exactly {*, +}, so `- item`
+    // -- the most common bullet in markdown -- was not recognised as a list
+    // item and never reset tracking, letting a long bulleted list accumulate
+    // until it tripped the repetition check and halted a healthy response.
     const hasListItem =
-      /(^|\n)\s*[*-+]\s/.test(content) || /(^|\n)\s*\d+\.\s/.test(content);
+      /(^|\n)\s*[-*+]\s/.test(content) || /(^|\n)\s*\d+\.\s/.test(content);
     const hasHeading = /(^|\n)#+\s/.test(content);
     const hasBlockquote = /(^|\n)>\s/.test(content);
-    const isDivider = /^[+-_=*\u2500-\u257F]+$/.test(content);
+    // `[+-_=*]` was the range U+002B-U+005F, which covers every digit and
+    // every uppercase letter, so `SELECT`, `12345`, `ABC` and `>>>` all read
+    // as horizontal rules. A divider both resets tracking and returns early
+    // below, so such content was excluded from the history entirely and a
+    // model chanting one of those tokens could never be detected. Only the
+    // \u2500-\u257F box-drawing span is meant to be a range.
+    const isDivider = /^[-+_=*\u2500-\u257F]+$/.test(content);
 
     if (
       numFences ||
@@ -746,6 +796,7 @@ export class LoopDetectionService {
     'read_file',
     'read_many_files',
     'list_directory',
+    'zoom_image',
   ]);
 
   // Prefix fallback for MCP-provided tools that follow the same naming
@@ -873,25 +924,22 @@ export class LoopDetectionService {
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    const cap = this.config.getMaxToolCallsPerTurn();
-    if (this.turnToolCallTotal <= cap) {
+    if (
+      !shouldHaltOnTurnToolCallCap(
+        this.turnToolCallTotal,
+        this.capMaxKeyRepeat,
+        this.config.getMaxToolCallsPerTurn(),
+        this.config.isMaxToolCallsPerTurnExplicit(),
+      )
+    ) {
       return false;
     }
-
-    // Over the configured cap. An explicit value is a hard cap; the default is
-    // adaptive (allow productive turns, halt on stuck or the hard backstop).
-    const explicitHardCap = this.config.isMaxToolCallsPerTurnExplicit();
-    const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
-    const stuck = this.capMaxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
-    if (explicitHardCap || this.turnToolCallTotal > hardCap || stuck) {
-      this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
-      );
-      return true;
-    }
-    return false;
+    this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(LoopType.TURN_TOOL_CALL_CAP, this.promptId),
+    );
+    return true;
   }
 
   /**

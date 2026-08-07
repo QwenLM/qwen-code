@@ -443,6 +443,7 @@ function normalizeHistoryTruncated(
   const truncatedEvents = numberField(event.data, 'truncatedEvents');
   const retainedEvents = numberField(event.data, 'retainedEvents');
   const maxBytes = numberField(event.data, 'maxBytes');
+  const maxEvents = numberField(event.data, 'maxEvents');
   if (
     reason !== 'replay_window_exceeded' ||
     truncatedEvents === undefined ||
@@ -453,12 +454,48 @@ function normalizeHistoryTruncated(
   ) {
     return fallbackDebug(event, base, 'malformed history_truncated payload');
   }
+  const scope = getString(event.data, 'scope');
+  if (
+    (event.data['scope'] !== undefined && !scope) ||
+    (event.data['maxEvents'] !== undefined &&
+      (maxEvents === undefined ||
+        !Number.isInteger(maxEvents) ||
+        maxEvents < 0))
+  ) {
+    return fallbackDebug(event, base, 'malformed history_truncated payload');
+  }
+  const fullTranscriptAvailable = event.data['fullTranscriptAvailable'];
+  const limits = [
+    maxEvents === undefined ? undefined : `${maxEvents} events`,
+    `${maxBytes} bytes`,
+  ]
+    .filter((limit): limit is string => limit !== undefined)
+    .join(' / ');
+  const text =
+    scope === 'live_journal'
+      ? `History truncated for live turn replay: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+          fullTranscriptAvailable
+            ? 'Complete content remains available after the turn finishes.'
+            : 'Complete content is not available for automatic recovery.'
+        }`
+      : scope === undefined
+        ? `History truncated in replay history: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+            fullTranscriptAvailable
+              ? 'Older content remains available from the full transcript.'
+              : 'Older content is not available from a full transcript.'
+          }`
+        : `History truncated: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+            fullTranscriptAvailable
+              ? 'Full transcript content remains available.'
+              : 'Full transcript content is not available.'
+          }`;
   return [
     {
       ...base,
       type: 'status',
-      text: `History truncated: retained ${retainedEvents}, dropped ${truncatedEvents} (window ${maxBytes} bytes).`,
+      text,
       source: 'history_truncated',
+      data: event.data,
     },
   ];
 }
@@ -992,6 +1029,9 @@ function normalizePlanUpdate(
   // (PlanEmitter) through to rawOutput, so the web-shell can diff consecutive
   // todo snapshots into per-task token/time detail.
   const stats = meta && isRecord(meta['stats']) ? meta['stats'] : undefined;
+  const todoPlan =
+    meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
+  const planId = getString(todoPlan, 'id');
   return {
     ...base,
     type: 'tool.update',
@@ -1006,7 +1046,11 @@ function normalizePlanUpdate(
         content: { type: 'text', text: contentText },
       },
     ],
-    rawOutput: stats ? { entries, stats } : { entries },
+    rawOutput: {
+      entries,
+      ...(stats ? { stats } : {}),
+      ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+    },
   };
 }
 

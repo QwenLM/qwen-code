@@ -46,10 +46,10 @@ export interface BridgeFileSystem {
    *      / procfs / sysfs entries can produce unbounded data on
    *      read despite reporting `stats.size === 0`). Inline path
    *      throws with `describeStatKind(stats)` in the message.
-   *   2. Cap the buffered size (the inline path uses
-   *      `READ_FILE_SIZE_CAP = 100 MiB` to defend against a small
-   *      `{ line: 1, limit: 10 }` request against a 500 MB log
-   *      from costing 500 MB of RSS just to return 10 lines).
+   *   2. Bound memory and returned content. The inline fallback caps
+   *      full buffering at `READ_FILE_SIZE_CAP = 100 MiB`; production
+   *      adapters may instead stream finite line windows from larger
+   *      files, but must retain a hard output cap.
    */
   readText(params: ReadTextFileRequest): Promise<ReadTextFileResponse>;
 

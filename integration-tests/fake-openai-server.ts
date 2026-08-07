@@ -7,6 +7,7 @@
 import {
   createServer,
   type IncomingMessage,
+  type IncomingHttpHeaders,
   type Server,
   type ServerResponse,
 } from 'node:http';
@@ -52,6 +53,7 @@ export type FakeOpenAIChoice = {
 
 export type FakeOpenAIRequest = {
   body: JsonObject;
+  headers: IncomingHttpHeaders;
 };
 
 export type FakeOpenAIServer = {
@@ -60,9 +62,12 @@ export type FakeOpenAIServer = {
   close: () => Promise<void>;
 };
 
-export type FakeOpenAIServerOptions =
+export type FakeOpenAIServerOptions = (
   | { listenHost?: undefined; baseUrlHost?: undefined }
-  | { listenHost: string; baseUrlHost: string };
+  | { listenHost: string; baseUrlHost: string }
+) & {
+  keepAlive?: boolean;
+};
 
 export type FakeOpenAIHandler = (ctx: {
   body: JsonObject;
@@ -114,13 +119,23 @@ export async function startFakeOpenAIServer(
       }
 
       const requestIndex = requests.length;
-      requests.push({ body });
+      requests.push({ body, headers: req.headers });
 
       const response = await handler({ body, requestIndex });
       if (body['stream'] === true) {
-        writeStreamed(res, getModel(body), response);
+        writeStreamed(
+          res,
+          getModel(body),
+          response,
+          options.keepAlive !== false,
+        );
       } else {
-        writeNonStreamed(res, getModel(body), response);
+        writeNonStreamed(
+          res,
+          getModel(body),
+          response,
+          options.keepAlive !== false,
+        );
       }
     } catch (error) {
       if (error instanceof RequestBodyTooLargeError) {
@@ -167,12 +182,13 @@ export async function startFakeOpenAIServer(
     throw new Error('failed to start fake OpenAI server');
   }
 
+  let closePromise: Promise<void> | undefined;
   return {
     baseUrl: `http://${options.baseUrlHost ?? '127.0.0.1'}:${
       (address as AddressInfo).port
     }/v1`,
     requests,
-    close: () => closeServer(server),
+    close: () => (closePromise ??= closeServer(server)),
   };
 }
 
@@ -219,8 +235,14 @@ function writeNonStreamed(
   res: ServerResponse,
   model: string,
   message: FakeOpenAIResponse,
+  keepAlive: boolean,
 ): void {
-  res.writeHead(200, { 'content-type': 'application/json' });
+  res.writeHead(
+    200,
+    keepAlive
+      ? { 'content-type': 'application/json' }
+      : { connection: 'close', 'content-type': 'application/json' },
+  );
   res.end(
     JSON.stringify({
       id: chatCompletionId(),
@@ -245,10 +267,11 @@ function writeStreamed(
   res: ServerResponse,
   model: string,
   message: FakeOpenAIResponse,
+  keepAlive: boolean,
 ): void {
   res.writeHead(200, {
     'cache-control': 'no-cache',
-    connection: 'keep-alive',
+    connection: keepAlive ? 'keep-alive' : 'close',
     'content-type': 'text/event-stream',
   });
 

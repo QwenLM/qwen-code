@@ -10,8 +10,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
+import { seedParseArgs } from './lib/test-utils.js';
 
 let dir: string;
+let cwd: string;
 const run = (diffPath: string, out: string, maxChunkLines = 400) =>
   (planDiffCommand.handler as (a: unknown) => void)({
     diff_path: diffPath,
@@ -21,8 +23,11 @@ const run = (diffPath: string, out: string, maxChunkLines = 400) =>
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'plan-diff-'));
+  cwd = process.cwd();
+  process.chdir(dir);
 });
 afterEach(() => {
+  process.chdir(cwd);
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -106,6 +111,16 @@ describe('plan-diff', () => {
       maxChunkLines: 400,
       effort: 'medium',
     });
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBe('medium');
+  });
+
+  it('recovers the effort from the parse-args report when --effort is not re-threaded', () => {
+    seedParseArgs(dir, 'medium');
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    run(diffPath, out); // note: no effort passed
+
     expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBe('medium');
   });
 

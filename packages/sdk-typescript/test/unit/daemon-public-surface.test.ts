@@ -26,6 +26,10 @@ import type {
   DaemonChannelDelivery,
   DaemonChannelNotifyRequest,
   DaemonChannelNotifyResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingSubject,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelDeliveryErrorCode,
   DaemonChannelDeliveryResultData,
   DaemonChannelDeliveryResultEvent,
@@ -220,6 +224,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelDelivery>().not.toBeNever();
     expectTypeOf<DaemonChannelNotifyRequest>().not.toBeNever();
     expectTypeOf<DaemonChannelNotifyResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingApprovalsSnapshot>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingSubject>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRevocationRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRevocationResult>().not.toBeNever();
     expectTypeOf<DaemonChannelDeliveryErrorCode>().not.toBeNever();
     expectTypeOf<DaemonChannelDeliveryResultData>().not.toBeNever();
     expectTypeOf<DaemonChannelDeliveryResultEvent>().not.toBeNever();

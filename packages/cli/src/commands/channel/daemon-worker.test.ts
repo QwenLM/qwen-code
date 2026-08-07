@@ -33,10 +33,18 @@ const mockDaemonObservedContactsPath = vi.hoisted(() =>
     () => '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
   ),
 );
+const mockDaemonChannelStateDir = vi.hoisted(() =>
+  vi.fn(
+    (workspace: string, channelName: string) =>
+      `/tmp/qwen/channels/daemon/${workspace === '/workspace' ? 'workspace-hash' : 'other-hash'}/instances/${channelName}-hash`,
+  ),
+);
 const mockObserveContact = vi.hoisted(() => vi.fn());
+const mockListContacts = vi.hoisted(() => vi.fn());
 const mockObservedContactStore = vi.hoisted(() =>
   vi.fn(() => ({
     observe: mockObserveContact,
+    list: mockListContacts,
   })),
 );
 const mockLoadSettings = vi.hoisted(() =>
@@ -127,6 +135,7 @@ const mockBridgeDiscardSession = vi.hoisted(() => vi.fn());
 const mockBridgeRespondToPermission = vi.hoisted(() => vi.fn());
 const mockBridgeShellCommand = vi.hoisted(() => vi.fn());
 const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
+const mockBridgeRegisterChannelLoopToolHandler = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreate = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreCreateForTarget = vi.hoisted(() => vi.fn());
 const mockChannelLoopStoreListForTarget = vi.hoisted(() => vi.fn());
@@ -162,6 +171,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
     discardSession: mockBridgeDiscardSession,
     respondToPermission: mockBridgeRespondToPermission,
     shellCommand: mockBridgeShellCommand,
+    registerChannelLoopToolHandler: mockBridgeRegisterChannelLoopToolHandler,
     start: mockBridgeStart,
     stop: mockBridgeStop,
   })),
@@ -223,6 +233,7 @@ vi.mock('./proxy.js', () => ({
 vi.mock('./runtime.js', () => ({
   createChannel: mockCreateChannel,
   daemonChannelLoopPath: mockDaemonChannelLoopPath,
+  daemonChannelStateDir: mockDaemonChannelStateDir,
   daemonObservedContactsPath: mockDaemonObservedContactsPath,
   daemonSessionRoutesPath: mockDaemonSessionRoutesPath,
   loadChannelsConfig: mockLoadChannelsConfig,
@@ -237,6 +248,7 @@ vi.mock('./runtime.js', () => ({
 }));
 
 vi.mock('./observed-contact-store.js', () => ({
+  OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS: 365 * 24 * 60 * 60,
   ObservedChannelContactStore: mockObservedContactStore,
 }));
 
@@ -673,7 +685,8 @@ describe('createDaemonChannelBridgeFacade', () => {
     expect('listSessions' in facade).toBe(false);
   });
 
-  it('does not expose channel loop MCP registration through the daemon facade', () => {
+  it('forwards channel loop MCP registration through the daemon facade', () => {
+    const registerChannelLoopToolHandler = vi.fn();
     const bridge = {
       availableCommands: [],
       on: mockBridgeOn,
@@ -682,14 +695,21 @@ describe('createDaemonChannelBridgeFacade', () => {
       loadSession: mockBridgeLoadSession,
       prompt: mockBridgePrompt,
       cancelSession: mockBridgeCancelSession,
-      registerChannelLoopToolHandler: vi.fn(),
+      registerChannelLoopToolHandler,
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
       exposeShellCommand: false,
     });
 
-    expect('registerChannelLoopToolHandler' in facade).toBe(false);
+    const handler = {
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    };
+    facade.registerChannelLoopToolHandler?.(handler);
+
+    expect(registerChannelLoopToolHandler).toHaveBeenCalledWith(handler);
   });
 });
 
@@ -781,8 +801,15 @@ describe('runChannelDaemonWorker', () => {
         channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
         observedContacts: {
           observe: expect.any(Function),
+          list: expect.any(Function),
         },
+        stateDir:
+          '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
       }),
+    );
+    expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(
+      '/workspace',
+      'telegram',
     );
     expect(mockDaemonObservedContactsPath).toHaveBeenCalledWith('/workspace');
     expect(mockObservedContactStore).toHaveBeenCalledWith(
@@ -791,6 +818,7 @@ describe('runChannelDaemonWorker', () => {
     const channelOptions = mockCreateChannel.mock.calls[0]![3] as {
       observedContacts: {
         observe(channelName: string, observation: unknown): unknown;
+        list(): unknown;
       };
     };
     const observation = {
@@ -799,6 +827,10 @@ describe('runChannelDaemonWorker', () => {
     };
     channelOptions.observedContacts.observe('telegram', observation);
     expect(mockObserveContact).toHaveBeenCalledWith('telegram', observation);
+    channelOptions.observedContacts.list();
+    expect(mockListContacts).toHaveBeenCalledWith({
+      freshWithinSeconds: 365 * 24 * 60 * 60,
+    });
     expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
       bridgeFacade,
       mockSessionRouter.mock.results[0]!.value,
@@ -1950,6 +1982,7 @@ describe('daemonWorkerCommand', () => {
     vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
     vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 
@@ -1963,6 +1996,7 @@ describe('daemonWorkerCommand', () => {
 
     expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_URL']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
     expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();

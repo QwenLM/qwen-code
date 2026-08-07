@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile, stat } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, parse } from 'node:path';
 import { z } from 'zod';
 import type {
   ExternalContextConfig,
@@ -16,28 +16,53 @@ import type {
 const MAX_CONFIG_BYTES = 64 * 1024;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const configSchema = z
-  .object({
-    version: z.literal(1),
-    timeoutMs: z.number().int().min(1).max(30_000).default(5000),
-    provider: z.discriminatedUnion('type', [
-      z
+const providerSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('mem0-platform-v3'),
+      apiKeyEnv: z.string().regex(ENV_NAME),
+      appId: z.string().trim().min(1).max(256),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('generic-http-search-v1'),
+      baseUrl: z.string().url(),
+      tokenEnv: z.string().regex(ENV_NAME),
+    })
+    .strict(),
+]);
+
+const configSchema = z.discriminatedUnion('version', [
+  z
+    .object({
+      version: z.literal(1),
+      timeoutMs: z.number().int().min(1).max(30_000).default(5000),
+      provider: providerSchema,
+      write: z
         .object({
-          type: z.literal('mem0-platform-v3'),
-          apiKeyEnv: z.string().regex(ENV_NAME),
-          appId: z.string().trim().min(1).max(256),
+          enabled: z.literal(true),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(2),
+      // Retained for compatibility with existing v2 configuration files. The
+      // auto-recall Hook uses autoRecall.timeoutMs, and the MCP rejects v2.
+      timeoutMs: z.number().int().min(1).max(30_000).default(5000),
+      autoRecall: z
+        .object({
+          repositoryRoot: z.string().min(1),
+          timeoutMs: z.number().int().min(1).max(5000).default(1500),
         })
         .strict(),
-      z
-        .object({
-          type: z.literal('generic-http-search-v1'),
-          baseUrl: z.string().url(),
-          tokenEnv: z.string().regex(ENV_NAME),
-        })
-        .strict(),
-    ]),
-  })
-  .strict();
+      provider: providerSchema,
+    })
+    .strict(),
+]);
 
 export class ConfigurationError extends Error {
   constructor(message: string) {
@@ -86,16 +111,40 @@ export async function loadConfig(
     throw new ConfigurationError('External context config is invalid.');
   }
 
+  if (result.data.version === 1) {
+    if (
+      result.data.write !== undefined &&
+      result.data.provider.type !== 'mem0-platform-v3'
+    ) {
+      throw new ConfigurationError(
+        'External context memory writes require a Mem0 provider.',
+      );
+    }
+    const provider = resolveProvider(result.data.provider, env);
+    return {
+      version: 1,
+      timeoutMs: result.data.timeoutMs,
+      provider,
+      ...(result.data.write === undefined ? {} : { write: result.data.write }),
+    };
+  }
+
   const provider = resolveProvider(result.data.provider, env);
   return {
-    version: 1,
+    version: 2,
     timeoutMs: result.data.timeoutMs,
+    autoRecall: {
+      repositoryRoot: await resolveRepositoryRoot(
+        result.data.autoRecall.repositoryRoot,
+      ),
+      timeoutMs: result.data.autoRecall.timeoutMs,
+    },
     provider,
   };
 }
 
 function resolveProvider(
-  provider: z.infer<typeof configSchema>['provider'],
+  provider: z.infer<typeof providerSchema>,
   env: NodeJS.ProcessEnv,
 ): Mem0ProviderConfig | GenericHttpProviderConfig {
   switch (provider.type) {
@@ -109,6 +158,36 @@ function resolveProvider(
     }
     // no default
   }
+}
+
+async function resolveRepositoryRoot(value: string): Promise<string> {
+  if (!isAbsolute(value)) {
+    throw new ConfigurationError(
+      'External context repository root is invalid.',
+    );
+  }
+
+  try {
+    const resolved = await realpath(value);
+    const rootStat = await stat(resolved);
+    if (!rootStat.isDirectory() || isFilesystemRoot(resolved)) {
+      throw new ConfigurationError(
+        'External context repository root is invalid.',
+      );
+    }
+    return resolved;
+  } catch (error) {
+    if (error instanceof ConfigurationError) {
+      throw error;
+    }
+    throw new ConfigurationError(
+      'External context repository root is invalid.',
+    );
+  }
+}
+
+function isFilesystemRoot(value: string): boolean {
+  return parse(value).root === value;
 }
 
 function readCredential(env: NodeJS.ProcessEnv, name: string): string {

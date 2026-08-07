@@ -14,21 +14,26 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Scope the group by event so back-to-back pushes to `main` cancel superseded
-  # runs (no pile-up when PRs merge in quick succession), without ever cancelling
-  # the nightly schedule or a manual dispatch — they share the ref but not the
-  # event. feat/e2e/** pushes still cancel their own superseded runs.
+  # Scope the group by event so pushes to `main` coalesce with each other without
+  # ever touching the nightly schedule or a manual dispatch — they share the ref
+  # but not the event. feat/e2e/** pushes coalesce within their own branch.
   group: |-
     ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
-  # Cancel superseded pushes (main included now — only the latest tree matters,
-  # and it covers every merged change). The nightly run always finishes, so a
-  # busy merge window that keeps cancelling the push run still gets a signal.
+  # Do NOT cancel in-progress runs on `main`: a full run takes ~40min while
+  # merges land every ~18min (median), so cancelling on every merge starved the
+  # suite — over 100 push runs, 67 were cancelled and only 25 ever reported.
+  # With cancellation off, GitHub keeps at most ONE pending run per group and
+  # cancels the previously pending one, so the queue collapses to the newest
+  # tree on its own: the in-flight run always finishes, and each result covers
+  # the batch of commits merged since the last one (bisect that range when it
+  # goes red). Dev branches keep cancelling superseded runs — nobody bisects
+  # those, and the latest push is the only tree of interest.
   cancel-in-progress: |-
-    ${{ github.event_name == 'push' }}
+    ${{ github.event_name == 'push' && github.ref_name != 'main' }}
 
 jobs:
   e2e-test-linux:
-    name: 'E2E Test (Linux) - ${{ matrix.sandbox }}'
+    name: 'E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}'
     runs-on: 'ubuntu-latest'
     # Skip on fork PRs: forks have no access to repository secrets
     # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
@@ -36,18 +41,28 @@ jobs:
     if: |-
       ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     strategy:
+      # One failing shard must not cancel the others: a partial matrix hides the
+      # rest of the suite and reports an incomplete failure set.
+      fail-fast: false
       matrix:
         sandbox:
           - 'sandbox:none'
           - 'sandbox:docker'
+        # The suite is ~16min of wall clock on one runner, dominated by a long
+        # tail of sdk-typescript files. vitest assigns files to shards by path
+        # hash, so those spread out instead of clustering in one shard.
+        shard:
+          - '1/3'
+          - '2/3'
+          - '3/3'
         node-version:
           - '22.x'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js ${{ matrix.node-version }}'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
           cache: 'npm'
@@ -62,6 +77,13 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        env:
+          # `npm ci` runs the `prepare` script, which builds and bundles the
+          # whole workspace — and the two steps below then do it a second time.
+          # Skip it so the install only installs; `prepare` still generates
+          # git-commit.ts, which the build needs. (The web-shell job below has
+          # no build step of its own, so it keeps building during install.)
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
@@ -87,6 +109,24 @@ jobs:
           username: '${{ secrets.DOCKERHUB_USERNAME }}'
           password: '${{ secrets.DOCKERHUB_TOKEN }}'
 
+      # The sandbox test script builds this image itself, but without `-s` it
+      # first re-runs install + build + bundle + pack on the host — all of which
+      # the steps above already did, and none of which the image consumes (the
+      # Dockerfile rebuilds and packs inside its own builder stage).
+      - name: 'Build the sandbox image'
+        if: |-
+          ${{ matrix.sandbox == 'sandbox:docker' }}
+        env:
+          # build_sandbox.js resolves the container command through
+          # sandbox_command.js, which exits non-zero on Linux when this is unset
+          # — the test script used to supply it.
+          QWEN_SANDBOX: 'docker'
+          # Without this, build_sandbox.js pipes docker build output to
+          # /dev/null — the longest step in the docker leg becomes undiagnosable.
+          VERBOSE: 'true'
+        run: |-
+          npm run build:sandbox -- -s
+
       - name: 'Run E2E tests'
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
@@ -95,24 +135,35 @@ jobs:
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
         run: |-
+          # The docker leg runs vitest directly instead of through
+          # test:integration:sandbox:docker: that script would rebuild the image
+          # the step above just built.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npm run test:integration:sandbox:docker -- --exclude '**/interactive/cron-interactive.test.ts'
+            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           else
-            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts'
+            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           fi
 
   e2e-test-macos:
-    name: 'E2E Test - macOS'
+    name: 'E2E Test - macOS - shard ${{ matrix.shard }}'
     runs-on: 'macos-latest'
     # Skip on fork PRs (no secrets) — see e2e-test-linux above.
     if: |-
       ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two shards, not three: the macOS runner is the slowest to install and
+        # build, so a third shard would add more fixed cost than it removes.
+        shard:
+          - '1/2'
+          - '2/2'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -127,6 +178,10 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        env:
+          # See e2e-test-linux: the install must not build, the two steps
+          # below do it explicitly.
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
@@ -143,23 +198,28 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts"'
+        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --shard="${{ matrix.shard }}"'
 
-  cron-interactive-nightly:
-    name: 'cron-interactive E2E (nightly)'
+  isolated-nightly:
+    name: '${{ matrix.label }} (nightly)'
     runs-on: 'ubuntu-latest'
     if: |-
       ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    # This test is inherently timing-flaky (wall-clock cron fire + real model
-    # latency). Run it nightly only so flakes do not turn push CI red.
-    # continue-on-error prevents this job from marking the workflow as failed.
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: 'cron-interactive E2E'
+            test_file: 'interactive/cron-interactive.test.ts'
+          - label: 'channel-plugin E2E'
+            test_file: 'channel-plugin.test.ts'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -174,6 +234,10 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        env:
+          # See e2e-test-linux: the install must not build, the two steps
+          # below do it explicitly.
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
@@ -185,14 +249,14 @@ jobs:
         run: |-
           npm run bundle
 
-      - name: 'Run cron-interactive E2E tests'
+      - name: 'Run ${{ matrix.label }} tests'
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
-        run: 'npx cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests interactive/cron-interactive.test.ts'
+        run: 'npx cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests "${{ matrix.test_file }}"'
 
   web-shell-browser-regression:
     name: 'web-shell Browser Regression'

@@ -22,6 +22,8 @@ import {
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
 
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
+
 const goalRecord = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
   goalId: 'g-1',
   revision: 1,
@@ -86,6 +88,28 @@ describe('goal reducer', () => {
       objective: 'new objective',
       evidenceCursor: { recordId: 'r-300' },
     });
+  });
+
+  it('clears lastReason when editing the objective', () => {
+    const previous = goalRecord({
+      goalId: 'g-1',
+      revision: 2,
+      lastReason: 'stale verifier rejection',
+    });
+    const next = reduceGoalControl(previous, {
+      request: {
+        action: 'edit',
+        objective: 'updated objective',
+        expectedGoalId: 'g-1',
+        expectedRevision: 2,
+      },
+      now: 300,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-300' },
+    });
+
+    expect(next?.lastReason).toBeUndefined();
+    expect(next?.objective).toBe('updated objective');
   });
 
   it('creates a trimmed active goal only when no goal exists', () => {
@@ -220,6 +244,33 @@ describe('goal reducer', () => {
       });
     },
   );
+
+  it('preserves the cumulative turn count when resuming a limited goal', () => {
+    const resumed = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        revision: 4,
+        turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
+      }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({
+      status: 'active',
+      revision: 4,
+      turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
+      evidenceCursor: { recordId: 'r-100' },
+    });
+  });
 
   it('rejects an unsupported control action instead of resuming', () => {
     expect(() =>

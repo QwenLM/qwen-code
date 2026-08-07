@@ -9,7 +9,10 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
+import {
+  EXCLUDED_TOOLS_FOR_SUBAGENTS,
+  extractParentToolNames,
+} from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -34,21 +37,30 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   FORK_PLACEHOLDER_RESULT,
+  buildForkExecutionAllowlist,
   buildForkedMessages,
   buildChildMessage,
   buildPinnedWorktreeNotice,
   buildWorktreeNotice,
   normalizeForkTurns,
+  registerForkDisplayImageForCache,
+  resolveForkExecutionAllowedTools,
   runInForkContext,
   selectForkHistory,
+  validateForkToolList,
   type ForkTurns,
 } from './fork-subagent.js';
+import {
+  loadForkProfile,
+  validateForkProfileName,
+  type ForkProfile,
+} from './fork-profile.js';
 import {
   generateAgentWorktreeSlug,
   GitWorktreeService,
@@ -207,12 +219,23 @@ function createLocalExternalInputQueue(): {
 export interface AgentParams {
   description: string;
   prompt: string;
+  /** Todo ID this top-level execution implements, when a visible plan exists. */
+  todo_id?: string;
   subagent_type?: string;
+  /** User-defined model grade for this subagent invocation. */
+  model?: string;
   /**
    * Parent conversation turns inherited by a fork. Omitted or `all` inherits
    * everything; a positive integer string inherits that many recent user turns.
    */
   fork_turns?: ForkTurns;
+  /**
+   * Tool names a fork may execute. The fork's current model-visible
+   * declarations remain unchanged so the prompt-cache prefix is preserved.
+   */
+  fork_tools?: string[];
+  /** Project-level named execution profile for a fork. */
+  fork_profile?: string;
   run_in_background?: boolean;
   /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
   name?: string;
@@ -246,6 +269,17 @@ export interface AgentParams {
 }
 
 const debugLogger = createDebugLogger('AGENT');
+const resolvedForkProfiles = new WeakMap<AgentParams, ForkProfile>();
+const FORK_PROFILE_SAFE_MODE_ERROR =
+  'Parameter "fork_profile" is unavailable in safe mode because project profiles are local customizations.';
+const FORK_PROFILE_BARE_MODE_ERROR =
+  'Parameter "fork_profile" is unavailable in bare mode because project profiles are local customizations.';
+
+function getForkProfileModeError(config: Config): string | undefined {
+  if (config.getBareMode()) return FORK_PROFILE_BARE_MODE_ERROR;
+  if (config.isSafeMode()) return FORK_PROFILE_SAFE_MODE_ERROR;
+  return undefined;
+}
 
 /**
  * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
@@ -774,6 +808,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           description: 'The task for the agent to perform',
         },
+        todo_id: {
+          type: 'string',
+          maxLength: 500,
+          description:
+            'ID of the todo this top-level agent execution implements. Use an ID from the current todo list when one exists.',
+        },
         subagent_type: {
           type: 'string',
           description:
@@ -792,6 +832,22 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           ],
           description:
             'Only valid with subagent_type "fork". Omit it or use "all" to inherit the full parent conversation; use a positive integer string such as "3" to inherit the most recent three real user turns. Tool responses and pure system reminders do not count as turns.',
+        },
+        fork_tools: {
+          type: 'array',
+          items: {
+            type: 'string',
+            minLength: 1,
+          },
+          description:
+            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". The model-visible tool declarations remain unchanged for prompt-cache sharing, while the task prompt tells the fork about the restriction. Forks can never execute ask_user_question; omit fork_tools to allow every other inherited tool, or use an empty array to reject every tool call.',
+        },
+        fork_profile: {
+          type: 'string',
+          minLength: 2,
+          maxLength: 50,
+          description:
+            'Only valid with subagent_type "fork". Loads a project profile from .qwen/fork-profiles/<name>.md and applies its tools and optional promptHint. Cannot be combined with fork_tools.',
         },
         run_in_background: {
           type: 'boolean',
@@ -892,7 +948,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns.
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -904,6 +960,7 @@ ${teamGuidance}
 
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
+- When a user-visible todo plan exists, set \`todo_id\` to the ID of the plan node this top-level agent execution implements. Create the todo before launching the agent when practical. Omit \`todo_id\` for work that is not represented by the current plan.
 - Delegate only concrete, bounded tasks that can run independently.
 - Keep immediate critical-path work local when your next action depends on it.
 - Do not duplicate work between the parent and subagents.
@@ -912,7 +969,7 @@ Usage notes:
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.LIST_AGENTS} to inspect the current roster, then call ${ToolNames.SEND_MESSAGE} with its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`; omit it for the full conversation or use a positive integer string such as \`"3"\` for a bounded recent window.
+- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`, \`fork_tools\`, and \`fork_profile\`; omit \`fork_turns\` for the full conversation and omit both restriction parameters to allow every inherited tool except \`${ToolNames.ASK_USER_QUESTION}\`. Regular subagents do not receive that tool either.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
@@ -979,6 +1036,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // Update the parameter schema by modifying the existing object
     const schema = this.parameterSchema as {
       properties?: {
+        model?: {
+          type: string;
+          enum: string[];
+          description: string;
+        };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       };
@@ -991,6 +1053,20 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       } else {
         delete schema.properties.name;
         delete schema.properties.plan_mode_required;
+      }
+
+      const availableGrades = [
+        ...this.subagentManager.getAvailableModelGrades().keys(),
+      ];
+      if (availableGrades.length > 0) {
+        schema.properties.model = {
+          type: 'string',
+          enum: availableGrades,
+          description:
+            'User-defined model grade for this subagent. Custom agents with an explicit model keep their configured model. Omit it to use the agent default.',
+        };
+      } else {
+        delete schema.properties.model;
       }
     }
   }
@@ -1011,6 +1087,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       params.prompt.trim() === ''
     ) {
       return 'Parameter "prompt" must be a non-empty string.';
+    }
+
+    if (
+      params.todo_id !== undefined &&
+      (typeof params.todo_id !== 'string' ||
+        params.todo_id.trim() === '' ||
+        params.todo_id.length > 500)
+    ) {
+      return 'Parameter "todo_id" must be a non-empty string of at most 500 characters.';
     }
 
     if (params.subagent_type !== undefined) {
@@ -1039,6 +1124,30 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         }
       }
     }
+
+    if (params.model !== undefined) {
+      if (typeof params.model !== 'string' || params.model.trim() === '') {
+        return 'Parameter "model" must be a non-empty model grade when set.';
+      }
+      if (params.subagent_type?.toLowerCase() === FORK_SUBAGENT_TYPE) {
+        return 'Parameter "model" cannot be used with subagent_type "fork".';
+      }
+      if (
+        params.name &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
+        return 'Parameter "model" is not supported for a named teammate.';
+      }
+      const availableGrades = this.subagentManager.getAvailableModelGrades();
+      if (!availableGrades.has(params.model)) {
+        return `Unknown model grade "${params.model}". Available: ${[
+          ...availableGrades.keys(),
+        ].join(', ')}.`;
+      }
+    }
+
     // Some models emit an empty placeholder for the unused optional field.
     // With isolation selected, normalize it away before downstream routing.
     if (
@@ -1064,6 +1173,37 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (params.name !== undefined) {
         return 'Parameter "fork_turns" cannot be used when spawning a named teammate.';
       }
+    }
+
+    if (params.fork_tools !== undefined) {
+      if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
+        return 'Parameter "fork_tools" can only be used with subagent_type "fork".';
+      }
+      if (params.name !== undefined) {
+        return 'Parameter "fork_tools" cannot be used when spawning a named teammate.';
+      }
+      const toolsError = validateForkToolList(params.fork_tools);
+      if (toolsError) {
+        return `Parameter "fork_tools" ${toolsError}.`;
+      }
+    }
+
+    if (params.fork_profile !== undefined) {
+      if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
+        return 'Parameter "fork_profile" can only be used with subagent_type "fork".';
+      }
+      if (params.name !== undefined) {
+        return 'Parameter "fork_profile" cannot be used when spawning a named teammate.';
+      }
+      if (params.fork_tools !== undefined) {
+        return 'Parameters "fork_profile" and "fork_tools" cannot be used together.';
+      }
+      const profileNameError = validateForkProfileName(params.fork_profile);
+      if (profileNameError) {
+        return `Parameter "fork_profile" ${profileNameError}.`;
+      }
+      const modeError = getForkProfileModeError(this.config);
+      if (modeError) return modeError;
     }
 
     if (params.isolation !== undefined) {
@@ -1147,10 +1287,32 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     const invocationParams = params.working_dir
       ? { ...params, isolation: undefined }
       : params;
+    // Tool invocations are built before AUTO-mode classification. Resolve the
+    // profile here so classification and execution consume one launch
+    // snapshot rather than rereading a mutable project file at two phases.
+    // This read is synchronous because the Tool.build() contract is
+    // synchronous.
+    if (invocationParams.fork_profile !== undefined) {
+      const modeError = getForkProfileModeError(this.config);
+      if (modeError) throw new Error(modeError);
+    }
+    const forkProfile =
+      invocationParams.fork_profile !== undefined
+        ? loadForkProfile(
+            this.config.getProjectRoot(),
+            invocationParams.fork_profile,
+          )
+        : undefined;
+    if (forkProfile) {
+      resolvedForkProfiles.set(invocationParams, forkProfile);
+    } else {
+      resolvedForkProfiles.delete(invocationParams);
+    }
     return new AgentToolInvocation(
       this.config,
       this.subagentManager,
       invocationParams,
+      forkProfile,
     );
   }
 
@@ -1160,9 +1322,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // the sub-agent itself received the full text — same shape of attack
     // surface as truncating a shell command. Shell tools forward the full
     // command for the same reason.
+    const forkProfile = resolvedForkProfiles.get(params);
     return {
       subagent_type: params.subagent_type,
       fork_turns: params.fork_turns,
+      fork_tools: params.fork_tools,
+      fork_profile: params.fork_profile,
+      fork_profile_tools: forkProfile?.tools,
+      fork_profile_prompt_hint: forkProfile?.promptHint,
       // Include working_dir: it rebinds the child's cwd to another registered
       // worktree, which the AUTO-mode classifier must be able to see — a
       // launch that looks benign from subagent_type + prompt alone could be
@@ -1260,6 +1427,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
     params: AgentParams,
+    private readonly forkProfile?: ForkProfile,
   ) {
     super(params);
   }
@@ -1533,11 +1701,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     subagent: AgentHeadless;
     initialMessages?: Content[];
     taskPrompt: string;
-    promptConfig: PromptConfig;
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
+    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    const parentToolNames = generationConfig?.systemInstruction
+      ? extractParentToolNames(generationConfig)
+      : [];
+    registerForkDisplayImageForCache(agentConfig, parentToolNames);
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
+    const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
+    const requestedExecutionAllowedTools =
+      requestedTools === undefined
+        ? undefined
+        : resolveForkExecutionAllowedTools(
+            parentToolNames,
+            buildForkExecutionAllowlist(requestedTools, []),
+          );
+    const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
     if (geminiClient) {
       // The `all` and numeric paths curate history differently on purpose.
@@ -1591,6 +1772,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const forkedMessages = buildForkedMessages(
           this.params.prompt,
           lastMessage,
+          requestedExecutionAllowedTools,
+          profilePromptHint,
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -1620,7 +1803,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     // Default: directive with fork boilerplate as task_prompt
     if (!taskPrompt) {
-      taskPrompt = buildChildMessage(this.params.prompt);
+      taskPrompt = buildChildMessage(
+        this.params.prompt,
+        requestedExecutionAllowedTools,
+        profilePromptHint,
+      );
     }
 
     // Read the parent's live generationConfig (systemInstruction + tool
@@ -1631,27 +1818,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let promptConfig: PromptConfig;
     let toolConfig: ToolConfig;
 
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
-      // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // (including `agent` and cron tools) so the fork's system prompt,
-      // tools, and history exactly match the parent's and share its
-      // DashScope cache prefix. A fork is a context-sharing extension of
-      // the parent, not an isolated subagent, so the general subagent
-      // exclusion list does not apply. Recursive forks are blocked by the
-      // ALS-based `isInForkExecution()` guard.
-      // However, we still exclude tools that must never be available to
-      // any subagent (agent, cron tools).
-      const parentToolDecls: FunctionDeclaration[] =
-        (
-          generationConfig.tools as Array<{
-            functionDeclarations?: FunctionDeclaration[];
-          }>
-        )
-          ?.flatMap((t) => t.functionDeclarations ?? [])
-          .filter(
-            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
-          ) ?? [];
+      // Keep the parent's current allowlist, but pass names rather than inline
+      // schemas so AgentCore resolves every declaration through the fork's
+      // current ToolRegistry. This preserves the parent's tool surface and
+      // cache prefix when schemas are unchanged without letting a persisted or
+      // stale declaration bypass the live registry.
+      const declaredExecutionToolNames =
+        parentToolNames.length > 0
+          ? parentToolNames
+          : agentConfig
+              .getToolRegistry()
+              .getAllToolNames()
+              .filter(
+                (toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName),
+              );
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -1660,15 +1841,31 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         initialMessages,
       };
       toolConfig = {
-        tools:
-          parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),
+        tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
+        executionAllowedTools: resolveForkExecutionAllowedTools(
+          parentToolNames,
+          buildForkExecutionAllowlist(
+            requestedTools,
+            declaredExecutionToolNames,
+          ),
+        ),
       };
     } else {
+      const registeredToolNames = agentConfig
+        .getToolRegistry()
+        .getAllToolNames()
+        .filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
       };
-      toolConfig = { tools: ['*'] };
+      toolConfig = {
+        tools: ['*'],
+        executionAllowedTools: resolveForkExecutionAllowedTools(
+          parentToolNames,
+          buildForkExecutionAllowlist(requestedTools, registeredToolNames),
+        ),
+      };
     }
 
     const subagent = await AgentHeadless.create(
@@ -1681,7 +1878,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
+    return { subagent, initialMessages, taskPrompt, toolConfig };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds
@@ -2119,6 +2316,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         debugLogger.debug(
           `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
         );
+      } else if (this.params.model !== undefined) {
+        return this.buildSpawnBlockedResult(
+          'Error: "model" is not supported for a named teammate.',
+          'model is incompatible with a named teammate',
+        );
       } else if (this.params.working_dir !== undefined) {
         // A teammate spawns via TeamManager with cwd = getCwd() and returns
         // before the working_dir rebind below is reached, so the pin would be
@@ -2425,6 +2627,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           };
         }
         subagentConfig = loadedConfig;
+      }
+      const model = this.subagentManager.resolveModelGrade(
+        this.params.model,
+        subagentConfig,
+      );
+      if (model !== undefined && model !== subagentConfig.model) {
+        subagentConfig = { ...subagentConfig, model };
       }
       // Initialize the current display state
       this.currentDisplay = {
@@ -2821,7 +3030,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagent: AgentHeadless;
       let taskPrompt: string;
       let initialMessages: Content[] | undefined;
-      let promptConfig: PromptConfig | undefined;
       let toolConfig: ToolConfig | undefined;
 
       // Per-spawn cleanup the subagent manager returns. The caller MUST
@@ -2840,7 +3048,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
         initialMessages = fork.initialMessages;
-        promptConfig = fork.promptConfig;
         toolConfig = fork.toolConfig;
       } else {
         const result = await this.subagentManager.createAgentHeadless(
@@ -2941,7 +3148,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const bgSubagent = subagent;
         const bgInitialMessages = initialMessages;
         const bgTaskPrompt = taskPrompt;
-        const bgPromptConfig = promptConfig;
         const bgToolConfig = toolConfig;
         const bgSubagentDispose = subagentDispose;
 
@@ -3064,11 +3270,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            bootstrapSystemInstruction: isFork
-              ? (bgPromptConfig?.renderedSystemPrompt ??
-                bgPromptConfig?.systemPrompt)
-              : undefined,
-            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
@@ -3088,6 +3289,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork &&
+          (this.params.fork_tools !== undefined ||
+            this.forkProfile !== undefined) &&
+          bgToolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...bgToolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
@@ -3878,6 +4087,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork &&
+          (this.params.fork_tools !== undefined ||
+            this.forkProfile !== undefined) &&
+          toolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...toolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,

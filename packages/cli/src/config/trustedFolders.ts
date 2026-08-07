@@ -9,20 +9,22 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import {
   atomicWriteFileSync,
+  createDebugLogger,
   FatalConfigError,
   getErrorMessage,
   ideContextStore,
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
-import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
-import { applyUpdates } from '../utils/commentJson.js';
+import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
   getPathComparisonVariants,
   isWithinRoot,
 } from './path-comparison.js';
+
+const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -256,9 +258,12 @@ function writeTrustedFolders(
   const release = lockfile.lockSync(filePath, {
     realpath: false,
     stale: 10_000,
+    onCompromised: (err) => {
+      debugLogger.warn('trusted folders lock compromised:', err);
+    },
   });
   try {
-    let parsed: Record<string, unknown> = {};
+    let originalContent = '{}';
     if (fs.existsSync(filePath)) {
       const stat = fs.lstatSync(filePath);
       if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -266,30 +271,28 @@ function writeTrustedFolders(
           'Trusted folders path must be a regular file.',
         );
       }
-      const originalContent = fs.readFileSync(filePath, 'utf-8');
-      const parsedValue = parse(originalContent);
+      originalContent = fs.readFileSync(filePath, 'utf-8');
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseJsoncObject(originalContent);
+    } catch (error) {
       if (
-        typeof parsedValue !== 'object' ||
-        parsedValue === null ||
-        Array.isArray(parsedValue) ||
-        parsedValue instanceof String ||
-        parsedValue instanceof Number ||
-        parsedValue instanceof Boolean
+        error instanceof Error &&
+        error.message === 'JSONC document root is not a JSON object.'
       ) {
         throw new FatalConfigError(
           'Trusted folders file is not a valid JSON object.',
         );
       }
-      parsed = parsedValue as Record<string, unknown>;
+      throw error;
     }
-
     const diskConfig = Object.fromEntries(Object.entries(parsed));
     assertTrustedFoldersConfig(diskConfig);
     const nextConfig = update({ ...diskConfig });
     assertTrustedFoldersConfig(nextConfig);
-    const updated = applyUpdates(parsed, nextConfig, true);
-    const content = stringify(updated, null, 2);
-    parse(content);
+    const content = updateJsoncContent(originalContent, nextConfig, true);
 
     atomicWriteFileSync(
       filePath,

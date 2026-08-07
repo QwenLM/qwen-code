@@ -66,7 +66,10 @@ jobs:
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       github.repository == 'QwenLM/qwen-code'
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (workflow_run events use
+    # base-repo YAML), so the persistent ECS pool is safe and skips the
+    # saturated hosted queue. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     steps:
       - name: 'Finalize CI evidence and deferred approval'
@@ -92,7 +95,8 @@ jobs:
           CI_BEGIN="<!-- qwen-triage-ci sha=${HEAD_SHA} -->"
           CI_END='<!-- /qwen-triage-ci -->'
           APPROVE_MARKER="<!-- qwen-triage approve-on-green sha=${HEAD_SHA} -->"
-          STATUS_MARKER='<!-- qwen-triage stage=status -->'
+          STATUS_MARKER='<!-- qwen-triage lifecycle -->'
+          LEGACY_STATUS_MARKER='<!-- qwen-triage stage=status -->'
 
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Cannot resolve the bot identity; skipping (markers cannot be author-verified)."
@@ -320,8 +324,8 @@ jobs:
                 ;;
               *) return 0 ;;
             esac
-            sid="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$STATUS_MARKER" \
-              '[.[] | select(.user.login == $bot) | select(.body | contains($m))] | last | .id // empty' \
+            sid="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$STATUS_MARKER" --arg legacy "$LEGACY_STATUS_MARKER" \
+              '[.[] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty' \
               "/tmp/comments-$pr.json")"
             [ -n "$sid" ] || return 0
             printf '%s\n\n%s\n\n%s' "$STATUS_MARKER" "$en" "$zh" > /tmp/status-body.md

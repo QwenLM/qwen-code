@@ -2,22 +2,31 @@
 
 ## Overview
 
-The daemon never lets HTTP routes or ACP-side agent calls touch the host filesystem directly. Every read, write, list, glob, and stat goes through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
+Daemon HTTP file routes and delegated ACP `readTextFile` / `writeTextFile` calls go through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
 
 - **Path resolution** — canonicalize paths and reject anything escaping the bound workspace, including via symlinks.
 - **Trust gating** — refuse writes when the workspace is not trusted (`untrusted_workspace`).
-- **Size & content policy** — read cap (`MAX_READ_BYTES = 256 KiB`), write cap (`MAX_WRITE_BYTES = 5 MiB`), binary detection.
+- **Size & content policy** — full-snapshot/output cap (`MAX_READ_BYTES = 256 KiB`), large-text windows bounded in both output and scan cost (`MAX_TEXT_SCAN_BYTES = 8 MiB`), write cap (`MAX_WRITE_BYTES = 5 MiB`), binary detection.
 - **Atomicity** — write-then-rename with target mode preservation and `0o600` default for new files.
 - **Audit** — every access / denial emits a structured event for `PermissionAuditRing` / monitoring.
 - **Typed errors** — closed `FsErrorKind` union mapped to HTTP statuses.
 
-The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) and the ACP-side `BridgeFileSystem` adapter (so agent-driven `readTextFile` / `writeTextFile` calls get the same gates) both go through this boundary.
+The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) use this boundary. In the production daemon, ACP calls that remain delegated reach WFS through the injected bridge adapter; generic bridge callers use WFS only when they inject such an adapter. Production same-host `qwen serve` runtimes advertise `readTextFile: false`, so all child `FileSystemService.readTextFile` consumers use the regular CLI filesystem service; final ACP `writeTextFile` content writes remain delegated through WFS.
+
+That text-read capability slice covers direct `read_file` plus the shared pre-reads used by write, edit, notebook, sed, and artifact operations:
+
+- It intentionally accepts regular CLI read behavior rather than the WFS read-side guarantees. [The design doc](../../design/daemon-local-text-reads.md) owns the exact list of what is given up.
+- The same doc records why #8618 still reproduces for the write and edit family even after this change, and the bounded sense in which the retained adapter read path "fails closed".
+- Direct external `read_file` keeps the normal CLI permission rules and core file-operation telemetry.
+- HTTP filesystem routes remain workspace-scoped, and agent discovery-tool behavior is unchanged by this capability.
+- Auxiliary actions such as parent-directory creation and shell commands are separate existing paths, not covered by this boundary.
+- `qwen serve` assumes a same-machine, same-UID security principal and is not an OS sandbox.
 
 ## Responsibilities
 
 - Resolve user-supplied paths into branded `ResolvedPath` values that the rest of the boundary can safely use.
 - Refuse paths outside the bound workspace (`path_outside_workspace`) and paths whose target is a symlink (`symlink_escape`).
-- Refuse reads above `MAX_READ_BYTES`, writes above `MAX_WRITE_BYTES`, and binary files (`binary_file`).
+- Refuse full-snapshot reads above `MAX_READ_BYTES`, while allowing explicit windows with output capped at `MAX_READ_BYTES` and scan cost capped at `MAX_TEXT_SCAN_BYTES`; refuse writes above `MAX_WRITE_BYTES` and binary files (`binary_file`).
 - Refuse writes/edits when the workspace is untrusted (`untrusted_workspace`) — gated by `assertTrustedForIntent(trusted, intent)`.
 - Honor `.gitignore` / `.qwenignore` patterns via `shouldIgnore`.
 - Perform atomic write-then-rename with target mode preservation; default new file mode is `0o600`.
@@ -28,12 +37,12 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 
 ### Module layout
 
-| File                     | Purpose                                                                                                                                                                                                                                               |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `paths.ts`               | `canonicalizeWorkspace`, `resolveWithinWorkspace`, `hasSuspiciousPathPattern`, branded `ResolvedPath`, `Intent` union (`read \| write \| list \| stat \| glob`).                                                                                      |
-| `policy.ts`              | `MAX_READ_BYTES`, `MAX_WRITE_BYTES`, `BINARY_PROBE_BYTES`, `assertTrustedForIntent`, `detectBinary`, `enforceReadBytesSize`, `enforceReadSize`, `enforceWriteSize`, `shouldIgnore`.                                                                   |
-| `audit.ts`               | `FS_ACCESS_EVENT_TYPE`, `FS_DENIED_EVENT_TYPE`, `createAuditPublisher`, audit payload types.                                                                                                                                                          |
-| `errors.ts`              | `FsError` class, `isFsError`, `FsErrorKind` union (14 kinds), `FsErrorStatus` union (`400 / 403 / 404 / 409 / 413 / 422 / 500 / 503`).                                                                                                                |
+| File                       | Purpose                                                                                                                                                                                                                                               |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `paths.ts`                 | `canonicalizeWorkspace`, `resolveWithinWorkspace`, `hasSuspiciousPathPattern`, branded `ResolvedPath`, `Intent` union (`read \| write \| list \| stat \| glob`).                                                                                      |
+| `policy.ts`                | `MAX_READ_BYTES`, `MAX_TEXT_SCAN_BYTES`, `MAX_WRITE_BYTES`, `BINARY_PROBE_BYTES`, `assertTrustedForIntent`, `detectBinary`, `enforceReadBytesSize`, `enforceReadSize`, `enforceWriteSize`, `shouldIgnore`.                                            |
+| `audit.ts`                 | `FS_ACCESS_EVENT_TYPE`, `FS_DENIED_EVENT_TYPE`, `createAuditPublisher`, audit payload types.                                                                                                                                                          |
+| `errors.ts`                | `FsError` class, `isFsError`, `FsErrorKind` union (14 kinds), `FsErrorStatus` union (`400 / 403 / 404 / 409 / 413 / 422 / 500 / 503`).                                                                                                                |
 | `workspace-file-system.ts` | `createWorkspaceFileSystemFactory`, `WorkspaceFileSystem` (the orchestrator that reads/writes/lists), `WriteMode`, `ContentHash`, `FsEntry`, `FsStat`, `ListOptions`, `GlobOptions`, `ReadTextOptions`, `ReadBytesOptions`, `WriteTextAtomicOptions`. |
 
 ### `FsErrorKind` taxonomy
@@ -43,9 +52,9 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 | `path_outside_workspace` | 400          | Resolved path is outside the bound workspace.                                                                                                                                                 |
 | `symlink_escape`         | 400          | Target is a symlink (rejected per the conservative PR 18 + PR 20 posture).                                                                                                                    |
 | `path_not_found`         | 404          | `ENOENT`.                                                                                                                                                                                     |
-| `binary_file`            | 422          | Content sniffed binary on a text route.                                                                                                                                                       |
-| `file_too_large`         | 413          | Above `MAX_READ_BYTES` or `MAX_WRITE_BYTES`.                                                                                                                                                  |
-| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed.                                                                                                                                               |
+| `binary_file`            | 422          | Content sniffed binary on a text route, or large text in an encoding the text route cannot decode.                                                                                            |
+| `file_too_large`         | 413          | Windowless/full-snapshot text above `MAX_READ_BYTES`, a line offset beyond `MAX_TEXT_SCAN_BYTES`, or a write above `MAX_WRITE_BYTES`.                                                         |
+| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed, or the file changed during a stable read.                                                                                                     |
 | `file_already_exists`    | 409          | `mode: 'create'` against an existing file.                                                                                                                                                    |
 | `text_not_found`         | 422          | `POST /file/edit`'s search string wasn't in the file.                                                                                                                                         |
 | `ambiguous_text_match`   | 422          | Multiple matches when exactly one was required.                                                                                                                                               |
@@ -66,12 +75,12 @@ interface BridgeFileSystem {
 }
 ```
 
-This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) so agent-side ACP writes pick up the same TOCTOU, symlink, trust-gate, and audit gates the HTTP routes use.
+This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) and sets `delegateReadTextFileToClient: false`. Capability-compliant children therefore read text locally and delegate final ACP text writes. The adapter retains its read implementation so unexpected or capability-violating delegated reads still encounter WFS's workspace boundary.
 
-Two defensive gates the adapter MUST replicate (because the inline proxy is fully bypassed when the adapter is injected):
+Two defensive properties the adapter MUST preserve (because the inline proxy is fully bypassed when the adapter is injected):
 
 1. **Reject non-regular files** — sockets / pipes / char devices / procfs / sysfs entries can stream unbounded data despite `stats.size === 0`. The inline path throws with `describeStatKind(stats)` in the message.
-2. **Cap buffered size** at `READ_FILE_SIZE_CAP = 100 MiB`. A tiny `{ line: 1, limit: 10 }` request against a 500 MB log would otherwise cost 500 MB of RSS just to return 10 lines.
+2. **Avoid unbounded full-file buffering.** The inline fallback caps a buffered read at `READ_FILE_SIZE_CAP = 100 MiB`. The injected adapter instead applies the stricter WorkspaceFileSystem contract: full snapshots stop at 256 KiB, while larger UTF-8 files require a finite `limit` and are streamed from an inode-bound handle with at most 256 KiB returned. It must not read an entire 500 MB log merely to return `{ line: 1, limit: 10 }`.
 
 The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside a per-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
 
@@ -139,15 +148,27 @@ sequenceDiagram
     FS->>FSP: stat(path)
     FSP-->>FS: stats
     FS->>FS: reject if not regular file (describeStatKind)
-    FS->>POL: enforceReadSize(stats.size, opts.maxBytes?)<br/>→ throw file_too_large OR slice plan
-    FS->>FSP: readFile(path)
-    FSP-->>FS: buffer
-    FS->>POL: detectBinary(buffer)
+    alt cursor supplied
+        FS->>FSP: open stable FileHandle
+        FS->>FS: validate cursor {dev,ino,size}; seek to the byte offset
+        FS->>FS: return whole lines; emit the next cursor
+    else file <= 256 KiB
+        FS->>FSP: open + read stable full snapshot
+        FSP-->>FS: buffer
+        FS->>FS: hash full snapshot; apply line/output limits
+    else file > 256 KiB AND an explicit window arg
+        FS->>FSP: open stable FileHandle
+        FS->>FS: stream requested lines from the same inode
+        FS->>FS: cap output at 256 KiB and scan at 8 MiB; omit full-file hash
+    else windowless large read
+        FS-->>R: file_too_large
+    end
+    FS->>POL: detectBinary(sample)
     POL-->>FS: isBinary?
-    FS->>FS: reject if binary; sha256 hash; truncate to line window
+    FS->>FS: reject if binary
     FS->>FS: shouldIgnore? → annotate meta.matchedIgnore
     FS->>FS: audit fs.access
-    FS-->>R: { content, sha256, truncated?, meta }
+    FS-->>R: { content, optional sha256, truncated?, meta }
 ```
 
 `readText` does not skip or reject reads because of ignore rules. It reads the
@@ -217,7 +238,8 @@ flowchart LR
 | Source                                            | Knob                                                                  | Effect                                                                                                            |
 | ------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `WorkspaceFileSystemFactoryDeps.trusted: boolean` | Constructor input                                                     | Whether writes are allowed; defaults to `true` from `runQwenServe`, `false` from `createServeApp` (with warning). |
-| Constant                                          | `MAX_READ_BYTES = 256 KiB`                                            | Read cap; `file_too_large` past this.                                                                             |
+| Constant                                          | `MAX_READ_BYTES = 256 KiB`                                            | Full-snapshot and returned-text cap; larger text requires an explicit window argument.                            |
+| Constant                                          | `MAX_TEXT_SCAN_BYTES = 8 MiB`                                         | Bytes a large-text read may scan to locate a line offset; past it, `file_too_large`.                              |
 | Constant                                          | `MAX_WRITE_BYTES = 5 MiB`                                             | Write cap; sized below `express.json({ limit: '10mb' })`.                                                         |
 | Constant                                          | `BINARY_PROBE_BYTES = 4096`                                           | Sample size for content-based binary detection.                                                                   |
 | Capability tags                                   | `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write` | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                                           |
@@ -229,8 +251,12 @@ flowchart LR
 - **`io_error` vs `permission_denied` are distinct.** Do not conflate them. Monitoring pipelines key on `errorKind` for alerting — folding ENOSPC into permission_denied would page security responders for `df -h` problems.
 - **New file mode defaults to `0o600`, not umask defaults.** The write syscall's `mode` arg bypasses umask. Agents writing public files should explicitly pass a mode override.
 - **`createServeApp` default `trusted: false`** silently rejects ACP writes with `untrusted_workspace` for embedders that do not inject a custom `fsFactory` or `bridge`. A one-time stderr warning fires the first time; further callers see no reminder. See [`02-serve-runtime.md`](./02-serve-runtime.md).
-- **Read cap is enforced pre-decode.** A file at `MAX_READ_BYTES + 1` is refused even if the request only wants 10 lines — because the underlying `readFileWithLineAndLimit` reads the whole file into memory before slicing.
-- **`BridgeFileSystem` adapter MUST replicate both inline-proxy gates** (non-regular-file refusal + buffered-size cap). The inline path is fully bypassed when the adapter is injected.
+- **Large text requires an explicit window argument**, any of `line` / `limit` / `maxBytes`. A read with none of them stays `file_too_large`, because a caller that believes it holds the whole file may write it back truncated. Windows stream from an inode-bound handle and never return more than `MAX_READ_BYTES`.
+- **`MAX_READ_BYTES` caps what a read returns; `MAX_TEXT_SCAN_BYTES` caps what it costs.** Line offsets are resolved by scanning from byte 0, so `{ line: 900_000_000, limit: 20 }` returns almost nothing and still walks the file. Past 8 MiB of scanning the read is refused with `file_too_large` pointing at `readBytes`, which reaches any offset in O(1).
+- **Streamed windows tolerate appends, not truncation.** The full-snapshot path can demand byte-for-byte stability because it returns the whole file; a prefix window cannot, or every read of a live log fails. The streamed path asserts inode identity plus "did not shrink", so appends pass and truncation / replacement are still rejected. `sizeBytes` reports the size at `open`, describing the snapshot the window was cut from.
+- **Large partial reads omit the full-file hash.** `originalLineCount` is omitted when streaming stops before EOF.
+- **Paging is by byte cursor, not by line.** A read that leaves content behind returns `hasMore` and, where a byte offset is derivable, an opaque `nextCursor`. Resuming from it is O(1); resuming by `line` re-scans from byte 0 and is refused past `MAX_TEXT_SCAN_BYTES`. The cursor carries `{dev, ino, size}`, so a replaced or truncated file yields `hash_mismatch` rather than bytes from the wrong place, while an append leaves it valid. Non-UTF-8 snapshot reads report `hasMore` but no cursor — their decoded text is a UTF-8 re-encoding whose lengths do not map back to file offsets.
+- **`BridgeFileSystem` adapter MUST replicate both inline-proxy gates** (non-regular-file refusal + bounded buffering/streaming). The inline path is fully bypassed when the adapter is injected.
 
 ## References
 

@@ -15,8 +15,12 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
-import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
+} from '../../constants/sessions';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
@@ -67,6 +71,7 @@ interface WorkspaceSectionProps {
   noSessionsLabel: string;
   loadErrorLabel: string;
   organizationEnabled: boolean;
+  sourceMetadataEnabled?: boolean;
   ungroupedLabel: string;
   formatTime: (iso: string) => string;
   searchQuery?: string;
@@ -94,6 +99,7 @@ interface WorkspaceSectionProps {
    * fires this on click. Omitted for untrusted workspaces (no git surface).
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  onOpenCommit?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
@@ -107,6 +113,7 @@ export function WorkspaceSection({
   noSessionsLabel,
   loadErrorLabel,
   organizationEnabled,
+  sourceMetadataEnabled = false,
   ungroupedLabel,
   formatTime,
   searchQuery = '',
@@ -123,8 +130,8 @@ export function WorkspaceSection({
   groupActionsDisabled,
   excludePinned = false,
   onOpenGitDiff,
+  onOpenCommit,
 }: WorkspaceSectionProps) {
-  const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
@@ -134,6 +141,8 @@ export function WorkspaceSection({
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
@@ -163,6 +172,9 @@ export function WorkspaceSection({
         .listWorkspaceSessions({
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'active',
+          ...(sourceMetadataEnabled
+            ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+            : {}),
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
             : {}),
@@ -175,7 +187,13 @@ export function WorkspaceSection({
       console.warn('[WorkspaceSection] session poll failed:', err);
       setLoadError(true);
     }
-  }, [client, disabled, organizationEnabled, workspace.cwd]);
+  }, [
+    client,
+    disabled,
+    organizationEnabled,
+    sourceMetadataEnabled,
+    workspace.cwd,
+  ]);
 
   useEffect(() => {
     if (!renderSessions || disabled || !organizationEnabled) {
@@ -354,18 +372,28 @@ export function WorkspaceSection({
           )}
         </button>
         {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-          <button
-            type="button"
-            className={styles.gitPill}
-            aria-label={`${t('gitDiff.title')} — ${gitStatus.branch}`}
-            onClick={() => onOpenGitDiff(workspace.cwd)}
+          <BranchPickerPopover
+            open={branchPickerOpen}
+            onOpenChange={setBranchPickerOpen}
+            workspaceCwd={workspace.cwd}
+            onBranchChanged={() => void loadGitStatus()}
+            onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
+            onOpenCommit={
+              onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined
+            }
           >
-            <GitBranchIndicator
-              branch={gitStatus.branch}
-              status={gitStatus}
-              compact
-            />
-          </button>
+            <button
+              type="button"
+              className={styles.gitPill}
+              aria-label={`${t('branchPicker.label')} — ${gitStatus.branch}`}
+            >
+              <GitBranchIndicator
+                branch={gitStatus.branch}
+                status={gitStatus}
+                compact
+              />
+            </button>
+          </BranchPickerPopover>
         )}
         {headerActions?.(actionsVisible)}
       </div>
