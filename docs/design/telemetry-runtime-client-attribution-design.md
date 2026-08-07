@@ -1,4 +1,4 @@
-# Telemetry: Runtime × Client Attribution in the Default Usage-Statistics Payload
+# Telemetry: Daemon 会话的 channel 归因
 
 > 配套 issue: [#8660](https://github.com/QwenLM/qwen-code/issues/8660)
 > 基于 2026-08-07 对 qwen-code main 分支的代码复核
@@ -13,45 +13,56 @@
 
 但 `qwen serve`（daemon）的 spawn 工厂启动的是不带 channel 的 `qwen --acp` 子进程（`packages/acp-bridge/src/spawnChannel.ts`），因此 **SDK（TS/Python/Java）、Web Shell、Tauri 桌面 shell 的会话全部上报为 `ACP`**，无法区分。Tauri shell 启动 daemon 时设置了 `QWEN_CODE_DESKTOP=1`（`packages/desktop-shell/src-tauri/src/runtime.rs`），但 telemetry 从未读取该变量。
 
-`app.channel` 是来自 `~/.qwen/source.json` 的**安装来源**，与运行时/客户端是不同概念，不应被重载。
+`app.channel` 是来自 `~/.qwen/source.json` 的**安装来源**，与入口归因是不同概念，不应被重载。
 
 ## 2. 方案
 
-在 `createRumPayload()` 的 `properties` 中新增两个稳定维度（纯增量，不改动 `properties.channel` 与 `app.channel`）：
+复用现有 `properties.channel` 维度，不新增 payload 键。`getChannel()` 经复核没有任何行为消费方（只有 telemetry 读取），channel 是纯上报维度，扩展其取值无副作用。
 
-| 属性      | 取值                                                 | 含义                                               |
-| --------- | ---------------------------------------------------- | -------------------------------------------------- |
-| `runtime` | `cli` \| `acp` \| `daemon`                           | 执行运行时：交互/无头 CLI、直接 ACP、daemon 子进程 |
-| `client`  | `vscode` \| `desktop` \| `desktop-shell`，未知时省略 | 发起方第一方客户端                                 |
+daemon 在每个子进程环境中设置 `QWEN_CODE_SERVE=1` 标记，覆盖两个 spawn 点：
 
-判定逻辑集中在 `packages/core/src/telemetry/qwen-logger/runtime-attribution.ts`：
+- `packages/acp-bridge/src/spawnChannel.ts`（ACP 会话子进程）
+- `packages/cli/src/serve/channel-worker-supervisor.ts`（channel worker；worker 内 `channels/base/AcpBridge.ts` 通过 `{...process.env}` 继续继承该标记）
 
-- **daemon**：daemon 在每个子进程环境中设置 `QWEN_CODE_SERVE=1` 标记。两个 spawn 点：
-  - `packages/acp-bridge/src/spawnChannel.ts`（ACP 会话子进程）
-  - `packages/cli/src/serve/channel-worker-supervisor.ts`（channel worker；worker 内 `channels/base/AcpBridge.ts` 通过 `{...process.env}` 继续继承该标记）
-    `qwen --acp` 子进程无法从命令行区分 daemon 启动与三方直接 ACP 启动，环境标记是唯一可靠信号。daemon 标记优先于 channel 启发式（daemon 会话的 channel 恰好回退为 `ACP`）。
-- **acp**：非 daemon 但存在 channel 值（含 `ACP` 回退、`VSCode`、`desktop`）。
-- **cli**：既无 daemon 标记也无 channel。
-- **client**：`--channel=VSCode` → `vscode`；`--channel=desktop` → `desktop`；`QWEN_CODE_DESKTOP=1` → `desktop-shell`（Tauri shell 启动 daemon 时设置，子进程继承——该变量不在 `SCRUBBED_CHILD_ENV_KEYS` 中）。
+CLI 的 ACP channel 回退（`packages/cli/src/config/acp-channel-fallback.ts`）按标记解析：
+
+| 条件                  | channel 取值                        |
+| --------------------- | ----------------------------------- |
+| 显式 `--channel=X`    | `X`（不变，显式参数优先）           |
+| `QWEN_CODE_DESKTOP=1` | `desktop-shell`（Tauri shell 会话） |
+| `QWEN_CODE_SERVE=1`   | `daemon`（daemon 承载的会话）       |
+| 其余                  | `ACP`（直接三方 ACP 启动，不变）    |
 
 归因矩阵：
 
-| 场景                       | properties.channel | runtime  | client          |
-| -------------------------- | ------------------ | -------- | --------------- |
-| 交互/无头 CLI              | （无）             | `cli`    | （省略）        |
-| 三方直接 ACP               | `ACP`              | `acp`    | （省略）        |
-| VS Code 伴生               | `VSCode`           | `acp`    | `vscode`        |
-| Electron 桌面端            | `desktop`          | `acp`    | `desktop`       |
-| daemon 会话（SDK 等）      | `ACP`              | `daemon` | （省略）        |
-| daemon 会话（Tauri shell） | `ACP`              | `daemon` | `desktop-shell` |
-| daemon channel worker      | channel 名         | `daemon` | （省略）        |
+| 场景                                        | properties.channel           |
+| ------------------------------------------- | ---------------------------- |
+| 交互/无头 CLI                               | （无）                       |
+| 三方直接 ACP                                | `ACP`                        |
+| VS Code 伴生                                | `VSCode`                     |
+| Electron 桌面端（直连，不走 daemon）        | `desktop`                    |
+| daemon 会话（TS/Py/Java SDK、Web Shell 等） | `daemon`                     |
+| daemon 会话（Tauri desktop shell）          | `desktop-shell`              |
+| daemon channel worker                       | worker 名（如 feishu，不变） |
 
-## 3. Schema 影响与兼容性
+## 3. 为什么 daemon 会话不能像 VS Code 那样直接传 `--channel`
 
-- 纯增量：新增 `properties.runtime`（始终存在）与 `properties.client`（仅已知时存在）。
-- `properties.channel`、`app.channel` 语义与取值不变，现有 `VSCode` 区分保留。
+VS Code 伴生插件**自己拥有 spawn**：一个客户端 = 一个专属子进程，所以能传 `--channel=VSCode`。
+
+daemon 的桥接模型不同（`packages/acp-bridge/src/bridge.ts`）：**一个 bridge（一个 workspace）至多一个 `qwen --acp` 子进程**，所有客户端的会话经 `connection.newSession()` 多路复用到同一个进程上，共享进程/OAuth/FileReadCache。因此：
+
+- spawn 时不知道哪个客户端会连进来（子进程可能预热）；
+- 同一进程内同时跑着不同客户端的会话，进程级参数无法表达会话级身份；
+- qwen-logger payload 是进程级构造，进程级 channel 无法按会话区分客户端。
+
+环境标记 + 回退解析因此是当前模型下唯一的进程级归因手段。
+
+## 4. Schema 影响与兼容性
+
+- 零新增键。`properties.channel` 新增两个可能取值：`daemon`、`desktop-shell`。
+- `app.channel` 语义与取值不变；显式 `--channel` 的既有取值（`VSCode`/`desktop`/worker 名）不变。
 - `QWEN_CODE_SERVE` 为信息性标记，不含敏感信息；不进入 `SCRUBBED_CHILD_ENV_KEYS`（denylist 语义不受影响）。
 
-## 4. 后续工作（不在本次范围）
+## 5. 后续工作（不在本次范围）
 
-按 SDK/Web Shell 细分 client 需要各客户端经由 daemon 自我声明：daemon 已有 `qwen.session.source` meta → `config.setSessionSource(sourceType, sourceId)` 管道（#8155 为生命周期钩子引入），当前 Web Shell 主会话仅使用 `sourceType: 'default'`。待客户端声明就位后，可将已知 `sourceType` 映射进 `client`，无需再改载荷 schema。
+按 SDK/Web Shell 细分客户端需要**会话级**归因：各客户端在创建会话时经由 daemon 自我声明，现有 `qwen.session.source` meta → `config.setSessionSource(sourceType, sourceId)` 管道（#8155 为生命周期钩子引入）是自然的扩展点。当前 Web Shell 主会话仅使用 `sourceType: 'default'`。由于默认 payload 是进程级的，会话级身份落到 telemetry 还需要会话维度的支持，届时再决定是否引入独立的 client 键。

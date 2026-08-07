@@ -377,8 +377,8 @@ function createWorkerEnv(opts: {
   const env: NodeJS.ProcessEnv = { ...(opts.baseEnv ?? process.env) };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
   // Marks the worker (and the ACP children it spawns) as daemon-spawned so
-  // default usage statistics can attribute runtime=daemon (see core
-  // telemetry runtime-attribution).
+  // the ACP channel fallback reports channel=daemon in usage statistics
+  // (see cli/src/config/acp-channel-fallback.ts).
   env['QWEN_CODE_SERVE'] = '1';
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
