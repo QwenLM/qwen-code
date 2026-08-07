@@ -2,8 +2,13 @@
   position: absolute;
   top: 12px;
   right: 12px;
-  /* Above the fullscreen artifact surface (dialog-backdrop - 10) so error
-     toasts from panel actions aren't painted under the opaque overlay. */
+  /* Above the fullscreen artifact surface so error toasts from panel
+     actions aren't painted under the opaque overlay. In drawer-mode
+     fullscreen the surface itself sits at dialog-backdrop z, so staying
+     visible means painting above every other dialog-backdrop-z surface
+     (e.g. the floating drawer's toolbar corner) until auto-dismiss; there
+     is no ladder slot above one but below the other. DialogShell modals
+     (z 1000 fallback) stay above. */
   z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
   display: flex;
   width: min(420px, calc(100% - 24px));

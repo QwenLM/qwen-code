@@ -3691,6 +3691,41 @@ export function App({
   const mainViewRef = useRef(mainView);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
+  // The drawer's Radix dismiss layer only checks `event.key === 'Escape'`
+  // (no isComposing guard), so while composing in a panel input an Escape
+  // that cancels the composition would close the drawer — and its
+  // preventDefault would swallow the native cancel. Mask the key for the
+  // capture-phase dismiss listener and restore it before the event reaches
+  // the focused input, mirroring DialogShell.preserveImeEscape. The docked
+  // fullscreen branch is covered by the window handler's isComposing guard.
+  useEffect(() => {
+    if (!artifactPanelOpen || !useFloatingArtifactPanel) return;
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+    };
+  }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   // Latest pane list, readable from the shrink-close effect without making it a
@@ -4032,6 +4067,10 @@ export function App({
     // The fullscreen artifact panel hides the chat (display:none +
     // aria-hidden), and the approval overlay renders inside the chat footer —
     // shrink the panel back to its dock/drawer so the approval surfaces.
+    // Split-view pane approvals deliberately do not shrink the panel: each
+    // pane renders its own approval banner, and surfacing them here would
+    // need a pending-approval signal plumbed up through SplitView. Escape or
+    // the toolbar exits fullscreen and reveals them.
     if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
     // The Scheduled Tasks and Goals pages are full-pane overlays
     // (position:absolute) that cover the chat footer too, so dismiss them for
@@ -10549,6 +10588,13 @@ export function App({
                       : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
                   }
                   onEscapeKeyDown={(event) => {
+                    if (event.isComposing || event.keyCode === 229) {
+                      // IME owns Escape; keep the dismiss layer from acting
+                      // on it. The preserveImeEscape mask above normally
+                      // hides composition Escapes from this handler entirely.
+                      event.preventDefault();
+                      return;
+                    }
                     // Fullscreen is the topmost surface: Escape shrinks the
                     // panel back to its drawer width. Without this the
                     // drawer's dismiss layer would close the panel instead.

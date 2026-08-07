@@ -303,6 +303,7 @@ const {
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
+      toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
       latestTodoPanelTodos: [] as Array<{
@@ -1269,6 +1270,9 @@ vi.doMock('./components/messages/ToolApproval', async () => {
       planTodos?: Array<{ id: string }>;
     }) => {
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
+      testState.toolApprovalKeyboardActiveHistory.push(
+        props.keyboardActive ?? null,
+      );
       testState.latestToolApprovalPlanTodos = props.planTodos ?? [];
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
@@ -1665,6 +1669,11 @@ describe('task activity key', () => {
     expect(container.querySelector('aside[aria-label="Right panel"]')).toBe(
       dockedAside,
     );
+    // The dock node just swapped back from fullscreen: suppress its open
+    // animation so the already-open panel doesn't re-play the slide-in.
+    expect(
+      container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       enterFullscreen?.click();
@@ -1904,49 +1913,57 @@ describe('task activity key', () => {
 });
 
 describe('artifact panel fullscreen', () => {
-  it('drops fullscreen when the panel closes and reopens docked', () => {
+  it('drops fullscreen when the panel closes and reopens docked', async () => {
     const { container } = renderApp();
 
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Toggle right panel"]',
         )
         ?.click();
+      await Promise.resolve();
     });
+    await flush();
     expect(
       container.querySelector('aside[aria-label="Right panel"]'),
     ).not.toBeNull();
 
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
         ?.click();
+      await Promise.resolve();
     });
+    await flush();
     expect(
       container.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // Close the panel with its own toggle while it is fullscreen.
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
           'aside button[aria-label="Toggle right panel"]',
         )
         ?.click();
+      await Promise.resolve();
     });
+    await flush();
     expect(
       container.querySelector('aside[aria-label="Right panel"]'),
     ).toBeNull();
 
     // Reopening must restore the docked default, not fullscreen.
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Toggle right panel"]',
         )
         ?.click();
+      await Promise.resolve();
     });
+    await flush();
     expect(
       container.querySelector('aside[aria-label="Right panel"]'),
     ).not.toBeNull();
@@ -1954,6 +1971,11 @@ describe('artifact panel fullscreen', () => {
       container.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(container.querySelector('[role="separator"]')).not.toBeNull();
+    // A genuine close-and-reopen re-arms the dock's open animation: the
+    // suppression class must be gone so the next open animates.
+    expect(
+      container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
+    ).toBeNull();
   });
 
   it('does not carry fullscreen into a switched-to session', async () => {
@@ -2093,7 +2115,88 @@ describe('artifact panel fullscreen', () => {
     expect(restoredContent?.className).toContain('min(520px');
   });
 
-  it('preserves the docked width across a fullscreen round-trip', () => {
+  it('leaves an IME-composition Escape to the composer in the fullscreen drawer', async () => {
+    // No min-width query matches: the panel floats in a drawer instead of
+    // docking.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    const portal = '[data-web-shell-portal-root]';
+    const drawerAside = document.querySelector(
+      `${portal} aside[aria-label="Right panel"]`,
+    );
+    expect(drawerAside).not.toBeNull();
+    act(() => {
+      drawerAside
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    await flush();
+    expect(drawerAside?.className).toContain('panelFullscreen');
+
+    // Escape during IME composition must only cancel the composition: the
+    // panel must not shrink and the drawer must not close. Radix's dismiss
+    // layer checks only `key === 'Escape'` on document capture (no
+    // isComposing guard), so the app masks the key for the dismiss layer
+    // and restores it before the event reaches the focused input — with no
+    // preventDefault to swallow the native IME cancel.
+    const compositionEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    await act(async () => {
+      drawerAside?.dispatchEvent(compositionEscape);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(compositionEscape.defaultPrevented).toBe(false);
+    expect(compositionEscape.key).toBe('Escape');
+    expect(
+      document.querySelector(`${portal} aside[aria-label="Right panel"]`),
+    ).toBe(drawerAside);
+    expect(drawerAside?.className).toContain('panelFullscreen');
+
+    // A plain Escape afterwards still shrinks the panel back to its drawer
+    // width instead of closing it.
+    await act(async () => {
+      drawerAside?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(drawerAside?.className).not.toContain('panelFullscreen');
+    expect(
+      document.querySelector(`${portal} aside[aria-label="Right panel"]`),
+    ).toBe(drawerAside);
+  });
+
+  it('preserves the docked width across a fullscreen round-trip', async () => {
     // While fullscreen, the chat pane is display:none; a real browser fires
     // its ResizeObserver the moment it collapses to 0x0. The width clamp
     // must not shrink the persisted panel width from that 0 measurement.
@@ -2119,13 +2222,15 @@ describe('artifact panel fullscreen', () => {
     );
     const { container } = renderApp();
 
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Toggle right panel"]',
         )
         ?.click();
+      await Promise.resolve();
     });
+    await flush();
     // The opening clamp shrinks the default 500px panel to fit the 400px
     // chat pane — the width a user would then carry into fullscreen.
     expect(
@@ -2134,11 +2239,13 @@ describe('artifact panel fullscreen', () => {
         ?.getAttribute('aria-valuenow'),
     ).toBe('400');
 
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
         ?.click();
+      await Promise.resolve();
     });
+    await flush();
     const fullscreenAside = container.querySelector<HTMLElement>(
       '[class*="artifactPanelFullscreen"] aside',
     );
@@ -2150,19 +2257,22 @@ describe('artifact panel fullscreen', () => {
 
     // The hidden pane collapses to 0x0 and its ResizeObserver fires.
     chatPaneWidth = 0;
-    act(() => {
+    await act(async () => {
       resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver));
+      await Promise.resolve();
     });
 
     // The pane lays back out at viewport(900) - panel(400) = 500 on exit.
     chatPaneWidth = 500;
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Exit fullscreen"]',
         )
         ?.click();
+      await Promise.resolve();
     });
+    await flush();
     expect(
       container
         .querySelector('[role="separator"]')
@@ -2202,11 +2312,21 @@ describe('artifact panel fullscreen', () => {
     expect(
       container.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
+    // The panel steps aside for the approval; it must not close — the
+    // user's artifact/tab context survives beside the overlay.
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="separator"]')).not.toBeNull();
     const approvalOverlay = document.querySelector(
       '[data-testid="approval-overlay"]',
     );
     expect(approvalOverlay).not.toBeNull();
     expect(approvalOverlay?.closest('[aria-hidden="true"]')).toBeNull();
+    // While fullscreen is still up the overlay is told keyboardActive=false;
+    // the focus pull is edge-triggered, so burning its first edge on the
+    // hidden (display:none) subtree would leave the shrunk overlay unfocused.
+    expect(testState.toolApprovalKeyboardActiveHistory[0]).toBe(false);
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
   });
 
@@ -2880,6 +3000,7 @@ beforeEach(() => {
   testState.latestMessageListProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
+  testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
   testState.latestAskUserQuestionKeyboardActive = null;
   testState.latestTodoPanelTodos = [];
