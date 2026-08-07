@@ -28,6 +28,7 @@ import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
+import { APIConnectionTimeoutError } from 'openai';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
@@ -9114,9 +9115,9 @@ describe('GeminiChat', async () => {
     it('retries an enhanced timeout before the first content chunk', async () => {
       vi.useFakeTimers();
       try {
-        const timeoutError = Object.assign(new Error('socket timed out'), {
-          code: 'ETIMEDOUT',
-        });
+        // The OpenAI SDK's canonical timeout shape: bare, with no code,
+        // status, or cause (issue #8527).
+        const timeoutError = new APIConnectionTimeoutError();
         const errorHandler = new EnhancedErrorHandler(() => true);
         let enhancedTimeout: unknown;
         try {

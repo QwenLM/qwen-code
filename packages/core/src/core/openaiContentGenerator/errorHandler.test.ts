@@ -9,6 +9,7 @@ import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
 import type { RequestContext } from './types.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { APIConnectionTimeoutError } from 'openai';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   error: vi.fn(),
@@ -213,6 +214,53 @@ describe('EnhancedErrorHandler', () => {
         reason: 'client-error',
         statusCode: 400,
       });
+    });
+
+    it('marks the SDK bare connection timeout as retryable transport', () => {
+      // The OpenAI SDK throws APIConnectionTimeoutError bare — no code,
+      // status, or cause — once its internal retries are exhausted.
+      const bareTimeout = new APIConnectionTimeoutError();
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(bareTimeout, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(
+        /Request timeout after 5s.*Troubleshooting tips:/s,
+      );
+      expect((thrown as Error).cause).toBe(bareTimeout);
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        transportCode: 'ETIMEDOUT',
+      });
+    });
+
+    it('attaches the redacted clone, not the raw original, when redaction clones', () => {
+      const original = Object.freeze(
+        Object.assign(
+          new Error('socket timed out via token@proxy.local:8080'),
+          {
+            code: 'ETIMEDOUT',
+          },
+        ),
+      );
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(original, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect((thrown as Error).cause).not.toBe(original);
+      expect(((thrown as Error).cause as Error).message).toContain(
+        '<redacted>@proxy.local:8080',
+      );
     });
 
     it('should use custom suppression function', () => {
