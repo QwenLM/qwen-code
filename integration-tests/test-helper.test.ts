@@ -43,32 +43,43 @@ describe('TestRig', () => {
     expect(existsSync(testDir)).toBe(false);
   });
 
-  it('does not poll for telemetry events when telemetry is unavailable', async () => {
+  it('keeps the test directory during cleanup when KEEP_OUTPUT is set', async () => {
+    process.env['KEEP_OUTPUT'] = 'true';
+    const rig = new TestRig();
+    await rig.setup('keep output test directory');
+    const testDir = rig.testDir!;
+
+    await rig.cleanup();
+
+    expect(existsSync(testDir)).toBe(true);
+  });
+
+  it('keeps polling for telemetry events when telemetry is not ready yet', async () => {
     const rig = new TestRig();
     vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(false);
-    const poll = vi.spyOn(rig, 'poll');
+    const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
 
     await expect(rig.waitForTelemetryEvent('tool_call')).resolves.toBe(false);
-    expect(poll).not.toHaveBeenCalled();
+    expect(poll).toHaveBeenCalled();
   });
 
-  it('does not poll for tool calls when telemetry is unavailable', async () => {
+  it('keeps polling for tool calls when telemetry is not ready yet', async () => {
     const rig = new TestRig();
     vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(false);
-    const poll = vi.spyOn(rig, 'poll');
+    const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
 
     await expect(rig.waitForToolCall('read_file')).resolves.toBe(false);
-    expect(poll).not.toHaveBeenCalled();
+    expect(poll).toHaveBeenCalled();
   });
 
-  it('does not poll for any tool call when telemetry is unavailable', async () => {
+  it('keeps polling for any tool call when telemetry is not ready yet', async () => {
     const rig = new TestRig();
     vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(false);
-    const poll = vi.spyOn(rig, 'poll');
+    const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
 
     await expect(
       rig.waitForAnyToolCall(['read_file', 'write_file']),
     ).resolves.toBe(false);
-    expect(poll).not.toHaveBeenCalled();
+    expect(poll).toHaveBeenCalled();
   });
 });
