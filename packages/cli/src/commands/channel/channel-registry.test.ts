@@ -577,6 +577,7 @@ describe('channel registry', () => {
     stderr.mockRestore();
 
     const registered = await getPlugin('valid-optional-required-object');
+    expect(registered).toBe(plugin);
     expect(registered?.management).toBe(plugin.management);
 
     const entry = (await supportedChannelCatalog()).find(

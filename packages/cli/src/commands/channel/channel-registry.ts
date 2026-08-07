@@ -205,7 +205,8 @@ function registerWithManagementValidation(
     // working with management stripped. The copy over the original prototype
     // keeps prototype methods (e.g. class-instance plugins) alive, and
     // defineProperty shadows getter-only accessors that would reject an
-    // assignment.
+    // assignment. The copy only carries own enumerable state, so ES #private
+    // fields and non-enumerable own properties do not survive it.
     process.stderr.write(
       `[channel-registry] Invalid management metadata in "${label}" channel: ${error instanceof Error ? error.message : String(error)}\n`,
     );

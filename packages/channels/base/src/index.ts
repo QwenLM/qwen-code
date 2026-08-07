@@ -92,6 +92,7 @@ export type {
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
   ChannelConfigNestedFieldDescriptor,

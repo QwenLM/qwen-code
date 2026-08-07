@@ -38,6 +38,7 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       key: 'interactiveCards',
       label: 'Interactive Cards',
       kind: 'object',
+      properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
     },
   ],
 };

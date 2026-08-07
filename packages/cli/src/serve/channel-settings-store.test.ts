@@ -598,6 +598,37 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
   });
 
+  it('re-validates an unchanged stored scalar instead of preserving it', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "retries": "3"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          retries: '3',
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "retries" has an invalid value.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('preserves an unchanged invalid nested object while a sibling property changes', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
@@ -701,6 +732,81 @@ describe('WorkspaceChannelSettingsStore', () => {
 
     expect(next.channels['bot']).toMatchObject({ clientId: 'updated-id' });
     expect(next.channels['bot']?.['nested']).toEqual({});
+  });
+
+  it('drops an omitted object field and leaves its nested required unchecked', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "nested": { "requiredValue": "kept" }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'updated-id',
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({ clientId: 'updated-id' });
+    expect(next.channels['bot']).not.toHaveProperty('nested');
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot'],
+    ).not.toHaveProperty('nested');
+  });
+
+  it('replaces nested object values wholesale without merging partial writes', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "interactiveCards": {
+      "enabled": false,
+      "questionCard": { "enabled": true, "timeoutMs": 270000 }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'updated-id',
+        interactiveCards: {
+          enabled: true,
+          questionCard: { enabled: true },
+        },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']?.['interactiveCards']).toEqual({
+      enabled: true,
+      questionCard: { enabled: true },
+    });
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot']?.['interactiveCards'],
+    ).toEqual({ enabled: true, questionCard: { enabled: true } });
   });
 
   it('accepts environment references on fields with truthy non-boolean envResolvable', async () => {
@@ -1019,6 +1125,43 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).rejects.toMatchObject({
       code: 'channel_settings_invalid_config',
       message: 'Channel validateConfig must return a string error message.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('rejects a throwing validateConfig as an invalid config error', async () => {
+    registerPlugin({
+      channelType: 'throwing-validate-config',
+      displayName: 'Throwing validate config',
+      management: {
+        fields: [
+          {
+            key: 'clientId',
+            label: 'Client ID',
+            kind: 'string',
+            required: true,
+          },
+        ],
+        validateConfig: (): string => {
+          throw new TypeError('note is missing');
+        },
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'throwing-validate-config', clientId: 'client-id' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel validateConfig failed: note is missing',
     });
 
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);

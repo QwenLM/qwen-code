@@ -3115,9 +3115,18 @@ interface DaemonChannelConfigFieldDescriptorBase {
 
 export interface DaemonChannelConfigValueFieldDescriptor
   extends DaemonChannelConfigFieldDescriptorBase {
-  kind: Exclude<DaemonChannelConfigFieldKind, 'object' | 'number'>;
+  kind: Exclude<DaemonChannelConfigFieldKind, 'enum' | 'number' | 'object'>;
   required?: boolean;
   envResolvable?: boolean;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigEnumFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'enum';
+  required?: boolean;
+  envResolvable?: boolean;
+  options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
 
@@ -3125,7 +3134,7 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   extends DaemonChannelConfigFieldDescriptorBase {
   kind: 'number';
   required?: boolean;
-  envResolvable?: boolean;
+  envResolvable?: never;
   exclusiveMinimum?: number;
   properties?: never;
 }
@@ -3135,15 +3144,19 @@ export interface DaemonChannelConfigObjectFieldDescriptor
   kind: 'object';
   required?: false;
   envResolvable?: never;
-  properties?: readonly DaemonChannelConfigNestedFieldDescriptor[];
+  properties: readonly DaemonChannelConfigNestedFieldDescriptor[];
 }
 
 export type DaemonChannelConfigNestedFieldDescriptor =
   | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
       kind: Exclude<
         DaemonChannelConfigFieldKind,
-        'secret' | 'object' | 'number'
+        'secret' | 'enum' | 'number' | 'object'
       >;
+      envResolvable?: never;
+    })
+  | (Omit<DaemonChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'enum';
       envResolvable?: never;
     })
   | (Omit<
@@ -3157,6 +3170,7 @@ export type DaemonChannelConfigNestedFieldDescriptor =
 
 export type DaemonChannelConfigFieldDescriptor =
   | DaemonChannelConfigValueFieldDescriptor
+  | DaemonChannelConfigEnumFieldDescriptor
   | DaemonChannelConfigNumberFieldDescriptor
   | DaemonChannelConfigObjectFieldDescriptor;
 

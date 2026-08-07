@@ -237,7 +237,7 @@ function assertDescriptorValue(
     }
     const previousRecord = isRecord(previous) ? previous : {};
     const properties = new Map(
-      (field.properties ?? []).map((property) => [property.key, property]),
+      field.properties.map((property) => [property.key, property]),
     );
     for (const [key, nestedValue] of Object.entries(value)) {
       const property = properties.get(key);
@@ -252,7 +252,7 @@ function assertDescriptorValue(
         Object.hasOwn(previousRecord, key) ? previousRecord[key] : undefined,
       );
     }
-    assertRequiredFields(field.properties ?? [], value, path);
+    assertRequiredFields(field.properties, value, path);
     return;
   }
   const invalidEnvironment =
@@ -465,8 +465,14 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
-    const crossFieldError: unknown =
-      plugin.management.validateConfig?.(nextConfig);
+    let crossFieldError: unknown;
+    try {
+      crossFieldError = plugin.management.validateConfig?.(nextConfig);
+    } catch (error) {
+      throw invalidConfig(
+        `Channel validateConfig failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     if (crossFieldError !== undefined) {
       throw invalidConfig(
         typeof crossFieldError === 'string'
