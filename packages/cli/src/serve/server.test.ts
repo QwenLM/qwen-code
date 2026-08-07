@@ -447,6 +447,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
+  'session_reasoning_control',
   'workspace_tool_toggle',
   'workspace_skill_toggle',
   'workspace_skill_manage',

@@ -10396,9 +10396,11 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
-                          reasoningControlsSupported={workspace.capabilities?.features.includes(
-                            'session_reasoning_control',
-                          )}
+                          reasoningControlsSupported={
+                            workspace.capabilities?.features?.includes(
+                              'session_reasoning_control',
+                            ) ?? false
+                          }
                           reasoningState={composerReasoningState}
                           reasoningBusy={reasoningActionBusy}
                           onSelectReasoningOption={

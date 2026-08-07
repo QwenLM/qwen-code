@@ -898,9 +898,11 @@ export function ChatPane({
           availableModels={availableModels}
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
-          reasoningControlsSupported={workspace.capabilities?.features.includes(
-            'session_reasoning_control',
-          )}
+          reasoningControlsSupported={
+            workspace.capabilities?.features?.includes(
+              'session_reasoning_control',
+            ) ?? false
+          }
           reasoningState={connection.reasoning}
           reasoningBusy={reasoningBusy}
           onSelectReasoningOption={handleSelectReasoningOption}
