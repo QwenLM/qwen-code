@@ -6,7 +6,15 @@
 
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +22,38 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 describe('scripts/check-build-status.js', () => {
+  function createBuildFixture(cwd, { sourceIsNewer }) {
+    const cliDir = join(cwd, 'packages', 'cli');
+    const distDir = join(cliDir, 'dist');
+    const sourceDir = join(cliDir, 'src');
+    const buildTimestamp = join(distDir, '.last_build');
+    const sourceFile = join(sourceDir, 'fixture.ts');
+    const watchedFiles = [
+      join(cliDir, 'package.json'),
+      join(cliDir, 'tsconfig.json'),
+      sourceFile,
+    ];
+
+    mkdirSync(distDir, { recursive: true });
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(watchedFiles[0], '{}');
+    writeFileSync(watchedFiles[1], '{}');
+    writeFileSync(sourceFile, 'export const fixture = true;');
+    writeFileSync(buildTimestamp, '');
+
+    const buildMtime = new Date(Date.now() - 1_000);
+    const oldMtime = new Date(buildMtime.getTime() - 1_000);
+    const sourceMtime = sourceIsNewer
+      ? new Date(buildMtime.getTime() + 1_000)
+      : oldMtime;
+    utimesSync(buildTimestamp, buildMtime, buildMtime);
+    utimesSync(watchedFiles[0], oldMtime, oldMtime);
+    utimesSync(watchedFiles[1], oldMtime, oldMtime);
+    utimesSync(sourceFile, sourceMtime, sourceMtime);
+
+    return { warningsFile: join(cwd, 'warnings.txt') };
+  }
+
   function runChecker(cwd, env = process.env) {
     return new Promise((resolve, reject) => {
       execFile(
@@ -21,6 +61,9 @@ describe('scripts/check-build-status.js', () => {
         [join(root, 'scripts', 'check-build-status.js')],
         { cwd, env },
         (err, stdout, stderr) => {
+          // The checker may exit non-zero without a spawn failure; the contract
+          // under test is the stream, not the verdict. A genuine spawn failure
+          // carries a string code, while process exit codes are numbers.
           if (err && typeof err.code === 'string') reject(err);
           else resolve({ stdout, stderr });
         },
@@ -64,6 +107,41 @@ describe('scripts/check-build-status.js', () => {
       await runChecker(cwd, env);
       expect(() => readFileSync(warningsFile)).toThrow();
       expect(existsSync(join(cwd, 'qwen-code-warnings.txt'))).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes a stale warnings file when the build is up to date', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-check-build-'));
+    const { warningsFile } = createBuildFixture(cwd, {
+      sourceIsNewer: false,
+    });
+    writeFileSync(warningsFile, 'stale warning');
+    try {
+      await runChecker(cwd, {
+        ...process.env,
+        QWEN_CODE_WARNINGS_FILE: warningsFile,
+      });
+      expect(existsSync(warningsFile)).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('writes source-newer warnings to the configured file', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-check-build-'));
+    const { warningsFile } = createBuildFixture(cwd, {
+      sourceIsNewer: true,
+    });
+    try {
+      await runChecker(cwd, {
+        ...process.env,
+        QWEN_CODE_WARNINGS_FILE: warningsFile,
+      });
+      expect(readFileSync(warningsFile, 'utf8')).toContain(
+        'modified since the last build',
+      );
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
