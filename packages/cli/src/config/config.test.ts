@@ -901,10 +901,22 @@ describe('parseArguments', () => {
     expect(argv.channel).toBe('desktop');
   });
 
-  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
-    process.argv = ['node', 'script.js', '--acp'];
+  it('should accept daemon as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'daemon'];
     const argv = await parseArguments();
-    expect(argv.channel).toBe('ACP');
+    expect(argv.channel).toBe('daemon');
+  });
+
+  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('ACP');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
@@ -918,6 +930,7 @@ describe('parseArguments', () => {
 
   it('reports the daemon channel for daemon-spawned ACP children', async () => {
     vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
     try {
       process.argv = ['node', 'script.js', '--acp'];
       const argv = await parseArguments();

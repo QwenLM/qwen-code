@@ -45,6 +45,7 @@ CLI 的 ACP channel 回退（`packages/cli/src/config/acp-channel-fallback.ts`�
 | SDK `query()` 直连（TS/Python/Java，不走 daemon） | `SDK`（SDK 自带，不变）      |
 | daemon 会话（SDK daemon 客户端、Web Shell 等）    | `daemon`                     |
 | daemon 会话（Tauri desktop shell）                | `desktop`                    |
+| docker/podman sandbox 内的 daemon 会话            | 继承外层 `daemon`/`desktop`  |
 | daemon channel worker                             | worker 名（如 feishu，不变） |
 
 ## 3. 为什么 daemon 会话不能像 VS Code 那样直接传 `--channel`
@@ -64,6 +65,7 @@ daemon 的桥接模型不同（`packages/acp-bridge/src/bridge.ts`）：**一个
 - 零新增键。`properties.channel` 仅新增一个可能取值：`daemon`（`desktop` 是既有取值，Tauri shell 会话并入其中）。
 - `app.channel` 语义与取值不变；显式 `--channel` 的既有取值（`VSCode`/`desktop`/`SDK`/worker 名）不变。
 - `QWEN_CODE_SERVE` 为信息性标记，不含敏感信息；不进入 `SCRUBBED_CHILD_ENV_KEYS`（denylist 语义不受影响）。
+- docker/podman sandbox 会显式透传 `QWEN_CODE_SERVE` / `QWEN_CODE_DESKTOP`，避免 sandbox 内子进程退回 `ACP`；项目 `.env`/`settings.env` 不能设置这两个标记，避免 workspace 伪造客户端归因。
 
 ## 5. 后续工作（不在本次范围）
 

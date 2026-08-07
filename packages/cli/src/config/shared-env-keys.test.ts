@@ -23,4 +23,9 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
       'NODE_TLS_REJECT_UNAUTHORIZED',
     );
   });
+
+  it('excludes attribution markers so a project .env cannot spoof channel', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_SERVE');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
+  });
 });
