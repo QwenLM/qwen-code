@@ -63,6 +63,7 @@ type ChatEditorTestProps = {
   skills?: Array<{ name: string; description: string }>;
   commands?: Array<{ name: string }>;
   isPreparing?: boolean;
+  cancelArmed?: boolean;
   disabled?: boolean;
   dialogOpen?: boolean;
   onToggleShortcuts?: () => void;
@@ -306,6 +307,7 @@ const {
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      askUserKeyboardActiveHistory: [] as Array<boolean | null>,
       latestTodoPanelTodos: [] as Array<{
         id: string;
         blockedBy?: string[];
@@ -1289,6 +1291,7 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
     }) => {
       testState.latestAskUserQuestionKeyboardActive =
         props.keyboardActive ?? null;
+      testState.askUserKeyboardActiveHistory.push(props.keyboardActive ?? null);
       testState.latestAskUserQuestionOnError = props.onError;
       return React.createElement('div', { 'data-web-shell-ask-panel': '' });
     },
@@ -2177,6 +2180,28 @@ describe('artifact panel fullscreen', () => {
     ).toBe(drawerAside);
     expect(drawerAside?.className).toContain('panelFullscreen');
 
+    // WebKit can mark IME-owned keys with keyCode 229 while isComposing is
+    // still false; the keyCode fallback branch must mask the key exactly like
+    // the isComposing one above.
+    const keyCodeEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(keyCodeEscape, 'keyCode', { value: 229 });
+    await act(async () => {
+      drawerAside?.dispatchEvent(keyCodeEscape);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(keyCodeEscape.defaultPrevented).toBe(false);
+    expect(keyCodeEscape.key).toBe('Escape');
+    expect(
+      document.querySelector(`${portal} aside[aria-label="Right panel"]`),
+    ).toBe(drawerAside);
+    expect(drawerAside?.className).toContain('panelFullscreen');
+
     // A plain Escape afterwards still shrinks the panel back to its drawer
     // width instead of closing it.
     await act(async () => {
@@ -2328,6 +2353,285 @@ describe('artifact panel fullscreen', () => {
     // hidden (display:none) subtree would leave the shrunk overlay unfocused.
     expect(testState.toolApprovalKeyboardActiveHistory[0]).toBe(false);
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+  });
+
+  it('shrinks fullscreen when an ask-user question becomes pending', async () => {
+    const { container, rerender } = renderApp();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // Mirror of the tool-approval case: the question overlay renders in the
+    // same hidden chat footer, so fullscreen must step aside for it too, and
+    // the overlay must not be told it owns the keyboard while still covered.
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    const approvalOverlay = document.querySelector(
+      '[data-testid="approval-overlay"]',
+    );
+    expect(approvalOverlay).not.toBeNull();
+    expect(approvalOverlay?.closest('[aria-hidden="true"]')).toBeNull();
+    expect(testState.askUserKeyboardActiveHistory[0]).toBe(false);
+    expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
+  });
+
+  it('leaves a docked-fullscreen IME Escape to the window handler guard', async () => {
+    const { container } = renderApp();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    const fullscreenSurface = container.querySelector(
+      '[class*="artifactPanelFullscreen"]',
+    );
+    expect(fullscreenSurface).not.toBeNull();
+
+    // Docked fullscreen has no drawer dismiss layer — the preserveImeEscape
+    // mask is floating-only — so the only protection is the window handler's
+    // isComposing guard. It must leave the native IME cancel untouched and
+    // keep the panel fullscreen.
+    const compositionEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    await act(async () => {
+      fullscreenSurface?.dispatchEvent(compositionEscape);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(compositionEscape.defaultPrevented).toBe(false);
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // The keyCode 229 shape (isComposing still false) must behave the same:
+    // the window handler's IME guard owns both halves.
+    const keyCodeEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(keyCodeEscape, 'keyCode', { value: 229 });
+    await act(async () => {
+      container
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(keyCodeEscape);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(keyCodeEscape.defaultPrevented).toBe(false);
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // A plain Escape afterwards still shrinks the panel back to its docked
+    // width instead of closing it.
+    await act(async () => {
+      container
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('shrinks fullscreen instead of arming cancel while streaming', async () => {
+    const { container, rerender } = renderApp();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+    });
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      testState.streamingState = 'responding';
+      rerender();
+      await Promise.resolve();
+    });
+
+    // The fullscreen surface is topmost, so Escape must shrink it first.
+    // Falling through to decideEscapeIntent would arm the two-press cancel,
+    // whose affordance renders inside the hidden (display:none) chat subtree
+    // — the user would see nothing and a second Escape would kill the turn.
+    await act(async () => {
+      container
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    // The panel shrinks but stays open.
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="separator"]')).not.toBeNull();
+    expect(testState.latestChatEditorProps?.cancelArmed).toBe(false);
+  });
+
+  it('re-arms the dock open animation after a floating interlude', async () => {
+    // Make the dock breakpoint flippable mid-test so the panel can hand over
+    // to the floating drawer and back, like the split-view toggle or a
+    // viewport resize.
+    const dockQuery = '(min-width: 1001px)';
+    let dockMatches = true;
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches:
+          query === dockQuery ? dockMatches : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Exit fullscreen"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    // The same dock node just swapped back from fullscreen: its open
+    // animation stays suppressed while it remains mounted.
+    expect(
+      container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
+    ).not.toBeNull();
+
+    // Narrow the viewport: the dock unmounts and the drawer takes over.
+    dockMatches = false;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: false }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[class*="artifactPanelDock"]')).toBeNull();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).not.toBeNull();
+
+    // Widen again: the dock remounts for a genuine open and must get its
+    // slide-in animation back — a stale suppression flag would eat it.
+    dockMatches = true;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: true }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[class*="artifactPanelDock"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
+    ).toBeNull();
   });
 
   it('does not dismiss the floating environment panel on pointerdown while fullscreen', async () => {
@@ -3003,6 +3307,7 @@ beforeEach(() => {
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.askUserKeyboardActiveHistory = [];
   testState.latestTodoPanelTodos = [];
   testState.latestTodoPanelOnOpen = null;
   testState.latestTasksStatusProps = null;

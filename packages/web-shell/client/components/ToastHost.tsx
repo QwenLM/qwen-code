@@ -14,17 +14,20 @@ interface ToastHostProps {
   toasts: readonly WebShellToast[];
   onDismiss: (id: string) => void;
   autoDismissMs?: number;
+  /** Paint above dialog-backdrop-tier surfaces (fullscreen artifact panel). */
+  elevated?: boolean;
 }
 
 export function ToastHost({
   toasts,
   onDismiss,
   autoDismissMs = 5000,
+  elevated = false,
 }: ToastHostProps) {
   if (toasts.length === 0) return null;
   return (
     <div
-      className={styles.host}
+      className={`${styles.host} ${elevated ? styles.hostElevated : ''}`}
       role="status"
       aria-live="polite"
       data-web-shell-toast-host

@@ -2405,7 +2405,8 @@ export function App({
   const [artifactPanelFullscreen, setArtifactPanelFullscreen] = useState(false);
   // Exiting fullscreen swaps the same DOM node back to .artifactPanelDock,
   // whose open animation would re-play on the already-open panel; suppress it
-  // until the panel closes and the dock remounts for a genuine open.
+  // until the dock remounts for a genuine open (panel close, or the floating
+  // drawer handing back).
   const [
     suppressArtifactDockOpenAnimation,
     setSuppressArtifactDockOpenAnimation,
@@ -3136,16 +3137,6 @@ export function App({
       catalog.items.length === 0 ? { ...catalog, loaded: false } : catalog,
     );
   }, []);
-  const toggleArtifactPanelFullscreen = useCallback(() => {
-    setArtifactPanelFullscreen((value) => !value);
-    setSuppressArtifactDockOpenAnimation(true);
-  }, []);
-  useEffect(() => {
-    if (!artifactPanelOpen) {
-      setArtifactPanelFullscreen(false);
-      setSuppressArtifactDockOpenAnimation(false);
-    }
-  }, [artifactPanelOpen]);
   useLayoutEffect(() => {
     // Fullscreen hides the chat pane (display:none); measuring it there
     // reports 0 and would clamp the panel down to its minimum width.
@@ -3691,13 +3682,29 @@ export function App({
   const mainViewRef = useRef(mainView);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
+  const toggleArtifactPanelFullscreen = useCallback(() => {
+    setArtifactPanelFullscreen((value) => !value);
+    // Only the docked node replays its open animation on the fullscreen ->
+    // docked class swap; the floating drawer has no such replay.
+    if (!useFloatingArtifactPanel) setSuppressArtifactDockOpenAnimation(true);
+  }, [useFloatingArtifactPanel]);
+  useEffect(() => {
+    if (!artifactPanelOpen) {
+      setArtifactPanelFullscreen(false);
+      setSuppressArtifactDockOpenAnimation(false);
+    } else if (useFloatingArtifactPanel) {
+      // The dock node unmounts while the drawer takes over; a stale flag would
+      // suppress the slide-in of the next genuine dock mount.
+      setSuppressArtifactDockOpenAnimation(false);
+    }
+  }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // The drawer's Radix dismiss layer only checks `event.key === 'Escape'`
   // (no isComposing guard), so while composing in a panel input an Escape
   // that cancels the composition would close the drawer — and its
   // preventDefault would swallow the native cancel. Mask the key for the
   // capture-phase dismiss listener and restore it before the event reaches
   // the focused input, mirroring DialogShell.preserveImeEscape. The docked
-  // fullscreen branch is covered by the window handler's isComposing guard.
+  // fullscreen branch is covered by the window handler's IME guard.
   useEffect(() => {
     if (!artifactPanelOpen || !useFloatingArtifactPanel) return;
     const preserveImeEscape = (event: KeyboardEvent) => {
@@ -8190,7 +8197,9 @@ export function App({
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.isComposing) return;
+      // keyCode 229: WebKit marks IME-owned keys this way while isComposing
+      // is still false; the IME owns them exactly like composing keys.
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       const live = escLiveRef.current;
 
       // The fullscreen right panel (artifacts/subagents) is the topmost
@@ -8929,7 +8938,13 @@ export function App({
           data-web-shell-shadcn
           lang={selectedLanguage}
         >
-          {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
+          {!onToast && (
+            <ToastHost
+              toasts={toasts}
+              onDismiss={dismissToast}
+              elevated={artifactPanelFullscreen}
+            />
+          )}
           {showResumeDialog && (
             <DialogShell
               title={t('resume.title')}

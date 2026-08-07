@@ -2,19 +2,23 @@
   position: absolute;
   top: 12px;
   right: 12px;
-  /* Above the fullscreen artifact surface so error toasts from panel
-     actions aren't painted under the opaque overlay. In drawer-mode
-     fullscreen the surface itself sits at dialog-backdrop z, so staying
-     visible means painting above every other dialog-backdrop-z surface
-     (e.g. the floating drawer's toolbar corner) until auto-dismiss; there
-     is no ladder slot above one but below the other. DialogShell modals
-     (z 1000 fallback) stay above. */
-  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
+  z-index: 30;
   display: flex;
   width: min(420px, calc(100% - 24px));
   flex-direction: column;
   gap: 8px;
   pointer-events: none;
+}
+
+/* Applied by App while the fullscreen artifact surface is up: the docked
+   surface covers the viewport at dialog-backdrop z - 10 and the drawer-mode
+   one at dialog-backdrop z, so an un-elevated toast from a panel action
+   would paint under the opaque surface. DialogShell modals resolve the same
+   dialog-backdrop variable, and no ladder slot exists above the fullscreen
+   surface but below modals — so while the surface is up, toasts paint above
+   modals too until auto-dismiss. */
+.hostElevated {
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
 }
 
 .toast {
