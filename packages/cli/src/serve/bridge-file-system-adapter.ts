@@ -6,10 +6,11 @@
 
 /**
  * Serve-side adapter that satisfies `@qwen-code/acp-bridge`'s
- * `BridgeFileSystem` interface by routing ACP `writeTextFile` /
- * `readTextFile` requests through the `WorkspaceFileSystem`. Agent-side
- * ACP fs calls pick up the same defensive guarantees the HTTP file
- * routes already enforce.
+ * `BridgeFileSystem` interface by routing delegated ACP `writeTextFile` /
+ * `readTextFile` requests through the `WorkspaceFileSystem`. Production
+ * `qwen serve` keeps text reads in the same-host child and delegates final ACP
+ * `writeTextFile` content writes through this adapter. The read path remains a
+ * fail-closed boundary for unexpected or capability-violating delegated reads.
  *
  * The adapter is a thin translation layer:
  *   - ACP request → `WorkspaceFileSystem.resolve(path, intent)` to
@@ -87,8 +88,8 @@ function buildAuditContext(
 /**
  * Adapter factory. Pass the existing `WorkspaceFileSystemFactory`
  * (the same instance `createServeApp` / `runQwenServe` build for
- * HTTP fs routes) — both paths share the same `fsAuditEmit` channel
- * + trust gate snapshot so an operator gets a unified audit stream.
+ * HTTP fs routes) — delegated operations share the same `fsAuditEmit` channel
+ * + trust gate snapshot.
  */
 export function createBridgeFileSystemAdapter(
   factory: WorkspaceFileSystemFactory,
