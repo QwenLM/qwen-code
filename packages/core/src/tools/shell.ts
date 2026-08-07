@@ -45,6 +45,7 @@ import type {
 } from '../services/shellExecutionService.js';
 import {
   getShellAbortReasonKind,
+  isSignalTermination,
   ShellExecutionService,
 } from '../services/shellExecutionService.js';
 import {
@@ -2809,10 +2810,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //         cancel). Their own messaging is enough; a "should have
     //         been background" reminder when the agent already knows
     //         the command didn't complete is noise.
-    //       * Suppressed on external signal kills (`result.signal !=
-    //         null` with `aborted: false`, e.g. SIGTERM from container
-    //         shutdown, k8s eviction, OOM killer, sibling reaping the
-    //         process group). `shellExecutionService` only sets
+    //       * Suppressed on external signal kills
+    //         (`isSignalTermination(result.signal)` with `aborted: false`,
+    //         e.g. SIGTERM from container shutdown, k8s eviction, OOM
+    //         killer, or sibling reaping the process group). node-pty's
+    //         clean-exit signal 0 is normalized to null and does not
+    //         suppress this hint. The service only sets
     //         `aborted` when the AbortSignal we passed was triggered,
     //         so external signals fall through to the non-aborted
     //         branch — same rationale as timeout.
@@ -2836,7 +2839,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shouldAppendLongRunHint =
       longRunThreshold !== null &&
       !result.aborted &&
-      result.signal === null &&
+      !isSignalTermination(result.signal) &&
       elapsedMs >= longRunThreshold;
     // Observability: the hint decision is otherwise invisible. If a
     // user reports "my 65s command didn't get the hint" or "5s command
@@ -2877,7 +2880,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             : wasPromoteRefused
               ? 'Command finished before background-promote could be honoured.'
               : 'Command cancelled by user.';
-        } else if (result.signal) {
+        } else if (isSignalTermination(result.signal)) {
           returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
         } else if (result.error) {
           returnDisplayMessage = `Command failed: ${getErrorMessage(
@@ -3016,7 +3019,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : isShellExitError(this.params.command, result.exitCode)
+        : (!result.aborted && isSignalTermination(result.signal)) ||
+            isShellExitError(this.params.command, result.exitCode)
           ? {
               error: {
                 // Schedulers use error.message as the model-facing response.
@@ -3389,21 +3393,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const classifySettle = (
       info: ShellPostPromoteSettleInfo,
     ): { status: 'completed' | 'failed'; failMsg: string | null } => {
-      // Decision table: `error` → fail (spawn-side failure); `exitCode
-      // === 0` → complete; non-zero exitCode → fail; signal-killed
-      // (no exitCode, signal set) → fail with descriptive message;
-      // everything-null → fail with generic message.
+      // Decision table: `error` → fail (spawn-side failure); a non-zero
+      // signal means the process was killed (including node-pty's
+      // `exitCode: 0, signal: N` shape), then `exitCode === 0` → complete;
+      // non-zero exitCode → fail; everything-null → fail with a generic
+      // message.
       if (info.error) return { status: 'failed', failMsg: info.error.message };
+      if (isSignalTermination(info.signal)) {
+        return {
+          status: 'failed',
+          failMsg: `Terminated by signal ${info.signal}`,
+        };
+      }
       if (info.exitCode === 0) return { status: 'completed', failMsg: null };
       if (info.exitCode !== null)
         return {
           status: 'failed',
           failMsg: `Exited with code ${info.exitCode}`,
-        };
-      if (info.signal !== null)
-        return {
-          status: 'failed',
-          failMsg: `Terminated by signal ${info.signal}`,
         };
       // PR-2.5 wave-3: this branch is meant to
       // be unreachable — the service always populates one of
@@ -3426,6 +3432,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       };
     };
     const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
+      // `task_stop` aborts the entry before the child necessarily reports
+      // its signal. Preserve the user-intended `cancelled` state instead of
+      // allowing the later signal settle to overwrite it as `failed`.
+      if (entryAc.signal.aborted) {
+        registry.cancel(shellId, info.endTime);
+        return;
+      }
       const cls = classifySettle(info);
       if (cls.status === 'completed') {
         registry.complete(shellId, info.exitCode as number, info.endTime);
@@ -3715,7 +3728,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           } else if (
             result.error ||
             (result.exitCode !== null && result.exitCode !== 0) ||
-            result.signal !== null
+            isSignalTermination(result.signal)
           ) {
             // Non-zero exit / killed by signal / spawn error all count as failed.
             // Treating them as `completed` would let `/tasks` (and any future
@@ -3723,7 +3736,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // `false` command as a success.
             const reason = result.error
               ? result.error.message
-              : result.signal !== null
+              : isSignalTermination(result.signal)
                 ? `terminated by signal ${result.signal}`
                 : `exited with code ${result.exitCode}`;
             registry.fail(shellId, reason, endTime);

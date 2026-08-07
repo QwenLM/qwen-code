@@ -5370,6 +5370,7 @@ describe('qwen-triage npm cache producer', () => {
       "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
     );
     expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    expect(cacheProducerWorkflow).toContain("options: '--init --user node'");
     for (const jobName of ['verify', 'tmux-testing']) {
       expect(job(jobName)).toContain(
         "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
