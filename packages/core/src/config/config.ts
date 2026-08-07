@@ -8053,6 +8053,32 @@ export class Config {
     }
 
     // Register monitor tool
+    // Omni media-policy tools: always registered when omni is enabled (the
+    // fixed-policy orchestrator must be able to find them), but hidden from
+    // every model-facing surface unless
+    // `omni.processing.policyTools.<name>.modelAccess.enabled` opens them up
+    // (see omni/policy/model-access.ts).
+    if (this.isOmniEnabled()) {
+      await registerLazy(ToolNames.OMNI_DOWNSAMPLE_IMAGE, async () => {
+        const { OmniDownsampleImageTool } = await import(
+          '../omni/policy/tools/downsample-image.js'
+        );
+        return new OmniDownsampleImageTool();
+      });
+      await registerLazy(ToolNames.OMNI_DOWNSCALE_VIDEO, async () => {
+        const { OmniDownscaleVideoTool } = await import(
+          '../omni/policy/tools/downscale-video.js'
+        );
+        return new OmniDownscaleVideoTool(this);
+      });
+      await registerLazy(ToolNames.OMNI_DOWNSAMPLE_AUDIO, async () => {
+        const { OmniDownsampleAudioTool } = await import(
+          '../omni/policy/tools/downsample-audio.js'
+        );
+        return new OmniDownsampleAudioTool(this);
+      });
+    }
+
     await registerLazy(ToolNames.MONITOR, async () => {
       const { MonitorTool } = await import('../tools/monitor.js');
       return new MonitorTool(this);

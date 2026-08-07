@@ -17,6 +17,7 @@ import {
   isFfprobeAvailable,
   probeMediaMetadata,
   resetFfmpegCachesForTests,
+  runFfmpeg,
 } from './ffmpeg.js';
 
 type ExecCallback = (
@@ -341,5 +342,53 @@ describe('probeMediaMetadata per-modality branches', () => {
     }));
     const result = await probeMediaMetadata('/silent.mp4', 'audio');
     expect(result.codec).toBeUndefined();
+  });
+});
+
+describe('runFfmpeg', () => {
+  it('invokes ffmpeg with the given args and resolves code 0 on success', async () => {
+    mockExecResult(() => ({ stderr: 'frame= 100' }));
+    await expect(
+      runFfmpeg(['-y', '-i', '/in.mov', '/out.mp4']),
+    ).resolves.toEqual({
+      code: 0,
+      stderr: 'frame= 100',
+    });
+    const [command, args, options] = execFileMock.mock.calls[0];
+    expect(command).toBe('ffmpeg');
+    expect(args).toEqual(['-y', '-i', '/in.mov', '/out.mp4']);
+    expect(options).toMatchObject({ maxBuffer: 16 * 1024 * 1024 });
+    expect(options).not.toHaveProperty('timeout');
+  });
+
+  it('threads timeoutMs and signal into execFile options', async () => {
+    mockExecResult(() => ({}));
+    const signal = new AbortController().signal;
+    await runFfmpeg(['-version'], { signal, timeoutMs: 120_000 });
+    const options = execFileMock.mock.calls[0][2];
+    expect(options).toMatchObject({ timeout: 120_000, signal });
+  });
+
+  it('never rejects: a failing run resolves with the exit code and stderr', async () => {
+    mockExecResult(() => ({
+      error: Object.assign(new Error('exit 187'), { code: 187 }),
+      stderr: 'Conversion failed!',
+    }));
+    await expect(runFfmpeg(['-i', '/in.mov'])).resolves.toEqual({
+      code: 187,
+      stderr: 'Conversion failed!',
+    });
+  });
+
+  it('maps a non-numeric error code (e.g. ENOENT/abort kill) to 1', async () => {
+    mockExecResult(() => ({
+      error: Object.assign(new Error('spawn ffmpeg ENOENT'), {
+        code: 'ENOENT',
+      }),
+    }));
+    await expect(runFfmpeg(['-version'])).resolves.toEqual({
+      code: 1,
+      stderr: '',
+    });
   });
 });

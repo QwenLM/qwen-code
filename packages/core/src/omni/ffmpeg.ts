@@ -121,6 +121,35 @@ export async function assertOmniRuntimeDependencies(): Promise<void> {
   );
 }
 
+/** Outcome of one ffmpeg run (see {@link runFfmpeg}). */
+export interface FfmpegRunResult {
+  /** Process exit code (non-zero on failure, including timeout kill). */
+  code: number;
+  /** Captured stderr (ffmpeg writes its diagnostics there). */
+  stderr: string;
+}
+
+/**
+ * Run ffmpeg with the given arguments. Never rejects — callers branch on
+ * the exit code, and MUST check `signal?.aborted` explicitly afterwards
+ * (an aborted run also surfaces as a non-zero code, but the two need
+ * different error messages). `timeoutMs` kills the process when exceeded,
+ * which likewise surfaces as a non-zero exit code.
+ */
+export async function runFfmpeg(
+  args: string[],
+  options?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<FfmpegRunResult> {
+  const { code, stderr } = await execCommand('ffmpeg', args, {
+    // Transcodes are long-running; stderr carries progress lines, so give
+    // it more headroom than the probe calls.
+    maxBuffer: 16 * 1024 * 1024,
+    ...(options?.timeoutMs !== undefined && { timeout: options.timeoutMs }),
+    ...(options?.signal && { signal: options.signal }),
+  });
+  return { code, stderr };
+}
+
 /** Media metadata extracted via ffprobe (fields populated per modality). */
 export interface MediaProbeResult {
   /** Container/format name reported by ffprobe (e.g. "mov,mp4,m4a,..."). */
