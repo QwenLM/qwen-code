@@ -40,6 +40,7 @@ import {
 } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { isDisclosureText } from '../../omni/disclosure.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
@@ -668,6 +669,11 @@ function processContent(
         ) {
           const mediaParts: OpenAIContentPart[] = [];
           const textParts: OpenAI.Chat.ChatCompletionContentPartText[] = [];
+          // Track the previous part so an omni media-degradation disclosure
+          // (emitted immediately before its media part) moves WITH the media
+          // into the follow-up user message instead of being stranded in the
+          // text-only tool message, where the model could not attribute it.
+          let prev: OpenAIContentPart | undefined;
           for (const cp of toolMessage.content as OpenAIContentPart[]) {
             if (
               cp &&
@@ -676,10 +682,17 @@ function processContent(
                 cp.type === 'video_url' ||
                 cp.type === 'file')
             ) {
+              if (prev?.type === 'text' && isDisclosureText(prev.text)) {
+                textParts.pop();
+                mediaParts.push(prev);
+              }
               mediaParts.push(cp);
             } else if (cp && cp.type === 'text') {
               textParts.push(cp);
             }
+            // Consecutive media parts after one disclosure must not each
+            // claim it: only the part directly following the text does.
+            prev = cp;
           }
           if (mediaParts.length > 0) {
             const textOnly = textParts.map((p) => p.text).join('\n');

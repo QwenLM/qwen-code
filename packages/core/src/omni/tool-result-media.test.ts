@@ -233,6 +233,86 @@ describe('processToolResultOmniMedia', () => {
     expect(deliverMock).not.toHaveBeenCalled();
   });
 
+  it('emits the degradation disclosure text immediately before the fileData part', async () => {
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/degraded',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      disclosure: 'downsampled to 1568px',
+      degraded: true,
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0]!.text).toBe(
+      '【媒体降质】tool-media.image：downsampled to 1568px',
+    );
+    expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/degraded');
+    // The pipeline was told this media came from a tool (policy origins).
+    expect(deliverMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.anything(),
+      expect.objectContaining({
+        origin: 'tool',
+        displayName: 'tool-media.image',
+        expectedModality: 'image',
+      }),
+    );
+  });
+
+  it('expands a disclosed delivery inside functionResponse.parts', async () => {
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/degraded',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      disclosure: 'downsampled to 1568px',
+      degraded: true,
+    });
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call_1',
+          name: 'Read',
+          response: { output: 'ok' },
+          parts: [
+            { text: 'caption' },
+            inlinePart('image/png', PNG_BYTES),
+          ] as Part[],
+        },
+      } as Part,
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    const nested = result[0]!.functionResponse?.parts as Part[];
+    expect(nested).toHaveLength(3);
+    expect(nested[0]!.text).toBe('caption');
+    expect(nested[1]!.text).toBe(
+      '【媒体降质】tool-media.image：downsampled to 1568px',
+    );
+    expect(nested[2]!.fileData?.fileUri).toBe('oss://bucket/degraded');
+  });
+
   it('converts media nested inside functionResponse.parts (the production funnel shape)', async () => {
     // Both physical funnels deliver tool-result media wrapped by
     // convertToFunctionResponse as {functionResponse: {…, parts:

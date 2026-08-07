@@ -11,6 +11,7 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isOmniDeliveryActive, processMediaForOmniDelivery } from './index.js';
+import { formatDisclosureText } from './disclosure.js';
 import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore } from './storage.js';
 import { sniffMediaType } from './recognition.js';
@@ -61,11 +62,15 @@ export async function processToolResultOmniMedia(
   let uploadsRemaining = MAX_UPLOADS_PER_TOOL_RESULT;
   let uploadBytesRemaining = MAX_UPLOAD_BYTES_PER_TOOL_RESULT;
 
-  const convertPart = async (part: Part): Promise<Part> => {
+  /** Returns the replacement Parts for one Part: `[part]` (unchanged),
+   * `[fileData]`, or `[disclosureText, fileData]` when a fixed policy
+   * degraded the media — the disclosure must sit IMMEDIATELY before its
+   * media part (decision D8) so converters can move the pair together. */
+  const convertPart = async (part: Part): Promise<Part[]> => {
     const inline = part.inlineData;
-    if (!inline?.data || !inline.mimeType) return part;
+    if (!inline?.data || !inline.mimeType) return [part];
     const top = inline.mimeType.split('/')[0];
-    if (top !== 'image' && top !== 'audio' && top !== 'video') return part;
+    if (top !== 'image' && top !== 'audio' && top !== 'video') return [part];
 
     // Sniff the decoded bytes before touching disk — non-media or
     // unsupported containers stay inline untouched. The SNIFFED modality
@@ -74,13 +79,13 @@ export async function processToolResultOmniMedia(
     // config on the strength of its declared MIME type.
     const bytes = Buffer.from(inline.data, 'base64');
     const sniffed = sniffMediaType(bytes.subarray(0, 4096));
-    if (!sniffed) return part;
-    if (!modalities[sniffed.modality]) return part;
+    if (!sniffed) return [part];
+    if (!modalities[sniffed.modality]) return [part];
     if (uploadsRemaining <= 0 || bytes.length > uploadBytesRemaining) {
       debugLogger.debug(
         `tool-result media budget exhausted; keeping part inline (${bytes.length} bytes)`,
       );
-      return part;
+      return [part];
     }
 
     // Everything from staging-dir setup onward sits inside the try: mkdir
@@ -97,20 +102,29 @@ export async function processToolResultOmniMedia(
     try {
       await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
       await fs.writeFile(tempPath, bytes, { mode: 0o600 });
+      const displayName = inline.displayName ?? `tool-media.${top}`;
       const delivery = await processMediaForOmniDelivery(tempPath, config, {
         expectedModality: sniffed.modality,
         signal,
+        displayName,
+        origin: 'tool',
       });
       changed = true;
       uploadsRemaining--;
       uploadBytesRemaining -= bytes.length;
-      return {
+      const fileDataPart: Part = {
         fileData: {
           fileUri: delivery.fileUri,
           mimeType: delivery.mimeType,
-          displayName: inline.displayName ?? `tool-media.${top}`,
+          displayName,
         },
       };
+      return delivery.disclosure
+        ? [
+            { text: formatDisclosureText(displayName, delivery.disclosure) },
+            fileDataPart,
+          ]
+        : [fileDataPart];
     } catch (err) {
       if (signal.aborted) throw err;
       if (err instanceof OmniTransportGuardError) {
@@ -121,16 +135,18 @@ export async function processToolResultOmniMedia(
         // rationale ("produced locally, already in memory") covers only
         // failures of the *transfer*.
         changed = true;
-        return {
-          text: `[Tool media part withheld by the omni transport guard: ${err.message}]`,
-        };
+        return [
+          {
+            text: `[Tool media part withheld by the omni transport guard: ${err.message}]`,
+          },
+        ];
       }
       debugLogger.debug(
         `tool-result media upload failed, keeping inline: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      return part;
+      return [part];
     } finally {
       await fs.rm(tempPath, { force: true }).catch(() => {});
     }
@@ -144,8 +160,10 @@ export async function processToolResultOmniMedia(
       let nestedChanged = false;
       for (const nestedPart of nested as Part[]) {
         const converted = await convertPart(nestedPart);
-        if (converted !== nestedPart) nestedChanged = true;
-        convertedNested.push(converted);
+        if (converted.length !== 1 || converted[0] !== nestedPart) {
+          nestedChanged = true;
+        }
+        convertedNested.push(...converted);
       }
       if (nestedChanged) {
         result.push({
@@ -161,7 +179,7 @@ export async function processToolResultOmniMedia(
       }
       continue;
     }
-    result.push(await convertPart(part));
+    result.push(...(await convertPart(part)));
   }
 
   return changed ? result : responseParts;

@@ -32,6 +32,67 @@ export type {
   FixedPolicyField,
 } from './conditions.js';
 
+import type { FixedPolicyCondition } from './conditions.js';
+import type { OmniModality } from '../recognition.js';
+
+/** Provenance labels a fixed policy can match on: `user` = user-attached
+ * input, `tool` = tool-result media, `policy` = a derivative produced by
+ * another fixed policy. */
+export type FixedPolicyOrigin = 'user' | 'tool' | 'policy';
+
+/**
+ * One fixed policy AFTER config normalization (policy design §8): every
+ * field present, defaults applied, structure validated. The orchestrator
+ * consumes only this shape — raw settings never reach it.
+ */
+export interface NormalizedFixedPolicy {
+  /** Unique id (settings key). Ties run records, staging dirs and the
+   * `fixed_policy` execution origin back to their configuration. */
+  id: string;
+  /** Bigger runs first; ties broken by id (ascending) for determinism. */
+  priority: number;
+  /** Modalities the policy applies to. */
+  mediaTypes: OmniModality[];
+  /** Resource provenances the policy applies to. */
+  origins: FixedPolicyOrigin[];
+  /** Optional condition; absent means "always applies". */
+  when?: FixedPolicyCondition;
+  /** What to do when `when` cannot be decided (default: skip). */
+  onConditionUnavailable: 'skip' | 'run';
+  /** Media-policy tool the policy invokes. */
+  toolName: string;
+  /** Fixed tool arguments (io params are injected per invocation). */
+  arguments: Record<string, unknown>;
+  /** Max executions of THIS policy along one derivation chain. */
+  maxRunsPerLineage: number;
+  /** Failure behavior: keep the source in the delivery set and move on,
+   * or abort the whole media delivery. */
+  onFailure: 'continue' | 'abort';
+  output: {
+    /** Whether derivatives re-enter policy matching. */
+    reprocessMedia: boolean;
+    /** Whether the source stays in the delivery set alongside the
+     * derivatives (`keep`) or is replaced by them (`omit`). */
+    source: 'keep' | 'omit';
+  };
+  /** Pipeline stage the policy runs in. Transport-guard policies fail
+   * closed regardless of `onFailure`. */
+  stage: 'preprocessing' | 'transport_guard';
+}
+
+/** Normalized `omni.processing` view the pipeline consumes. */
+export interface NormalizedOmniProcessingConfig {
+  fixedPolicies: NormalizedFixedPolicy[];
+  transportGuardPolicies: NormalizedFixedPolicy[];
+}
+
+/** Structural Config view for the processing config accessor (optional so
+ * stub configs and embedders without omni settings keep working; the real
+ * accessor lands with config normalization). */
+export interface OmniProcessingConfigView {
+  getOmniProcessingConfig?: () => NormalizedOmniProcessingConfig | undefined;
+}
+
 /**
  * Raw (pre-normalization) shape of one
  * `omni.processing.policyTools.<toolName>` settings entry. Full semantic
