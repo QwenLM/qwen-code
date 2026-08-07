@@ -231,6 +231,15 @@ describe('assign-issue-owner: apply boundary', () => {
     assert.doesNotMatch(log, /issue edit/);
     assert.match(stdout, /skipped — issue already has an assignee/);
   });
+
+  it('re-checks area labels immediately before assigning', () => {
+    const { log, stdout } = runAssign(
+      false,
+      '{"state":"OPEN","labels":[{"name":"category/ui"},{"name":"need-discussion"}],"assignees":[]}',
+    );
+    assert.doesNotMatch(log, /issue edit/);
+    assert.match(stdout, /skipped — issue labels changed/);
+  });
 });
 
 const doc = parse(
