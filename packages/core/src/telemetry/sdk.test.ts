@@ -190,6 +190,46 @@ describe('Telemetry SDK', () => {
       expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
     });
 
+    it('ignores external exporter selectors while starting explicit exporters', async () => {
+      const exporterEnv = {
+        OTEL_TRACES_EXPORTER: 'console',
+        OTEL_LOGS_EXPORTER: 'none',
+        OTEL_METRICS_EXPORTER: 'otlp',
+      } as const;
+      const previousValues = Object.fromEntries(
+        Object.keys(exporterEnv).map((name) => [name, process.env[name]]),
+      );
+      Object.assign(process.env, exporterEnv);
+      expect(isTelemetrySdkInitialized()).toBe(false);
+      let startCalled = false;
+
+      vi.mocked(NodeSDK.prototype.start).mockImplementationOnce(() => {
+        startCalled = true;
+        for (const name of Object.keys(exporterEnv)) {
+          expect(process.env[name]).toBeUndefined();
+        }
+      });
+
+      try {
+        await initializeTelemetry(mockConfig);
+        expect(startCalled).toBe(true);
+        for (const name of Object.keys(exporterEnv)) {
+          expect(process.env[name]).toBe(
+            exporterEnv[name as keyof typeof exporterEnv],
+          );
+        }
+      } finally {
+        for (const name of Object.keys(exporterEnv)) {
+          const previousValue = previousValues[name];
+          if (previousValue === undefined) {
+            delete process.env[name];
+          } else {
+            process.env[name] = previousValue;
+          }
+        }
+      }
+    });
+
     it('clears the in-flight promise so a failed init can be retried', async () => {
       vi.mocked(NodeSDK.prototype.start).mockImplementationOnce(() => {
         throw new Error('start failed');
