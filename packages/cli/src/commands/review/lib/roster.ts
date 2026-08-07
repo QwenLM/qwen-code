@@ -24,7 +24,8 @@
 // Nothing here is supplied by the caller. A roster the caller could shrink is a
 // roster that gets shrunk.
 
-import type { RoleId } from './agent-briefs.js';
+import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
+import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
 
 /**
@@ -72,6 +73,7 @@ export interface RosterPlan {
    * recomputation then all read the same value and cannot disagree.
    */
   effort?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -273,5 +275,47 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     }
   }
 
+  const repositoryContext = repositoryContextOf(plan);
+  for (const role of repositoryContext?.requiredAgents ?? []) {
+    if (!contextRoleRunsInThisReview(role, plan, mode)) continue;
+    if (!out.some((agent) => agent.role === role && agent.file === undefined)) {
+      add(role);
+    }
+  }
+
   return out;
+}
+
+/**
+ * A repository context may REQUIRE an agent this review's policy already runs;
+ * it may not override the policy. The effort gate, the topology split, and the
+ * mode are cost and capability decisions the roster owns — a manifest naming a
+ * role they exclude would otherwise silently inflate a medium review with the
+ * adversarial personas, re-add whole-diff walkers to a chunked 3B fan-out, or
+ * demand a tree-grepping tracer from a review that has no tree.
+ */
+function contextRoleRunsInThisReview(
+  role: RepositoryContextRoleId,
+  plan: RosterPlan,
+  mode: ReviewMode,
+): boolean {
+  const fanOut = isTerritoryFanOut(plan);
+  switch (role) {
+    case '6a':
+    case '6b':
+    case '6c':
+      return !fanOut && plan.effort !== 'medium';
+    case 'test-matrix':
+      return fanOut;
+    case '1c':
+      return mode !== 'diff-only';
+    case '1b':
+      // Both topologies run the removed-behavior audit; whether it has work is
+      // the diff's business (hasDeletions), not the policy's.
+      return true;
+    default:
+      // Whole-diff dimension walkers exist only in Step 3A; a 3B chunk agent
+      // already owns every dimension for its own lines.
+      return !fanOut;
+  }
 }

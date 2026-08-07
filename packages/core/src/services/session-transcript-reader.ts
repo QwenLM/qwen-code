@@ -28,6 +28,16 @@ export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
+// Hard source-byte ceiling for one backward page, counting everything the
+// turn-alignment and pair extensions add above the soft `maxBytes`
+// selection budget. It is a backstop, not the only bound: each expansion is
+// also capped at a bounded multiple of the caller's `maxBytes`. The
+// workspace route caps serialized responses at twice this value, leaving
+// headroom for the envelope; a single aggregated record can still exceed
+// both caps (the always-take-one-record rule admits it so pagination
+// cannot dead-end), in which case that anchor reports
+// transcript_page_too_large.
+export const SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES = 16 * 1024 * 1024;
 
 export class InvalidSessionTranscriptCursorError extends Error {
   constructor(message = 'Invalid transcript cursor') {
@@ -168,6 +178,11 @@ const indexCache = new Map<string, CacheEntry>();
 // who can already read the key file next to the transcripts it signs.
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
+let expandedPageBytesForTest: number | undefined;
+
+function getExpandedPageBytes(): number {
+  return expandedPageBytesForTest ?? SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
+}
 
 function makeSessionTranscriptNotFoundError(
   sessionId: string,
@@ -480,17 +495,139 @@ function selectPageUuids(
   return selected;
 }
 
-function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
-  const entry = index.byUuid.get(uuid);
-  return entry?.type === 'user' && entry.subtype !== 'mid_turn_user_message';
+// User-role records the turn loop persists mid-turn. Replay renders them
+// as inline messages, not turn boundaries (see projectUserRecord in
+// transcript-replay), so turn alignment and page starts must pass over
+// them. realtime_message is deliberately absent: a realtime user record is
+// a genuine user turn start even though it is not a page start (see
+// isReplayPageStart).
+const REPLAY_MID_TURN_USER_SUBTYPES: ReadonlySet<string> = new Set([
+  'goal_runtime',
+  'notification',
+  'cron',
+  'mid_turn_user_message',
+] satisfies ReadonlyArray<NonNullable<ChatRecord['subtype']>>);
+
+export function isReplayTurnStartType(
+  type: ChatRecord['type'] | undefined,
+  subtype: string | undefined,
+): boolean {
+  return (
+    type === 'user' &&
+    (subtype === undefined || !REPLAY_MID_TURN_USER_SUBTYPES.has(subtype))
+  );
 }
 
+function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
+  const entry = index.byUuid.get(uuid);
+  return isReplayTurnStartType(entry?.type, entry?.subtype);
+}
+
+// A backward page can safely start at a replay turn start or at the
+// assistant record owning any following tool results. The turn loop
+// persists one assistant record per model response and records each tool
+// run's results as one contiguous batch before the next assistant record,
+// so the nearest matching assistant below a tool_result run owns it.
+// Realtime conversation records are the exception: they interleave at
+// wall-clock time and own no tool results, so the walk must pass through
+// them instead of splitting the pair.
+function isReplayPageStart(index: TranscriptIndex, uuid: string): boolean {
+  const entry = index.byUuid.get(uuid);
+  return (
+    entry?.subtype !== 'realtime_message' &&
+    (entry?.type === 'assistant' ||
+      isReplayTurnStartType(entry?.type, entry?.subtype))
+  );
+}
+
+// Walk backward from `from` toward the nearest item matching `isBoundary`,
+// never below `floor`. The returned index is a boundary only if one exists
+// within the bound; otherwise it is `floor` itself, so callers must re-check
+// the result. Shared by the uuid-indexed reader and the record-array
+// selectors (ACP bulk replay) so the walk/floor/accept policy lives in one
+// place.
+export function findBoundaryAtOrBefore<T>(
+  items: ArrayLike<T>,
+  from: number,
+  floor: number,
+  isBoundary: (item: T) => boolean,
+): number {
+  let candidate = from;
+  while (candidate > floor && !isBoundary(items[candidate]!)) {
+    candidate--;
+  }
+  return candidate;
+}
+
+function findReplayBoundaryAtOrBefore(
+  index: TranscriptIndex,
+  from: number,
+  floor: number,
+  isBoundary: (index: TranscriptIndex, uuid: string) => boolean,
+): number {
+  return findBoundaryAtOrBefore(index.activeUuids, from, floor, (uuid) =>
+    isBoundary(index, uuid),
+  );
+}
+
+function backwardPageBytesFit(
+  index: TranscriptIndex,
+  start: number,
+  end: number,
+  budget: number,
+): boolean {
+  let total = 0;
+  for (let i = start; i < end; i++) {
+    total += recordSegmentBytes(index, index.activeUuids[i]!);
+    if (total > budget) return false;
+  }
+  return true;
+}
+
+// True when the first tool_result in [start, end) lost its owning call
+// below `start`, i.e. the selection begins mid-pair. Only the first result
+// needs checking: later results belong to calls at or after it, all inside
+// the page once the first pair is whole.
+function selectionOrphansToolResult(
+  index: TranscriptIndex,
+  start: number,
+  end: number,
+): boolean {
+  for (let i = start; i < end; i++) {
+    if (index.byUuid.get(index.activeUuids[i]!)?.type !== 'tool_result') {
+      continue;
+    }
+    for (let owner = i - 1; owner >= start; owner--) {
+      if (isReplayPageStart(index, index.activeUuids[owner]!)) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+// Selects one backward page. Worst case the page holds 3 * limit records:
+// the requested window, one turn-alignment window, and one pair-extension
+// window. Each expansion is additionally capped at one extra byte budget —
+// a bounded multiple of the soft `maxBytes` budget, clamped to the hard
+// page ceiling — so chained pages stay bounded relative to the caller's
+// budget instead of jumping straight to the ceiling.
 function selectBackwardPageUuids(
   index: TranscriptIndex,
+  sessionId: string,
   position: number,
   limit: number,
   maxBytes: number | undefined,
 ): { uuids: string[]; nextPosition: number } {
+  if (position === 0) return { uuids: [], nextPosition: 0 };
+  // One extra byte budget per expansion: enough to admit a small
+  // over-budget turn or absorb a result batch whole, but bounded relative
+  // to the caller's soft budget so chained pages cannot balloon to the
+  // absolute ceiling.
+  const expansionByteBudget =
+    maxBytes === undefined
+      ? getExpandedPageBytes()
+      : Math.min(2 * maxBytes, getExpandedPageBytes());
+
   let start = Math.max(0, position - limit);
   for (let i = start; i < position; i++) {
     if (isReplayTurnStart(index, index.activeUuids[i]!)) {
@@ -498,8 +635,23 @@ function selectBackwardPageUuids(
       break;
     }
   }
-  while (start > 0 && !isReplayTurnStart(index, index.activeUuids[start]!)) {
-    start--;
+  // Turn-boundary alignment may expand the page past the requested window,
+  // but never without bound: a transcript dominated by a single long turn
+  // (e.g. one in-flight prompt with thousands of records) would otherwise
+  // turn EVERY backward page into the whole transcript — ignoring `limit`
+  // and making anchor-based pagination dead-end at the file head. Allow at
+  // most one extra window (`limit` records) of expansion, and only when it
+  // reaches a real boundary: otherwise keep the requested window so pages
+  // inside a long turn stay `limit` records, not `2 * limit`.
+  const expansionFloor = Math.max(0, position - 2 * limit);
+  const expandedStart = findReplayBoundaryAtOrBefore(
+    index,
+    start,
+    expansionFloor,
+    isReplayTurnStart,
+  );
+  if (isReplayTurnStart(index, index.activeUuids[expandedStart]!)) {
+    start = expandedStart;
   }
 
   let selectedStart = position;
@@ -507,8 +659,8 @@ function selectBackwardPageUuids(
   for (let i = position - 1; i >= start; i--) {
     const uuid = index.activeUuids[i]!;
     const bytes = recordSegmentBytes(index, uuid);
-    // A turn cannot be split across pages; always take at least one record
-    // so an oversized turn cannot dead-end backward pagination.
+    // Always take at least one record so backward pagination cannot
+    // dead-end.
     if (
       selectedStart < position &&
       maxBytes !== undefined &&
@@ -520,6 +672,16 @@ function selectBackwardPageUuids(
     selectedBytes += bytes;
   }
 
+  // Turn-alignment expansion admits a whole turn even when it overshoots
+  // the soft `maxBytes` budget, but never past the expansion byte budget:
+  // a page the workspace route cannot serialize would fail at its response
+  // cap and dead-end backward pagination at this anchor on every retry.
+  const logTurnExpansionSkipped = (reason: string): void => {
+    debugLogger.debug(
+      `backward turn expansion skipped session=${sessionId} ` +
+        `start=${index.activeUuids[selectedStart]!} reason=${reason}`,
+    );
+  };
   let alignedToReplayBoundary = false;
   for (let i = selectedStart; i < position; i++) {
     if (isReplayTurnStart(index, index.activeUuids[i]!)) {
@@ -529,22 +691,102 @@ function selectBackwardPageUuids(
     }
   }
   if (alignedToReplayBoundary && selectedStart > 0) {
-    let previousTurnStart = selectedStart - 1;
-    while (
-      previousTurnStart >= 0 &&
-      !isReplayTurnStart(index, index.activeUuids[previousTurnStart]!)
-    ) {
-      previousTurnStart--;
-    }
+    const previousTurnStart = findReplayBoundaryAtOrBefore(
+      index,
+      selectedStart - 1,
+      -1,
+      isReplayTurnStart,
+    );
     if (previousTurnStart < 0) {
-      selectedStart = 0;
+      // No earlier turn start anywhere: the file head is the only boundary
+      // below. Absorb the leading prefix only when it lies inside the same
+      // record and byte budgets as every other expansion, so a long
+      // synthetic prefix cannot balloon the page past the 3 * limit worst
+      // case.
+      if (
+        expansionFloor === 0 &&
+        backwardPageBytesFit(index, 0, position, expansionByteBudget)
+      ) {
+        selectedStart = 0;
+      } else {
+        logTurnExpansionSkipped(
+          expansionFloor === 0 ? 'byte-budget' : 'record-budget',
+        );
+      }
     }
   } else if (!alignedToReplayBoundary) {
-    while (
-      selectedStart > 0 &&
-      !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
+    // Expansion only pays off when it reaches a turn boundary; otherwise
+    // keep the limit/maxBytes-respecting selection.
+    const candidate = findReplayBoundaryAtOrBefore(
+      index,
+      selectedStart,
+      expansionFloor,
+      isReplayTurnStart,
+    );
+    if (isReplayTurnStart(index, index.activeUuids[candidate]!)) {
+      if (
+        backwardPageBytesFit(index, candidate, position, expansionByteBudget)
+      ) {
+        selectedStart = candidate;
+      } else {
+        logTurnExpansionSkipped('byte-budget');
+      }
+    }
+  }
+
+  // Backward replay finalizes each page independently, so a page boundary
+  // between a tool call and its persisted result would render the completed
+  // call as failed ("result missing") on the older page and the result as an
+  // orphan block on the newer one. When the selection starts mid-pair,
+  // extend the page down to the owning assistant record (or turn boundary)
+  // so the pair stays on a single page. The extension runs only when a
+  // tool_result in the selection actually lost its call: system records and
+  // mid-turn user records are not page starts either, but walking further
+  // down gains nothing when there is no pair to keep together. The walk is
+  // bounded to one window below the selection: one assistant record can own
+  // an arbitrarily long contiguous tool_result run (a persisted parallel
+  // batch), and an uncapped walk would balloon the page far past `limit` —
+  // reintroducing the unbounded growth this function exists to cap. The
+  // budget covers only the records the extension adds beyond the owner —
+  // the selection above already respected `maxBytes`, and the owner itself
+  // is exempt the way the selection loop exempts its forced first record,
+  // so a single oversized owner (which the next page would force-take
+  // anyway) cannot fail the check by construction and split the pair.
+  // Records between the owner and the selection — a result batch — still
+  // count against the budget; an extension that would absorb more than the
+  // budget keeps the bounded selection, accepting a mid-pair boundary in
+  // that edge. The skip is logged so such a report stays diagnosable
+  // without re-deriving the budget arithmetic.
+  if (
+    selectedStart > 0 &&
+    selectionOrphansToolResult(index, selectedStart, position)
+  ) {
+    const pairFloor = Math.max(0, selectedStart - limit);
+    const pairStart = findReplayBoundaryAtOrBefore(
+      index,
+      selectedStart,
+      pairFloor,
+      isReplayPageStart,
+    );
+    if (!isReplayPageStart(index, index.activeUuids[pairStart]!)) {
+      debugLogger.debug(
+        `backward pair extension skipped session=${sessionId} ` +
+          `start=${index.activeUuids[selectedStart]!} reason=record-budget`,
+      );
+    } else if (
+      !backwardPageBytesFit(
+        index,
+        pairStart + 1,
+        selectedStart,
+        expansionByteBudget,
+      )
     ) {
-      selectedStart--;
+      debugLogger.debug(
+        `backward pair extension skipped session=${sessionId} ` +
+          `start=${index.activeUuids[selectedStart]!} reason=byte-budget`,
+      );
+    } else {
+      selectedStart = pairStart;
     }
   }
 
@@ -558,6 +800,23 @@ function fileIdentityFromStats(stats: fs.Stats): SessionTranscriptFileIdentity {
   return { dev: stats.dev, ino: stats.ino };
 }
 
+// `ino: 0` (FAT/exFAT, some SMB mounts) is not proof that two stats describe
+// the same file, but it is not treated as unverifiable here the way
+// `FileReadCache` and the writer lease treat it. Those two compare identities
+// that can belong to *different* files — a global `dev:ino` cache key, and an
+// open handle against the path it was opened from — so a zero-inode match
+// there is a false positive with real consequences.
+//
+// This reader only ever compares the same session's transcript path against
+// itself across time, and the cursor carries a content-derived proof
+// (`leafUuid` + `snapshotSize` + `lastUpdated`, all re-checked below) that
+// already detects the replacement an inode comparison would catch. Refusing
+// zero here bought nothing and broke pagination outright: `readPage` hands
+// back a cursor built from the current identity, so on such a filesystem
+// every continuation rejected the cursor the reader itself had just issued.
+//
+// Comparing the raw values still catches a zero/non-zero transition, which
+// does mean the file changed.
 function sameFileIdentity(
   a: SessionTranscriptFileIdentity,
   b: SessionTranscriptFileIdentity,
@@ -1107,7 +1366,7 @@ export class SessionTranscriptReader {
     }
     const backwardPage =
       direction === 'backward'
-        ? selectBackwardPageUuids(index, position, limit, maxBytes)
+        ? selectBackwardPageUuids(index, sessionId, position, limit, maxBytes)
         : undefined;
     const pageUuids =
       backwardPage?.uuids ?? selectPageUuids(index, position, limit, maxBytes);
@@ -1167,6 +1426,7 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
+  expandedPageBytesForTest = undefined;
 }
 
 export function setSessionTranscriptIndexCacheMaxBytesForTest(
@@ -1174,6 +1434,12 @@ export function setSessionTranscriptIndexCacheMaxBytesForTest(
 ): void {
   indexCacheMaxBytesForTest = maxBytes;
   pruneCache();
+}
+
+export function setSessionTranscriptExpandedPageBytesForTest(
+  maxBytes: number,
+): void {
+  expandedPageBytesForTest = maxBytes;
 }
 
 export function getSessionTranscriptIndexCacheStatsForTest(): {
