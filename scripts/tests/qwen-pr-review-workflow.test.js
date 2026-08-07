@@ -1239,20 +1239,20 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
   // abort on a small turn), the idle window covers a stalled generation
   // (the 17-agent fan-out on a ~1.27M-token context), and the lifetime cap
   // must exceed the idle window or a single legitimate gap trips the
-  // drip-feed guard first.
+  // drip-feed guard first. All three ride step env on 'Run review':
+  // QWEN_CODE_API_TIMEOUT_MS outranks settings in model-config resolution
+  // (so no settings.json write is needed) and step env outranks any stray
+  // runner-level env of the same name.
   const doc = parse(workflow);
-  const steps = doc.jobs['review-pr'].steps;
+  const env = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  ).env;
 
-  it('writes the SDK request timeout into the per-run settings.json', () => {
-    const setup = steps.find((s) =>
-      (s.run ?? '').includes('Fresh per-run agent home'),
-    );
-    expect(setup.run).toContain('"generationConfig": { "timeout": 600000 }');
-    expect(setup.run).toContain('> "$QWEN_HOME/settings.json"');
+  it('raises the SDK request timeout via QWEN_CODE_API_TIMEOUT_MS', () => {
+    expect(env.QWEN_CODE_API_TIMEOUT_MS).toBe('600000');
   });
 
   it('raises the stream guards with lifetime strictly above idle', () => {
-    const env = steps.find((s) => s.name === 'Run review').env;
     const idle = Number(env.QWEN_STREAM_IDLE_TIMEOUT_MS);
     const lifetime = Number(env.QWEN_STREAM_MAX_LIFETIME_MS);
     expect(idle).toBe(600000);
