@@ -38,6 +38,20 @@ To start Qwen Code in raw mode by default, set `ui.renderMode`:
 Accepted values are `"render"` and `"raw"`. The shortcut only changes the
 current session view; it does not rewrite your settings file.
 
+## Assistant and Tool Images
+
+The interactive TUI displays image parts returned in assistant responses and successful tool results directly in the conversation. Text and images keep their original response order, and this behavior is independent of the Markdown `render` and `raw` modes. Other output surfaces, including headless, ACP, daemon/Web Shell, channels, and IDE integrations, remain text-only.
+
+| Environment                                      | Image display                                                                           |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Direct Kitty or Ghostty TTY, without tmux or SSH | Native terminal image placement                                                         |
+| Other terminals with `chafa` installed           | 256-color ANSI preview, including in iTerm2, Warp, tmux, and SSH sessions               |
+| No compatible renderer, or screen-reader mode    | Deterministic text such as `[image: 1024x768 png]` instead of a terminal image sequence |
+
+Pixel previews currently require valid PNG data. Other image formats and invalid PNGs remain visible as text placeholders. Payloads above the 8 MiB image admission limit are dropped before entering TUI history and do not produce a placeholder. Each assistant response or tool row displays at most four images and reports the remainder with a marker such as `[+2 more images]`.
+
+Tool image parts are saved with their results and can be reconstructed after session resume. Assistant images render live but are not currently persisted, so `--continue` and `--resume` restore the assistant text without those images.
+
 ## Mermaid
 
 Fenced `mermaid` code blocks render visually in `render` mode. The TUI uses a
