@@ -468,6 +468,12 @@ export class WorkspaceChannelSettingsStore {
     let crossFieldError: unknown;
     try {
       crossFieldError = plugin.management.validateConfig?.(nextConfig);
+      if (crossFieldError instanceof Promise) {
+        // A non-async validateConfig can still return a rejected Promise; the
+        // backstop below throws without awaiting it, so attach a handler to
+        // keep the rejection from terminating the daemon.
+        void crossFieldError.catch(() => {});
+      }
     } catch (error) {
       throw invalidConfig(
         `Channel validateConfig failed: ${error instanceof Error ? error.message : String(error)}`,

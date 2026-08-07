@@ -399,9 +399,17 @@ interface ChannelConfigFieldDescriptorBase {
 
 export interface ChannelConfigValueFieldDescriptor
   extends ChannelConfigFieldDescriptorBase {
-  kind: Exclude<ChannelConfigFieldKind, 'enum' | 'number' | 'object'>;
+  kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  properties?: never;
+}
+
+export interface ChannelConfigPlainValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'boolean' | 'string-list' | 'record';
+  required?: boolean;
+  envResolvable?: never;
   properties?: never;
 }
 
@@ -409,7 +417,7 @@ export interface ChannelConfigEnumFieldDescriptor
   extends ChannelConfigFieldDescriptorBase {
   kind: 'enum';
   required?: boolean;
-  envResolvable?: boolean;
+  envResolvable?: never;
   options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
@@ -451,6 +459,7 @@ export type ChannelConfigNestedFieldDescriptor =
 
 export type ChannelConfigFieldDescriptor =
   | ChannelConfigValueFieldDescriptor
+  | ChannelConfigPlainValueFieldDescriptor
   | ChannelConfigEnumFieldDescriptor
   | ChannelConfigNumberFieldDescriptor
   | ChannelConfigObjectFieldDescriptor;

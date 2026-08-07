@@ -69,24 +69,49 @@ function assertManagementField(
       `Channel field "${path}" cannot use the reserved key "type".`,
     );
   }
+  if (typeof field.label !== 'string' || field.label.length === 0) {
+    throw new Error(`Channel field "${path}" must declare a string label.`);
+  }
+  if (
+    field.description !== undefined &&
+    typeof field.description !== 'string'
+  ) {
+    throw new Error(
+      `Channel field "${path}" must declare a string description.`,
+    );
+  }
+  if (field.default !== undefined && typeof field.default !== 'string') {
+    throw new Error(`Channel field "${path}" must declare a string default.`);
+  }
   const envResolvable = Boolean(field.envResolvable);
   const required = Boolean(field.required);
   if (field.kind === 'secret' && nested) {
     throw new Error(`Channel field "${path}" cannot declare a nested secret.`);
   }
-  if (envResolvable && nested) {
+  if (
+    envResolvable &&
+    (nested || (field.kind !== 'string' && field.kind !== 'secret'))
+  ) {
     throw new Error(
       `Channel field "${path}" cannot resolve environment references.`,
     );
   }
-  if (
-    field.kind === 'number' &&
-    field.exclusiveMinimum !== undefined &&
-    !Number.isFinite(field.exclusiveMinimum)
-  ) {
-    throw new Error(
-      `Channel field "${path}" must declare a finite exclusiveMinimum.`,
-    );
+  const exclusiveMinimum = (field as { exclusiveMinimum?: unknown })
+    .exclusiveMinimum;
+  if (exclusiveMinimum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare exclusiveMinimum on number fields.`,
+      );
+    }
+    if (
+      typeof exclusiveMinimum !== 'number' ||
+      !Number.isFinite(exclusiveMinimum)
+    ) {
+      throw new Error(
+        `Channel field "${path}" must declare a finite exclusiveMinimum.`,
+      );
+    }
   }
   if (field.kind === 'enum') {
     if (!Array.isArray(field.options) || field.options.length === 0) {
@@ -112,15 +137,18 @@ function assertManagementField(
         `Channel field "${path}" declares duplicate option values.`,
       );
     }
+    if (
+      field.default !== undefined &&
+      !field.options.some((option) => option.value === field.default)
+    ) {
+      throw new Error(
+        `Channel field "${path}" declares a default that is not one of its options.`,
+      );
+    }
   }
   if (field.kind !== 'object') return;
   if (required) {
     throw new Error(`Channel field "${path}" cannot be a required object.`);
-  }
-  if (envResolvable) {
-    throw new Error(
-      `Channel field "${path}" cannot resolve environment references.`,
-    );
   }
   if (!Array.isArray(field.properties)) {
     throw new Error(`Channel field "${path}" must declare a properties array.`);

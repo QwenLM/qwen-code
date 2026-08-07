@@ -357,6 +357,7 @@ export type {
   DaemonChannelConfigFieldKind,
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelConfigValueFieldDescriptor,
+  DaemonChannelConfigPlainValueFieldDescriptor,
   DaemonChannelConfigEnumFieldDescriptor,
   DaemonChannelConfigNumberFieldDescriptor,
   DaemonChannelConfigObjectFieldDescriptor,

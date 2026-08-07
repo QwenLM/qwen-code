@@ -271,6 +271,108 @@ describe('channel registry', () => {
         'Channel field "retries" must declare a finite exclusiveMinimum.',
     },
     {
+      type: 'invalid-exclusive-minimum-on-string',
+      fields: [
+        {
+          key: 'retentionDays',
+          label: 'Retention days',
+          kind: 'string',
+          exclusiveMinimum: 0,
+        },
+      ],
+      message:
+        'Channel field "retentionDays" can only declare exclusiveMinimum on number fields.',
+    },
+    {
+      type: 'invalid-env-resolvable-number',
+      fields: [
+        {
+          key: 'timeout',
+          label: 'Timeout',
+          kind: 'number',
+          envResolvable: true,
+        },
+      ],
+      message: 'Channel field "timeout" cannot resolve environment references.',
+    },
+    {
+      type: 'invalid-env-resolvable-enum',
+      fields: [
+        {
+          key: 'mode',
+          label: 'Mode',
+          kind: 'enum',
+          envResolvable: true,
+          options: [{ value: 'safe', label: 'Safe' }],
+        },
+      ],
+      message: 'Channel field "mode" cannot resolve environment references.',
+    },
+    {
+      type: 'invalid-env-resolvable-boolean',
+      fields: [
+        {
+          key: 'enabled',
+          label: 'Enabled',
+          kind: 'boolean',
+          envResolvable: true,
+        },
+      ],
+      message: 'Channel field "enabled" cannot resolve environment references.',
+    },
+    {
+      type: 'invalid-missing-label',
+      fields: [{ key: 'token', kind: 'string' }],
+      message: 'Channel field "token" must declare a string label.',
+    },
+    {
+      type: 'invalid-object-label',
+      fields: [{ key: 'token', label: { en: 'Token' }, kind: 'secret' }],
+      message: 'Channel field "token" must declare a string label.',
+    },
+    {
+      type: 'invalid-non-string-description',
+      fields: [
+        {
+          key: 'token',
+          label: 'Token',
+          kind: 'string',
+          description: ['rich'],
+        },
+      ],
+      message: 'Channel field "token" must declare a string description.',
+    },
+    {
+      type: 'invalid-non-string-default',
+      fields: [
+        {
+          key: 'mode',
+          label: 'Mode',
+          kind: 'enum',
+          default: 42,
+          options: [{ value: 'safe', label: 'Safe' }],
+        },
+      ],
+      message: 'Channel field "mode" must declare a string default.',
+    },
+    {
+      type: 'invalid-enum-default-not-in-options',
+      fields: [
+        {
+          key: 'mode',
+          label: 'Mode',
+          kind: 'enum',
+          default: 'turbo',
+          options: [
+            { value: 'safe', label: 'Safe' },
+            { value: 'fast', label: 'Fast' },
+          ],
+        },
+      ],
+      message:
+        'Channel field "mode" declares a default that is not one of its options.',
+    },
+    {
       type: 'invalid-object-properties-not-array',
       fields: [
         {

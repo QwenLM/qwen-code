@@ -1132,6 +1132,56 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
   });
 
+  it('does not leak a rejection when validateConfig returns a rejected Promise', async () => {
+    registerPlugin({
+      channelType: 'rejected-promise-validate-config',
+      displayName: 'Rejected promise validate config',
+      management: {
+        fields: [
+          {
+            key: 'clientId',
+            label: 'Client ID',
+            kind: 'string',
+            required: true,
+          },
+        ],
+        validateConfig: () => Promise.reject(new Error('network down')),
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'rejected-promise-validate-config',
+            clientId: 'client-id',
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: 'Channel validateConfig must return a string error message.',
+      });
+      // Give the rejection a tick to surface if it were left unhandled.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('rejects a throwing validateConfig as an invalid config error', async () => {
     registerPlugin({
       channelType: 'throwing-validate-config',

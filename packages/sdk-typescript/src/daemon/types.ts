@@ -3189,9 +3189,17 @@ interface DaemonChannelConfigFieldDescriptorBase {
 
 export interface DaemonChannelConfigValueFieldDescriptor
   extends DaemonChannelConfigFieldDescriptorBase {
-  kind: Exclude<DaemonChannelConfigFieldKind, 'enum' | 'number' | 'object'>;
+  kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigPlainValueFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'boolean' | 'string-list' | 'record';
+  required?: boolean;
+  envResolvable?: never;
   properties?: never;
 }
 
@@ -3199,7 +3207,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   extends DaemonChannelConfigFieldDescriptorBase {
   kind: 'enum';
   required?: boolean;
-  envResolvable?: boolean;
+  envResolvable?: never;
   options: ReadonlyArray<{ value: string; label: string }>;
   properties?: never;
 }
@@ -3244,6 +3252,7 @@ export type DaemonChannelConfigNestedFieldDescriptor =
 
 export type DaemonChannelConfigFieldDescriptor =
   | DaemonChannelConfigValueFieldDescriptor
+  | DaemonChannelConfigPlainValueFieldDescriptor
   | DaemonChannelConfigEnumFieldDescriptor
   | DaemonChannelConfigNumberFieldDescriptor
   | DaemonChannelConfigObjectFieldDescriptor;

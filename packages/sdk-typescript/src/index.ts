@@ -60,6 +60,7 @@ export {
   type DaemonChannelConfigFieldKind,
   type DaemonChannelConfigFieldDescriptor,
   type DaemonChannelConfigValueFieldDescriptor,
+  type DaemonChannelConfigPlainValueFieldDescriptor,
   type DaemonChannelConfigEnumFieldDescriptor,
   type DaemonChannelConfigNumberFieldDescriptor,
   type DaemonChannelConfigObjectFieldDescriptor,

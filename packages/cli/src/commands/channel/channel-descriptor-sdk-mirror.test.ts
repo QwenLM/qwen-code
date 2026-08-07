@@ -78,7 +78,10 @@ function assertDescriptorWireShape(
       assertDescriptorWireShape(property, true);
     }
   } else {
-    if (!nested) {
+    if (
+      !nested &&
+      (descriptor.kind === 'string' || descriptor.kind === 'secret')
+    ) {
       allowedKeys.add('envResolvable');
     }
     if (descriptor.kind === 'number') {

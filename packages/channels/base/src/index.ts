@@ -102,6 +102,7 @@ export type {
   ChannelConfigNestedFieldDescriptor,
   ChannelConfigNumberFieldDescriptor,
   ChannelConfigObjectFieldDescriptor,
+  ChannelConfigPlainValueFieldDescriptor,
   ChannelConfigValueFieldDescriptor,
   ChannelIdentityConfig,
   ChannelManagementDescriptor,
