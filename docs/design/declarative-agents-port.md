@@ -1,3 +1,7 @@
+---
+description: "Port declarative agent definitions to Qwen Code. Review schema boundaries, implementation status, and follow-up fields for agent configuration."
+---
+
 # Declarative Agent Definitions — Port from Claude Code 2.1.168
 
 Internal design document for porting Claude Code's declarative agent (markdown +

@@ -1,3 +1,7 @@
+---
+description: "Implementation plan for Qwen Code auto-compaction threshold redesign, including token estimation, failure handling, and tests."
+---
+
 # Auto-Compaction Threshold Redesign Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

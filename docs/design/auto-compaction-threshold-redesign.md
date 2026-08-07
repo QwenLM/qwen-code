@@ -1,3 +1,7 @@
+---
+description: "Qwen Code auto-compaction threshold redesign. Add warn, auto, and hard token thresholds with safer compression budgeting."
+---
+
 # Auto-Compaction Threshold Redesign
 
 **Status:** Draft · 2026-05-14

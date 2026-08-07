@@ -1,3 +1,7 @@
+---
+description: "Qwen Code subagent trace tree design. Isolate foreground, forked, and background subagent spans for clearer OpenTelemetry traces."
+---
+
 # Subagent Trace Tree Design (P3 Phase 3)
 
 > **GenAI attribute migration:**

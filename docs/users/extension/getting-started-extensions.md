@@ -1,3 +1,7 @@
+---
+description: "Build your first Qwen Code extension. Step-by-step guide to creating custom tools, MCP servers, and slash commands for your workflow."
+---
+
 # Getting Started with Qwen Code Extensions
 
 This guide will walk you through creating your first Qwen Code extension. You'll learn how to set up a new extension, add a custom tool via an MCP server, create a custom command, and provide context to the model with a `QWEN.md` file.

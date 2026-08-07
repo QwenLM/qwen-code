@@ -1,3 +1,7 @@
+---
+description: "Track Qwen Code Followup Suggestions implementation status. See which modules are complete, in progress, or need work across all packages."
+---
+
 # Prompt Suggestion Implementation Status
 
 > Tracks the implementation status of the prompt suggestion (NES) feature across all packages.

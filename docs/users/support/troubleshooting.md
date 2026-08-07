@@ -1,3 +1,7 @@
+---
+description: "Fix common Qwen Code issues. Solutions for auth errors, installation problems, debugging tips, and how to report bugs effectively."
+---
+
 # Troubleshooting
 
 This guide provides solutions to common issues and debugging tips, including topics on:

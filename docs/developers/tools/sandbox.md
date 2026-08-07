@@ -1,3 +1,7 @@
+---
+description: "Customize Qwen Code sandbox environment. Build Docker/Podman containers for secure AI code execution and file modification isolation."
+---
+
 ## Customizing the sandbox environment (Docker/Podman)
 
 ### Currently, the project does not support the use of the BUILD_SANDBOX function after installation through the npm package

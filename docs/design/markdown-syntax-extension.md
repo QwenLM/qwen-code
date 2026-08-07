@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Markdown syntax extension design. Add terminal rendering support for diagrams, tables, task lists, math, and rich Markdown blocks."
+---
+
 # Markdown Syntax Extension Design
 
 ## Context

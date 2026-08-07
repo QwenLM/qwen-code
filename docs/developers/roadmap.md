@@ -1,3 +1,7 @@
+---
+description: "Qwen Code product roadmap. Track development phases, feature priorities, and our journey to match Claude Code's functionality."
+---
+
 # Qwen Code RoadMap
 
 > **Objective**: Catch up with Claude Code's product functionality, continuously refine details, and enhance user experience.

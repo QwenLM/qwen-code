@@ -1,3 +1,7 @@
+---
+description: "Run Qwen Code as a local HTTP daemon with qwen serve so IDEs, web UIs, and scripts can share agent sessions over SSE."
+---
+
 # Daemon mode (`qwen serve`)
 
 Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, CI scripts, custom CLIs) share one agent session over HTTP + Server-Sent Events instead of each spawning their own subprocess.

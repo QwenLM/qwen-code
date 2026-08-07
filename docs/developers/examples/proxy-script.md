@@ -1,3 +1,7 @@
+---
+description: "Review an example Qwen Code sandbox proxy script for controlling outbound HTTPS access inside sandboxed commands."
+---
+
 # Example Proxy Script
 
 The following is an example of a proxy script that can be used with the `QWEN_SANDBOX_PROXY_COMMAND` environment variable. This script only allows `HTTPS` connections to `example.com:443` and declines all other requests.

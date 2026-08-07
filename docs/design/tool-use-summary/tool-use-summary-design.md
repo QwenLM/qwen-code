@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Tool-Use Summary design. Generate git-commit-style labels for parallel tool batches to improve transcript readability."
+---
+
 # Tool-Use Summary Design
 
 > Fast-model labels for parallel tool batches — motivation, competitive analysis with Claude Code, architecture, and the append-only-Static rationale that drove the current full-mode render.

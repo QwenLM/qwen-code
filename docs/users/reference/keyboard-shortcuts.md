@@ -1,3 +1,7 @@
+---
+description: "Master Qwen Code keyboard shortcuts. Complete reference for navigation, editing, history, and session management — code faster in the terminal."
+---
+
 # Qwen Code Keyboard Shortcuts
 
 This document lists the available keyboard shortcuts in Qwen Code.

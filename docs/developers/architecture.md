@@ -1,3 +1,7 @@
+---
+description: "Understand Qwen Code architecture. Explore core components, module structure, and how the AI coding agent works under the hood."
+---
+
 # Qwen Code Architecture Overview
 
 Qwen Code is a monorepo that supports an interactive terminal, headless and
