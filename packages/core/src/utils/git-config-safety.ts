@@ -22,8 +22,9 @@
  *     URLs, `protocol.<name>.allow` lifts, `core.gitProxy` — `remote
  *     show` network/transport helpers
  *   - `gpg.program` — signature verification helpers
- *   - `core.hooksPath` — redirects hook resolution; the default hooks
- *     directory is also probed for hooks that read-only commands fire
+ *   - `core.hooksPath` — redirects hook resolution; the redirected
+ *     directory is probed for read-only-triggered hooks the same way as
+ *     the default hooks directory
  *
  * A `.git/config` planted by an attacker (prompt-injection chain with local
  * file write, shared workspace) could therefore turn an auto-approved
@@ -52,6 +53,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /** Options accepted by the read-only classifiers. */
@@ -87,7 +89,6 @@ const PROGRAM_VALUED_KEYS = new Set([
   'core.askpass', // credential prompts (e.g. `git remote show <url>`)
   'core.fsmonitor', // fsmonitor hook command (`git status`)
   'core.gitproxy', // git:// transport proxy (`git remote show git://…`)
-  'core.hookspath', // redirects hook resolution to attacker-chosen files
   'core.pager', // pager program for log / show / diff output
   'core.sshcommand', // ssh override for authenticated remotes
   'credential.helper', // credential helpers during network auth
@@ -378,6 +379,45 @@ function hooksMayExecutePrograms(hooksDir: string): boolean {
   return false;
 }
 
+/**
+ * Collect the directories `core.hooksPath` entries redirect hook
+ * resolution to, resolved the way git does: a leading `~` expands to the
+ * user's home, and relative paths anchor at `root` — the worktree root
+ * for repositories found through a `.git` entry, the git dir itself when
+ * the probe stands in one. An empty value disables hooks entirely and
+ * contributes nothing. Returns `null` when a value cannot be decoded or
+ * resolved — callers fail closed.
+ */
+function hooksPathDirectories(
+  entries: ConfigEntry[],
+  root: string,
+): string[] | null {
+  const dirs: string[] = [];
+  for (const entry of entries) {
+    if (
+      entry.section !== 'core' ||
+      entry.subsection !== null ||
+      entry.key !== 'hookspath'
+    ) {
+      continue;
+    }
+    const value = decodeGitConfigValue(entry.value);
+    if (value === null) return null;
+    if (value === '') continue; // git runs no hooks at all
+    let expanded = value;
+    if (expanded.startsWith('~')) {
+      // git expands `~` and `~/...` to the user's home; `~user` lookups
+      // cannot be reproduced here.
+      if (expanded.length > 1 && expanded[1] !== '/') return null;
+      expanded = path.join(os.homedir(), expanded.slice(1));
+    }
+    dirs.push(
+      path.isAbsolute(expanded) ? expanded : path.resolve(root, expanded),
+    );
+  }
+  return dirs;
+}
+
 function worktreeConfigEnabled(entries: ConfigEntry[]): boolean {
   let enabled = false;
   for (const entry of entries) {
@@ -435,10 +475,18 @@ function isGitDirectory(dir: string): boolean {
  *   - `cwd` itself (or an ancestor) is a git directory → its `config`, the
  *     commondir `config` when present, and `config.worktree`.
  *
+ * Also reports the directory relative `core.hooksPath` values resolve
+ * against — git anchors them at the worktree root (the directory holding
+ * the `.git` entry); when the probe stands in a git directory itself, the
+ * git dir stands in.
+ *
  * Throws when the search cannot conclude (unreadable pointer, search depth
  * exhausted) — the caller converts that into "may execute programs".
  */
-function findLocalGitConfigFiles(cwd: string): string[] {
+function findLocalGitConfigFiles(cwd: string): {
+  files: string[];
+  hooksPathRoot: string;
+} {
   let dir = path.resolve(cwd);
   try {
     // git resolves the physical cwd; a symlink between the execution
@@ -483,7 +531,7 @@ function findLocalGitConfigFiles(cwd: string): string[] {
           // No commondir — the repo's own config is the common config.
         }
         files.push(path.join(gitPath, 'config.worktree'));
-        return files;
+        return { files, hooksPathRoot: dir };
       }
       if (stat.isFile()) {
         let pointer: string;
@@ -512,7 +560,7 @@ function findLocalGitConfigFiles(cwd: string): string[] {
           // Submodule git dir (no commondir) — the two paths above suffice.
         }
         files.push(path.join(gitDir, 'config.worktree'));
-        return files;
+        return { files, hooksPathRoot: dir };
       }
     }
 
@@ -529,11 +577,12 @@ function findLocalGitConfigFiles(cwd: string): string[] {
         // No commondir — the git dir's own config is the common config.
       }
       files.push(path.join(dir, 'config.worktree'));
-      return files;
+      return { files, hooksPathRoot: dir };
     }
 
     const parent = path.dirname(dir);
-    if (parent === dir) return []; // reached the filesystem root — no repo
+    // Reached the filesystem root — no repo.
+    if (parent === dir) return { files: [], hooksPathRoot: dir };
     dir = parent;
   }
 }
@@ -553,7 +602,8 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
   try {
     let readWorktreeConfig = false;
     const hooksDirs = new Set<string>();
-    for (const file of findLocalGitConfigFiles(cwd)) {
+    const { files, hooksPathRoot } = findLocalGitConfigFiles(cwd);
+    for (const file of files) {
       if (path.basename(file) === 'config') {
         hooksDirs.add(path.join(path.dirname(file), 'hooks'));
       }
@@ -575,6 +625,9 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
       }
       const entries = parseGitConfig(content);
       if (entriesMayExecutePrograms(entries)) return true;
+      const redirectedHooksDirs = hooksPathDirectories(entries, hooksPathRoot);
+      if (redirectedHooksDirs === null) return true; // fail closed
+      for (const dir of redirectedHooksDirs) hooksDirs.add(dir);
       readWorktreeConfig ||= worktreeConfigEnabled(entries);
     }
     for (const hooksDir of hooksDirs) {

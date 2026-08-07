@@ -22,6 +22,7 @@ describe('ShellTool git config probe end-to-end (#8575)', () => {
   let root: string;
   let cleanRepo: string;
   let dirtyRepo: string;
+  let huskyRepo: string;
 
   function makeShellTool(targetDir: string): ShellTool {
     const config = {
@@ -48,6 +49,20 @@ describe('ShellTool git config probe end-to-end (#8575)', () => {
       path.join(dirtyRepo, '.git', 'config'),
       '[diff]\n\texternal = /tmp/evil\n[core]\n\tfsmonitor = /tmp/evil\n',
     );
+
+    // husky-style setup: core.hooksPath redirects hook resolution, but the
+    // target dir holds no hooks that read-only commands trigger.
+    huskyRepo = path.join(root, 'husky');
+    fs.mkdirSync(path.join(huskyRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(huskyRepo, '.git', 'config'),
+      '[core]\n\thooksPath = .husky/_\n',
+    );
+    const huskyHooks = path.join(huskyRepo, '.husky', '_');
+    fs.mkdirSync(huskyHooks, { recursive: true });
+    fs.writeFileSync(path.join(huskyHooks, 'pre-commit'), '#!/bin/sh\n', {
+      mode: 0o755,
+    });
   });
 
   afterAll(() => {
@@ -69,6 +84,17 @@ describe('ShellTool git config probe end-to-end (#8575)', () => {
     'allows %s when repo config is clean',
     async (command) => {
       const invocation = makeShellTool(cleanRepo).build({
+        command,
+        is_background: false,
+      });
+      expect(await invocation.getDefaultPermission()).toBe('allow');
+    },
+  );
+
+  it.each(['git status', 'git diff', 'git log -p'])(
+    'allows %s when core.hooksPath holds no read-only-triggered hooks',
+    async (command) => {
+      const invocation = makeShellTool(huskyRepo).build({
         command,
         is_background: false,
       });

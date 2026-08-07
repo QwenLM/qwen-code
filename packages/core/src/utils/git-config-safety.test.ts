@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -206,9 +206,116 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
 
-  it('flags core.hooksPath overrides (hooks resolve to attacker files)', () => {
-    const repo = makeRepo('hookspath', '[core]\n\thooksPath = .myhooks\n');
-    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  describe('core.hooksPath overrides', () => {
+    function writeExecutableHook(hooksDir: string, hook: string): void {
+      fs.mkdirSync(hooksDir, { recursive: true });
+      const hookPath = path.join(hooksDir, hook);
+      fs.writeFileSync(hookPath, '#!/bin/sh\ntouch /tmp/evil\n');
+      fs.chmodSync(hookPath, 0o755);
+    }
+
+    it('flags relative overrides pointing at executable trigger hooks', () => {
+      const repo = makeRepo(
+        'hookspath-dirty',
+        '[core]\n\thooksPath = .myhooks\n',
+      );
+      writeExecutableHook(path.join(repo, '.myhooks'), 'post-index-change');
+      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+    });
+
+    it('keeps husky-style overrides read-only when no trigger hooks exist', () => {
+      // husky / lefthook installs set core.hooksPath in every repo; their
+      // hook dirs hold commit-time hooks only, so whitelisted read-only
+      // commands must keep their auto-approval.
+      const repo = makeRepo('husky', '[core]\n\thooksPath = .husky/_\n');
+      const hooksDir = path.join(repo, '.husky', '_');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(path.join(hooksDir, 'pre-commit'), '#!/bin/sh\n', {
+        mode: 0o755,
+      });
+      fs.writeFileSync(path.join(hooksDir, 'commit-msg'), '#!/bin/sh\n', {
+        mode: 0o755,
+      });
+      expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+    });
+
+    it('resolves relative overrides against the worktree root, not the cwd', () => {
+      const repo = makeRepo(
+        'hookspath-root',
+        '[core]\n\thooksPath = hooks-dir\n',
+      );
+      writeExecutableHook(path.join(repo, 'hooks-dir'), 'fsmonitor-watchman');
+      // Decoy with the same name below the probe's cwd: git never consults
+      // it, so its emptiness must not hide the root hit.
+      const nested = path.join(repo, 'sub');
+      fs.mkdirSync(path.join(nested, 'hooks-dir'), { recursive: true });
+      expect(gitConfigMayExecutePrograms(nested)).toBe(true);
+    });
+
+    it('flags absolute overrides pointing at executable trigger hooks', () => {
+      const external = path.join(root, 'external-hooks');
+      writeExecutableHook(external, 'post-index-change');
+      const repo = makeRepo(
+        'hookspath-abs',
+        `[core]\n\thooksPath = ${external}\n`,
+      );
+      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+    });
+
+    it('expands a leading ~ to the user home', () => {
+      writeExecutableHook(path.join(root, 'home-hooks'), 'post-index-change');
+      const homedir = vi.spyOn(os, 'homedir').mockReturnValue(root);
+      try {
+        const repo = makeRepo(
+          'hookspath-tilde',
+          '[core]\n\thooksPath = ~/home-hooks\n',
+        );
+        expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+      } finally {
+        homedir.mockRestore();
+      }
+    });
+
+    it('does not flag an empty override (git then runs no hooks at all)', () => {
+      const repo = makeRepo('hookspath-empty', '[core]\n\thooksPath =\n');
+      expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+    });
+
+    it('fails closed on undecodable override values', () => {
+      const repo = makeRepo(
+        'hookspath-bad',
+        '[core]\n\thooksPath = "unterminated\n',
+      );
+      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+    });
+
+    it('fails closed on ~user overrides it cannot resolve', () => {
+      const repo = makeRepo(
+        'hookspath-user',
+        '[core]\n\thooksPath = ~other/hooks\n',
+      );
+      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+    });
+
+    // fs.accessSync(X_OK) is not meaningful on Windows — every file is
+    // "executable" there — so only assert the negative case elsewhere.
+    it.skipIf(process.platform === 'win32')(
+      'does not flag non-executable trigger hooks under an override',
+      () => {
+        const repo = makeRepo(
+          'hookspath-noexec',
+          '[core]\n\thooksPath = .myhooks\n',
+        );
+        const hooksDir = path.join(repo, '.myhooks');
+        fs.mkdirSync(hooksDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(hooksDir, 'post-index-change'),
+          '#!/bin/sh\ntouch /tmp/evil\n',
+        );
+        fs.chmodSync(path.join(hooksDir, 'post-index-change'), 0o644);
+        expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+      },
+    );
   });
 
   it('flags executable hooks that read-only commands trigger', () => {
