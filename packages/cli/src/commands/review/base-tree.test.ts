@@ -250,6 +250,11 @@ describe('runBaseTree', () => {
     expect(
       existsSync(join(baseWorktreePath(worktree), '.qwen-review-base-ok')),
     ).toBe(false);
+    // "Not buildable" is a SETTLED answer too: the failed marker is what
+    // keeps later shards from re-paying the same cold checkout.
+    expect(
+      existsSync(join(baseWorktreePath(worktree), '.qwen-review-base-failed')),
+    ).toBe(true);
   });
 
   it('does NOT run a Maven merge-base build nothing could consume', () => {
@@ -257,22 +262,14 @@ describe('runBaseTree', () => {
     // says the same for Maven in this release. Commit the pom so the base
     // tree selects the Maven adapter, and pin that the build never runs.
     writeFileSync(join(repo, 'pom.xml'), '<project/>');
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'pom.xml');
     git(repo, 'commit', '-qam', 'maven base');
     const mavenSha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: mavenSha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: mavenSha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(r.available).toBe(false);
@@ -294,22 +291,14 @@ describe('runBaseTree', () => {
     // probe, but the base is Maven just the same and cannot be consumed.
     mkdirSync(join(repo, 'app'), { recursive: true });
     writeFileSync(join(repo, 'app', 'pom.xml'), '<project/>');
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'app');
     git(repo, 'commit', '-qam', 'nested maven base');
     const nestedSha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: nestedSha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: nestedSha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(r.available).toBe(false);
@@ -325,25 +314,14 @@ describe('runBaseTree', () => {
     const fixture = join(repo, 'src', 'test', 'resources', 'projects', 'it');
     mkdirSync(fixture, { recursive: true });
     writeFileSync(join(fixture, 'pom.xml'), '<project/>');
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'src');
     git(repo, 'commit', '-qam', 'fixture pom');
     const fixtureSha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(
-      plan,
-      JSON.stringify({ mergeBaseSha: fixtureSha, files: [] }),
-    );
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: fixtureSha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(builds).toHaveLength(1);
@@ -356,22 +334,14 @@ describe('runBaseTree', () => {
     // resolve the raw name anyway, or the base slips past the gate.
     mkdirSync(join(repo, 'm\u00f3dulo'), { recursive: true });
     writeFileSync(join(repo, 'm\u00f3dulo', 'pom.xml'), '<project/>');
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'm\u00f3dulo');
     git(repo, 'commit', '-qam', 'non-ascii nested maven base');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(r.available).toBe(false);
@@ -390,22 +360,14 @@ describe('runBaseTree', () => {
       join(repo, 'package.json'),
       JSON.stringify({ scripts: { prepare: 'husky' } }),
     );
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'app', 'package.json');
     git(repo, 'commit', '-qam', 'husky + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(r.available).toBe(false);
@@ -422,22 +384,14 @@ describe('runBaseTree', () => {
       join(repo, 'package.json'),
       JSON.stringify({ scripts: { build: 'tsc' } }),
     );
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'app', 'package.json');
     git(repo, 'commit', '-qam', 'npm + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(builds).toHaveLength(1);
@@ -455,22 +409,14 @@ describe('runBaseTree', () => {
       join(repo, 'package.json'),
       JSON.stringify({ workspaces: ['packages/**'] }),
     );
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'app', 'package.json');
     git(repo, 'commit', '-qam', 'unmodeled glob + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(r.available).toBe(false);
@@ -488,22 +434,14 @@ describe('runBaseTree', () => {
       join(repo, 'package.json'),
       JSON.stringify({ workspaces: ['packages/*'] }),
     );
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'java', 'package.json');
     git(repo, 'commit', '-qam', 'empty glob + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(r.available).toBe(false);
@@ -526,22 +464,14 @@ describe('runBaseTree', () => {
       join(repo, 'package.json'),
       JSON.stringify({ workspaces: ['packages/*'] }),
     );
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'packages', 'java', 'package.json');
     git(repo, 'commit', '-qam', 'workspace + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(builds).toHaveLength(1);
@@ -563,22 +493,14 @@ describe('runBaseTree', () => {
       join(repo, 'package.json'),
       JSON.stringify({ workspaces: ['./packages/*'] }),
     );
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'packages', 'java', 'package.json');
     git(repo, 'commit', '-qam', 'dot-slash workspace + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(builds).toHaveLength(1);
@@ -598,27 +520,104 @@ describe('runBaseTree', () => {
       join(repo, 'package.json'),
       JSON.stringify({ workspaces: ['packages/*'] }),
     );
-    git(repo, 'add', '-A');
+    git(repo, 'add', 'packages', 'java', 'package.json');
     git(repo, 'commit', '-qam', 'broken member manifest + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
     const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
     });
 
     expect(r.available).toBe(false);
     expect(builds).toEqual([]);
     expect(r.note).toContain('Maven');
+  });
+
+  it('does NOT count a negation-excluded workspace member as npm-applicable', () => {
+    // The on-disk twin puts a negated member in `skipped`, not `packages`;
+    // excluding the ONLY member leaves nothing npm-applicable, so the
+    // nested-pom probe must still run.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'app', 'package.json'),
+      JSON.stringify({ name: '@x/app', scripts: { build: 'tsc' } }),
+    );
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*', '!packages/app'] }),
+    );
+    git(repo, 'add', 'packages', 'java', 'package.json');
+    git(repo, 'commit', '-qam', 'negated member + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+  });
+
+  it('still counts a workspace when its negation excludes nothing', () => {
+    // The positive twin: a negation matching no member leaves the real
+    // member npm-applicable, so the probe stays home and the build decides.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'app', 'package.json'),
+      JSON.stringify({ name: '@x/app', scripts: { build: 'tsc' } }),
+    );
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*', '!packages/ghost'] }),
+    );
+    git(repo, 'add', 'packages', 'java', 'package.json');
+    git(repo, 'commit', '-qam', 'harmless negation + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
+  it('treats a base carrying BOTH a root pom.xml and an npm package.json as Maven', () => {
+    // The root-pom branch of the gate is unconditional: the npm half does
+    // not rescue a Maven root. Symmetrizing the gate to condition the root
+    // branch on !npmAtBase would let this polyglot base pay the cold
+    // checkout, and multi-toolchain aggregation (a declared future phase)
+    // would leave that symmetrized gate as the only defense.
+    writeFileSync(join(repo, 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+    git(repo, 'add', 'pom.xml', 'package.json');
+    git(repo, 'commit', '-qam', 'polyglot base');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+    expect(r.note).toMatch(/never a finding against the PR/);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -629,22 +628,14 @@ describe('runBaseTree', () => {
       // structurally, or this base slips past the gate.
       mkdirSync(join(repo, 'bad\ndir'), { recursive: true });
       writeFileSync(join(repo, 'bad\ndir', 'pom.xml'), '<project/>');
-      git(repo, 'add', '-A');
+      git(repo, 'add', 'bad\ndir');
       git(repo, 'commit', '-qam', 'newline-dir nested maven base');
       const sha = git(repo, 'rev-parse', 'HEAD');
 
-      const plan = join(repo, 'plan.json');
-      writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
       const builds: string[] = [];
-      const r = runBaseTree({
-        plan,
-        worktree,
-        timeout: 60,
-        install: false,
-        build: (w) => {
-          builds.push(w);
-          return okBuild;
-        },
+      const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+        builds.push(w);
+        return okBuild;
       });
 
       expect(r.available).toBe(false);

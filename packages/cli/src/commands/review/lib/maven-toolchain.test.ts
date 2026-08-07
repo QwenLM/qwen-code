@@ -2257,9 +2257,14 @@ describe('maven toolchain adapter', () => {
       // Keep both 5s deadlines whole despite the warm-up's wall time.
       budget: 600,
       install: true,
-      exec: (command) =>
+      exec: (command, _cwd, timeoutMs) =>
         command.includes('dependency:go-offline')
-          ? result(command, { exitCode: null, timedOut: true, seconds: 5 })
+          ? result(command, {
+              exitCode: null,
+              timedOut: true,
+              seconds: 5,
+              deadlineMs: timeoutMs,
+            })
           : result(command),
     });
     expect(timedOut.ok).toBe(true);
@@ -2826,6 +2831,295 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('infrastructure evidence');
   });
 
+  it('fails closed on a POM larger than the read cap', () => {
+    // A hostile PR can commit a module pom.xml inside GitHub's per-file
+    // limit that the tokenizer would amplify into gigabytes of heap; the
+    // read is size-capped and fails closed like the other unreadable shapes.
+    writeProject('.', ['huge']);
+    mkdirSync(join(root, 'huge'), { recursive: true });
+    writeFileSync(
+      join(root, 'huge', 'pom.xml'),
+      'x'.repeat(2 * 1024 * 1024 + 1),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.error).toContain('larger than the 2097152-byte read cap');
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['huge/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) => result(command),
+    });
+    expect(report.toolchain).toBe('unsupported');
+    expect(report.note).toContain('read cap');
+  });
+
+  it('walks a parent chain that passes through named parent files', () => {
+    // app -> base/parent.xml (named file) -> grand/parent2.xml (named
+    // file): Maven merges the WHOLE chain into app, so the higher file's
+    // directory must carry an inheritance edge to app too, and both named
+    // files are dependency inputs / parent-config changes.
+    writeProject('.', ['grand', 'base', 'app']);
+    writeProject('grand');
+    writeProject('base');
+    writeProject('app');
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../base/parent.xml'),
+    );
+    writeFileSync(
+      join(root, 'base', 'parent.xml'),
+      childPomInheriting('../grand/parent2.xml'),
+    );
+    writeFileSync(join(root, 'grand', 'parent2.xml'), pom());
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.reactor?.inheritors).toEqual({
+      base: ['app'],
+      grand: ['app'],
+    });
+    expect(parsed.reactor?.parentPomFiles).toEqual([
+      'base/parent.xml',
+      'grand/parent2.xml',
+    ]);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    // A change to the HIGHER parent reaches the transitive inheritor.
+    expect(
+      detectMavenOwnership(root, ['grand/parent2.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'grand'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('adds the owning module of a changed named parent file to the scope', () => {
+    // The named parent lives in ANOTHER module's tree: changing it must
+    // build and test that module too, not only the inheritor closure.
+    writeProject('.', ['core', 'app']);
+    writeProject('core');
+    writeProject('app');
+    mkdirSync(join(root, 'core', 'src', 'test', 'resources'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(root, 'core', 'src', 'test', 'resources', 'parent.xml'),
+      pom(),
+    );
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../core/src/test/resources/parent.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(
+        root,
+        ['core/src/test/resources/parent.xml'],
+        parsed.reactor,
+      ),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'core'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('keeps the inactive-project abort for an out-of-reactor named parent', () => {
+    // standalone/parent.xml backs app's inheritance edge, but standalone
+    // is not a reactor member: changing the named parent must fail closed
+    // exactly like changing any other file of standalone/.
+    writeProject('.', ['app']);
+    writeProject('app');
+    writeProject('standalone');
+    writeFileSync(join(root, 'standalone', 'parent.xml'), pom());
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../standalone/parent.xml'),
+    );
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['standalone/parent.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('unsupported');
+    expect(report.note).toContain('outside the root reactor: standalone');
+    expect(calls).toEqual([]);
+  });
+
+  it('expands a descendant already in the scope through an earlier changed file', () => {
+    // parent aggregates app (a top-level sibling via ../app) and is its
+    // <parent>; app aggregates app/it. Path-sorted order puts the app
+    // source change first, so `app` is already in the result set when the
+    // parent POM change walks: the expansion guard must not conflate "in
+    // the set" with "expanded", or app/it silently drops out of the build
+    // scope.
+    writeProject('.', ['parent']);
+    writeProject('parent', ['../app']);
+    writeProject('app/it');
+    // app BOTH inherits parent AND aggregates app/it.
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      pom(['it']).replace(
+        '<project>',
+        `<project>
+  <parent>
+    <groupId>example</groupId>
+    <artifactId>fixture</artifactId>
+    <version>1</version>
+    <relativePath>../parent/pom.xml</relativePath>
+  </parent>`,
+      ),
+    );
+
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(
+        root,
+        ['app/src/main/java/Foo.java', 'parent/pom.xml'],
+        parsed.reactor,
+      ),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'app/it', 'parent'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('does not exempt subtrees of directories named after doc or metadata files', () => {
+    // The exemptions anchor on the final segment: a DIRECTORY named
+    // README*/LICENSE.*/NOTICE.* must not exempt files of any extension
+    // beneath it from verification.
+    writeReactor();
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+
+    for (const changed of [
+      'README.md/checkstyle.xml',
+      'LICENSE.md/settings.xml',
+      'NOTICE.txt/build.sh',
+    ]) {
+      expect(detectMavenOwnership(root, [changed], parsed.reactor)).toEqual({
+        reactorWide: true,
+        modules: [],
+        inactiveProjects: [],
+      });
+    }
+    expect(
+      detectMavenOwnership(
+        root,
+        ['core/README.md/checkstyle.xml'],
+        parsed.reactor,
+      ),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['core'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('classifies a fail-never launch failure as infrastructure, not a pass', () => {
+    // `-fn` keeps Maven going after a mid-command ENOSPC and exits 0: the
+    // zero exit must not read as green, and the launch-class failure stays
+    // environmental like its exit-1 twin.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[ERROR] Failed to write target/generated.txt: No space left on device',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain('fail-never');
+  });
+
+  it('treats chained local repositories from -Dmaven.repo.local.tail as dependency inputs', () => {
+    // Maven 3.9's chained local repositories: every entry is a local-
+    // repository location the PR can change.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    mkdirSync(join(root, '.mvn-repo-cache'));
+    mkdirSync(join(root, '.mvn-repo-tail'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-Dmaven.repo.local.tail=./.mvn-repo-cache,./.mvn-repo-tail\n',
+    );
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['.mvn-repo-tail/some/artifact.jar'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('quotes the deadline the lifecycle actually ran under in its timeout note', () => {
+    // The warm-up spends shared budget first, so the lifecycle fires a
+    // shorter deadline than the --timeout flag; the note must quote the
+    // number that fired, not the flag default.
+    writeReactor();
+    let clock = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    try {
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['core/src/Main.java'],
+        timeout: 300,
+        budget: 60,
+        install: true,
+        exec: (command, _cwd, timeoutMs) => {
+          clock += 45_000;
+          return command.includes('dependency:go-offline')
+            ? result(command, { deadlineMs: timeoutMs })
+            : result(command, {
+                exitCode: null,
+                timedOut: true,
+                seconds: 15,
+                deadlineMs: timeoutMs,
+              });
+        },
+      });
+
+      expect(report.ok).toBe(false);
+      expect(report.note).toContain('ran out of time (15s)');
+      expect(report.note).not.toContain('ran out of time (300s)');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it('spends the whole-call budget across warm-up and lifecycle', () => {
     // The warm-up and the lifecycle command share one budget: each gets
     // the smaller of its own deadline and what remains, and --budget
@@ -2878,13 +3172,20 @@ describe('maven toolchain adapter', () => {
         timeout: 300,
         budget: 60,
         install: true,
-        exec: (command) => {
+        exec: (command, _cwd, timeoutMs) => {
           calls.push(command);
           clock += 50_000;
           // A cold reactor's warm-up really does eat the budget by timing
-          // out; the disclosure must survive the budget early-return.
+          // out; the disclosure must survive the budget early-return. The
+          // recorded deadline mirrors the production exec: the note must
+          // quote the 60s that fired, not the 300s flag default.
           return command.includes('dependency:go-offline')
-            ? result(command, { exitCode: null, timedOut: true, seconds: 50 })
+            ? result(command, {
+                exitCode: null,
+                timedOut: true,
+                seconds: 50,
+                deadlineMs: timeoutMs,
+              })
             : result(command);
         },
       });
@@ -2897,7 +3198,7 @@ describe('maven toolchain adapter', () => {
       expect(report.install?.command).toContain('dependency:go-offline');
       expect(report.note).toContain('whole-call budget (60s) was spent');
       expect(report.note).toContain('informational');
-      expect(report.note).toContain('ran out of time');
+      expect(report.note).toContain('ran out of time (60s)');
     } finally {
       nowSpy.mockRestore();
     }
@@ -2922,6 +3223,10 @@ describe('maven toolchain adapter', () => {
     expect(calls).toEqual([]);
     expect(report.ok).toBe(false);
     expect(report.install).toBeNull();
-    expect(report.note).toContain('whole-call budget (5s) was spent');
+    // Nothing ever ran, so the note must not claim the budget "was
+    // spent" — it names the floor the grant fell short of instead.
+    expect(report.note).toContain('granted budget (5s) is below the');
+    expect(report.note).toContain('15s minimum');
+    expect(report.note).not.toContain('was spent');
   });
 });

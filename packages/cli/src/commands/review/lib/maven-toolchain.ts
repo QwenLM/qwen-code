@@ -104,6 +104,15 @@ const MAX_SELECTOR_CHARS = 4096;
 const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 
 /**
+ * POM reads carry the same class of cap: the CDATA/comment strip and the
+ * tokenizer each walk the text again, so an uncapped multi-megabyte
+ * `pom.xml` a PR commits is this harness's own denial-of-service surface.
+ * 2 MiB is far beyond any realistic POM; an oversized one fails closed with
+ * a reportable error exactly like the other unreadable shapes.
+ */
+const MAX_POM_BYTES = 2 * 1024 * 1024;
+
+/**
  * Reactor nesting is a handful of levels in every real repository; a deeper
  * chain is a hostile checkout shape. Cap the walk so it fails closed with a
  * reportable error instead of overflowing the stack.
@@ -380,6 +389,9 @@ export function readMavenReactor(root: string): MavenReactorResult {
 
     let pom: string;
     try {
+      if (statSync(pomPath).size > MAX_POM_BYTES) {
+        return `Maven POM ${toPosix(relative(reactorRoot, pomPath))} is larger than the ${MAX_POM_BYTES}-byte read cap.`;
+      }
       pom = readFileSync(pomPath, 'utf8');
     } catch (error) {
       return `Cannot read ${toPosix(relative(reactorRoot, pomPath))}: ${(error as Error).message}`;
@@ -425,20 +437,45 @@ export function readMavenReactor(root: string): MavenReactorResult {
   // check Maven applies before trusting a local parent POM. A matching
   // parent can live ANYWHERE in the reactor (`../parent/pom.xml`), so the
   // POM-change closure walks these edges rather than directory prefixes.
+  // The walk is a worklist, not one hop: a NAMED parent file carries a
+  // `<parent>` declaration of its own, and Maven merges the WHOLE chain
+  // into the inheriting project — stopping at the first file would scope a
+  // change to a higher parent away from the modules that inherit it.
   const inheritors = new Map<string, string[]>();
   const namedParentPoms = new Set<string>();
+  const worklist: Array<{
+    heir: string;
+    fromDir: string;
+    parent: PomParent;
+  }> = [];
   for (const [modulePath, structure] of structures) {
-    const parent = structure.parent;
-    if (!parent) continue;
+    if (structure.parent) {
+      worklist.push({
+        heir: modulePath,
+        fromDir: modulePath,
+        parent: structure.parent,
+      });
+    }
+  }
+  // Per-(heir, file) cycle guard: a hostile chain can name files in a ring,
+  // and each (heir, parent file) pair is resolved at most once.
+  const enqueued = new Set<string>();
+  while (worklist.length > 0) {
+    const item = worklist.pop() as {
+      heir: string;
+      fromDir: string;
+      parent: PomParent;
+    };
+    const parent = item.parent;
     // `<relativePath/>`: resolved from the repository, no local edge.
     if (parent.relativePath === '') continue;
     const relPath = parent.relativePath ?? '../pom.xml';
     if (relPath.includes('${') || relPath.includes('@{')) {
       return {
-        error: `Maven parent relativePath of ${modulePath} is not a literal path.`,
+        error: `Maven parent relativePath of ${item.fromDir} is not a literal path.`,
       };
     }
-    let parentPom = resolve(reactorRoot, modulePath, relPath);
+    let parentPom = resolve(reactorRoot, item.fromDir, relPath);
     // Maven appends `pom.xml` only when the resolved path IS A DIRECTORY
     // (DefaultModelBuilder.getParentPomFile): a parent FILE may carry any
     // name. A path that is not an existing file keeps the historical append,
@@ -455,23 +492,29 @@ export function readMavenReactor(root: string): MavenReactorResult {
     const parentDir = dirname(parentPom);
     if (!isInside(reactorRoot, parentDir)) continue;
     const parentPath = toPosix(relative(reactorRoot, parentDir)) || '.';
-    if (parentPath === modulePath) continue;
+    if (parentPath === item.heir) continue;
     // A named parent FILE is not a visited reactor POM: match the
     // declaration against its own artifactId, not the directory's pom.xml
     // (which may not exist, or may be a different project).
     let targetArtifactId: string | null;
+    let namedStructure: PomStructure | null = null;
     if (basename(parentPom) === 'pom.xml') {
       targetArtifactId = structures.get(parentPath)?.artifactId ?? null;
     } else {
       let namedPom: string;
       try {
+        if (statSync(parentPom).size > MAX_POM_BYTES) {
+          return {
+            error: `Maven POM ${toPosix(relative(reactorRoot, parentPom))} is larger than the ${MAX_POM_BYTES}-byte read cap.`,
+          };
+        }
         namedPom = readFileSync(parentPom, 'utf8');
       } catch (error) {
         return {
           error: `Cannot read ${toPosix(relative(reactorRoot, parentPom))}: ${(error as Error).message}`,
         };
       }
-      const namedStructure = parsePomStructure(namedPom);
+      namedStructure = parsePomStructure(namedPom);
       if (!namedStructure) {
         return {
           error: `Cannot safely parse literal Maven modules from ${toPosix(relative(reactorRoot, parentPom))}.`,
@@ -482,10 +525,26 @@ export function readMavenReactor(root: string): MavenReactorResult {
     if (targetArtifactId !== parent.artifactId) continue;
     if (basename(parentPom) !== 'pom.xml') {
       namedParentPoms.add(toPosix(relative(reactorRoot, parentPom)));
+      // The named file's own `<parent>` continues the chain, resolved
+      // from the file's own directory but still owed to the SAME heir.
+      if (namedStructure?.parent) {
+        const key = `${item.heir}\0${parentPom}`;
+        if (!enqueued.has(key)) {
+          enqueued.add(key);
+          worklist.push({
+            heir: item.heir,
+            fromDir: parentPath,
+            parent: namedStructure.parent,
+          });
+        }
+      }
     }
     const inherited = inheritors.get(parentPath);
-    if (inherited) inherited.push(modulePath);
-    else inheritors.set(parentPath, [modulePath]);
+    if (inherited) {
+      if (!inherited.includes(item.heir)) inherited.push(item.heir);
+    } else {
+      inheritors.set(parentPath, [item.heir]);
+    }
   }
 
   return {
@@ -511,7 +570,10 @@ function normalizedChangedPath(
 }
 
 function isDocumentationPath(path: string): boolean {
-  if (path === 'README' || /^README(?:\.|$)/i.test(path)) return true;
+  // Anchored to the WHOLE relative path: a DIRECTORY named `README` must
+  // not exempt its entire subtree — files of any extension — from
+  // verification.
+  if (/^README(?:\.[^/]*)?$/i.test(path)) return true;
   // The `src/` guard alone would skip a compilable file under a module's
   // `doc/` tree; a documentation path is a documentation EXTENSION first.
   if (path.startsWith('src/')) return false;
@@ -532,8 +594,11 @@ function isDocumentationPath(path: string): boolean {
  * closed costs time while failing open ships an unverified diff.
  */
 function isRepoMetadataPath(path: string): boolean {
+  // `[^/]*` keeps the LICENSE/NOTICE extension run inside the final
+  // segment: a DIRECTORY with one of those names must not exempt its
+  // subtree from verification.
   return (
-    /^(?:\.git(?:ignore|attributes|modules)|\.editorconfig|CODEOWNERS|LICENSE(?:\..*)?|NOTICE(?:\..*)?)$/.test(
+    /^(?:\.git(?:ignore|attributes|modules)|\.editorconfig|CODEOWNERS|LICENSE(?:\.[^/]*)?|NOTICE(?:\.[^/]*)?)$/.test(
       path,
     ) || path.startsWith('.github/')
   );
@@ -598,6 +663,33 @@ export function detectMavenOwnership(
     (reactor.parentPomFiles ?? []).map((file) => [file, dirname(file)]),
   );
 
+  // The descendant closure shared by both parent-config change paths (a
+  // changed module `pom.xml` and a changed named parent file): a parent
+  // config change reaches every module aggregated beneath it AND every
+  // module declaring it as `<parent>`, transitively. The closure walks the
+  // recorded aggregation and inheritance edges, not directory prefixes: a
+  // `<module>../its/app-it</module>` entry sits OUTSIDE the aggregator's
+  // directory and still inherits the parent change. `seen` is the
+  // expansion guard, SEPARATE from the result set: a descendant already in
+  // `modules` through an earlier changed file still has to be expanded, or
+  // its whole subtree silently drops out of the scope.
+  const addDescendantClosure = (start: string): void => {
+    const seen = new Set<string>([start]);
+    const queue = [start];
+    while (queue.length > 0) {
+      const aggregator = queue.pop() as string;
+      for (const child of [
+        ...(reactor.children[aggregator] ?? []),
+        ...(reactor.inheritors[aggregator] ?? []),
+      ]) {
+        if (seen.has(child)) continue;
+        seen.add(child);
+        modules.add(child);
+        queue.push(child);
+      }
+    }
+  };
+
   for (const changedFile of changedFiles) {
     const path = normalizedChangedPath(root, changedFile);
     if (path === null) continue;
@@ -610,23 +702,13 @@ export function detectMavenOwnership(
         if (deepestFirst.includes(namedParentDir)) {
           modules.add(namedParentDir);
         }
-        const queue = [namedParentDir];
-        while (queue.length > 0) {
-          const aggregator = queue.pop() as string;
-          for (const child of [
-            ...(reactor.children[aggregator] ?? []),
-            ...(reactor.inheritors[aggregator] ?? []),
-          ]) {
-            if (!modules.has(child)) {
-              modules.add(child);
-              queue.push(child);
-            }
-          }
-        }
+        addDescendantClosure(namedParentDir);
       }
-      continue;
-    }
-    if (REACTOR_WIDE_FILES.has(path) || path.startsWith('.mvn/')) {
+      // Deliberately NO continue: the file still routes through the
+      // ownership checks below, so the module whose tree holds it joins
+      // the scope, and an out-of-reactor home reaches the inactive-project
+      // abort instead of bypassing it.
+    } else if (REACTOR_WIDE_FILES.has(path) || path.startsWith('.mvn/')) {
       reactorWide = true;
       continue;
     }
@@ -638,24 +720,9 @@ export function detectMavenOwnership(
         // A module POM is the parent config of every module aggregated
         // beneath it AND of every module declaring it as `<parent>`: the
         // descendants inherit what changed, and `-am` alone would compile
-        // only the aggregator and test nothing. The closure walks the
-        // recorded aggregation and inheritance edges, not directory
-        // prefixes: a `<module>../its/app-it</module>` entry sits OUTSIDE
-        // the aggregator's directory and still inherits the parent change.
+        // only the aggregator and test nothing.
         modules.add(owner);
-        const queue = [owner];
-        while (queue.length > 0) {
-          const aggregator = queue.pop() as string;
-          for (const child of [
-            ...(reactor.children[aggregator] ?? []),
-            ...(reactor.inheritors[aggregator] ?? []),
-          ]) {
-            if (!modules.has(child)) {
-              modules.add(child);
-              queue.push(child);
-            }
-          }
-        }
+        addDescendantClosure(owner);
         continue;
       }
       // The out-of-reactor project check outranks the documentation
@@ -1139,12 +1206,19 @@ function unsupportedReport(note: string): BuildTestReport {
   };
 }
 
-/** How a non-clean best-effort dependency warm-up ended. */
-function warmUpOutcome(install: CommandResult, timeoutSeconds: number): string {
+/**
+ * How a non-clean best-effort dependency warm-up ended. The timeout note
+ * quotes the deadline that was actually applied — the whole-call budget
+ * shortens it below the `--timeout` flag — not the flag default.
+ */
+function warmUpOutcome(
+  install: CommandResult,
+  deadlineSeconds: number,
+): string {
   return (
     `Dependency warm-up (\`${install.command}\`) ` +
     (install.timedOut
-      ? `ran out of time (${timeoutSeconds}s)`
+      ? `ran out of time (${deadlineSeconds}s)`
       : install.exitCode === null
         ? 'ended without an exit code (a spawn failure or signal outside the deadline)'
         : `exited ${install.exitCode}`)
@@ -1328,6 +1402,19 @@ function mavenConfigDependencyInputs(root: string): string[] {
   const pairedFlags = new Set(['-s', '--settings', '-gs', '--global-settings']);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
+    // Maven 3.9's chained local repositories: EVERY entry is a local-
+    // repository location. Checked before `-Dmaven.repo.local=` — the
+    // longer property merely starts with that prefix.
+    if (token.startsWith('-Dmaven.repo.local.tail=')) {
+      for (const part of token
+        .slice('-Dmaven.repo.local.tail='.length)
+        .split(/[,|]/)) {
+        if (!part) continue;
+        const path = normalizedChangedPath(root, part);
+        if (path !== null) inputs.push(path);
+      }
+      continue;
+    }
     let value: string | undefined;
     if (pairedFlags.has(token)) value = tokens[i + 1];
     else if (token.startsWith('--settings='))
@@ -1349,6 +1436,11 @@ function mavenConfigDependencyInputs(root: string): string[] {
 
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const perCommandMs = args.timeout * 1000;
+  /** The deadline a command was actually given, in whole seconds — the
+   * whole-call budget shortens it below the flag default, and timeout
+   * notes must quote the number that fired. */
+  const deadlineSecs = (r: CommandResult): number =>
+    Math.round((r.deadlineMs ?? perCommandMs) / 1000);
   // The floor never exceeds the caller's own per-command deadline: a run
   // whose whole budget is one short deadline still gets that attempt,
   // exactly as it did before budgeting existed.
@@ -1474,12 +1566,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       return true;
     }
     if (path.endsWith('/pom.xml')) {
-      // Only a reactor MEMBER's POM is a resolution input. This branch is
-      // reachable only for a POM the diff DELETED or renamed away (the
-      // inactive-project abort needs the file on disk), and a POM absent
-      // from disk cannot take part in resolution — counting it would
-      // suppress the infrastructure carve-out for outages the diff cannot
-      // have caused. Fixture POMs under `src/` are not members either.
+      // Only a reactor MEMBER's POM is a resolution input: a changed member
+      // POM counts exactly like the root `pom.xml` above, whether it stays
+      // on disk (the common case) or the diff deleted it. Fixture POMs
+      // under a project's `src/` tree and POMs in out-of-reactor projects
+      // are the excluded shapes — counting them would suppress the
+      // infrastructure carve-out for outages the diff cannot have caused.
       const projectDir = path.slice(0, -'/pom.xml'.length);
       return parsed.reactor.projectDirs.includes(projectDir);
     }
@@ -1544,13 +1636,21 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     );
   }
   if (remainingMs() < attemptFloorMs) {
+    // spentMs === 0 means nothing ever ran: the budget was below the
+    // attempt floor from the start, so "was spent" would assert a
+    // consumption that has no consumer.
     let note =
-      `The whole-call budget (${Math.round(callBudgetMs / 1000)}s) was spent ` +
-      `before \`${command}\` could start, so nothing could be built or tested. ` +
-      'This is an infrastructure result, not a defect in the diff — report it as informational.';
-    if (install && (install.timedOut || install.exitCode !== 0)) {
+      spentMs === 0
+        ? `The granted budget (${Math.round(callBudgetMs / 1000)}s) is below the ` +
+          `${Math.round(attemptFloorMs / 1000)}s minimum a Maven attempt needs, so nothing ` +
+          'could be started, built, or tested. This is an infrastructure result, ' +
+          'not a defect in the diff — report it as informational.'
+        : `The whole-call budget (${Math.round(callBudgetMs / 1000)}s) was spent ` +
+          `before \`${command}\` could start, so nothing could be built or tested. ` +
+          'This is an infrastructure result, not a defect in the diff — report it as informational.';
+    if (install) {
       note +=
-        ` ${warmUpOutcome(install, args.timeout)} — the budget it consumed ` +
+        ` ${warmUpOutcome(install, deadlineSecs(install))} — the budget it consumed ` +
         'is what stopped the lifecycle command.';
     }
     return mavenReport({
@@ -1587,15 +1687,17 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const freshFailures = hasFreshTestFailure(summaries);
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
-  // `-fn`/`--fail-never` makes Maven exit 0 over compilation AND dependency
-  // resolution failures, and neither phase writes Surefire XML for
-  // `freshFailures` to see. Read the output, or the run verifies nothing
-  // while reporting green.
+  // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
+  // resolution, AND launch-class failures (a mid-command ENOSPC), and none
+  // of those writes Surefire XML for `freshFailures` to see. Read the
+  // output, or the run verifies nothing while reporting green.
   const swallowedFailure =
     result.exitCode === 0 &&
     !result.timedOut &&
     !freshFailures &&
-    (isSourceFailure(result.output) || isDependencyFailure(result.output));
+    (isSourceFailure(result.output) ||
+      isDependencyFailure(result.output) ||
+      isLaunchFailure(result.output));
   const ok =
     result.exitCode === 0 &&
     !result.timedOut &&
@@ -1644,7 +1746,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     // infrastructure, but keep the captured regressions as test evidence.
     const totals = summaryTotals(summaries);
     const cause = result.timedOut
-      ? `ran out of time (${args.timeout}s)`
+      ? `ran out of time (${deadlineSecs(result)}s)`
       : 'ended without an exit code (a spawn failure or signal outside the deadline)';
     report.note =
       `\`${result.command}\` ${cause} — that part is infrastructure. But fresh ` +
@@ -1653,7 +1755,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       'not as a pass or as purely environmental.';
   } else if (result.timedOut) {
     report.note =
-      `\`${result.command}\` ran out of time (${args.timeout}s). This is an infrastructure result, ` +
+      `\`${result.command}\` ran out of time (${deadlineSecs(result)}s). This is an infrastructure result, ` +
       'not a defect in the diff — report it as informational.';
     if (selectorOverflow) {
       report.note +=
@@ -1723,7 +1825,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   }
   if (install && (install.timedOut || install.exitCode !== 0)) {
     report.note +=
-      ` ${warmUpOutcome(install, args.timeout)} — it is best-effort, and the ` +
+      ` ${warmUpOutcome(install, deadlineSecs(install))} — it is best-effort, and the ` +
       'lifecycle outcome above stands on its own.';
   }
   if (wrapperChanged && !executedWrapperChanged) {

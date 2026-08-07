@@ -194,15 +194,23 @@ export function extractTestPlanSection(
   return null;
 }
 
-/** Runners whose presence makes a backticked span a command, not prose. */
-const RUNNER_RE =
-  /^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\b|^(?:mvn(?:\.cmd)?|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?|\.\.\/mvnw(?:\.cmd)?|\.\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
+// `mvn.cmd` is the spelling Windows `cmd.exe` users type for system Maven.
+// The relative wrapper spellings — `./mvnw`, `.\mvnw`, and ANY number of
+// `../` / `..\` hops (`../../mvnw` is a normal nested-module invocation two
+// levels deep) — are command claims exactly like the bare runner; without
+// the deeper hops such claims are silently never extracted and never ruled.
+const MAVEN_RUNNER_SOURCE =
+  'mvn(?:\\.cmd)?|mvnw(?:\\.cmd)?' +
+  '|(?:\\.\\.[/\\\\])*\\.[/\\\\]mvnw(?:\\.cmd)?' +
+  '|(?:\\.\\.[/\\\\])+mvnw(?:\\.cmd)?';
 
-// `mvn.cmd` is the spelling Windows `cmd.exe` users type for system Maven, and
-// `../mvnw` a parent-dir wrapper invocation; without them such claims are
-// silently never extracted and never ruled.
-const MAVEN_RUNNER_RE =
-  /^(?:mvn(?:\.cmd)?|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?|\.\.\/mvnw(?:\.cmd)?|\.\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
+/** Runners whose presence makes a backticked span a command, not prose. */
+const RUNNER_RE = new RegExp(
+  '^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\\b' +
+    `|^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`,
+);
+
+const MAVEN_RUNNER_RE = new RegExp(`^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`);
 
 /** `foo/bar.ts`, `packages/cli/src/x.tsx:42` — a path, not a sentence. */
 const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
@@ -474,16 +482,22 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
       total += Number(m[1]);
       saw = true;
     }
-    while ((m = mavenRe.exec(text))) {
-      // Surefire does not guarantee tests >= failures + errors + skipped
-      // (class-level @Disabled and rerunFailingTestsCount reruns both perturb
-      // it), and this sum spans every report of the command: one negative
-      // value would silently cancel legitimate counts from its neighbours.
-      total += Math.max(
-        0,
-        Number(m[1]) - Number(m[2]) - Number(m[3]) - Number(m[4]),
-      );
-      saw = true;
+    // Runner-gated: the markers are only evidence a MAVEN run prints. The
+    // same text mined from a non-Maven command's stdout is a fabricated
+    // count — the npm console-summary above stays ungated (no runner to
+    // gate on), but this shape can be gated, so it is.
+    if (MAVEN_RUNNER_RE.test(cmd.command)) {
+      while ((m = mavenRe.exec(text))) {
+        // Surefire does not guarantee tests >= failures + errors + skipped
+        // (class-level @Disabled and rerunFailingTestsCount reruns both perturb
+        // it), and this sum spans every report of the command: one negative
+        // value would silently cancel legitimate counts from its neighbours.
+        total += Math.max(
+          0,
+          Number(m[1]) - Number(m[2]) - Number(m[3]) - Number(m[4]),
+        );
+        saw = true;
+      }
     }
     if (saw) counts.push(total);
   }
@@ -614,32 +628,101 @@ export function npmScriptOf(command: string): string | null {
   return alias ? alias[1] : null;
 }
 
+/** Lifecycle phases a Maven command can name. */
+const MAVEN_PHASE_RE =
+  /^(?:clean|validate|compile|test-compile|test|package|verify|install)$/;
+
+/**
+ * Flags whose space-separated form consumes the NEXT token as their value
+ * (the attached `=` forms carry it in-token and consume nothing). A module
+ * dir named `test` handed to one is a flag VALUE, not a lifecycle phase.
+ */
+const MAVEN_VALUE_FLAGS = new Set([
+  '-pl',
+  '--projects',
+  '-P',
+  '--activate-profiles',
+  '-D',
+  '--define',
+  '-rf',
+  '--resume-from',
+  '-f',
+  '--file',
+  '-s',
+  '--settings',
+  '-gs',
+  '--global-settings',
+  '-l',
+  '--log-file',
+  '-T',
+  '--threads',
+]);
+
+/**
+ * The tokens of a Maven command line that are not consumed as flag values —
+ * quote-aware like mavenPlModules, so a quoted selector is one value.
+ */
+function mavenPositionalTokens(command: string): string[] {
+  const tokens = command.trim().split(/\s+/);
+  const positional: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (MAVEN_VALUE_FLAGS.has(token)) {
+      i += 1;
+      const raw = tokens[i];
+      if (raw === undefined) break;
+      const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
+      if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
+        while (i + 1 < tokens.length && !tokens[i].endsWith(quote)) i += 1;
+      }
+      continue;
+    }
+    positional.push(token);
+  }
+  return positional;
+}
+
 function mavenLifecycle(command: string): string | null {
   const trimmed = command.trim();
   if (!MAVEN_RUNNER_RE.test(trimmed)) return null;
-  return (
-    /(?:^|\s)(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
-      trimmed,
-    )?.[1] ?? null
-  );
+  // The LAST phase token that is not a flag value: that reads a phase-first
+  // spelling (`mvnw test -pl core`) correctly and never mistakes a
+  // phase-named `-pl` VALUE (`-pl test`) for the command's lifecycle.
+  let lifecycle: string | null = null;
+  for (const token of mavenPositionalTokens(trimmed)) {
+    if (MAVEN_PHASE_RE.test(token)) lifecycle = token;
+  }
+  return lifecycle;
 }
 
+const BARE_MAVEN_LIFECYCLE_RE = new RegExp(
+  `^(?:${MAVEN_RUNNER_SOURCE})\\s+(clean|validate|compile|test-compile|test|package|verify|install)$`,
+);
+
 function bareMavenLifecycle(command: string): string | null {
-  const trimmed = command.trim();
-  if (!MAVEN_RUNNER_RE.test(trimmed)) return null;
-  return (
-    /^(?:mvn(?:\.cmd)?|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?|\.\.\/mvnw(?:\.cmd)?|\.\.\\mvnw(?:\.cmd)?)\s+(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
-      trimmed,
-    )?.[1] ?? null
-  );
+  return BARE_MAVEN_LIFECYCLE_RE.exec(command.trim())?.[1] ?? null;
 }
 
 /** True when a command carries `-am`/`--also-make` (upstream closure). */
 function mavenHasAlsoMake(command: string): boolean {
-  return command
-    .trim()
-    .split(/\s+/)
-    .some((token) => token === '-am' || token === '--also-make');
+  const tokens = command.trim().split(/\s+/);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    // A quoted `-pl` selector can carry `-am` inside a module dir name
+    // (`-pl 'foo -am bar'` — spaces pass the POM entry gate); consume the
+    // whole selector so the split inside it is not read as the flag.
+    if ((token === '-pl' || token === '--projects') && i + 1 < tokens.length) {
+      i += 1;
+      const raw = tokens[i];
+      const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
+      if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
+        while (i + 1 < tokens.length && !tokens[i].endsWith(quote)) i += 1;
+      }
+      continue;
+    }
+    if (token === '-am' || token === '--also-make') return true;
+  }
+  return false;
 }
 
 /** The module set of a command's `-pl`/`--projects` selector, sorted. */
@@ -748,10 +831,10 @@ function ruleCommand(
   const claimTokens = claimed.split(/\s+/);
   // Lifecycle phases the claim names, in order: a multi-phase claim
   // (`clean test`) runs phases the recorded single-phase run never did.
-  const claimPhases = claimTokens.filter((token) =>
-    /^(?:clean|validate|compile|test-compile|test|package|verify|install)$/.test(
-      token,
-    ),
+  // Flag values are excluded: a module dir named `test` handed to `-pl` is
+  // a selector, not a claimed phase.
+  const claimPhases = mavenPositionalTokens(claimed).filter((token) =>
+    MAVEN_PHASE_RE.test(token),
   );
   const claimScopesItself = claimTokens.some(
     (token) =>
@@ -796,6 +879,20 @@ function ruleCommand(
   // claim must not read as reproduced.
   const ranFailed = (c: CommandResult): boolean =>
     c.exitCode !== 0 || freshTestFailures(c) || c.swallowedFailure === true;
+  // A run's `[maven-test-failure]` markers attribute each failure to its
+  // report path `<module>/target/...`: when one resolves inside the claimed
+  // `-pl` set the failure is provably inside the claim's scope, and the
+  // `-am` carve-outs must not discard it. Mined from the command's own
+  // output, so it carries the same tamper surface as freshTestFailures.
+  const failureInsideClaim = (c: CommandResult): boolean => {
+    if (claimPlModules === null) return false;
+    const output = c.output ?? '';
+    return claimPlModules.some((module) =>
+      output.includes(
+        `[maven-test-failure] ${module === '.' ? '' : `${module}/`}target/`,
+      ),
+    );
+  };
   const matches = [
     ...(buildTest?.build ?? []),
     ...(buildTest?.test ?? []),
@@ -822,13 +919,16 @@ function ruleCommand(
     // tests, so it cannot contradict it — one scoped run must not settle a
     // differently scoped claim in the failing direction. (The converse IS
     // sound: a run WITHOUT `-am` that fails inside the claimed module set
-    // falsifies an `-am` claim too, so that direction stays settled.)
+    // falsifies an `-am` claim too, so that direction stays settled.) The
+    // exclusion yields when the run's own markers attribute a failure to a
+    // module INSIDE the claimed set: that failure is in-scope evidence.
     return !(
       settledBySameScope(command) &&
       mavenHasAlsoMake(command) &&
       !mavenHasAlsoMake(claimed) &&
       finished(c) &&
-      ranFailed(c)
+      ranFailed(c) &&
+      !failureInsideClaim(c)
     );
   });
   // build-test records one scoped command per package and does not stop on
@@ -838,16 +938,18 @@ function ruleCommand(
   // sorted first, stating the opposite of the authoritative `ok: false`.
   const ran =
     matches.find((c) => finished(c) && ranFailed(c)) ??
-    matches.find(finished) ??
     // A spawn-level death (exitCode null, no deadline kill) is a failed run
-    // for a non-Maven claim: it never finished, so the manifest fallback
-    // must not rule it `reproduces`. Maven claims keep the cascade below,
-    // which reports the same result as unchecked.
+    // for a non-Maven claim, ranked ABOVE any green finished sibling: one
+    // green package must not shadow the death and read the claim
+    // `reproduces` while the build-test report says `ok: false`. Maven
+    // claims keep the cascade below, which reports the same result as
+    // unchecked.
     (!mavenRunnerClaim
       ? matches.find(
           (c) => !c.timedOut && c.exitCode === null && !c.infrastructure,
         )
-      : undefined);
+      : undefined) ??
+    matches.find(finished);
   if (ran) {
     // Reactor-wide recorded runs carry no `-pl`; calling those module-scoped
     // would understate what the evidence verified.
@@ -859,7 +961,9 @@ function ruleCommand(
     // carries no scoping of its own — the adapter only ever runs `test` or
     // `test-compile`, so the note must not read as if the earlier phases
     // ran.
-    const phaseReduced = settledReduced && claimPhases.length > 1;
+    const phaseReduced =
+      (settledReduced || settledBySameScope(ran.command.trim())) &&
+      claimPhases.length > 1;
     const howItRan =
       scoped && phaseReduced
         ? `this review ran a module-scoped form of its final phase (\`${claimedLifecycle}\`), ` +
@@ -918,11 +1022,13 @@ function ruleCommand(
           // The same scope asymmetry the `-am` guard above applies to
           // finished runs: an interrupted `-am` run's fresh failures may
           // live entirely in upstream modules the claim never tests, so it
-          // cannot contradict the claim either.
+          // cannot contradict the claim either — unless the markers
+          // attribute a failure to a module inside the claimed set.
           !(
             settledBySameScope(c.command.trim()) &&
             mavenHasAlsoMake(c.command) &&
-            !mavenHasAlsoMake(claimed)
+            !mavenHasAlsoMake(claimed) &&
+            !failureInsideClaim(c)
           ),
       )
     ) {

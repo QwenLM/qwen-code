@@ -207,7 +207,11 @@ the Maven branches of the `test-plan`, `base-tree`, and `build-test` suites:
 
 1. Literal reactor discovery: aggregation edges AND `<parent>` inheritance
    edges are read from checked-in POMs; property expressions, escaping paths,
-   missing child POMs, and shell-active module names fail closed.
+   and missing child POMs fail closed. Module names carrying `[<$>{}&%,:]`
+   fail closed; any other module name that reaches a `-pl` selector is quoted
+   for the platform shell (POSIX single-quote wrap, win32 `"…"` under the
+   `%`-rejection and filename gates) rather than interpolated bare into a
+   `shell: true` command line.
 2. Ownership: changed paths map to the deepest owning module; documentation
    (doc extensions in doc-shaped locations only) and repository metadata are
    exempted; out-of-reactor projects fail closed.
