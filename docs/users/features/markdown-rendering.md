@@ -40,15 +40,15 @@ current session view; it does not rewrite your settings file.
 
 ## Assistant and Tool Images
 
-The interactive TUI displays image parts returned in assistant responses and successful tool results directly in the conversation. Text and images keep their original response order, and this behavior is independent of the Markdown `render` and `raw` modes. Other output surfaces, including headless, ACP, daemon/Web Shell, channels, and IDE integrations, remain text-only.
+The interactive TUI displays image parts returned in assistant responses and completed tool results (successful, failed, and cancelled) directly in the conversation. In assistant responses, text and images keep their original order; tool rows show the result text followed by its images. This behavior is independent of the Markdown `render` and `raw` modes. Other output surfaces, including headless, ACP, daemon/Web Shell, and IDE integrations, do not render image parts. IM channels can still deliver agent-generated image files through their own `[IMAGE: ...]` marker flow.
 
 | Environment                                      | Image display                                                                           |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------- |
 | Direct Kitty or Ghostty TTY, without tmux or SSH | Native terminal image placement                                                         |
 | Other terminals with `chafa` installed           | 256-color ANSI preview, including in iTerm2, Warp, tmux, and SSH sessions               |
-| No compatible renderer, or screen-reader mode    | Deterministic text such as `[image: 1024x768 png]` instead of a terminal image sequence |
+| No compatible renderer, or screen-reader mode (inline image parts) | Deterministic text such as `[image: 1024x768 png]` instead of a terminal image sequence |
 
-Pixel previews currently require valid PNG data. Other image formats and invalid PNGs remain visible as text placeholders. Payloads above the 8 MiB image admission limit are dropped before entering TUI history and do not produce a placeholder. Each assistant response or tool row displays at most four images and reports the remainder with a marker such as `[+2 more images]`.
+Pixel previews currently require valid PNG data within the display limits (64 megapixels total and at most 1,000,000 pixels per side). Other image formats, invalid PNGs, and valid PNGs exceeding those limits remain visible as text placeholders. Inline image payloads larger than 8 MiB are not pixel-rendered: most oversized payloads are dropped before entering TUI history, while payloads marginally over the limit may remain as text placeholders because admission is based on encoded size. Each assistant response or tool row displays at most four images and reports the remainder with a marker such as `[+2 more images]`.
 
 Tool image parts are saved with their results and can be reconstructed after session resume. Assistant images render live but are not currently persisted, so `--continue` and `--resume` restore the assistant text without those images.
 
