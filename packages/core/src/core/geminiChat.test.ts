@@ -7445,6 +7445,16 @@ describe('GeminiChat', async () => {
                 'Recovered after thinking-phase retry',
           ),
         ).toBe(true);
+        // The retry log must record that non-content chunks (the
+        // thinking) had already flowed — the diagnostic that makes
+        // thinking-phase replays visible in the debug log.
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry scheduled',
+          expect.objectContaining({
+            retryDecision: 'retry',
+            yieldedNonContentChunks: true,
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -7530,6 +7540,69 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('attributes a blocked replay to delivered content when a function call was cut', async () => {
+      // A cut after a functionCall part closes both recovery paths: the
+      // delivered functionCall is non-thought output (a replay would
+      // duplicate it), and continuation across a functionCall boundary is
+      // excluded. The not-taken log must attribute the block to delivered
+      // content rather than budget exhaustion — the diagnostic that
+      // separates "unsafe to recover" from "gave up" in the debug log.
+      const transportError = Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'Choosing a tool…', thought: true }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ functionCall: { name: 'read_file', args: {} } }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw transportError;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-no-recovery-after-function-call-cut',
+      );
+      const events: StreamEvent[] = [];
+      await expect(async () => {
+        for await (const event of stream) {
+          events.push(event);
+        }
+      }).rejects.toThrow('terminated');
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        'Transport stream retry not taken',
+        expect.objectContaining({
+          retryDecision: 'skipped_after_content',
+        }),
+      );
     });
 
     it('retries a transport stream error after yielding only tool preparation metadata', async () => {

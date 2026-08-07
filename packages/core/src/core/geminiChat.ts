@@ -147,11 +147,14 @@ function hasCandidateOutput(response: GenerateContentResponse): boolean {
 /**
  * True when the chunk carries model output beyond ephemeral reasoning:
  * any candidate part without the `thought` flag (text, functionCall,
- * inlineData, …). Thought parts stream reasoning that is never recorded
- * as the assistant's final response in history, so replaying a request
- * that has produced only thought parts cannot duplicate user-visible
- * output — the distinction the transport stream retry gate relies on
- * (#7832).
+ * inlineData, …). What makes a replay after thinking-only output safe
+ * is NOT that thought parts stay out of history — the successful
+ * attempt's thoughts are recorded there. It is that the failed
+ * attempt's accumulated partial turn is discarded wholesale before the
+ * retry (`popPendingPartialAssistantTurn`), and thought parts are never
+ * user-visible content — so nothing the caller saw from the failed
+ * attempt can appear twice. The transport stream retry gate relies on
+ * this distinction (#7832).
  */
 function hasNonThoughtCandidateParts(
   response: GenerateContentResponse,
@@ -2836,12 +2839,12 @@ export class GeminiChat {
 
             // Replay only curated socket-level failures before any
             // user-visible content has reached callers. Thinking-only
-            // output does not block the replay: thought parts are
-            // ephemeral (never recorded as the assistant's response in
-            // history), so retrying after them cannot duplicate visible
-            // output — and thinking models can spend minutes in that
-            // phase, exactly when gateways close long-lived SSE
-            // connections (#7832).
+            // output does not block the replay: the failed attempt's
+            // partial turn is popped wholesale below, and thought parts
+            // are never user-visible content, so the replay cannot
+            // duplicate anything the caller saw — and thinking models
+            // can spend minutes in that phase, exactly when gateways
+            // close long-lived SSE connections (#7832).
             const isRetryableStreamTransportError =
               classification.kind === 'transport' &&
               classification.transportCode !== undefined &&
