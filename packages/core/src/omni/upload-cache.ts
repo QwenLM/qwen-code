@@ -75,7 +75,9 @@ interface UploadCacheFile {
  *   design — the pipeline only knows the URL the server rejected, not
  *   which scope minted it. Pre-scope 2-part keys simply never match again
  *   and age out via TTL;
- * - expired entries are misses and are lazily pruned;
+ * - expired entries are misses; they are pruned on read and swept
+ *   wholesale on every {@link put} (so never-read-again entries cannot
+ *   accumulate forever);
  * - a corrupt cache file is backed up and rebuilt empty (never fatal),
  *   keeping at most the newest {@link MAX_CORRUPT_BACKUPS} backups;
  * - a cache file that exists but cannot be READ (EACCES, EMFILE, …) makes
@@ -235,6 +237,15 @@ export class OmniUploadCache {
         uploadedAt: new Date(now).toISOString(),
         expiresAt: new Date(now + this.ttlMs).toISOString(),
       };
+      // Wholesale sweep of expired entries: `get()` prunes only the key it
+      // was asked about, so entries that are never read again would
+      // otherwise accumulate forever — every load/save re-parses and
+      // rewrites the whole table, monotonically slowing with dead history.
+      // put() is the natural hook: it already holds the serialized write.
+      for (const [k, v] of Object.entries(data.entries)) {
+        const t = Date.parse(v.expiresAt);
+        if (!Number.isFinite(t) || t <= now) delete data.entries[k];
+      }
       await this.save(data);
     });
   }

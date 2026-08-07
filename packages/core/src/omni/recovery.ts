@@ -228,7 +228,16 @@ export function runStartupRecoveryOnce(
   let scan = recoveryOnce.get(root);
   if (!scan) {
     scan = (async () => {
+      // The per-directory guards below lstat only the FINAL path component
+      // of each directory they enter — every intermediate component is
+      // still followed. Verify the shared prefix chain up front: a symlink
+      // planted at the omni root itself, or at the `objects/` level above
+      // `objects/sha256`, would otherwise redirect every sweep outside the
+      // managed tree. (An absent directory fails the check too, which is
+      // fine — there is nothing to sweep beneath it.)
+      if (!(await isRealDirectory(root))) return;
       await sweepDownloads(path.join(root, 'downloads'));
+      if (!(await isRealDirectory(path.join(root, 'objects')))) return;
       await sweepTmpFiles(store.getObjectsDir());
       await sampleVerifyObjects(
         store.getObjectsDir(),

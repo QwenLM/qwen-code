@@ -194,6 +194,35 @@ describe('OmniUploadCache', () => {
     expect(await cache.get(SHA, 'm')).toBeNull();
   });
 
+  it('put() sweeps ALL expired entries, not just the written key', async () => {
+    const cache = new OmniUploadCache(root);
+    const deadSha = 'b'.repeat(64);
+    const malformedSha = 'c'.repeat(64);
+    const liveSha = 'd'.repeat(64);
+    await cache.put(deadSha, 'm', 'oss://bucket/dead');
+    await cache.put(malformedSha, 'm', 'oss://bucket/malformed');
+    await cache.put(liveSha, 'm', 'oss://bucket/live');
+    // Force-expire one entry and corrupt another's timestamp — neither
+    // key is ever read again, so only a wholesale sweep can remove them.
+    const file = path.join(root, 'upload-cache.json');
+    const data = JSON.parse(await fs.readFile(file, 'utf8'));
+    data.entries[`${deadSha}|m|`].expiresAt = new Date(
+      Date.now() - 1000,
+    ).toISOString();
+    data.entries[`${malformedSha}|m|`].expiresAt = 'not-a-date';
+    await fs.writeFile(file, JSON.stringify(data));
+
+    // A put of a DIFFERENT key must evict both stale entries.
+    await cache.put(SHA, 'm', 'oss://bucket/fresh');
+
+    const after = JSON.parse(await fs.readFile(file, 'utf8'));
+    expect(after.entries[`${deadSha}|m|`]).toBeUndefined();
+    expect(after.entries[`${malformedSha}|m|`]).toBeUndefined();
+    // Live neighbors and the fresh write survive.
+    expect(after.entries[`${liveSha}|m|`]).toBeDefined();
+    expect(after.entries[`${SHA}|m|`]).toBeDefined();
+  });
+
   it('serializes concurrent puts without losing entries', async () => {
     const cache = new OmniUploadCache(root);
     await Promise.all([

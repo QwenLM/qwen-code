@@ -372,5 +372,74 @@ describe('runStartupRecoveryOnce', () => {
         await fs.rm(outside, { recursive: true, force: true });
       }
     });
+
+    /** Build a full omni-shaped layout inside an external dir: victims in
+     * downloads/, in an objects/sha256 shard, and .tmp orphans — so if a
+     * root-level or intermediate-level symlink is followed, EVERY sweep
+     * finds deletable-looking targets. */
+    async function makeOmniShapedVictimTree(): Promise<{
+      outside: string;
+      victims: string[];
+    }> {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-outside-'));
+      const old = new Date(Date.now() - 72 * 3600_000);
+      const downloads = path.join(outside, 'downloads');
+      const shard = path.join(outside, 'objects', 'sha256', 'aa');
+      await fs.mkdir(downloads, { recursive: true });
+      await fs.mkdir(shard, { recursive: true });
+      const victims = [
+        path.join(downloads, 'movie.mp4.part'),
+        path.join(shard, `${'a'.repeat(64)}.pdf`),
+        path.join(shard, '.tmp-orphan'),
+      ];
+      for (const p of victims) {
+        await fs.writeFile(p, 'external-bytes-recovery-must-not-touch');
+        await fs.utimes(p, old, old);
+      }
+      return { outside, victims };
+    }
+
+    it('a symlinked OMNI ROOT is never swept (intermediate components must be real)', async () => {
+      const { outside, victims } = await makeOmniShapedVictimTree();
+      try {
+        const root = store.getOmniRootDir();
+        await fs.rm(root, { recursive: true, force: true });
+        // The reviewer's probe: a repo ships `.qwen/omni` itself as a
+        // symlink; every per-directory guard lstats only the final
+        // component and would pass through this link.
+        await fs.symlink(outside, root);
+
+        await runStartupRecoveryOnce(store, undefined, {
+          sampleVerifyLimit: 100,
+        });
+
+        await expectAllSurvive(victims);
+        expect((await fs.lstat(root)).isSymbolicLink()).toBe(true);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('a symlinked objects/ INTERMEDIATE directory is never traversed', async () => {
+      const { outside, victims } = await makeOmniShapedVictimTree();
+      try {
+        // Link the `objects/` level (the parent of `objects/sha256`): the
+        // sha256-root guard lstats only `objects/sha256` — resolved through
+        // this link it IS a real directory, so only an explicit
+        // intermediate-chain check stops the traversal.
+        const objectsParent = path.join(store.getOmniRootDir(), 'objects');
+        await fs.rm(objectsParent, { recursive: true, force: true });
+        await fs.symlink(path.join(outside, 'objects'), objectsParent);
+
+        await runStartupRecoveryOnce(store, undefined, {
+          sampleVerifyLimit: 100,
+        });
+
+        await expectAllSurvive(victims);
+        expect((await fs.lstat(objectsParent)).isSymbolicLink()).toBe(true);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
   });
 });
