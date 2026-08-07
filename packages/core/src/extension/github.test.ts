@@ -36,6 +36,7 @@ import {
 } from './extensionManager.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 import { ExtensionStorage } from './storage.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 
@@ -147,6 +148,7 @@ describe('git extension helpers', () => {
       getRemotes: vi.fn(),
       fetch: vi.fn(),
       checkout: vi.fn(),
+      revparse: vi.fn(),
       version: vi.fn(),
       env: vi.fn(),
     };
@@ -155,6 +157,7 @@ describe('git extension helpers', () => {
       vi.mocked(simpleGit).mockReturnValue(mockGit as unknown as SimpleGit);
       mockGit.env.mockReturnValue(mockGit);
       mockGit.version.mockResolvedValue({ major: 2, minor: 52 });
+      mockGit.revparse.mockResolvedValue('local-hash');
     });
 
     it('should clone, fetch and checkout a repo', async () => {
@@ -170,7 +173,11 @@ describe('git extension helpers', () => {
       ]);
       const controller = new AbortController();
 
-      await cloneFromGit(installMetadata, destination, controller.signal);
+      const commit = await cloneFromGit(
+        installMetadata,
+        destination,
+        controller.signal,
+      );
 
       expect(simpleGit).toHaveBeenCalledWith(destination, {
         abort: controller.signal,
@@ -187,6 +194,7 @@ describe('git extension helpers', () => {
         'my-ref',
       );
       expect(mockGit.checkout).toHaveBeenCalledWith('FETCH_HEAD');
+      expect(commit).toBe('local-hash');
     });
 
     it('should use core.symlinks=false on Windows to avoid permission errors', async () => {
@@ -561,6 +569,48 @@ describe('git extension helpers', () => {
       expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
     });
 
+    it('checks a converted Qoder Git extension using its recorded commit', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/example/sample-qoder-plugin',
+          originSource: 'Qoder',
+          gitCommit: 'local-hash',
+        },
+      });
+      mockGit.listRemote.mockResolvedValue('remote-hash\tHEAD');
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      expect(mockGit.getRemotes).not.toHaveBeenCalled();
+      expect(mockGit.listRemote).toHaveBeenCalledWith([
+        'https://github.com/example/sample-qoder-plugin',
+        'HEAD',
+      ]);
+    });
+
+    it('does not update-check legacy Qoder Git installs without a recorded commit', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/example/sample-qoder-plugin',
+          originSource: 'Qoder',
+        },
+      });
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockGit.listRemote).not.toHaveBeenCalled();
+    });
+
     it('pins public Git update checks and disables redirects and proxies', async () => {
       vi.spyOn(dns, 'lookup').mockResolvedValue([
         { address: '8.8.8.8', family: 4 },
@@ -700,6 +750,44 @@ describe('git extension helpers', () => {
 
       const result = await checkForExtensionUpdate(extension, mockManager);
       expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+    });
+
+    it('should convert a local Qoder plugin before checking for updates', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-qoder-update-test-'),
+      );
+      try {
+        await fs.mkdir(path.join(tempDir, '.qoder-plugin'));
+        await fs.writeFile(
+          path.join(tempDir, QODER_PLUGIN_MANIFEST),
+          JSON.stringify({ name: 'sample-qoder-plugin', version: '2.0.0' }),
+        );
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: tempDir,
+            originSource: 'Qoder',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) =>
+              JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ),
+          ),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
 
     it('should return NOT_UPDATABLE for local extension when source cannot be loaded', async () => {
@@ -1753,6 +1841,30 @@ describe('git extension helpers', () => {
       await expect(
         fs.readFile(path.join(tempDir, EXTENSIONS_CONFIG_FILENAME), 'utf-8'),
       ).resolves.toContain('tar-wrapped-extension');
+    });
+
+    it('should extract and flatten a wrapped Qoder plugin archive', async () => {
+      const archivePath = path.join(tempDir, 'wrapped-qoder-plugin.zip');
+      const archive = await createZipBuffer(tempDir, [
+        {
+          name: `wrapped/${QODER_PLUGIN_MANIFEST}`,
+          content: JSON.stringify({ name: 'sample-qoder-plugin' }),
+        },
+        {
+          name: 'wrapped/system-prompt.md',
+          content: '# System context',
+        },
+      ]);
+      await fs.writeFile(archivePath, archive);
+
+      await extractArchiveFile(archivePath, tempDir);
+
+      await expect(
+        fs.readFile(path.join(tempDir, QODER_PLUGIN_MANIFEST), 'utf-8'),
+      ).resolves.toContain('sample-qoder-plugin');
+      await expect(
+        fs.readFile(path.join(tempDir, 'system-prompt.md'), 'utf-8'),
+      ).resolves.toBe('# System context');
     });
 
     it('should flatten wrapped archives when the archive file is in the destination', async () => {

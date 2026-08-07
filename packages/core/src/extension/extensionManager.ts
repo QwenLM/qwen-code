@@ -63,7 +63,7 @@ import {
   loadMarketplaceConfigFromSource,
   parseInstallSource,
 } from './marketplace.js';
-import { convertGeminiOrClaudeExtension } from './extension-converter.js';
+import { convertCompatibleExtension } from './extension-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
@@ -1768,7 +1768,11 @@ export class ExtensionManager {
           // See #6334.
           await fs.promises.rm(tempDir, { recursive: true, force: true });
           await fs.promises.mkdir(tempDir, { recursive: true });
-          await cloneFromGit(installMetadata, tempDir, signal);
+          installMetadata.gitCommit = await cloneFromGit(
+            installMetadata,
+            tempDir,
+            signal,
+          );
           if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';
           }
@@ -1806,13 +1810,12 @@ export class ExtensionManager {
       signal?.throwIfAborted();
       try {
         const sourceBeforeConversion = localSourcePath;
-        const { extensionDir, originSource } =
-          await convertGeminiOrClaudeExtension(
-            sourceBeforeConversion,
-            installMetadata.pluginName,
-            installMetadata.networkPolicy,
-            signal,
-          );
+        const { extensionDir, originSource } = await convertCompatibleExtension(
+          sourceBeforeConversion,
+          installMetadata.pluginName,
+          installMetadata.networkPolicy,
+          signal,
+        );
         signal?.throwIfAborted();
 
         if (extensionDir !== sourceBeforeConversion) {
@@ -1820,6 +1823,9 @@ export class ExtensionManager {
         }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
+        if (originSource !== 'Qoder') {
+          delete installMetadata.gitCommit;
+        }
 
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,

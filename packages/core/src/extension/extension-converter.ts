@@ -15,6 +15,10 @@ import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
 } from './claude-converter.js';
+import {
+  convertQoderPlugin,
+  QODER_PLUGIN_MANIFEST,
+} from './qoder-converter.js';
 import type {
   ExtensionNetworkPolicy,
   ExtensionOriginSource,
@@ -25,9 +29,10 @@ export const SUPPORTED_EXTENSION_MANIFESTS = [
   'gemini-extension.json',
   '.claude-plugin/marketplace.json',
   '.claude-plugin/plugin.json',
+  QODER_PLUGIN_MANIFEST,
 ] as const;
 
-export async function convertGeminiOrClaudeExtension(
+export async function convertCompatibleExtension(
   extensionDir: string,
   pluginName?: string,
   networkPolicy?: ExtensionNetworkPolicy,
@@ -62,6 +67,9 @@ export async function convertGeminiOrClaudeExtension(
     newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
       .convertedDir;
     originSource = 'Claude';
+  } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
+    newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
+    originSource = 'Qoder';
   }
   signal?.throwIfAborted();
   return { extensionDir: newExtensionDir, originSource };

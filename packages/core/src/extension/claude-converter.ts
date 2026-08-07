@@ -591,7 +591,7 @@ function resolvePluginRelativeFile(
  * (`convertClaudePluginPackage`) and standalone (`convertClaudePluginStandalone`)
  * conversion paths.
  */
-async function buildQwenExtensionFromPlugin(
+export async function buildQwenExtensionFromPlugin(
   pluginSource: string,
   mergedConfig: ClaudePluginConfig,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {

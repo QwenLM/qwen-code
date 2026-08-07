@@ -672,7 +672,7 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   };
 }
 
-export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini' | 'Qoder';
 export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
@@ -680,6 +680,7 @@ export interface ExtensionInstallMetadata {
   type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
+  gitCommit?: string; // Only present when a converted Git install cannot retain .git.
   registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;

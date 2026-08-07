@@ -44,6 +44,7 @@ const mockGit = {
 };
 const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
 const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
+const mockDownloadFromNpmRegistry = vi.hoisted(() => vi.fn());
 
 vi.mock('simple-git', () => ({
   CheckRepoActions: { IS_REPO_ROOT: 'is-repo-root' },
@@ -62,6 +63,14 @@ vi.mock('./github.js', async (importOriginal) => {
       .fn()
       .mockRejectedValue(new Error('Mocked GitHub release download failure')),
     extractArchiveFile: mockExtractArchiveFile,
+  };
+});
+
+vi.mock('./npm.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./npm.js')>();
+  return {
+    ...actual,
+    downloadFromNpmRegistry: mockDownloadFromNpmRegistry,
   };
 });
 
@@ -153,6 +162,8 @@ describe('extension tests', () => {
     Object.values(mockGit).forEach((fn) => fn.mockReset());
     mockDownloadFromArchiveUrl.mockReset();
     mockExtractArchiveFile.mockReset();
+    mockDownloadFromNpmRegistry.mockReset();
+    mockGit.revparse.mockResolvedValue('sample-commit');
   });
 
   afterEach(() => {
@@ -184,6 +195,20 @@ describe('extension tests', () => {
       fs.writeFileSync(
         path.join(destination, EXTENSIONS_CONFIG_FILENAME),
         JSON.stringify({ name, version: '1.0.0' }),
+      );
+    }
+
+    function writeQoderPlugin(destination: string) {
+      fs.mkdirSync(path.join(destination, '.qoder-plugin'), {
+        recursive: true,
+      });
+      fs.writeFileSync(
+        path.join(destination, '.qoder-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'sample-qoder-plugin', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(destination, 'system-prompt.md'),
+        '# System context',
       );
     }
 
@@ -674,6 +699,135 @@ describe('extension tests', () => {
         source: archivePath,
         type: 'local',
       });
+    });
+
+    it('should install a Qoder plugin with skills and system context', async () => {
+      const sourcePath = path.join(tempWorkspaceDir, 'sample-qoder-plugin');
+      fs.mkdirSync(path.join(sourcePath, '.qoder-plugin'), {
+        recursive: true,
+      });
+      fs.writeFileSync(
+        path.join(sourcePath, '.qoder-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'sample-qoder-plugin', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(sourcePath, 'system-prompt.md'),
+        '# System context',
+      );
+      const skillPath = path.join(sourcePath, 'skills', 'sample-skill');
+      fs.mkdirSync(skillPath, { recursive: true });
+      fs.writeFileSync(
+        path.join(skillPath, 'SKILL.md'),
+        '---\nname: sample-skill\ndescription: Synthetic skill\n---\n',
+      );
+      const requestConsent = vi.fn(async () => {});
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        { source: sourcePath, type: 'local' },
+        requestConsent,
+      );
+
+      expect(extension.installMetadata).toMatchObject({
+        source: sourcePath,
+        type: 'local',
+        originSource: 'Qoder',
+      });
+      expect(extension.contextFiles).toEqual([
+        path.join(extension.path, 'system-prompt.md'),
+      ]);
+      expect(extension.skills?.map((skill) => skill.name)).toEqual([
+        'sample-skill',
+      ]);
+      expect(requestConsent).toHaveBeenCalledWith(
+        expect.objectContaining({ originSource: 'Qoder' }),
+      );
+    });
+
+    it.each([
+      {
+        type: 'local' as const,
+        source: 'sample-qoder-plugin.zip',
+      },
+      {
+        type: 'archive-url' as const,
+        source: 'https://example.com/sample-qoder-plugin.zip',
+      },
+      {
+        type: 'npm' as const,
+        source: '@example/sample-qoder-plugin',
+      },
+    ])('should install a Qoder plugin from $type', async (installMetadata) => {
+      const resolvedInstallMetadata =
+        installMetadata.type === 'local'
+          ? {
+              ...installMetadata,
+              source: path.join(tempWorkspaceDir, installMetadata.source),
+            }
+          : installMetadata;
+      if (resolvedInstallMetadata.type === 'local') {
+        fs.writeFileSync(resolvedInstallMetadata.source, 'synthetic archive');
+        mockExtractArchiveFile.mockImplementation(
+          async (_source: string, destination: string) => {
+            writeQoderPlugin(destination);
+          },
+        );
+      } else if (installMetadata.type === 'archive-url') {
+        mockDownloadFromArchiveUrl.mockImplementation(
+          async (_metadata: ExtensionInstallMetadata, destination: string) => {
+            writeQoderPlugin(destination);
+          },
+        );
+      } else {
+        mockDownloadFromNpmRegistry.mockImplementation(
+          async (_metadata: ExtensionInstallMetadata, destination: string) => {
+            writeQoderPlugin(destination);
+            return { version: '1.0.0', type: 'npm' };
+          },
+        );
+      }
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        resolvedInstallMetadata,
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-qoder-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Qoder');
+      expect(extension.contextFiles).toEqual([
+        path.join(extension.path, 'system-prompt.md'),
+      ]);
+    });
+
+    it('should install a Qoder plugin from Git', async () => {
+      mockGit.clone.mockImplementation(async () => {
+        writeQoderPlugin(mockGit.path());
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-qoder-plugin' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-qoder-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-qoder-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Qoder');
+      expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
     });
 
     it('should emit mutation lifecycle events around install', async () => {

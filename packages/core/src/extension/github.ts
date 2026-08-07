@@ -23,7 +23,7 @@ import type { ExtensionInstallMetadata } from '../config/config.js';
 import { checkNpmUpdate } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import {
-  convertGeminiOrClaudeExtension,
+  convertCompatibleExtension,
   SUPPORTED_EXTENSION_MANIFESTS,
 } from './extension-converter.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
@@ -109,6 +109,25 @@ function getGitHubToken(): string | undefined {
   return process.env['GITHUB_TOKEN'];
 }
 
+function addGitHubToken(source: string): string {
+  const token = getGitHubToken();
+  if (!token) return source;
+  try {
+    const parsedUrl = new URL(source);
+    if (
+      parsedUrl.protocol === 'https:' &&
+      parsedUrl.hostname === 'github.com' &&
+      !parsedUrl.username
+    ) {
+      parsedUrl.username = token;
+      return parsedUrl.toString();
+    }
+  } catch {
+    return source;
+  }
+  return source;
+}
+
 async function assertPinnedGitSupported(): Promise<void> {
   const { simpleGit } = await loadSimpleGit();
   const version = await simpleGit().version();
@@ -165,7 +184,7 @@ export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<string> {
   const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
     const { simpleGit } = await loadSimpleGit();
@@ -200,25 +219,7 @@ export async function cloneFromGit(
       installMetadata.networkPolicy,
     );
     signal?.throwIfAborted();
-    let sourceUrl = installMetadata.source;
-    const token = getGitHubToken();
-    if (token) {
-      try {
-        const parsedUrl = new URL(sourceUrl);
-        if (
-          parsedUrl.protocol === 'https:' &&
-          parsedUrl.hostname === 'github.com'
-        ) {
-          if (!parsedUrl.username) {
-            parsedUrl.username = token;
-          }
-          sourceUrl = parsedUrl.toString();
-        }
-      } catch {
-        // If source is not a valid URL, we don't inject the token.
-        // We let git handle the source as is.
-      }
-    }
+    const sourceUrl = addGitHubToken(installMetadata.source);
     // On Windows, symlinks require elevated privileges by default, so we
     // disable them to avoid "Permission denied" errors during checkout.
     const symlinkValue = os.platform() === 'win32' ? 'false' : 'true';
@@ -247,6 +248,7 @@ export async function cloneFromGit(
     // Detached HEAD is expected here — we only need the fetched content.
     await git.checkout('FETCH_HEAD');
     signal?.throwIfAborted();
+    return (await git.revparse(['HEAD'])).trim();
   } catch (error) {
     if (
       signal?.aborted &&
@@ -325,18 +327,20 @@ export async function checkForExtensionUpdate(
         signal?.throwIfAborted();
         await extractArchiveFile(installMetadata.source, tempDir, signal);
         signal?.throwIfAborted();
-        const converted = await convertGeminiOrClaudeExtension(
-          tempDir,
-          installMetadata.pluginName,
-          installMetadata.networkPolicy,
-          signal,
-        );
-        extensionDir = converted.extensionDir;
-        if (extensionDir !== tempDir) {
-          convertedDir = extensionDir;
-        }
-        signal?.throwIfAborted();
+        extensionDir = tempDir;
       }
+      const sourceBeforeConversion = extensionDir;
+      const converted = await convertCompatibleExtension(
+        sourceBeforeConversion,
+        installMetadata.pluginName,
+        installMetadata.networkPolicy,
+        signal,
+      );
+      extensionDir = converted.extensionDir;
+      if (extensionDir !== sourceBeforeConversion) {
+        convertedDir = extensionDir;
+      }
+      signal?.throwIfAborted();
       latestConfig = extensionManager.loadExtensionConfig({
         extensionDir,
       });
@@ -377,7 +381,7 @@ export async function checkForExtensionUpdate(
         path.join(os.tmpdir(), 'extension-archive-update-'),
       );
       await downloadFromArchiveUrl(installMetadata, tempDir, signal);
-      const converted = await convertGeminiOrClaudeExtension(
+      const converted = await convertCompatibleExtension(
         tempDir,
         installMetadata.pluginName,
         installMetadata.networkPolicy,
@@ -429,22 +433,34 @@ export async function checkForExtensionUpdate(
       if (installMetadata.networkPolicy === 'public') {
         await assertPinnedGitSupported();
       }
-      const localGit = simpleGit(
-        extension.path,
-        signal ? { abort: signal } : undefined,
-      );
-      const remotes = await localGit.getRemotes(true);
-      signal?.throwIfAborted();
-      if (remotes.length === 0) {
-        debugLogger.error('No git remotes found.');
-        return ExtensionUpdateState.ERROR;
-      }
-      const remoteUrl = remotes[0].refs.fetch;
-      if (!remoteUrl) {
-        debugLogger.error(
-          `No fetch URL found for git remote ${remotes[0].name}.`,
+      let remoteUrl: string;
+      let localHash: string;
+      if (installMetadata.originSource === 'Qoder') {
+        if (!installMetadata.gitCommit) {
+          return ExtensionUpdateState.NOT_UPDATABLE;
+        }
+        remoteUrl = addGitHubToken(installMetadata.source);
+        localHash = installMetadata.gitCommit;
+      } else {
+        const localGit = simpleGit(
+          extension.path,
+          signal ? { abort: signal } : undefined,
         );
-        return ExtensionUpdateState.ERROR;
+        const remotes = await localGit.getRemotes(true);
+        signal?.throwIfAborted();
+        if (remotes.length === 0) {
+          debugLogger.error('No git remotes found.');
+          return ExtensionUpdateState.ERROR;
+        }
+        const fetchedRemoteUrl = remotes[0].refs.fetch;
+        if (!fetchedRemoteUrl) {
+          debugLogger.error(
+            `No fetch URL found for git remote ${remotes[0].name}.`,
+          );
+          return ExtensionUpdateState.ERROR;
+        }
+        remoteUrl = fetchedRemoteUrl;
+        localHash = await localGit.revparse(['HEAD']);
       }
       let networkConfig: string[] = [];
       if (installMetadata.networkPolicy === 'public') {
@@ -487,7 +503,6 @@ export async function checkForExtensionUpdate(
       }
 
       const remoteHash = lsRemoteOutput.split('\t')[0];
-      const localHash = await git.revparse(['HEAD']);
       signal?.throwIfAborted();
 
       if (!remoteHash) {
