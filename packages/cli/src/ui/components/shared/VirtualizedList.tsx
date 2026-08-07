@@ -331,8 +331,9 @@ function VirtualizedList<T>(
       if (isStickingToBottom) {
         setIsStickingToBottom(false);
       }
-      if (scrollAnchor.index !== target || scrollAnchor.offset !== 0) {
-        setScrollAnchor({ index: target, offset: 0 });
+      const anchoredIndex = firstIndexOfOffsetRun(offsets, target);
+      if (scrollAnchor.index !== anchoredIndex || scrollAnchor.offset !== 0) {
+        setScrollAnchor({ index: anchoredIndex, offset: 0 });
       }
     }
   }

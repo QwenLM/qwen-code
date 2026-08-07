@@ -860,6 +860,35 @@ describe('<VirtualizedList />', () => {
   });
 });
 
+// Hoisted to module scope so every harness rerender hands VirtualizedList
+// the same element type and in-window items reconcile in place, matching
+// production's stable `renderVirtualItem` over `memo(HistoryItemDisplay)`
+// (MainContent). A component type rebuilt per evaluation would remount the
+// whole window on every rerender and skip the persistent-mount path.
+const ThoughtItem = ({
+  item,
+  index,
+  thoughtHeadId,
+  onRenderIndex,
+}: {
+  item: HistoryItem;
+  index: number;
+  thoughtHeadId: number | undefined;
+  onRenderIndex?: (index: number) => void;
+}) => {
+  onRenderIndex?.(index);
+  return (
+    <HistoryItemDisplay
+      terminalWidth={80}
+      mainAreaWidth={80}
+      availableTerminalHeight={40}
+      item={item}
+      isPending={false}
+      thoughtHeadId={thoughtHeadId}
+    />
+  );
+};
+
 describe('<VirtualizedList /> VP collapsed thought groups', () => {
   const settings = {
     merged: { ui: { useTerminalBuffer: true, mouseTracking: false } },
@@ -908,26 +937,21 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     onRenderIndex?: (index: number) => void,
   ) => {
     const headIdMap = buildThoughtHeadIdMap(data);
-    const ThoughtItem = ({
+    const renderItem = ({
       item,
       index,
     }: {
       item: HistoryItem;
       index: number;
-    }) => {
-      onRenderIndex?.(index);
-      return (
-        <HistoryItemDisplay
-          terminalWidth={80}
-          mainAreaWidth={80}
-          availableTerminalHeight={40}
-          item={item}
-          isPending={false}
-          thoughtHeadId={headIdMap.get(item)}
-        />
-      );
-    };
-    return ThoughtItem;
+    }) => (
+      <ThoughtItem
+        item={item}
+        index={index}
+        thoughtHeadId={headIdMap.get(item)}
+        onRenderIndex={onRenderIndex}
+      />
+    );
+    return renderItem;
   };
 
   const thoughtTree = (
@@ -936,6 +960,7 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     data: HistoryItem[],
     initialScrollIndex?: number,
     onRenderIndex?: (index: number) => void,
+    targetScrollIndex?: number,
   ) => (
     <SettingsContext.Provider value={settings}>
       <VirtualViewportContext.Provider value={true}>
@@ -951,6 +976,7 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
               keyExtractor={(item) => `h-${item.id}`}
               isStaticItem={() => true}
               initialScrollIndex={initialScrollIndex}
+              targetScrollIndex={targetScrollIndex}
               containerHeight={40}
               showScrollbar={false}
             />
@@ -1179,5 +1205,56 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     expect(lines.filter((l) => l.trim() !== '').length).toBeGreaterThan(0);
     expect(/thought line|answer/.test(harness.lastFrame() ?? '')).toBe(true);
     expect(ref.current!.getScrollState().scrollHeight).toBe(159);
+  });
+
+  it('walks a mid-run targetScrollIndex anchor back to the first item of the run', async () => {
+    const data = thoughtHistory(12, 0, 5);
+    const ref: RefObject<VirtualizedListRef<HistoryItem> | null> = {
+      current: null,
+    };
+    const harness = render(
+      thoughtTree(new Set([HEAD_ID]), ref, data, SCROLL_TO_ITEM_END),
+    );
+    await tick();
+    await tick();
+
+    // Collapse so the continuations cache 0, then grow the answer to pin
+    // the viewport bottom-stuck below the collapsed group.
+    harness.rerender(thoughtTree(new Set(), ref, data, SCROLL_TO_ITEM_END));
+    await tick();
+    await tick();
+    const tallData = thoughtHistory(12, 60, 5);
+    harness.rerender(thoughtTree(new Set(), ref, tallData, SCROLL_TO_ITEM_END));
+    await tick();
+    await tick();
+
+    // Target mid-run (collapsed continuations 2..6 share one offset):
+    // the anchor must resolve to the run's FIRST item like every other
+    // anchor path, or healing jumps scrollTop past the healed rows.
+    harness.rerender(
+      thoughtTree(new Set(), ref, tallData, SCROLL_TO_ITEM_END, undefined, 4),
+    );
+    await tick();
+    await tick();
+    expect(ref.current!.getScrollIndex()).toBe(2);
+
+    // Re-expand: the healed run must stay visible at the viewport top
+    // instead of being stranded above it.
+    harness.rerender(
+      thoughtTree(
+        new Set([HEAD_ID]),
+        ref,
+        tallData,
+        SCROLL_TO_ITEM_END,
+        undefined,
+        4,
+      ),
+    );
+    for (let i = 0; i < 10; i++) {
+      await tick();
+    }
+    expect((harness.lastFrame() ?? '').includes('c1 thought line 0')).toBe(
+      true,
+    );
   });
 });
