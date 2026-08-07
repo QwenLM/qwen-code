@@ -104,6 +104,7 @@
     <section>
       <label>Pairing code <input id="code" placeholder="paste code" /></label>
       <button id="pair">Pair</button>
+      <span id="pair-feedback" role="status" aria-live="polite"></span>
     </section>
     <section>
       <label>Session id <input id="session" placeholder="session id" /></label>
@@ -363,24 +364,66 @@
         }
       }
 
-      $('pair').onclick = async () => {
-        const code = $('code').value.trim();
-        if (!code) return setStatus('enter a code');
+      // Feedback shown right next to the Pair button (the global #status is far
+      // down the page, so on its own it read as "no feedback"). ok=true green,
+      // ok=false red, ok=null neutral (in-progress). Mirrors to #status too.
+      const pairFeedback = (msg, ok) => {
+        const el = $('pair-feedback');
+        el.textContent = msg;
+        el.style.color =
+          ok === true ? 'green' : ok === false ? 'crimson' : 'inherit';
+        setStatus(msg);
+      };
+
+      async function doPair(code) {
+        if (!code) return pairFeedback('enter a code', false);
+        $('pair').disabled = true;
+        pairFeedback('pairing…', null);
         try {
           const res = await fetch('/rc/pair/redeem', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ code, label: 'web' }),
           });
-          if (!res.ok) return setStatus('invalid code (' + res.status + ')');
+          if (!res.ok) {
+            pairFeedback(
+              res.status === 400
+                ? '✗ invalid or expired code — get a fresh one and retry'
+                : '✗ pair failed (' + res.status + ')',
+              false,
+            );
+            return;
+          }
           const data = await res.json();
           localStorage.setItem(TOKEN_KEY, data.token);
           idbPutToken(data.token);
-          setStatus('paired; scopes: ' + (data.scopes || []).join(', '));
+          $('code').value = ''; // single-use; clear it once redeemed
+          pairFeedback(
+            '✓ paired — scopes: ' + (data.scopes || []).join(', '),
+            true,
+          );
         } catch (e) {
-          setStatus('pair failed: ' + e);
+          pairFeedback('✗ pair failed: ' + e, false);
+        } finally {
+          $('pair').disabled = false;
         }
-      };
+      }
+
+      $('pair').onclick = () => doPair($('code').value.trim());
+
+      // QR auto-fill: a scanned QR opens .../ui/#code=<code>. Read it, scrub it
+      // from the address bar IMMEDIATELY (so a reload/bookmark can't retry a
+      // single-use code, and it never lingers in history), prefill the field,
+      // then pair — no typing. The code rides the URL *fragment*, which never
+      // reaches server access logs or the Referer header.
+      (function autoPairFromHash() {
+        const m = /[#&]code=([^&]+)/.exec(location.hash || '');
+        if (!m) return;
+        const code = decodeURIComponent(m[1]);
+        history.replaceState(null, '', location.pathname + location.search);
+        $('code').value = code;
+        void doPair(code);
+      })();
 
       async function vote(sessionId, requestId, outcome, optionId) {
         const entry = cards.get(requestId);

@@ -184,7 +184,15 @@ export async function up(deps: Deps): Promise<UpResult> {
     deps.bootstrapTimeoutMs ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS,
     deps.bootstrapPollMs ?? DEFAULT_BOOTSTRAP_POLL_MS,
   );
-  const qr = await renderQr(url).catch(() => undefined);
+  // Embed the pairing code in the URL fragment so a scanned QR auto-fills and
+  // pairs (the /ui/ page reads `#code=`, then scrubs it). Human terminal output
+  // only — `upJson()` omits `qr`, so the code never reaches the `--json` stream;
+  // it rides the fragment, which never hits server logs/Referer.
+  const qrTarget =
+    bootstrapCode === undefined
+      ? url
+      : `${url}#code=${encodeURIComponent(bootstrapCode)}`;
+  const qr = await renderQr(qrTarget).catch(() => undefined);
   const hint =
     bootstrapCode === undefined
       ? 'The pairing code was not ready yet — the gateway may still be starting. Run `qwen-rc status`, then retry `qwen-rc up` to fetch it.'
