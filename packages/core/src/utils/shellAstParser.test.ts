@@ -389,6 +389,14 @@ describe('isShellCommandReadOnlyAST', () => {
     it('rejects other @-transformations conservatively', async () => {
       expect(await isShellCommandReadOnlyAST('echo "${var@Q}"')).toBe(false);
       expect(await isShellCommandReadOnlyAST('echo "${var@E}"')).toBe(false);
+      // `@Q` never executes code, so it must downgrade to confirmation
+      // rather than reach the hard-deny path (#8590 review, finding 2).
+      expect(await isShellCommandReadOnlyAST('printf %s "${cmd@Q}"')).toBe(
+        false,
+      );
+      expect(await classifyShellCommandSafety('printf %s "${cmd@Q}"')).toBe(
+        'unknown',
+      );
     });
 
     it('rejects @-transformation applied to an array subscript', async () => {
@@ -408,6 +416,18 @@ describe('isShellCommandReadOnlyAST', () => {
       );
       expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
       expect(await isShellCommandReadOnlyAST('echo "${#arr[@]}"')).toBe(true);
+      expect(
+        await isShellCommandReadOnlyAST('echo "${EMAIL:-user@example.com}"'),
+      ).toBe(true);
+    });
+
+    it('allows indirect key/name enumeration (no subscript evaluation)', async () => {
+      // `${!arr[@]}` enumerates array keys and cannot execute code, unlike
+      // plain `${!ref}` indirect expansion (#8590 review, finding 2).
+      expect(await isShellCommandReadOnlyAST('echo "${!arr[@]}"')).toBe(true);
+      expect(await classifyShellCommandSafety('echo "${!arr[@]}"')).toBe(
+        'read-only',
+      );
     });
 
     it('rejects indirect expansion that can evaluate an array subscript', async () => {
@@ -460,6 +480,27 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await isShellCommandReadOnlyAST(command)).toBe(false);
     },
   );
+
+  it('rejects a command whose tree swallows a continuation-broken comment', async () => {
+    // bash ends the comment at the raw newline and runs the later line as a
+    // separate command, but tree-sitter joins it into the `ls` node as
+    // arguments — so the argument list is not trustworthy (#8590 review,
+    // finding 1).
+    const cmd = 'ls #x\\\n\\\nrm -rf /tmp/zzz';
+    expect(await isShellCommandReadOnlyAST(cmd)).toBe(false);
+    expect(await classifyShellCommandSafety(cmd)).toBe('unknown');
+  });
+
+  it('keeps commands with sibling comments at confirmation level', async () => {
+    // A program-level comment node already forced unknown before this
+    // change; the nested-comment fix must not loosen that.
+    expect(await isShellCommandReadOnlyAST('ls # trailing comment')).toBe(
+      false,
+    );
+    expect(await classifyShellCommandSafety('echo hello # $(rm -rf /)')).toBe(
+      'unknown',
+    );
+  });
 });
 
 // =========================================================================
@@ -1119,6 +1160,32 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
         isShellCommandReadOnly(cmd),
       );
     }
+  });
+
+  it('keeps safe parameter expansions read-only when parser is marked failed', async () => {
+    _setParserFailedForTesting();
+    // An `@` inside a default value or an array subscript is not a
+    // transformation; the fallback regex must stay anchored so these keep
+    // the normal-path verdict (#8590 review, finding 4).
+    expect(
+      await isShellCommandReadOnlyAST('echo "${EMAIL:-user@example.com}"'),
+    ).toBe(true);
+    expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
+  });
+
+  it('fails closed on @-transformations when parser is marked failed', async () => {
+    _setParserFailedForTesting();
+    expect(await isShellCommandReadOnlyAST('echo "${two@P}"')).toBe(false);
+    expect(await isShellCommandReadOnlyAST('echo "${two@Q}"')).toBe(false);
+    expect(await isShellCommandReadOnlyAST('echo "${arr[@]@P}"')).toBe(false);
+  });
+
+  it('fails closed on continuation-split @P when parser is marked failed', async () => {
+    // Bash removes `\<newline>` before parsing, so `@` + continuation + `P`
+    // is the `@P` operator at execution time (#8590 review).
+    _setParserFailedForTesting();
+    expect(await isShellCommandReadOnlyAST('echo "${two@\\\nP}"')).toBe(false);
+    expect(await isShellCommandReadOnlyAST('echo "$\\\n{PWD@P}"')).toBe(false);
   });
 
   it('re-initialises normally after _resetParser', async () => {

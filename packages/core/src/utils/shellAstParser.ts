@@ -1001,6 +1001,14 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
 }
 
 function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
+  // A comment nested inside the command node means tree-sitter joined lines
+  // across a `\<newline>` that bash kept inside the comment: bash ends the
+  // comment at the raw newline and executes the following line as a separate
+  // command, while this node presents that line's words as arguments. The
+  // argument list is therefore not trustworthy (#8582).
+  if (commandNode.namedChildren.some((child) => child.type === 'comment')) {
+    return 'unknown';
+  }
   const rawRoot = commandNode.childForFieldName('name')?.text;
   const root = getCommandName(commandNode);
   const argNodes = getArgumentNodes(commandNode);
@@ -1149,11 +1157,21 @@ export async function classifyShellCommandSafety(
 }
 
 function isShellCommandReadOnlyFallback(command: string): boolean {
-  // The regex fallback cannot model Bash parameter transformations. Keep
-  // array subscripts (`${arr[@]}`) allowed while failing closed on `@P` etc.
+  // The regex fallback cannot model Bash parameter transformations. Anchor
+  // the operator directly after the parameter name/subscript — the way
+  // `startsRiskyParameterExpansion` does — so an `@` inside a default value
+  // (`${EMAIL:-user@example.com}`) or an array subscript (`${arr[@]}`)
+  // stays allowed, while `@P` etc. fail closed. The `(?:\\\n)*` gaps
+  // tolerate line continuations, which bash removes before parsing (#8582).
+  // The regex requires a literal `@`, so commands without one skip the
+  // scan entirely (exact pre-filter, not a heuristic).
   return (
-    !/\$\{[^}]*@(?:\\\n)*[A-Za-z]/.test(command) &&
-    isShellCommandReadOnly(command)
+    !(
+      command.includes('@') &&
+      /\$\{#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[*@$?!-])(?:\[(?:[^[\]]|\[[^\]]*\])*\])?(?:\\\n)*@(?:\\\n)*[A-Za-z]/.test(
+        command,
+      )
+    ) && isShellCommandReadOnly(command)
   );
 }
 

@@ -1535,11 +1535,24 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
 export function detectCommandSubstitution(command: string): boolean {
   const startsRiskyParameterExpansion = (text: string, index: number) => {
     const expansion = text.slice(index).replaceAll('\\\n', '');
-    return (
-      /^\$\{!/.test(expansion) ||
-      /^\$\{#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[*@$?!-])(?:\[[^\]]*\])?@[A-Za-z]\}/.test(
+    if (/^\$\{!/.test(expansion)) {
+      // `${!name[@]}` / `${!name[*]}` enumerate array keys and
+      // `${!prefix@}` / `${!prefix*}` enumerate variable names; neither
+      // evaluates a subscript, so neither can execute code. Every other
+      // `${!...}` is indirect expansion: bash evaluates the referenced
+      // name including any subscript, executing embedded substitution
+      // (`ref='a[$(cmd)]'; echo "${!ref}"` runs `cmd`).
+      return !/^\$\{!(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?:\[[@*]\]|[@*])\}/.test(
         expansion,
-      )
+      );
+    }
+    // Only the `@P` transformation executes code: prompt expansion runs
+    // any command substitution embedded in the value. `@Q`, `@E`, etc.
+    // only reformat the value, so they must not reach the hard-deny path;
+    // the AST classifier still downgrades them to confirmation. The
+    // subscript may nest one level deep (`${x[${y[1]}]@P}`).
+    return /^\$\{#?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[*@$?!-])(?:\[(?:[^[\]]|\[[^\]]*\])*\])?@P\}/.test(
+      expansion,
     );
   };
 
@@ -1589,9 +1602,19 @@ export function detectCommandSubstitution(command: string): boolean {
     const stripLeadingTabs = command[i] === '-';
     if (stripLeadingTabs) i++;
 
-    // Skip whitespace between operator and delimiter word.
-    while (i < command.length && (command[i] === ' ' || command[i] === '\t')) {
-      i++;
+    // Skip whitespace between operator and delimiter word. Bash removes
+    // `\<newline>` before quote analysis, so a continuation here is
+    // equally transparent.
+    while (i < command.length) {
+      if (command[i] === ' ' || command[i] === '\t') {
+        i++;
+        continue;
+      }
+      if (command[i] === '\\' && command[i + 1] === '\n') {
+        i += 2;
+        continue;
+      }
+      break;
     }
 
     // Parse the delimiter WORD token. If any quoting is used in the delimiter,
@@ -1621,6 +1644,13 @@ export function detectCommandSubstitution(command: string): boolean {
           continue;
         }
         if (char === '\\') {
+          if (command[i + 1] === '\n') {
+            // Bash removes `\<newline>` before quote analysis, so the
+            // delimiter word continues on the next line and stays
+            // unquoted: body expansions remain live (#8582).
+            i += 2;
+            continue;
+          }
           isQuotedDelimiter = true;
           i++;
           if (i >= command.length) break;
@@ -2018,7 +2048,7 @@ export function detectCommandSubstitution(command: string): boolean {
  * the wording can't drift between sites — see #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
-  'Contains command substitution or risky parameter expansion ($(...), backticks, <(...), >(...), ${...@...}, or ${!...}).';
+  'Contains command substitution or risky parameter expansion ($(...), backticks, <(...), >(...), ${...@P}, or ${!...}).';
 
 /**
  * Single dual-check predicate: does the command contain shell substitution
@@ -2109,7 +2139,7 @@ export async function checkCommandPermissions(
       allAllowed: false,
       disallowedCommands: [command],
       blockReason:
-        'Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons',
+        'Command substitution using $(), `` ` ``, <(), or >(), or risky parameter expansion (${...@P} or ${!...}), is not allowed for security reasons',
       isHardDenial: true,
     };
   }

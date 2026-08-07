@@ -339,6 +339,31 @@ describe('checkCommandPermissions', () => {
       expect(result.disallowedCommands).toEqual(['rm -rf /tmp/x']);
     });
 
+    it('does not hard-deny safe @Q quoting or key enumeration (#8590)', async () => {
+      // `@Q` quotes a value for reuse and `${!arr[@]}` enumerates keys;
+      // neither executes code, so they must not hit the unoverridable
+      // substitution hard-deny (#8590 review, finding 2).
+      for (const cmd of ['printf %s "${files[@]@Q}"', 'echo "${!arr[@]}"']) {
+        const result = await checkCommandPermissions(cmd, config);
+        expect(result.allAllowed).toBe(true);
+        expect(result.isHardDenial).toBeUndefined();
+      }
+    });
+
+    it('still hard-denies @P prompt expansion with an accurate reason (#8590)', async () => {
+      const result = await checkCommandPermissions(
+        'printf %s "${files@P}"',
+        config,
+      );
+      expect(result).toEqual({
+        allAllowed: false,
+        disallowedCommands: ['printf %s "${files@P}"'],
+        blockReason:
+          'Command substitution using $(), `` ` ``, <(), or >(), or risky parameter expansion (${...@P} or ${!...}), is not allowed for security reasons',
+        isHardDenial: true,
+      });
+    });
+
     it('should return a detailed failure object for a command not on a strict allowlist', async () => {
       config.getCoreTools = () => ['ShellTool(ls)'];
       const result = await checkCommandPermissions('git status && ls', config);
@@ -1439,6 +1464,57 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
   it('still allows escaped continuation-split substitution in heredoc bodies', () => {
     const cmd = ['cat <<EOF', '\\$\\', '(touch /tmp/pwned)', 'EOF'].join('\n');
     expect(detectCommandSubstitution(cmd)).toBe(false);
+  });
+
+  it('detects substitution in a heredoc whose delimiter is joined across a continuation', () => {
+    // Bash removes `\<newline>` before quote analysis, so the real delimiter
+    // is the joined `EOF`, unquoted, and body expansions stay live (#8590
+    // review, finding 3).
+    const cmd = ['cat <<EO\\', 'F', '$(touch /tmp/pwned)', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('still treats backslash-quoted delimiter characters as quoting', () => {
+    // `\E` quotes a delimiter character (no newline follows the backslash),
+    // so bash disables body expansions.
+    const cmd = ['cat <<E\\OF', '$(touch /tmp/pwned)', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(false);
+  });
+});
+
+// Regression coverage for the PR #8590 review: folding every `@`-transformed
+// or `${!...}` expansion into `detectCommandSubstitution` routed safe idioms
+// (`@Q` quoting for reuse, array key enumeration) into the hard-deny path of
+// `checkCommandPermissions`, which neither YOLO mode nor an explicit allow
+// rule can override. Only expansions that can actually execute code — `@P`
+// prompt expansion and `${!...}` indirect expansion other than key/name
+// enumeration — may be flagged; the AST classifier still downgrades the
+// non-executing `@`-transformations to confirmation.
+describe('detectCommandSubstitution risky-expansion scope (#8590)', () => {
+  it.each([
+    'printf %s "${cmd@Q}"',
+    'printf \'%s\\n\' "${files[@]@Q}"',
+    'echo "${var@E}"',
+    'echo "${!arr[@]}"',
+    'echo "${!arr[*]}"',
+    'echo "${!prefix@}"',
+    'echo "${!prefix*}"',
+  ])('does not flag expansions that cannot execute code: %j', (command) => {
+    expect(detectCommandSubstitution(command)).toBe(false);
+  });
+
+  it.each([
+    'echo "${var@P}"',
+    'echo "${!ref}"',
+    // `${!arr[0]}` indirection resolves through arr's value, and any
+    // subscript in that value is evaluated — same vector as `${!ref}`.
+    'echo "${!arr[0]}"',
+    'echo "${arr[@]@P}"',
+    // Nested subscripts: the AST classifier downgrades this shape, so the
+    // scanner must agree (finding 5).
+    'echo "${x[${y[1]}]@P}"',
+  ])('still flags expansions that can execute code: %j', (command) => {
+    expect(detectCommandSubstitution(command)).toBe(true);
   });
 });
 
