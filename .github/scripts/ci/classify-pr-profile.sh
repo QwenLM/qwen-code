@@ -37,6 +37,7 @@ fi
 declared="$(gh api "repos/${repo}/pulls/${pr}" --jq '.changed_files')" || exit 2
 retrieved="$(wc -l < "${files}")"
 if [ "${retrieved}" -ne "${declared}" ]; then
+  echo "classify-pr-profile: retrieved ${retrieved} file entries but PR declares ${declared}; classifying full." >&2
   echo "full"
   exit 0
 fi

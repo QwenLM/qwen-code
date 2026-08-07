@@ -61,6 +61,7 @@ function run(scenario, { updateOnly = false } = {}) {
       '        if [ "$n" -le 1 ]; then exit 1; else echo \'[{"id":7,"user":{"login":"bot"},"body":"<!-- test-marker --> old"}]\'; fi ;;',
       '      fresh) echo "[]" ;;',
       '      existing-bot) echo \'[{"id":7,"user":{"login":"bot"},"body":"<!-- test-marker --> old"}]\' ;;',
+      '      duplicate-pair) echo \'[{"id":5,"user":{"login":"bot"},"body":"<!-- test-marker --> older"},{"id":9,"user":{"login":"bot"},"body":"<!-- test-marker --> newer"}]\' ;;',
       '      existing-user) echo \'[{"id":8,"user":{"login":"alice"},"body":"<!-- test-marker --> mine"}]\' ;;',
       '      deleted-mid-retry)',
       '        if [ "$n" -le 1 ]; then echo \'[{"id":9,"user":{"login":"bot"},"body":"<!-- test-marker --> old"}]\'; else echo "[]"; fi ;;',
@@ -172,4 +173,15 @@ test('--update-only PATCHes an existing bot-authored badge', () => {
   assert.equal(r.code, 0);
   assert.match(r.stdout, /updated comment 7/);
   assert.match(r.calls, /--method PATCH repos\/o\/r\/issues\/comments\/7/);
+});
+
+test('with duplicate badges, the upsert refreshes the LAST (newest) one', () => {
+  // The header's documented duplicate-resolution semantics: after a
+  // transient failure once minted a pair, every subsequent upsert must
+  // target the newest — a flip to `first` would refresh the older comment
+  // while the newer stale one stays the visible latest.
+  const r = run('duplicate-pair');
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /updated comment 9/);
+  assert.doesNotMatch(r.calls, /comments\/5/);
 });

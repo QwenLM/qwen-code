@@ -61,12 +61,14 @@ function run(scenario, { stubNodeFailure = false } = {}) {
       '      docs-only) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1},{"filename":"README.md","status":"modified","previous_filename":null,"sha":"y","additions":1}]\' ;;',
       '      renamed-source) FIXTURE=\'[{"filename":"docs/new.md","status":"renamed","previous_filename":"packages/core/src/runtime.ts","sha":"z","additions":0}]\' ;;',
       '      truncated) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1}]\' ;;',
+      '      declared-fails) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1}]\' ;;',
       '      *) exit 9 ;;',
       '    esac',
       '    printf \'%s\' "$FIXTURE" | jq -c "$jqfilter" ;;',
       '  *"repos/"*)',
       '    case "$SCENARIO" in',
       '      truncated) echo 5 ;;',
+      '      declared-fails) exit 1 ;;',
       '      docs-only) echo 2 ;;',
       '      renamed-source) echo 1 ;;',
       '      *) exit 9 ;;',
@@ -115,4 +117,12 @@ test('exit 2 when the file listing fails', () => {
 
 test('exit 3 when the classifier fails', () => {
   assert.equal(run('docs-only', { stubNodeFailure: true }).code, 3);
+});
+
+test('exit 2 when the changed_files fetch fails after a successful listing', () => {
+  // The truncation guard's precondition: a swallowed failure here leaves
+  // `declared` empty and the guard silently skipped (probed mutant
+  // `|| exit 2` → `|| true` classified a docs first page as docs_only).
+  const r = run('declared-fails');
+  assert.equal(r.code, 2);
 });

@@ -1473,7 +1473,7 @@ describe('docs-only gate and relay, executed', () => {
   ).run;
 
   function gateSource() {
-    const start = runStep.indexOf('DOCS_ONLY_MEDIUM=false');
+    const start = runStep.indexOf('DOCS_ONLY_MEDIUM=""');
     const endAnchor =
       'echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"';
     const end = runStep.indexOf(endAnchor) + endAnchor.length;
@@ -1531,7 +1531,9 @@ describe('docs-only gate and relay, executed', () => {
 
   it('falls back to the full review when the wrapper fails', () => {
     const r = runGate({ autoReview: 'true', wrapper: '#!/bin/bash\nexit 2\n' });
-    expect(r.output).toBe('docs_only_medium=false');
+    // Empty, not 'false': a failed classification is 'never determined', and
+    // the supersede step must not read it as a positive determination.
+    expect(r.output).toBe('docs_only_medium=');
     expect(r.stdout).toContain('could not classify');
     expect(r.stdout).toContain('timeout=360');
   });
@@ -1550,7 +1552,7 @@ describe('docs-only gate and relay, executed', () => {
       autoReview: 'false',
       wrapper: '#!/bin/bash\necho docs_only\n',
     });
-    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.output).toBe('docs_only_medium=');
     expect(r.stdout).toContain('timeout=360');
   });
 
@@ -1612,6 +1614,10 @@ describe('docs-only gate and relay, executed', () => {
     expect(r.stdout).toContain('relayed to PR #42');
     expect(r.calls).toContain('api repos/o/r/issues/42/comments -f');
     expect(r.calls).not.toContain('--method PATCH');
+    // The POSTed body must carry the marker — it is the dedup key both the
+    // upsert lookup and the supersede step match on; a body without it makes
+    // every push stack a new badge and supersede match nothing.
+    expect(r.calls).toContain('<!-- qwen-review docs-only-medium -->');
   });
 
   it('PATCHes the existing bot-authored relay comment', () => {
@@ -1654,9 +1660,21 @@ describe('docs-only gate and relay, executed', () => {
     const supersede = doc2.jobs['review-pr'].steps.find(
       (s) => s.name === 'Supersede stale docs-only badge',
     );
-    expect(supersede.if).not.toContain('review_completed');
+    // Path (1): a POSITIVE not-docs-only determination (three-valued output;
+    // empty = never determined) — deliberately without review success.
     expect(supersede.if).toContain(
       "steps.review.outputs.docs_only_medium == 'false'",
+    );
+    // Path (2): an explicit comment-mode review that completed (the badge's
+    // CTA); a dispatch dry-run retires nothing.
+    expect(supersede.if).toContain(
+      "steps.context.outputs.auto_review == 'false'",
+    );
+    expect(supersede.if).toContain(
+      "steps.context.outputs.review_mode == 'comment'",
+    );
+    expect(supersede.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
     );
     expect(supersede.if).toContain('!cancelled()');
   });
@@ -1692,5 +1710,140 @@ describe('docs-only gate and relay, executed', () => {
     expect(review.env.AUTO_REVIEW).toBe(
       '${{ steps.context.outputs.auto_review }}',
     );
+  });
+});
+
+describe('supersede step and ci.yml rc-handling, executed', () => {
+  const doc = parse(workflow);
+  const supersedeRun = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Supersede stale docs-only badge',
+  ).run;
+
+  function runSupersede({ scenario }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-supersede-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const write = (name, body) => {
+        writeFileSync(join(bin, name), body);
+        chmodSync(join(bin, name), 0o755);
+      };
+      write('sleep', '#!/bin/bash\nexit 0\n');
+      write(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "$*" >> "$CALLS"',
+          'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
+          'case "$*" in',
+          '  "api user"*) echo bot ;;',
+          '  *"--method GET"*)',
+          '    echo \'[{"id":31,"user":{"login":"bot"},"body":"<!-- qwen-review docs-only-medium --> badge"}]\' ;;',
+          '  *) : ;;',
+          'esac',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      const script = [
+        'set -euo pipefail',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        `RUNNER_TEMP="${dir}"`,
+        supersedeRun,
+        'echo "STEP_EXIT_OK"',
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          SCENARIO: scenario,
+          CALLS: calls,
+        },
+      });
+      return { stdout, calls: readFileSync(calls, 'utf8') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('supersedes an existing bot-authored badge (PATCH, update-only)', () => {
+    const r = runSupersede({ scenario: 'existing' });
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/31',
+    );
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+  });
+
+  it('warns and exits 0 when every supersede attempt fails', () => {
+    // The never-fail guard is load-bearing: a failing step here would trip
+    // the post-failure fallback into announcing a review failure that never
+    // happened (the same phantom the relay guard prevents).
+    const r = runSupersede({ scenario: 'all-fail' });
+    expect(r.stdout).toContain('::warning::Could not supersede');
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+  });
+
+  function ciRcFragment() {
+    const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+    const ciDoc = parse(ci);
+    let run;
+    for (const job of Object.values(ciDoc.jobs)) {
+      for (const step of job.steps ?? []) {
+        if ((step.run ?? '').includes('classify-pr-profile.sh')) run = step.run;
+      }
+    }
+    expect(run).toBeTruthy();
+    const start = run.indexOf('set +e');
+    expect(start).toBeGreaterThan(-1);
+    const indent = run.slice(run.lastIndexOf('\n', start) + 1, start);
+    const end = run.indexOf(`\n${indent}fi`, start) + `\n${indent}fi`.length;
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function runCiFragment(wrapper) {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-rc-'));
+    try {
+      const stub = join(dir, '.github/scripts/ci');
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(join(stub, 'classify-pr-profile.sh'), wrapper);
+      chmodSync(join(stub, 'classify-pr-profile.sh'), 0o755);
+      const script = [
+        'set -euo pipefail',
+        'profile=full',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        ciRcFragment(),
+        'printf "profile=%s" "$profile"',
+      ].join('\n');
+      return execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: dir,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('ci.yml consumes the wrapper result on success', () => {
+    expect(runCiFragment('#!/bin/bash\necho docs_only\n')).toContain(
+      'profile=docs_only',
+    );
+  });
+
+  it.each([
+    ['#!/bin/bash\nexit 2\n', 'Unable to list PR changed files'],
+    ['#!/bin/bash\nexit 3\n', 'classifier exited non-zero'],
+  ])('ci.yml falls back to full on wrapper failure (%#)', (wrapper, note) => {
+    // The probed mutant (deleting the rc handling) leaves profile EMPTY on
+    // failure — no downstream matrix bucket matches empty, and a broken PR
+    // would pass CI with zero tests run.
+    const out = runCiFragment(wrapper);
+    expect(out).toContain(note);
+    expect(out).toContain('profile=full');
   });
 });

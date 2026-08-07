@@ -977,7 +977,14 @@ jobs:
           # (parse-args), and medium never posts — so the "Report docs-only
           # medium outcome" step relays the review's completion line instead.
           # Explicit requests (dispatch, @qwen-code /review) never downgrade.
-          DOCS_ONLY_MEDIUM=false
+          # Three-valued on purpose: 'true' (classified docs-only), 'false'
+          # (POSITIVELY classified not-docs-only by a successful automatic
+          # classification), '' (never determined — explicit run, or the
+          # classification failed). The supersede step keys on 'false', so
+          # conflating "never determined" with "determined not docs-only"
+          # would retire a still-accurate badge on a transient classifier
+          # failure or a dry run.
+          DOCS_ONLY_MEDIUM=""
           if [ "${AUTO_REVIEW:-false}" = "true" ]; then
             # Fetch + classify through the shared wrapper so this gate and
             # ci.yml's profile gate cannot drift on the classifier's input
@@ -998,6 +1005,8 @@ jobs:
                 EFFECTIVE_TIMEOUT_MINUTES=90
               fi
               echo "PR #${PR_NUMBER} is docs-only; automatic review runs at --effort medium (${EFFECTIVE_TIMEOUT_MINUTES}-minute budget)."
+            else
+              DOCS_ONLY_MEDIUM=false
             fi
           fi
           echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"
@@ -1299,21 +1308,30 @@ jobs:
           fi
 
       - name: 'Supersede stale docs-only badge'
-        # Runs whenever this run determined the PR is NOT (or no longer)
-        # docs-only — including a FAILED full review and an EXPLICIT
-        # requested review: the stale badge misrepresents the PR whether or
-        # not this particular run completed (a failed full review posts its
-        # own failure fallback; an explicit run is the badge's own CTA and
-        # must retire it). `docs_only_medium == 'false'` is the load-bearing
-        # gate: a run that failed before classifying emits nothing (empty !=
-        # 'false'), so a badge is never superseded on ignorance — and the
-        # supersede body is cause-neutral, asserting only what is true on
-        # every path here: the badge described an earlier revision.
+        # Two paths owe the badge correction, and only these two:
+        # (1) an automatic run whose classification POSITIVELY determined the
+        #     PR is not (or no longer) docs-only — docs_only_medium == 'false'
+        #     is three-valued and empty when the classifier failed or never
+        #     ran, so a badge is never retired on ignorance; the review's own
+        #     success is deliberately not required (a failed full review still
+        #     leaves the badge misdescribing the head);
+        # (2) an explicit comment-mode review that actually completed — the
+        #     badge's own CTA path, whose posted full review makes the badge
+        #     redundant; a dispatch dry-run that posts nothing retires
+        #     nothing. The body is cause-neutral: it asserts only what is
+        #     true on every covered path.
         if: |-
           !cancelled() &&
           steps.context.outputs.should_run == 'true' &&
-          steps.review.outputs.docs_only_medium == 'false' &&
-          steps.context.outputs.pr_number != ''
+          steps.context.outputs.pr_number != '' &&
+          (
+            steps.review.outputs.docs_only_medium == 'false' ||
+            (
+              steps.context.outputs.auto_review == 'false' &&
+              steps.context.outputs.review_mode == 'comment' &&
+              steps.review.outputs.review_completed == 'true'
+            )
+          )
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
