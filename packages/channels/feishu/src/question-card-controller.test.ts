@@ -225,6 +225,54 @@ describe('FeishuQuestionCardController presentation', () => {
       kind: 'unsupported',
     });
   });
+
+  it('keeps concurrent owners in one shared session and chat independent', async () => {
+    const { controller, sendCard } = createHarness();
+    sendCard.mockResolvedValueOnce('om_one').mockResolvedValueOnce('om_two');
+    const first = createContext('request-shared-1');
+    const second = createContext('request-shared-2', {
+      owner: { kind: 'channel_user', id: 'owner-2' },
+      target: {
+        channelName: 'feishu',
+        chatId: 'oc_1',
+        senderId: 'owner-2',
+        isGroup: true,
+      },
+    });
+
+    await expect(controller.present(first.context)).resolves.toEqual({
+      kind: 'presented',
+    });
+    await expect(controller.present(second.context)).resolves.toEqual({
+      kind: 'presented',
+    });
+    expect(
+      controller.claim(
+        validCancel('request-shared-1', { messageId: 'om_one' }),
+      ),
+    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
+    expect(
+      controller.claim(
+        validCancel('request-shared-2', {
+          operatorId: 'owner-2',
+          messageId: 'om_two',
+        }),
+      ),
+    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
+  });
+
+  it('projects 已取消 when a delivered question settles as cancelled', async () => {
+    const { controller, patchCard } = createHarness();
+    const { context, settle } = createContext('request-settle-cancelled');
+    await controller.present(context);
+
+    settle('cancelled');
+    await vi.waitFor(() => expect(patchCard).toHaveBeenCalledOnce());
+
+    const card = JSON.stringify(patchCard.mock.calls[0]?.[1]);
+    expect(card).toContain('已取消');
+    expect(card).not.toContain('已过期');
+  });
 });
 
 describe('FeishuQuestionCardController callbacks', () => {
@@ -351,6 +399,27 @@ describe('FeishuQuestionCardController callbacks', () => {
     });
   });
 
+  it('projects the terminal fallback to the chat id captured at delivery time', async () => {
+    const { controller, patchCard, sendFallback } = createHarness();
+    patchCard.mockResolvedValue(false);
+    const { context } = createContext('request-captured-fallback');
+    await controller.present(context);
+    context.target.chatId = 'oc_changed';
+
+    const claimed = controller.claim(
+      submit('request-captured-fallback', { '0': 'Beijing' }),
+    );
+    if (claimed.kind !== 'handled' || !claimed.execute) {
+      throw new Error('Expected claimed callback execution');
+    }
+    await claimed.execute();
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('已提交'),
+    );
+  });
+
   it.each([
     ['missing operator', validCancel('request-1', { operatorId: undefined })],
     [
@@ -452,12 +521,84 @@ describe('FeishuQuestionCardController callbacks', () => {
       // The cancel card was delivered by the callback response; a rejected
       // responder must not flip it to 已过期 or post a fallback beside it.
       expect(patchCard).not.toHaveBeenCalled();
-      expect(controller.claim(validCancel('request-failed'))).toMatchObject({
+      expect(controller.claim(validCancel('request-failed'))).toEqual({
         kind: 'handled',
-        response: { toast: expect.any(Object) },
+        response: {
+          toast: { type: 'warning', content: '该问题已过期或已处理。' },
+        },
       });
+      // The failed respond must still release the session+owner scope.
+      await expect(
+        controller.present(createContext('request-after-reject').context),
+      ).resolves.toEqual({ kind: 'presented' });
     },
   );
+
+  it.each([
+    ['returns false', vi.fn().mockResolvedValue(false)],
+    ['throws', vi.fn().mockRejectedValue(new Error('response failed'))],
+  ])(
+    'terminalizes an unaccepted submission as expired when the responder %s',
+    async (_name, respond) => {
+      const { controller, onError, patchCard } = createHarness();
+      const { context } = createContext('request-submit-failed', { respond });
+      await controller.present(context);
+      const claimed = controller.claim(
+        submit('request-submit-failed', { '0': 'Beijing' }),
+      );
+      if (claimed.kind !== 'handled' || !claimed.execute) {
+        throw new Error('Expected claimed callback execution');
+      }
+
+      await claimed.execute();
+
+      expect(onError).toHaveBeenCalledWith(
+        'question response',
+        expect.any(Error),
+      );
+      expect(patchCard).toHaveBeenCalledOnce();
+      expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已过期');
+      // The request stays closed and the session+owner scope is released.
+      expect(
+        controller.claim(submit('request-submit-failed', { '0': 'Beijing' })),
+      ).toEqual({
+        kind: 'handled',
+        response: {
+          toast: { type: 'warning', content: '该问题已过期或已处理。' },
+        },
+      });
+      await expect(
+        controller.present(
+          createContext('request-after-submit-failure').context,
+        ),
+      ).resolves.toEqual({ kind: 'presented' });
+    },
+  );
+
+  it('falls back to text when an unaccepted submission cannot patch the card', async () => {
+    const { controller, patchCard, sendFallback } = createHarness();
+    patchCard.mockResolvedValue(false);
+    const respond = vi.fn().mockResolvedValue(false);
+    const { context } = createContext('request-submit-expiry', { respond });
+    await controller.present(context);
+    const claimed = controller.claim(
+      submit('request-submit-expiry', { '0': 'Beijing' }),
+    );
+    if (claimed.kind !== 'handled' || !claimed.execute) {
+      throw new Error('Expected claimed callback execution');
+    }
+
+    await claimed.execute();
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('已过期'),
+    );
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('Region: Which region?'),
+    );
+  });
 
   it('does not reopen an accepted response when its terminal patch fails', async () => {
     const { controller, onError, patchCard, sendFallback } = createHarness();
@@ -495,6 +636,46 @@ describe('FeishuQuestionCardController callbacks', () => {
         toast: { type: 'warning', content: '该问题已过期或已处理。' },
       },
     });
+  });
+
+  it('falls back to text when the terminal patch rejects', async () => {
+    const { controller, onError, patchCard, sendFallback } = createHarness();
+    patchCard.mockRejectedValue(new Error('patch failed'));
+    const { context, respond } = createContext('request-patch-reject');
+    await controller.present(context);
+
+    controller.cancelRun('run-1');
+    await vi.waitFor(() => expect(sendFallback).toHaveBeenCalledOnce());
+
+    expect(onError).toHaveBeenCalledWith(
+      'question card finalization',
+      expect.any(Error),
+    );
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('已取消'),
+    );
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('contains a rejected terminal fallback without leaking a rejection', async () => {
+    const { controller, onError, patchCard, sendFallback } = createHarness();
+    patchCard.mockResolvedValue(false);
+    sendFallback.mockRejectedValue(new Error('fallback failed'));
+    const { context } = createContext('request-fallback-reject');
+    await controller.present(context);
+
+    controller.cancelRun('run-1');
+    await vi.waitFor(() => {
+      expect(onError).toHaveBeenCalledWith(
+        'question terminal fallback delivery',
+        expect.any(Error),
+      );
+    });
+    expect(onError).toHaveBeenCalledWith(
+      'question card finalization',
+      expect.any(Error),
+    );
   });
 
   it('includes submitted answers in the patch-failure fallback', async () => {
@@ -547,6 +728,10 @@ describe('FeishuQuestionCardController callbacks', () => {
         toast: { type: 'warning', content: '该问题已过期或已处理。' },
       },
     });
+    // The failed respond must still release the session+owner scope.
+    await expect(
+      controller.present(createContext('request-after-reject').context),
+    ).resolves.toEqual({ kind: 'presented' });
   });
 
   it('keeps concurrent sessions and owners independent', async () => {
@@ -557,6 +742,7 @@ describe('FeishuQuestionCardController callbacks', () => {
       .mockResolvedValueOnce('om_three');
     const first = createContext('request-one');
     const second = createContext('request-two', {
+      runId: 'run-2',
       owner: { kind: 'channel_user', id: 'owner-2' },
       target: {
         channelName: 'feishu',
@@ -566,6 +752,7 @@ describe('FeishuQuestionCardController callbacks', () => {
       },
     });
     const third = createContext('request-three', {
+      runId: 'run-3',
       sessionId: 'session-2',
       target: {
         channelName: 'feishu',
@@ -616,6 +803,16 @@ describe('FeishuQuestionCardController callbacks', () => {
       outcome: { outcome: 'cancelled' },
     });
     expect(first.respond).not.toHaveBeenCalled();
+    expect(second.respond).not.toHaveBeenCalled();
+
+    // A sibling claim must still settle its own request afterwards.
+    if (firstClaimed.kind !== 'handled' || !firstClaimed.execute) {
+      throw new Error('Expected claimed callback execution');
+    }
+    await firstClaimed.execute();
+    expect(first.respond).toHaveBeenCalledWith({
+      outcome: { outcome: 'cancelled' },
+    });
     expect(second.respond).not.toHaveBeenCalled();
   });
 });
@@ -694,7 +891,10 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
 
   it('cancels every live request for a run exactly once', async () => {
     const { controller, patchCard, sendCard } = createHarness();
-    sendCard.mockResolvedValueOnce('om_one').mockResolvedValueOnce('om_two');
+    sendCard
+      .mockResolvedValueOnce('om_one')
+      .mockResolvedValueOnce('om_two')
+      .mockResolvedValueOnce('om_three');
     const first = createContext('request-run-one');
     const second = createContext('request-run-two', {
       sessionId: 'session-2',
@@ -743,6 +943,7 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
         validCancel('request-run-other', {
           operatorId: 'owner-3',
           chatId: 'oc_3',
+          messageId: 'om_three',
         }),
       ),
     ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
@@ -808,6 +1009,35 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
     expect(respond).not.toHaveBeenCalled();
     expect(
       controller.claim(validCancel('request-late', { messageId: 'om_late' })),
+    ).toEqual({
+      kind: 'handled',
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
+    });
+  });
+
+  it('patches a terminal card when delivery lands across disposal', async () => {
+    const delivery = deferred<string>();
+    const { controller, patchCard, sendCard } = createHarness();
+    sendCard.mockReturnValue(delivery.promise);
+    const { context, respond } = createContext('request-dispose-late');
+
+    const presenting = controller.present(context);
+    controller.dispose();
+    delivery.resolve('om_late');
+
+    await expect(presenting).resolves.toEqual({ kind: 'presented' });
+    expect(patchCard).toHaveBeenCalledWith(
+      'om_late',
+      expect.objectContaining({ schema: '2.0' }),
+    );
+    expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已过期');
+    expect(respond).not.toHaveBeenCalled();
+    expect(
+      controller.claim(
+        validCancel('request-dispose-late', { messageId: 'om_late' }),
+      ),
     ).toEqual({
       kind: 'handled',
       response: {
@@ -974,7 +1204,7 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
     await vi.waitFor(() => expect(patchCard).toHaveBeenCalledOnce());
     await expect(
       controller.present(createContext('replacement').context),
-    ).resolves.toEqual({ kind: 'presented' });
+    ).resolves.toEqual({ kind: 'unsupported' });
     response.resolve(true);
     await executing;
 

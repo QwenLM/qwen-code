@@ -143,15 +143,13 @@ const BASE_URL = 'https://open.feishu.cn/open-apis';
 const FEISHU_ID_RE = /^[a-zA-Z0-9_.:-]+$/;
 
 /**
- * Typed failure for interactive-card delivery. `status` and `detail` are set
- * for HTTP failures so callers (createStreamingCard) can classify and report
- * by field instead of string-matching message literals that could drift
- * under rewording.
+ * Typed failure for interactive-card delivery. `detail` is set for HTTP
+ * failures so callers (createStreamingCard) can report by field instead of
+ * string-matching message literals that could drift under rewording.
  */
 class FeishuCardDeliveryError extends Error {
   constructor(
     message: string,
-    readonly status?: number,
     readonly detail?: string,
   ) {
     super(message);
@@ -1122,7 +1120,6 @@ export class FeishuChannel extends ChannelBase {
       const errorDetail = `HTTP ${resp.status} ${detail}`;
       throw new FeishuCardDeliveryError(
         `Feishu card delivery failed: ${errorDetail}`,
-        resp.status,
         errorDetail,
       );
     }
@@ -1418,12 +1415,15 @@ export class FeishuChannel extends ChannelBase {
           cs.updateQueued = true;
           return;
         }
-        cs.pendingUpdatePromise = this.runThrottledCardUpdate(
-          inboundMsgId,
-          cs,
-        ).then(() => {
-          cs.pendingUpdatePromise = undefined;
-        });
+        cs.pendingUpdatePromise = this.runThrottledCardUpdate(inboundMsgId, cs)
+          .catch((err) => {
+            process.stderr.write(
+              `[Feishu:${this.name}] card update error: ${err}\n`,
+            );
+          })
+          .then(() => {
+            cs.pendingUpdatePromise = undefined;
+          });
       }, delay);
     }
   }
@@ -1448,7 +1448,7 @@ export class FeishuChannel extends ChannelBase {
         false,
         inboundMsgId,
       );
-      if (!ok) {
+      if (!ok && !cs.stopped && !cs.finalizing) {
         // Fallback: strip tables to avoid card table limit (code-fence aware)
         const stripped = this.stripTables(displayContent, '(表格)');
         await this.updateCard(cs.messageId, stripped, false, inboundMsgId);
@@ -1475,6 +1475,9 @@ export class FeishuChannel extends ChannelBase {
       clearTimeout(cardState.pendingUpdateTimer);
       cardState.pendingUpdateTimer = undefined;
     }
+    // The boundary empties the buffer, so a coalesced trailing run would have
+    // nothing legitimate to send; drop the flag or it PATCHes the card empty.
+    cardState.updateQueued = false;
     if (cardState.accumulatedText) {
       cardState.boundaryText = cardState.accumulatedText;
     }
@@ -1513,6 +1516,7 @@ export class FeishuChannel extends ChannelBase {
     if (
       cardState.cancelling ||
       cardState.stopped ||
+      cardState.finalizing ||
       this.stoppedMessages.has(inboundMsgId)
     ) {
       return;
@@ -1525,6 +1529,14 @@ export class FeishuChannel extends ChannelBase {
         ? `${atPrefix}\n\n${text}`
         : atPrefix
       : text;
+    // Mirror onResponseComplete: reserve room for the greeting prefix and the
+    // completed status block that buildCardContent renders alongside the text.
+    const completedSuffix = `\n\n---\n*${this.statusLabelFor('completed')}*`;
+    const prefixPart = atPrefix && text ? `${atPrefix}\n\n` : '';
+    const finalText = text
+      ? prefixPart +
+        this.truncateCardText(text, prefixPart.length + completedSuffix.length)
+      : displayText;
 
     try {
       if (cardState.created && cardState.messageId && !cardState.stopped) {
@@ -1556,7 +1568,7 @@ export class FeishuChannel extends ChannelBase {
           }
           updated = await this.updateCard(
             cardState.messageId,
-            this.truncateCardText(displayText),
+            finalText,
             true,
             inboundMsgId,
             this.statusLabelFor('completed'),
@@ -1565,7 +1577,7 @@ export class FeishuChannel extends ChannelBase {
             // Mirror onResponseComplete: retry without tables (Feishu card
             // table-count limit) before giving up on the card.
             const noTableText = this.stripTables(
-              this.truncateCardText(displayText),
+              finalText,
               '(表格内容请查看原文)',
             );
             updated = await this.updateCard(
@@ -1690,7 +1702,17 @@ export class FeishuChannel extends ChannelBase {
     if (!isTerminalTaskLifecycleType(event.type)) {
       return;
     }
-    if (event.runId) this.questionCardController.cancelRun(event.runId);
+    if (event.runId) {
+      // Mirror the DingTalk sibling: only a user-initiated cancel projects
+      // 已取消; a completed or failed run leaves the question 已过期.
+      this.questionCardController.cancelRun(
+        event.runId,
+        event.type === 'cancelled' &&
+          (event.reason === 'cancel_command' || event.reason === 'clear')
+          ? 'cancelled'
+          : 'expired',
+      );
+    }
 
     const inboundMsgId = this.knownInboundMessageId(
       event.sessionId,
@@ -1749,9 +1771,8 @@ export class FeishuChannel extends ChannelBase {
     if (cardState?.pendingUpdateTimer) {
       clearTimeout(cardState.pendingUpdateTimer);
     }
-    if (cardState?.creationTimer) {
-      clearTimeout(cardState.creationTimer);
-    }
+    // Do not clear creationTimer: the pending creation callback is the only
+    // path that clears `creating`, which the busy-wait below drains.
     if (cardState?.pendingUpdatePromise) {
       await cardState.pendingUpdatePromise;
     }
@@ -1939,6 +1960,16 @@ export class FeishuChannel extends ChannelBase {
           cs.stopped = true;
         } else if (cs.created) {
           cs.stopped = true;
+          // Mirror the other final-patch paths: drain the streaming chain so
+          // the terminal patch is the last update Feishu applies.
+          cs.finalizing = true;
+          if (cs.pendingUpdateTimer) {
+            clearTimeout(cs.pendingUpdateTimer);
+            cs.pendingUpdateTimer = undefined;
+          }
+          if (cs.pendingUpdatePromise) {
+            await cs.pendingUpdatePromise;
+          }
           const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
           const terminalStatus =
             cs.terminalStatus ?? (cs.cancelling ? 'cancelled' : 'failed');
@@ -2186,6 +2217,16 @@ export class FeishuChannel extends ChannelBase {
         }
         // If onResponseComplete is already finalizing the card, don't race with it.
         if (cardState.finalizing) return;
+        // Mirror the other final-patch paths: drain the streaming chain so a
+        // slow or reordered streaming PATCH cannot land after the stop patch
+        // and re-render the stopped card as running.
+        if (cardState.pendingUpdateTimer) {
+          clearTimeout(cardState.pendingUpdateTimer);
+          cardState.pendingUpdateTimer = undefined;
+        }
+        if (cardState.pendingUpdatePromise) {
+          await cardState.pendingUpdatePromise;
+        }
         // Only update card if it was actually created (skip if still creating —
         // the createStreamingCard callback will finalize using cardState.atPrefix)
         if (cardState.created && cardState.messageId) {

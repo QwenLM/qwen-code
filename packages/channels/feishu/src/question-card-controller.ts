@@ -53,12 +53,14 @@ export interface FeishuQuestionCardControllerOptions {
 export class FeishuQuestionCardController {
   private readonly byRequest = new Map<string, QuestionRecord>();
   private readonly activeByScope = new Map<string, QuestionRecord>();
+  private disposed = false;
 
   constructor(private readonly options: FeishuQuestionCardControllerOptions) {}
 
   async present(
     context: ChannelUserInputRequestContext,
   ): Promise<UserInputPresentationResult> {
+    if (this.disposed) return { kind: 'unsupported' };
     const scopeKey = this.scopeKey(context);
     const active = this.activeByScope.get(scopeKey);
     if (active && active.state !== 'terminal') return { kind: 'unsupported' };
@@ -202,13 +204,17 @@ export class FeishuQuestionCardController {
     };
   }
 
-  cancelRun(runId: string): void {
+  cancelRun(
+    runId: string,
+    terminalState: 'cancelled' | 'expired' = 'cancelled',
+  ): void {
     for (const record of [...this.byRequest.values()]) {
-      if (record.runId === runId) void this.finalize(record, 'cancelled');
+      if (record.runId === runId) void this.finalize(record, terminalState);
     }
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const record of [...this.byRequest.values()]) {
       record.ignoreResponseProjection = true;
       void this.finalize(record, 'expired');
