@@ -15,6 +15,7 @@ import {
   applyProviderInstallPlan,
   buildInstallPlan,
   computeProviderTemplateVersion,
+  createDebugLogger,
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
@@ -27,6 +28,8 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+
+const debugLogger = createDebugLogger('PROVIDER_UPDATES');
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -239,13 +242,18 @@ export function useProviderUpdates(
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
+        const installedIds = readInstalledOwnedIds(settings, providerCfg);
+        const modelIds = reconcileInstallModelIds(providerCfg, installedIds);
+        const addedIds = modelIds.filter((id) => !installedIds.includes(id));
+        if (addedIds.length > 0) {
+          debugLogger.debug(
+            `[providers] update for "${providerCfg.id}" added built-in models: ${addedIds.join(', ')}`,
+          );
+        }
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
-          modelIds: reconcileInstallModelIds(
-            providerCfg,
-            readInstalledOwnedIds(settings, providerCfg),
-          ),
+          modelIds,
         });
         delete installPlan.env;
         const previousModel = config.getModel();

@@ -14,8 +14,10 @@ import {
   findExistingProviderModels,
   findProviderByCredentials,
   getDefaultModelIds,
+  PROVIDER_METADATA_NS,
   reconcileInstallModelIds,
   resolveBaseUrl,
+  resolveReconnectModelIds,
   shouldShowStep,
   providerMatchesCredentials,
   type ProviderConfig,
@@ -494,6 +496,150 @@ describe('reconcileInstallModelIds', () => {
         'https://api.test.com/v1',
       ),
     });
+  });
+});
+
+describe('resolveReconnectModelIds', () => {
+  const baseUrl = 'https://api.test.com/v1';
+  const makeEditableConfig = () =>
+    makeConfig({ modelsEditable: true, models: [{ id: 'a' }, { id: 'b' }] });
+  const inputsFor = (
+    config: ProviderConfig,
+    modelIds: string[],
+  ): Parameters<typeof resolveReconnectModelIds>[1] => ({
+    baseUrl,
+    apiKey: 'sk-test',
+    modelIds,
+  });
+  const planVersion = (config: ProviderConfig, modelIds: string[]) =>
+    (
+      buildInstallPlan(config, {
+        baseUrl,
+        apiKey: 'sk-test',
+        modelIds,
+      }).providerState?.[`${PROVIDER_METADATA_NS}.test`] as {
+        version: string;
+      }
+    ).version;
+
+  it('falls back to the default model IDs when the echo is empty', () => {
+    const config = makeEditableConfig();
+    expect(resolveReconnectModelIds(config, inputsFor(config, []), {})).toEqual(
+      ['a', 'b'],
+    );
+  });
+
+  it('installs a fresh wizard selection verbatim when nothing is recorded', () => {
+    // No providerMetadata and no stored models: the echo is the user's new
+    // selection, not a stale snapshot — the TUI wizard installs subsets
+    // verbatim by design, and the reconnect paths must match.
+    const config = makeEditableConfig();
+    expect(
+      resolveReconnectModelIds(config, inputsFor(config, ['a']), {}),
+    ).toEqual(['a']);
+  });
+
+  it('keeps a faithfully echoed deliberately installed subset verbatim', () => {
+    // The persisted version is exactly what the verbatim install would stamp
+    // again, so the echo reproduces the recorded install and must not be
+    // re-expanded — update detection keeps re-offering the missing built-in.
+    const config = makeEditableConfig();
+    const mergedSettings = {
+      [PROVIDER_METADATA_NS]: {
+        test: { version: planVersion(config, ['a']), baseUrl },
+      },
+    };
+    expect(
+      resolveReconnectModelIds(
+        config,
+        inputsFor(config, ['a']),
+        mergedSettings,
+      ),
+    ).toEqual(['a']);
+  });
+
+  it('keeps a faithfully echoed full template plus custom IDs verbatim', () => {
+    const config = makeEditableConfig();
+    const mergedSettings = {
+      [PROVIDER_METADATA_NS]: {
+        test: { version: planVersion(config, ['a', 'b', 'mine']), baseUrl },
+      },
+    };
+    expect(
+      resolveReconnectModelIds(
+        config,
+        inputsFor(config, ['a', 'b', 'mine']),
+        mergedSettings,
+      ),
+    ).toEqual(['a', 'b', 'mine']);
+  });
+
+  it('honors an explicit update-prompt skip over a stale recorded version', () => {
+    // ignoredVersion matching the current template wins even when the
+    // recorded version would mark the echo stale — a key rotation must not
+    // override the user's "skip".
+    const config = makeEditableConfig();
+    const mergedSettings = {
+      [PROVIDER_METADATA_NS]: {
+        test: {
+          version: 'legacy-version-hash',
+          ignoredVersion: computeProviderTemplateVersion(config, baseUrl),
+          baseUrl,
+        },
+      },
+    };
+    expect(
+      resolveReconnectModelIds(
+        config,
+        inputsFor(config, ['a']),
+        mergedSettings,
+      ),
+    ).toEqual(['a']);
+  });
+
+  it('refreshes an echo whose recorded version no longer matches', () => {
+    // A version written before the built-in-only formula (or a drifted
+    // client copy) marks the echo stale: built-ins refresh, customs survive.
+    const config = makeEditableConfig();
+    const mergedSettings = {
+      [PROVIDER_METADATA_NS]: {
+        test: { version: 'legacy-version-hash', baseUrl },
+      },
+    };
+    expect(
+      resolveReconnectModelIds(
+        config,
+        inputsFor(config, ['a', 'mine']),
+        mergedSettings,
+      ),
+    ).toEqual(['a', 'b', 'mine']);
+  });
+
+  it('refreshes a legacy install that has stored models but no version', () => {
+    // Without a recorded version update detection never runs, so the
+    // reconnect refresh is the only upgrade path for pre-tracking installs.
+    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
+    const mergedSettings = {
+      modelProviders: {
+        [AuthType.USE_OPENAI]: [
+          { id: 'a', name: '[Test] a', baseUrl, envKey: 'TEST_API_KEY' },
+        ],
+      },
+    };
+    expect(
+      resolveReconnectModelIds(
+        config,
+        inputsFor(config, ['a']),
+        mergedSettings,
+      ),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('leaves the echo untouched for providers without a built-in list', () => {
+    const config = makeConfig({ models: undefined });
+    expect(
+      resolveReconnectModelIds(config, inputsFor(config, ['only-mine']), {}),
+    ).toEqual(['only-mine']);
   });
 });
 

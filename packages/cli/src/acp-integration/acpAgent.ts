@@ -26,8 +26,8 @@ import {
   getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
-  reconcileInstallModelIds,
   resolveBaseUrl,
+  resolveReconnectModelIds,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
@@ -2105,6 +2105,7 @@ function serializeProviderConfig(
 function readProviderSetupInputs(
   config: ProviderConfig,
   params: Record<string, unknown>,
+  settings: LoadedSettings,
   resolveExistingApiKey?: (
     protocol: ProviderConfig['protocol'],
     baseUrl: string,
@@ -2151,24 +2152,29 @@ function readProviderSetupInputs(
     throw RequestError.invalidParams(undefined, apiKeyError);
   }
 
-  const defaultModelIds = getDefaultModelIds(config);
   const modelIds = readStringArray(params['modelIds'], 'modelIds');
+  const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
   // Reconnect clients (including the desktop connect form) echo back the model
-  // IDs saved in settings. Reconcile them against the current built-in template
-  // so a reconnect after a template change installs the new built-ins rather
-  // than persisting a stale list that re-triggers the update prompt.
-  const resolvedModelIds =
-    modelIds.length > 0
-      ? reconcileInstallModelIds(config, modelIds)
-      : defaultModelIds;
+  // IDs saved in settings. The resolver refreshes stale echoes to the current
+  // built-in template while installing deliberate choices — a recorded subset,
+  // an explicit update-prompt skip, a fresh wizard selection — verbatim.
+  const resolvedModelIds = resolveReconnectModelIds(
+    config,
+    {
+      ...(protocol ? { protocol } : {}),
+      baseUrl,
+      apiKey,
+      modelIds,
+      ...(advancedConfig ? { advancedConfig } : {}),
+    },
+    settings.merged as Record<string, unknown>,
+  );
   if (resolvedModelIds.length === 0) {
     throw RequestError.invalidParams(
       undefined,
       `Invalid or missing modelIds for provider "${config.id}"`,
     );
   }
-
-  const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
 
   return {
     ...(protocol ? { protocol } : {}),
@@ -7660,6 +7666,7 @@ class QwenAgent implements Agent {
         const inputs = readProviderSetupInputs(
           providerConfig,
           params,
+          this.settings,
           (protocol, baseUrl) =>
             resolveExistingProviderApiKey(
               providerConfig,
@@ -7684,6 +7691,15 @@ class QwenAgent implements Agent {
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => this.config.refreshAuth(authType),
         });
+        const echoedModelIds = readStringArray(params['modelIds'], 'modelIds');
+        const addedModelIds = inputs.modelIds.filter(
+          (id) => !echoedModelIds.includes(id),
+        );
+        if (addedModelIds.length > 0) {
+          debugLogger.debug(
+            `[providers] reconnect install for "${providerConfig.id}" refreshed built-in models, added: ${addedModelIds.join(', ')}`,
+          );
+        }
         const effectiveModelId =
           (adapter.getValue('model.name') as string | undefined) ??
           plan.modelSelection?.modelId;

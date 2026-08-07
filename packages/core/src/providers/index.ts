@@ -33,6 +33,7 @@ export {
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
+  resolveReconnectModelIds,
   shouldShowStep,
 } from './provider-config.js';
 

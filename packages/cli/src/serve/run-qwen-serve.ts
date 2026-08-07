@@ -919,47 +919,38 @@ function channelServiceStartingConflictError(): Error {
   );
 }
 
-export function normalizeInstallModelIds(
-  req: ServeAuthProviderInstallRequest,
-  provider: ProviderConfig,
-  getDefaultModelIds: CoreRuntime['getDefaultModelIds'],
-  reconcileInstallModelIds: CoreRuntime['reconcileInstallModelIds'],
-): string[] {
-  const fromRequest = req.modelIds
-    ?.map((id) => id.trim())
-    .filter((id) => id.length > 0);
-  // A reconnect echoes back the saved model IDs; reconcile them against the
-  // current built-in template so the install lands on the current template
-  // instead of persisting a stale set that re-triggers the update prompt.
-  const modelIds =
-    fromRequest && fromRequest.length > 0
-      ? reconcileInstallModelIds(provider, fromRequest)
-      : getDefaultModelIds(provider);
-  return [...new Set(modelIds)];
-}
-
 export function buildProviderSetupInputs(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
   helpers: {
-    getDefaultModelIds: CoreRuntime['getDefaultModelIds'];
-    reconcileInstallModelIds: CoreRuntime['reconcileInstallModelIds'];
     resolveBaseUrl: CoreRuntime['resolveBaseUrl'];
+    resolveReconnectModelIds: CoreRuntime['resolveReconnectModelIds'];
   },
+  mergedSettings: Record<string, unknown> | undefined,
 ): ProviderSetupInputs {
   const protocol = (req.protocol ?? provider.protocol) as AuthType;
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
-  return {
+  const echoedIds = (req.modelIds ?? [])
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+  const inputs: ProviderSetupInputs = {
     ...(provider.protocolOptions ? { protocol } : {}),
     baseUrl,
     apiKey: req.apiKey.trim(),
-    modelIds: normalizeInstallModelIds(
-      req,
-      provider,
-      helpers.getDefaultModelIds,
-      helpers.reconcileInstallModelIds,
-    ),
+    modelIds: echoedIds,
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
+  };
+  // A reconnect echoes back the saved model IDs; the resolver refreshes stale
+  // echoes to the current built-in template while installing deliberate
+  // choices — a recorded subset, an explicit skip, a fresh selection —
+  // verbatim.
+  return {
+    ...inputs,
+    modelIds: [
+      ...new Set(
+        helpers.resolveReconnectModelIds(provider, inputs, mergedSettings),
+      ),
+    ],
   };
 }
 
@@ -5583,13 +5574,17 @@ async function runQwenServeImpl(
             if (!provider) {
               throw new Error(`Unsupported auth provider: ${req.providerId}`);
             }
-            const inputs = buildProviderSetupInputs(req, provider, {
-              getDefaultModelIds: core.getDefaultModelIds,
-              reconcileInstallModelIds: core.reconcileInstallModelIds,
-              resolveBaseUrl: core.resolveBaseUrl,
-            });
-            const plan = core.buildInstallPlan(provider, inputs);
             const fresh = loadSettingsForPersistence(boundWorkspace);
+            const inputs = buildProviderSetupInputs(
+              req,
+              provider,
+              {
+                resolveBaseUrl: core.resolveBaseUrl,
+                resolveReconnectModelIds: core.resolveReconnectModelIds,
+              },
+              fresh.merged as Record<string, unknown>,
+            );
+            const plan = core.buildInstallPlan(provider, inputs);
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
                 fresh,
@@ -5599,9 +5594,20 @@ async function runQwenServeImpl(
               doRefreshAuth: false,
             });
             assertGenerationOpen?.();
+            const echoedIds = (req.modelIds ?? [])
+              .map((id) => id.trim())
+              .filter((id) => id.length > 0);
+            const addedModelIds = inputs.modelIds.filter(
+              (id) => !echoedIds.includes(id),
+            );
             core.emitDaemonLog('Auth provider installed.', {
               'qwen-code.daemon.auth.provider_id': provider.id,
               'qwen-code.daemon.auth.auth_type': plan.authType,
+              ...(addedModelIds.length > 0
+                ? {
+                    'qwen-code.daemon.auth.reconciled_model_ids': addedModelIds,
+                  }
+                : {}),
             });
             const effectiveModelId =
               (adapter.getValue('model.name') as string | undefined) ??

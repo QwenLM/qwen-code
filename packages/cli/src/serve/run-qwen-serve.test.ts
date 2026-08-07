@@ -926,14 +926,33 @@ describe('buildProviderSetupInputs', () => {
     modelsEditable: true,
   };
   const helpers = {
-    getDefaultModelIds: qwenCore.getDefaultModelIds,
-    reconcileInstallModelIds: qwenCore.reconcileInstallModelIds,
     resolveBaseUrl: qwenCore.resolveBaseUrl,
+    resolveReconnectModelIds: qwenCore.resolveReconnectModelIds,
   };
+  const planVersion = (modelIds: string[]) =>
+    (
+      qwenCore.buildInstallPlan(provider, {
+        baseUrl: 'https://api.test.com/v1',
+        apiKey: 'sk-test',
+        modelIds,
+      }).providerState?.['providerMetadata.test-plan'] as { version: string }
+    ).version;
 
-  it('refreshes built-ins a reconnect echoed back stale and keeps custom IDs', () => {
-    // The daemon install request echoes the model list saved before
-    // 'builtin-b' was added to the template.
+  it('falls back to the default model IDs when the request has none', () => {
+    for (const modelIds of [undefined, [], ['  ']]) {
+      const inputs = buildProviderSetupInputs(
+        { providerId: 'test-plan', apiKey: 'sk-test', modelIds },
+        provider,
+        helpers,
+        {},
+      );
+      expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b']);
+    }
+  });
+
+  it('installs a fresh selection verbatim when nothing is recorded', () => {
+    // No providerMetadata and no stored models: the request carries the
+    // user's new wizard selection, which must not be re-expanded.
     const inputs = buildProviderSetupInputs(
       {
         providerId: 'test-plan',
@@ -942,25 +961,67 @@ describe('buildProviderSetupInputs', () => {
       },
       provider,
       helpers,
+      {},
     );
 
-    expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b', 'my-custom']);
+    expect(inputs.modelIds).toEqual(['builtin-a', 'my-custom']);
     expect(inputs.apiKey).toBe('sk-test');
     expect(inputs.baseUrl).toBe('https://api.test.com/v1');
   });
 
-  it('falls back to the default model IDs when the request has none', () => {
-    for (const modelIds of [undefined, [], ['  ']]) {
-      const inputs = buildProviderSetupInputs(
-        { providerId: 'test-plan', apiKey: 'sk-test', modelIds },
-        provider,
-        helpers,
-      );
-      expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b']);
-    }
+  it('keeps a faithfully echoed deliberately installed subset verbatim', () => {
+    // The recorded version equals what the verbatim install would stamp
+    // again, so reconnecting (e.g. rotating the API key) must not re-add
+    // the deselected built-in.
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'test-plan',
+        apiKey: 'sk-test',
+        modelIds: ['builtin-a'],
+      },
+      provider,
+      helpers,
+      {
+        providerMetadata: {
+          'test-plan': {
+            version: planVersion(['builtin-a']),
+            baseUrl: 'https://api.test.com/v1',
+          },
+        },
+      },
+    );
+    expect(inputs.modelIds).toEqual(['builtin-a']);
   });
 
-  it('deduplicates echoed IDs', () => {
+  it('honors an explicit update-prompt skip over a stale recorded version', () => {
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'test-plan',
+        apiKey: 'sk-test',
+        modelIds: ['builtin-a'],
+      },
+      provider,
+      helpers,
+      {
+        providerMetadata: {
+          'test-plan': {
+            version: 'legacy-version-hash',
+            ignoredVersion: qwenCore.computeProviderTemplateVersion(
+              provider,
+              'https://api.test.com/v1',
+            ),
+            baseUrl: 'https://api.test.com/v1',
+          },
+        },
+      },
+    );
+    expect(inputs.modelIds).toEqual(['builtin-a']);
+  });
+
+  it('refreshes built-ins and dedupes when the recorded version is stale', () => {
+    // A version hash that no longer matches the echo (legacy formula or
+    // drifted client copy) marks the echo stale: built-ins refresh while
+    // custom IDs survive.
     const inputs = buildProviderSetupInputs(
       {
         providerId: 'test-plan',
@@ -969,6 +1030,14 @@ describe('buildProviderSetupInputs', () => {
       },
       provider,
       helpers,
+      {
+        providerMetadata: {
+          'test-plan': {
+            version: 'legacy-version-hash',
+            baseUrl: 'https://api.test.com/v1',
+          },
+        },
+      },
     );
     expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b', 'my-custom']);
   });
@@ -989,6 +1058,7 @@ describe('buildProviderSetupInputs', () => {
       },
       customProvider,
       helpers,
+      {},
     );
     expect(inputs.modelIds).toEqual(['only-mine']);
   });

@@ -541,22 +541,19 @@ export function computeProviderTemplateVersion(
 
 /**
  * Reconciles a caller-supplied model list against the provider's current
- * built-in template.
+ * built-in template: built-ins refresh to the current template while
+ * user-added custom IDs survive. For providers with no built-in list (custom
+ * providers, which carry no version metadata) this is the identity.
  *
- * Reconnect paths echo back the model IDs they read from settings — ACP
- * `qwen/providers/connect`, `qwen serve`'s install request, and the desktop
- * connect form (which pre-fills from `existingConfig.modelIds` and posts them
- * through ACP). Installing that echoed list verbatim after a release that adds
- * or removes a built-in would persist the stale model set, whose built-in-only
- * version hash mismatches the current template and re-triggers the update
- * prompt on the next startup.
- *
- * Built-ins are refreshed to the current template while user-added custom IDs
- * survive — the same merge `executeUpdate` performs, and the list the TUI
- * wizard pre-fills (a user-edited subset is installed verbatim by design; its
- * built-in-only version hash keeps update detection aware of it). For providers
- * with no built-in list (custom providers, which carry no version metadata)
- * this is the identity.
+ * Callers must only apply it where refreshing built-ins is the intended rule:
+ * `executeUpdate` (the user accepted the offered diff) and — gated on the
+ * persisted provider metadata by `resolveReconnectModelIds` — the reconnect
+ * paths that echo saved model IDs back (ACP `qwen/providers/connect`,
+ * `qwen serve`'s install request, and the desktop connect form, which
+ * pre-fills from `existingConfig.modelIds`). Refreshing an echoed list that
+ * the user chose deliberately (an installed subset, an explicit update-prompt
+ * skip) would silently re-install the dropped built-ins and stamp the full
+ * template hash so update detection never re-offers them.
  */
 export function reconcileInstallModelIds(
   config: ProviderConfig,
@@ -566,4 +563,86 @@ export function reconcileInstallModelIds(
   if (defaultIds.length === 0) return [...requestedIds];
   const builtinIds = new Set(defaultIds);
   return [...defaultIds, ...requestedIds.filter((id) => !builtinIds.has(id))];
+}
+
+interface PersistedProviderMetadata {
+  version?: unknown;
+  ignoredVersion?: unknown;
+}
+
+function readPersistedProviderMetadata(
+  mergedSettings: Record<string, unknown> | undefined,
+  metadataKey: string,
+): PersistedProviderMetadata {
+  const ns = mergedSettings?.[PROVIDER_METADATA_NS];
+  if (!ns || typeof ns !== 'object') return {};
+  const entry = (ns as Record<string, unknown>)[metadataKey];
+  return entry && typeof entry === 'object'
+    ? (entry as PersistedProviderMetadata)
+    : {};
+}
+
+/**
+ * Resolves the model IDs a reconnect-style install should apply when a
+ * client echoes a saved model list back — ACP `qwen/providers/connect`,
+ * `qwen serve`'s install request, and the desktop connect form (which
+ * pre-fills from `existingConfig.modelIds` and posts them through ACP).
+ *
+ * The echoed list is installed verbatim whenever the persisted
+ * `providerMetadata` shows it is the user's current intent rather than a
+ * stale snapshot:
+ *
+ * - the user explicitly skipped the current template (`ignoredVersion`
+ *   matches it), so a key rotation or reconnect never overrides the skip;
+ * - the persisted install `version` equals the hash the verbatim install
+ *   would stamp again, i.e. the echo reproduces the recorded install. This
+ *   keeps a deliberately installed subset intact — its built-in-only version
+ *   hash keeps differing from the template hash so update detection
+ *   re-offers the missing built-ins (see `resolveProviderState`);
+ * - nothing is recorded yet and no models are stored — a fresh wizard
+ *   selection, installed verbatim like the TUI wizard does.
+ *
+ * Otherwise the echo is stale (a version hash written before the
+ * built-in-only formula, or a drifted client-side copy) and
+ * `reconcileInstallModelIds` refreshes the built-ins; with no recorded
+ * version that refresh is also the only upgrade path, since update detection
+ * never runs without one.
+ */
+export function resolveReconnectModelIds(
+  config: ProviderConfig,
+  inputs: ProviderSetupInputs,
+  mergedSettings?: Record<string, unknown>,
+): string[] {
+  const echoedIds = inputs.modelIds;
+  if (echoedIds.length === 0) return getDefaultModelIds(config);
+
+  const key = resolveMetadataKey(config);
+  if (key) {
+    const metadata = readPersistedProviderMetadata(mergedSettings, key);
+    if (
+      typeof metadata.ignoredVersion === 'string' &&
+      metadata.ignoredVersion ===
+        computeProviderTemplateVersion(config, inputs.baseUrl)
+    ) {
+      return [...echoedIds];
+    }
+    if (typeof metadata.version === 'string') {
+      const verbatimVersion = buildInstallPlan(config, inputs).providerState?.[
+        `${PROVIDER_METADATA_NS}.${key}`
+      ]?.['version'];
+      if (metadata.version === verbatimVersion) return [...echoedIds];
+      return reconcileInstallModelIds(config, echoedIds);
+    }
+  }
+
+  const modelProviders = mergedSettings?.['modelProviders'];
+  const existingModels = findExistingProviderModels(
+    config,
+    modelProviders && typeof modelProviders === 'object'
+      ? (modelProviders as Record<string, unknown>)
+      : undefined,
+  );
+  return existingModels
+    ? reconcileInstallModelIds(config, echoedIds)
+    : [...echoedIds];
 }

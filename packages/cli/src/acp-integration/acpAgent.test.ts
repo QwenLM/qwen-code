@@ -290,7 +290,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       protocol: 'openai',
       baseUrl: 'https://api.deepseek.com',
       envKey: 'DEEPSEEK_API_KEY',
-      models: [{ id: 'deepseek-chat' }],
+      models: [{ id: 'deepseek-chat' }, { id: 'deepseek-coder' }],
       modelsEditable: true,
       modelNamePrefix: 'DeepSeek',
       uiGroup: 'third-party',
@@ -305,7 +305,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         protocol: 'openai',
         baseUrl: 'https://api.deepseek.com',
         envKey: 'DEEPSEEK_API_KEY',
-        models: [{ id: 'deepseek-chat' }],
+        models: [{ id: 'deepseek-chat' }, { id: 'deepseek-coder' }],
         modelsEditable: true,
         modelNamePrefix: 'DeepSeek',
         uiGroup: 'third-party',
@@ -340,14 +340,18 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (provider: { models?: Array<{ id: string }> }) =>
       provider.models?.map((model) => model.id) ?? [],
   ),
-  reconcileInstallModelIds: vi.fn(
-    (provider: { models?: Array<{ id: string }> }, requested: string[]) => {
-      const defaultIds = provider.models?.map((model) => model.id) ?? [];
-      if (defaultIds.length === 0) return [...requested];
-      const builtinIds = new Set(defaultIds);
-      return [...defaultIds, ...requested.filter((id) => !builtinIds.has(id))];
-    },
-  ),
+  resolveReconnectModelIds: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveReconnectModelIds,
+  buildProviderTemplate: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).buildProviderTemplate,
+  computeModelListVersion: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).computeModelListVersion,
+  computeProviderTemplateVersion: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).computeProviderTemplateVersion,
   resolveBaseUrl: vi.fn(
     (
       provider: { baseUrl?: string | Array<{ url: string }> },
@@ -829,7 +833,7 @@ import {
   createManagedExternalToolGuard,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, ProviderConfig } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
@@ -845,6 +849,9 @@ import {
   tokenLimit,
   McpBudgetWouldExceedError,
   buildInstallPlan,
+  buildProviderTemplate,
+  computeModelListVersion,
+  computeProviderTemplateVersion,
   applyProviderInstallPlan,
   Storage,
   SessionTranscriptReader,
@@ -10894,7 +10901,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           id: 'deepseek',
           label: 'DeepSeek API Key',
-          defaultModelIds: ['deepseek-chat'],
+          defaultModelIds: ['deepseek-chat', 'deepseek-coder'],
           uiGroup: 'third-party',
         }),
       ],
@@ -11490,11 +11497,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/providers/connect refreshes built-in models a reconnect echoed back stale', async () => {
-    // The desktop connect form pre-fills from existingConfig.modelIds and posts
-    // them back unchanged. Installing that list verbatim would persist a stale
-    // model set under the *current* template version, and update detection
-    // would then never offer the missing built-in again.
+  it('qwen/providers/connect refreshes built-in models for a legacy install with no recorded version', async () => {
+    // Stored models but no providerMetadata version: a pre-version-tracking
+    // install. Update detection never runs without a version, so the
+    // reconnect refresh is the only path that brings the new built-ins in.
     const settings = {
       ...makeSessionSettings(),
       merged: {
@@ -11504,6 +11510,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           openai: [
             {
               id: 'my-custom-model',
+              name: '[DeepSeek] my-custom-model',
               baseUrl: 'https://api.deepseek.com',
               envKey: 'DEEPSEEK_API_KEY',
             },
@@ -11524,7 +11531,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await expect(
       agent.extMethod('qwen/providers/connect', {
         providerId: 'deepseek',
-        // Echoed list predating the built-in 'deepseek-chat'.
         modelIds: ['my-custom-model'],
       }),
     ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
@@ -11532,8 +11538,146 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({
-        modelIds: ['deepseek-chat', 'my-custom-model'],
+        modelIds: ['deepseek-chat', 'deepseek-coder', 'my-custom-model'],
       }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect installs a faithfully echoed subset verbatim', async () => {
+    // The user deselected 'deepseek-coder'; the recorded version equals what
+    // the verbatim install would stamp again, so a reconnect (e.g. rotating
+    // the API key) must not silently re-add it.
+    const deepseekProvider: ProviderConfig = {
+      id: 'deepseek',
+      label: 'DeepSeek API Key',
+      description: 'Quick setup for DeepSeek',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.deepseek.com',
+      envKey: 'DEEPSEEK_API_KEY',
+      models: [{ id: 'deepseek-chat' }, { id: 'deepseek-coder' }],
+      modelsEditable: true,
+      modelNamePrefix: 'DeepSeek',
+    };
+    const subsetVersion = computeModelListVersion(
+      buildProviderTemplate(
+        deepseekProvider,
+        'https://api.deepseek.com',
+      ).filter((model) => model.id === 'deepseek-chat'),
+    );
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              name: '[DeepSeek] deepseek-chat',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+          ],
+        },
+        providerMetadata: {
+          deepseek: {
+            version: subsetVersion,
+            baseUrl: 'https://api.deepseek.com',
+          },
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        modelIds: ['deepseek-chat'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({ modelIds: ['deepseek-chat'] }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect honors an explicit update-prompt skip', async () => {
+    // ignoredVersion matching the current template wins over a recorded
+    // version that would otherwise mark the echo stale: a key rotation must
+    // not override the user's "skip".
+    const deepseekProvider: ProviderConfig = {
+      id: 'deepseek',
+      label: 'DeepSeek API Key',
+      description: 'Quick setup for DeepSeek',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.deepseek.com',
+      envKey: 'DEEPSEEK_API_KEY',
+      models: [{ id: 'deepseek-chat' }, { id: 'deepseek-coder' }],
+      modelsEditable: true,
+      modelNamePrefix: 'DeepSeek',
+    };
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              name: '[DeepSeek] deepseek-chat',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+          ],
+        },
+        providerMetadata: {
+          deepseek: {
+            version: 'an-older-template-version',
+            ignoredVersion: computeProviderTemplateVersion(
+              deepseekProvider,
+              'https://api.deepseek.com',
+            ),
+            baseUrl: 'https://api.deepseek.com',
+          },
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        modelIds: ['deepseek-chat'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({ modelIds: ['deepseek-chat'] }),
     );
 
     mockConnectionState.resolve();
