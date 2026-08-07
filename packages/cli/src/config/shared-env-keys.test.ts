@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from './shared-env-keys.js';
+import {
+  HOME_ENV_BOOTSTRAP_KEYS,
+  PROJECT_ENV_HARDCODED_EXCLUSIONS,
+} from './shared-env-keys.js';
 
 describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // Security guard: a project `.env` must never be able to disable TLS
@@ -27,5 +30,10 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes attribution markers so a project .env cannot spoof channel', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_SERVE');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
+  });
+
+  it('does not bootstrap attribution markers from a home .env', () => {
+    expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_SERVE');
+    expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_DESKTOP');
   });
 });
