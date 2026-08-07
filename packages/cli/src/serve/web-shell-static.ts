@@ -78,6 +78,43 @@ export function isDocumentNavigation(req: Request): boolean {
 }
 
 /**
+ * Exact session deep-link document navigations: `/session/<id>` with an
+ * optional trailing slash and no further segments. Expressed as a regex (not
+ * an Express route) so callers outside the runtime app — the deferred-runtime
+ * gate in `run-qwen-serve.ts` — can apply the same discriminator.
+ */
+const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
+
+/**
+ * True when the request matches a route `mountWebShellAssets` registers
+ * BEFORE `bearerAuth`. The deferred-runtime gate in `createDelegatingServeApp`
+ * exempts exactly these so a cold daemon answers the shell's entry points the
+ * same way the warm runtime app does, instead of 401ing browser navigations
+ * that cannot attach the bearer header. Percent-encoded single-segment deep
+ * links (e.g. `/session/<id>%2fstatus`) also match — Express does not decode
+ * `%2F` during route matching — but they cannot reach an API route or session
+ * data: pre-auth answers serve only the public shell HTML, identical to
+ * `GET /` (or the startup-failure envelope). Keep in sync with the routes
+ * registered in `mountWebShellAssets`.
+ */
+export function isPreAuthWebShellRequest(req: Request): boolean {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  // Express route matching is case-insensitive by default, so the warm app
+  // serves /Session/<id> and /Assets/* pre-auth too; mirror that exactly.
+  const reqPath = req.path.toLowerCase();
+  if (
+    reqPath === '/' ||
+    // Express non-strict routing compiles `/` to `/^(?:\/)(?:\/$)?$/i`, so
+    // a raw `//` also matches `app.get('/')` pre-auth (but `///` does not).
+    reqPath === '//' ||
+    reqPath === '/assets' ||
+    reqPath.startsWith('/assets/')
+  )
+    return true;
+  return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);
+}
+
+/**
  * Build the `index.html` responder for a Web Shell dir. Sets the security
  * headers + a no-cache policy (a redeploy changes the hashed asset names
  * index.html references, so a stale shell would point at missing chunks; the
@@ -149,6 +186,11 @@ function createSendIndex(
  *
  *  - `GET /assets/*` — hashed, immutable build chunks (long-cache).
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
+ *  - `GET /session/:id` document navigations — the HTML shell, so a browser
+ *    refresh can load before the front-end adds its bearer header.
+ *
+ * `isPreAuthWebShellRequest` encodes this same surface for the
+ * deferred-runtime gate; keep the two in sync.
  *
  * Caller must have already verified `webShellDir` exists.
  */
@@ -183,10 +225,14 @@ export function mountWebShellAssets(
     res.status(404).type('text/plain').send('Not found');
   });
   app.get('/', (_req: Request, res: Response) => sendIndex(res));
+  app.get('/session/:id', (req: Request, res: Response, next: NextFunction) => {
+    if (!isDocumentNavigation(req)) return next();
+    sendIndex(res);
+  });
 }
 
 /**
- * Mount the SPA deep-link fallback (for navigations like `/session/<id>`).
+ * Mount the SPA deep-link fallback for routes not explicitly mounted above.
  * Registered AFTER all API routes — just before the error handler — so real
  * routes, INCLUDING their `bearerAuth` 401s, always win and only genuine 404
  * misses fall through to the shell.
@@ -195,7 +241,12 @@ export function mountWebShellAssets(
  * attacker-controlled `Accept: text/html` to an authed route (e.g.
  * `/capabilities`, `/health` on a non-loopback bind) hits that route's real
  * response / 401, not this shell. Because real routes run first, no per-path
- * denylist is needed.
+ * denylist is needed. The one exception is exact `/session/:id` document
+ * navigations, which `mountWebShellAssets` claims BEFORE auth so a browser
+ * refresh can load the shell. That stays safe because the route matches a
+ * single path segment only, serves only document navigations, and there is no
+ * `GET /session/:id` API route for it to shadow — API subpaths like
+ * `/session/:id/status` still hit `bearerAuth`.
  *
  * Only GET/HEAD document navigations are claimed; API fetches send
  * `Accept: application/json`, fail `isDocumentNavigation`, and fall through to

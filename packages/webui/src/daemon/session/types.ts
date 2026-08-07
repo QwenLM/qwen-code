@@ -356,7 +356,11 @@ export interface DaemonSessionActions {
     sessionId: string,
     options?: { workspaceCwd?: string },
   ): Promise<void>;
-  reloadSession(signal: AbortSignal): Promise<void>;
+  /** `memory` replay is reserved for the provider's live-journal repair. */
+  reloadSession(
+    signal: AbortSignal,
+    options?: { replaySource?: 'configured' | 'memory' },
+  ): Promise<void>;
   resumeSession(
     sessionId: string,
     options?: { workspaceCwd?: string },
@@ -496,4 +500,5 @@ export interface PendingSessionLoad {
   resolve: () => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;
+  replaySource?: 'configured' | 'memory';
 }

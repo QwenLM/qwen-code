@@ -26,7 +26,6 @@ import {
   useWorkspaceActions,
   useWorkspaceEventSignals,
   type DaemonSessionActions,
-  type DaemonWorkspaceActions,
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -65,6 +64,7 @@ import {
   type VoiceStatusRevision,
 } from './voice/voice-workspace-target';
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
+import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -124,6 +124,7 @@ import {
   getFileChangePreviewContent,
   TURN_OUTPUT_KINDS,
 } from './components/artifacts/TurnOutputs';
+import { useArtifactWorkspaceTarget } from './components/artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -387,7 +388,6 @@ interface ArtifactPanelSessionState {
 }
 interface PaneArtifactSnapshot {
   artifacts: readonly DaemonSessionArtifact[];
-  workspaceActions: DaemonWorkspaceActions;
 }
 // Cap on how long a manual "run now" waits for its bound session to become
 // active before giving up, so the scheduled-tasks UI can't stay stuck disabled
@@ -1834,7 +1834,8 @@ export function App({
     ? workspaces.map((entry) => ({
         id: entry.id,
         cwd: entry.cwd,
-        label: workspaceLabel(entry),
+        label:
+          entry.kind === 'live' ? t('sidebar.live') : workspaceLabel(entry),
         primary: entry.primary,
         trusted: entry.trusted,
       }))
@@ -1884,6 +1885,9 @@ export function App({
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
+    connection.workspaceCwd,
+  );
   const dynamicWorkspaceRegistrationSupported =
     workspace.capabilities?.features?.includes(
       'dynamic_workspace_registration',
@@ -2241,15 +2245,18 @@ export function App({
       return;
     }
     const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
-    const paneArtifactIds = new Set(
+    // Extras referenced by open artifact tabs must survive the reconcile:
+    // they keep those tabs renderable through transient gaps in the live
+    // list, and stay inert while the live list (merged first) covers them.
+    const openArtifactIds = new Set(
       artifactPanelTabs
-        .filter((tab) => tab.kind === 'artifact' && tab.workspaceActions)
+        .filter((tab) => tab.kind === 'artifact')
         .map((tab) => (tab.kind === 'artifact' ? tab.artifactId : '')),
     );
     setArtifactPanelExtraArtifacts((previous) => {
       const next = previous.filter(
         (artifact) =>
-          !artifactIds.has(artifact.id) || paneArtifactIds.has(artifact.id),
+          !artifactIds.has(artifact.id) || openArtifactIds.has(artifact.id),
       );
       return next.length === previous.length ? previous : next;
     });
@@ -2269,9 +2276,11 @@ export function App({
       return artifacts;
     }
     const merged = [...artifacts];
+    // Pane snapshots outrank open-time extras so a retained extra never
+    // shadows a fresher pane report for the same artifact id.
     for (const artifact of [
-      ...artifactPanelExtraArtifacts,
       ...paneArtifactExtras,
+      ...artifactPanelExtraArtifacts,
     ]) {
       const index = merged.findIndex((item) => item.id === artifact.id);
       if (index < 0) {
@@ -2284,13 +2293,31 @@ export function App({
     (
       paneSessionId: string,
       paneArtifacts: readonly DaemonSessionArtifact[],
-      paneWorkspaceActions: DaemonWorkspaceActions,
     ) => {
+      if (paneArtifacts.length > 0) {
+        const paneArtifactIds = new Set(
+          paneArtifacts.map((artifact) => artifact.id),
+        );
+        // Keep extras whose artifact tab is still open: once the pane closes
+        // and its snapshot is dropped, the extra is the tab's only copy.
+        const openArtifactIds = new Set(
+          artifactPanelTabsRef.current
+            .filter((tab) => tab.kind === 'artifact')
+            .map((tab) => (tab.kind === 'artifact' ? tab.artifactId : '')),
+        );
+        setArtifactPanelExtraArtifacts((current) => {
+          const next = current.filter(
+            (artifact) =>
+              !paneArtifactIds.has(artifact.id) ||
+              openArtifactIds.has(artifact.id),
+          );
+          return next.length === current.length ? current : next;
+        });
+      }
       setPaneArtifactSnapshots((current) => {
         const previous = current.get(paneSessionId);
         const unchanged =
-          previous?.workspaceActions === paneWorkspaceActions &&
-          previous.artifacts.length === paneArtifacts.length &&
+          previous?.artifacts.length === paneArtifacts.length &&
           previous.artifacts.every((artifact, index) => {
             const nextArtifact = paneArtifacts[index];
             // `metadata` is deliberately not compared: artifact events carry
@@ -2312,31 +2339,9 @@ export function App({
         } else {
           next.set(paneSessionId, {
             artifacts: [...paneArtifacts],
-            workspaceActions: paneWorkspaceActions,
           });
         }
         return next;
-      });
-      const artifactIds = new Set(paneArtifacts.map((artifact) => artifact.id));
-      setArtifactPanelTabs((tabs) => {
-        let changed = false;
-        const next = tabs.map((tab) => {
-          if (tab.kind !== 'artifact' || !artifactIds.has(tab.artifactId)) {
-            return tab;
-          }
-          const updated = {
-            id: tab.id,
-            kind: 'artifact' as const,
-            title: tab.title,
-            artifactId: tab.artifactId,
-            workspaceActions: tab.workspaceActions ?? paneWorkspaceActions,
-          };
-          if (tab.previewContent !== undefined) changed = true;
-          if (tab.workspaceActions) return updated;
-          changed = true;
-          return updated;
-        });
-        return changed ? next : tabs;
       });
     },
     [],
@@ -2751,6 +2756,12 @@ export function App({
         kind: 'artifact',
         artifactId,
         title: artifact?.title ?? 'Artifact',
+        ...(connection.workspaceCwd
+          ? { workspaceCwd: connection.workspaceCwd }
+          : {}),
+        ...(artifactWorkspaceTarget?.workspaceId
+          ? { workspaceId: artifactWorkspaceTarget.workspaceId }
+          : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       };
       setArtifactPanelTabs((tabs) =>
@@ -2766,14 +2777,19 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [artifactPanelArtifacts, getDefaultReviewPanelWidth],
+    [
+      artifactPanelArtifacts,
+      artifactWorkspaceTarget?.workspaceId,
+      connection.workspaceCwd,
+      getDefaultReviewPanelWidth,
+    ],
   );
   const openReviewPanel = useCallback(
     (
       changes: readonly TurnOutputFileChange[],
       selectedPath?: string,
-      workspaceActions?: DaemonWorkspaceActions,
       reviewWorkspaceCwd?: string,
+      reviewWorkspaceId?: string,
       tabId = 'review',
     ) => {
       const reviewTab: ArtifactPanelTab = {
@@ -2782,8 +2798,8 @@ export function App({
         title: t('turnOutputs.review'),
         changes,
         ...(selectedPath ? { selectedPath } : {}),
-        ...(workspaceActions ? { workspaceActions } : {}),
         ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
+        ...(reviewWorkspaceId ? { workspaceId: reviewWorkspaceId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
@@ -2802,12 +2818,23 @@ export function App({
   );
   const openLatestReviewPanel = useCallback(() => {
     if (latestReviewChanges.length === 0) return;
-    openReviewPanel(latestReviewChanges);
-  }, [latestReviewChanges, openReviewPanel]);
+    openReviewPanel(
+      latestReviewChanges,
+      undefined,
+      connection.workspaceCwd,
+      artifactWorkspaceTarget?.workspaceId,
+    );
+  }, [
+    artifactWorkspaceTarget?.workspaceId,
+    connection.workspaceCwd,
+    latestReviewChanges,
+    openReviewPanel,
+  ]);
   const openScheduledTaskPanel = useCallback(
     (
       task: TurnOutputScheduledTask,
-      tabWorkspaceActions?: ReturnType<typeof useWorkspaceActions>,
+      tabWorkspaceCwd?: string,
+      tabWorkspaceId?: string,
       sourceSessionId?: string,
     ) => {
       const tab: ArtifactPanelTab = {
@@ -2816,10 +2843,9 @@ export function App({
           : `scheduled-task:${task.toolCallId}`,
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
-        task,
-        ...(tabWorkspaceActions
-          ? { workspaceActions: tabWorkspaceActions }
-          : {}),
+        task: tabWorkspaceId ? { ...task, workspaceId: tabWorkspaceId } : task,
+        ...(tabWorkspaceCwd ? { workspaceCwd: tabWorkspaceCwd } : {}),
+        ...(tabWorkspaceId ? { workspaceId: tabWorkspaceId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -2994,8 +3020,8 @@ export function App({
         openReviewPanel(
           request.changes,
           request.selectedPath,
-          request.workspaceActions,
           request.workspaceCwd,
+          request.workspaceId,
           request.sourceSessionId
             ? `review:${request.sourceSessionId}:${request.turnId}`
             : undefined,
@@ -3005,7 +3031,8 @@ export function App({
       if (request.kind === 'scheduled_task') {
         openScheduledTaskPanel(
           request.task,
-          request.workspaceActions,
+          request.workspaceCwd,
+          request.workspaceId,
           request.sourceSessionId,
         );
         return;
@@ -3018,17 +3045,19 @@ export function App({
         );
         return;
       }
-      if (!request.workspaceActions || request.sourceSessionId) {
-        setArtifactPanelExtraArtifacts((current) => {
-          const index = current.findIndex(
-            (artifact) => artifact.id === request.artifact.id,
-          );
-          if (index < 0) return [...current, request.artifact];
-          const next = [...current];
-          next[index] = request.artifact;
-          return next;
-        });
-      }
+      // Cache the opened row so the tab keeps rendering through transient
+      // gaps in the live artifact lists (an SSE reconnect, or the source
+      // pane closing); the snapshot/live-list reconciles drop the copy once
+      // a fresher source covers the artifact again.
+      setArtifactPanelExtraArtifacts((current) => {
+        const index = current.findIndex(
+          (artifact) => artifact.id === request.artifact.id,
+        );
+        if (index < 0) return [...current, request.artifact];
+        const next = [...current];
+        next[index] = request.artifact;
+        return next;
+      });
       const tab: ArtifactPanelTab = {
         id: request.sourceSessionId
           ? `${request.sourceSessionId}:${request.id}`
@@ -3036,8 +3065,10 @@ export function App({
         kind: 'artifact',
         title: request.title,
         artifactId: request.artifactId,
-        ...(request.workspaceActions
-          ? { workspaceActions: request.workspaceActions }
+        ...(request.workspaceCwd ? { workspaceCwd: request.workspaceCwd } : {}),
+        ...(request.workspaceId ? { workspaceId: request.workspaceId } : {}),
+        ...(request.sourceSessionId
+          ? { sourceSessionId: request.sourceSessionId }
           : {}),
         ...(request.previewContent !== undefined
           ? { previewContent: request.previewContent }
@@ -3067,8 +3098,8 @@ export function App({
   const openFilePreview = useCallback(
     (
       change: TurnOutputFileChange,
-      workspaceActions: DaemonWorkspaceActions,
       previewWorkspaceCwd?: string,
+      previewWorkspaceId?: string,
     ) => {
       const previewContent = getFileChangePreviewContent(change);
       const tab: ArtifactPanelTab = {
@@ -3076,7 +3107,8 @@ export function App({
         kind: 'file',
         title: displayPath(change.path, previewWorkspaceCwd),
         workspacePath: change.path,
-        workspaceActions,
+        ...(previewWorkspaceCwd ? { workspaceCwd: previewWorkspaceCwd } : {}),
+        ...(previewWorkspaceId ? { workspaceId: previewWorkspaceId } : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       };
       setArtifactPanelTabs((tabs) =>
@@ -4993,7 +5025,10 @@ export function App({
   // Echo a local command into the transcript, or suppress it while a turn is
   // streaming so the injected user row can't split the active turn (see
   // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
-  // then stop and not run the command's inline side effects.
+  // then stop and not run the command's inline side effects. Exception:
+  // read-only display commands wrap this in echoLocalCommandIfIdle and
+  // intentionally ignore the suppression signal — their status-block output
+  // does not split the active turn.
   const echoOrDeferLocalCommand = useCallback(
     (text: string, images?: PromptImage[]): boolean =>
       appendOrDeferLocalUserMessage(
@@ -5005,6 +5040,29 @@ export function App({
         },
       ),
     [store],
+  );
+
+  // Echo a local command when idle, but never block it. Read-only display
+  // commands (/stats, /about, /context) render their result as a status
+  // block, which does not split the active turn, so they run immediately
+  // mid-turn with only the echo skipped.
+  const echoLocalCommandIfIdle = useCallback(
+    (text: string): void => {
+      void echoOrDeferLocalCommand(text);
+    },
+    [echoOrDeferLocalCommand],
+  );
+
+  // Shared result dispatch for those read-only commands: `clearActiveText:
+  // false` keeps the status block from finalizing the in-flight assistant
+  // block mid-stream, which would split the streaming answer and orphan its
+  // usage frames.
+  const dispatchReadOnlyStatus = useCallback(
+    (text: string) => {
+      store.dispatch([{ type: 'status', text, clearActiveText: false }]);
+      resumeChatBottomFollow('smooth');
+    },
+    [store, resumeChatBottomFollow],
   );
 
   const blockLocalCommandDuringTurn = useCallback((): false => {
@@ -5046,6 +5104,11 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const liveSetup = useLiveVoiceSetup(
+    workspaceSettings.some(
+      (setting) => setting.key === 'experimental.liveVoice.enabled',
+    ),
+  );
   const sessionWorkflowEnabled =
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
@@ -5090,6 +5153,7 @@ export function App({
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
+    liveSetup,
   };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
@@ -5815,21 +5879,31 @@ export function App({
       lastRecapBlockCountRef.current = currentCount;
       const sessionId = connection.sessionId;
       const version = autoRecapVersionRef.current;
+      // Local-only commands also append user blocks. Treat any new visible user
+      // activity as invalidating the recap rather than risk placing it too late.
+      const userBlockId = getLatestUserBlockId(store.getSnapshot().blocks);
       sessionActions.recapSession().then(
         (result) => {
+          const currentUserBlockId = getLatestUserBlockId(
+            store.getSnapshot().blocks,
+          );
           // result.sessionId only pins the daemon wire contract (the daemon
           // echoes the id back), not a real race; the epoch/connection checks
           // catch those. Kept so it is not simplified away as redundant.
           if (
             autoRecapVersionRef.current !== version ||
             connectionRef.current.sessionId !== sessionId ||
-            result.sessionId !== sessionId
+            result.sessionId !== sessionId ||
+            currentUserBlockId !== userBlockId ||
+            streamingStateRef.current !== 'idle'
           ) {
             console.warn('[auto-recap] discarding stale recap', {
-              captured: { sessionId, version },
+              captured: { sessionId, version, userBlockId },
               current: {
                 sessionId: connectionRef.current.sessionId,
                 version: autoRecapVersionRef.current,
+                userBlockId: currentUserBlockId,
+                streamingState: streamingStateRef.current,
               },
               result: result.sessionId,
             });
@@ -5864,37 +5938,32 @@ export function App({
   }, [currentMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
-  // indicator. Echoes the command as a local user message first — that also
-  // makes the transcript follow the tail (MessageList Rule 4), so the panel
-  // is revealed even when the click comes while scrolled up.
+  // indicator. Echoes the command when idle — that also makes the transcript
+  // follow the tail (MessageList Rule 4). Mid-turn the echo is skipped and
+  // dispatchReadOnlyStatus's resumeChatBottomFollow resumes bottom-follow,
+  // so the panel is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      // Self-guard so every entry point (keyboard, status-bar button, in-chat
-      // "context detail" click) defers mid-turn instead of splitting the turn.
+      // Read-only: every entry point (keyboard, status-bar button, in-chat
+      // "context detail" click) runs immediately, even mid-turn — only the
+      // echo is skipped while streaming so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
-      if (echoOrDeferLocalCommand(commandText)) return;
+      echoLocalCommandIfIdle(commandText);
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
-          store.dispatch([
-            {
-              type: 'status',
-              text: serializeContextUsageMessage(result),
-            },
-          ]);
-          resumeChatBottomFollow('smooth');
+          dispatchReadOnlyStatus(serializeContextUsageMessage(result));
         })
         .catch((error: unknown) => {
           reportError(error, 'Failed to load context usage');
         });
     },
     [
-      echoOrDeferLocalCommand,
-      store,
+      echoLocalCommandIfIdle,
+      dispatchReadOnlyStatus,
       requireActiveSessionForLocalCommand,
       sessionActions,
       reportError,
-      resumeChatBottomFollow,
     ],
   );
 
@@ -6447,11 +6516,13 @@ export function App({
   // to that session. loadSidebarSession already closes the panel, so this just
   // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, workspaceCwd?: string) => {
       setMainView('chat');
-      void loadSidebarSession(sessionId).catch((error: unknown) => {
-        reportError(error, 'Failed to open session');
-      });
+      void loadSidebarSession(sessionId, workspaceCwd).catch(
+        (error: unknown) => {
+          reportError(error, 'Failed to open session');
+        },
+      );
     },
     [loadSidebarSession, reportError],
   );
@@ -6460,9 +6531,20 @@ export function App({
   // when a `qwen-session://<id>` link is clicked. Navigate to the session.
   useEffect(() => {
     const handler = (e: Event) => {
-      const sessionId = (e as CustomEvent<string>).detail;
+      const detail = (
+        e as CustomEvent<
+          string | { sessionId?: unknown; workspaceCwd?: unknown }
+        >
+      ).detail;
+      const sessionId = typeof detail === 'string' ? detail : detail?.sessionId;
+      const workspaceCwd =
+        typeof detail === 'object' &&
+        detail !== null &&
+        typeof detail.workspaceCwd === 'string'
+          ? detail.workspaceCwd
+          : undefined;
       if (typeof sessionId === 'string' && sessionId) {
-        handleOpenSessionFromOverview(sessionId);
+        handleOpenSessionFromOverview(sessionId, workspaceCwd);
       }
     };
     window.addEventListener('qwen:open-session', handler);
@@ -7565,84 +7647,84 @@ export function App({
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
             if (!requireActiveSessionForLocalCommand()) return false;
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            echoLocalCommandIfIdle(text);
             sessionActions
               .getStats()
               .then((result) => {
-                store.dispatch([
-                  {
-                    type: 'status',
-                    text: serializeStatsMessage(result, statsView),
-                  },
-                ]);
-                resumeChatBottomFollow('smooth');
+                dispatchReadOnlyStatus(
+                  serializeStatsMessage(result, statsView),
+                );
               })
-              .catch(() => {});
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load stats');
+              });
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            echoLocalCommandIfIdle(text);
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadProviders().catch(() => null),
               workspaceActions.loadEnv().catch(() => null),
-            ]).then(([preflight, providers, env]) => {
-              const sys = collectSystemInfo(preflight, env);
+            ])
+              .then(([preflight, providers, env]) => {
+                const sys = collectSystemInfo(preflight, env);
 
-              let authSource = sys.authSource;
-              if (!authSource && providers?.current?.authType) {
-                authSource = providers.current.authType;
-              }
-
-              const runtimeParts: string[] = [];
-              if (sys.nodeVersion)
-                runtimeParts.push(`Node.js v${sys.nodeVersion}`);
-              if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
-
-              let formattedAuth = '';
-              if (authSource) {
-                if (
-                  authSource.startsWith('oauth') ||
-                  authSource === 'qwen-oauth'
-                ) {
-                  formattedAuth = 'Qwen OAuth';
-                } else {
-                  formattedAuth = `API Key - ${authSource}`;
+                let authSource = sys.authSource;
+                if (!authSource && providers?.current?.authType) {
+                  authSource = providers.current.authType;
                 }
-              }
 
-              const platformStr = `${sys.platform} ${sys.arch}`.trim();
-              const curModel = currentModelRef.current;
-              const conn = connectionRef.current;
-              const qwenCodeVersion = conn.capabilities?.qwenCodeVersion || '';
-              const info: StatusInfo = {
-                cliVersion: qwenCodeVersion,
-                runtime: runtimeParts.join(' / '),
-                platform: platformStr,
-                auth: formattedAuth,
-                baseUrl: providers?.current?.baseUrl || '',
-                model:
-                  curModel ||
-                  conn.currentModel ||
-                  providers?.current?.modelId ||
-                  '',
-                fastModel:
-                  providers?.current?.fastModelId ||
-                  curModel ||
-                  conn.currentModel ||
-                  providers?.current?.modelId ||
-                  '',
-                sessionId: conn.sessionId || '',
-                sandbox: sys.sandbox,
-                proxy: sys.proxy,
-                memoryUsage: sys.memoryUsage,
-              };
+                const runtimeParts: string[] = [];
+                if (sys.nodeVersion)
+                  runtimeParts.push(`Node.js v${sys.nodeVersion}`);
+                if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
 
-              store.dispatch([
-                { type: 'status', text: serializeStatusMessage(info) },
-              ]);
-              resumeChatBottomFollow('smooth');
-            });
+                let formattedAuth = '';
+                if (authSource) {
+                  if (
+                    authSource.startsWith('oauth') ||
+                    authSource === 'qwen-oauth'
+                  ) {
+                    formattedAuth = 'Qwen OAuth';
+                  } else {
+                    formattedAuth = `API Key - ${authSource}`;
+                  }
+                }
+
+                const platformStr = `${sys.platform} ${sys.arch}`.trim();
+                const curModel = currentModelRef.current;
+                const conn = connectionRef.current;
+                const qwenCodeVersion =
+                  conn.capabilities?.qwenCodeVersion || '';
+                const info: StatusInfo = {
+                  cliVersion: qwenCodeVersion,
+                  runtime: runtimeParts.join(' / '),
+                  platform: platformStr,
+                  auth: formattedAuth,
+                  baseUrl: providers?.current?.baseUrl || '',
+                  model:
+                    curModel ||
+                    conn.currentModel ||
+                    providers?.current?.modelId ||
+                    '',
+                  fastModel:
+                    providers?.current?.fastModelId ||
+                    curModel ||
+                    conn.currentModel ||
+                    providers?.current?.modelId ||
+                    '',
+                  sessionId: conn.sessionId || '',
+                  sandbox: sys.sandbox,
+                  proxy: sys.proxy,
+                  memoryUsage: sys.memoryUsage,
+                };
+
+                dispatchReadOnlyStatus(serializeStatusMessage(info));
+              })
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load status info');
+              });
             return true;
           }
           if (cmd === 'bug') {
@@ -7784,6 +7866,8 @@ export function App({
       store,
       enqueuePrompt,
       echoOrDeferLocalCommand,
+      echoLocalCommandIfIdle,
+      dispatchReadOnlyStatus,
       branchCurrentSession,
       closeMobileDrawer,
       closePanel,
