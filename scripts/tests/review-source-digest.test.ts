@@ -124,6 +124,16 @@ describe('the build stamp and the staleness check agree', () => {
         'review',
       );
       writeFileSync(join(cli, 'review.ts'), 'registers everything');
+      // The lease is the other file-shaped root, and the only one outside
+      // `commands/`. Materialized here so its pin is local: the repo-tree
+      // case holds it only through the real file, and would silently drop
+      // the pin the day that file moved.
+      const services = join(root, 'packages', 'cli', 'src', 'services');
+      mkdirSync(services, { recursive: true });
+      writeFileSync(
+        join(services, 'review-worktree-lease.ts'),
+        'leases the worktree',
+      );
       writeFileSync(join(cli, 'review', 'drive.ts'), 'drives');
       writeFileSync(join(cli, 'review', 'lib', 'ledger.ts'), 'ledgers');
       // One production file per admitted code extension: dropping a member
@@ -142,13 +152,13 @@ describe('the build stamp and the staleness check agree', () => {
       mkdirSync(join(skillDir, '__fixtures__'), { recursive: true });
       writeFileSync(join(skillDir, '__fixtures__', 'example.md'), '# fixture');
       // DESIGN.md is the copier's deliberate skip, so it must move neither
-      // side of the digest — pinned by the count below staying at 11.
+      // side of the digest — pinned by the count below staying at 12.
       writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
 
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(11);
+      expect(reviewSourceDigestForBuild(root).count).toBe(12);
 
       // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
@@ -197,7 +207,7 @@ describe('the build stamp and the staleness check agree', () => {
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(11);
+      expect(reviewSourceDigestForBuild(root).count).toBe(12);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
