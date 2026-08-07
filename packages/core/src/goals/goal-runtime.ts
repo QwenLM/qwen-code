@@ -588,6 +588,33 @@ export function createGoalRuntime(
       return undefined;
     });
 
+  // Post-commit checkpoint recording is best-effort bookkeeping. When its
+  // persistence fails, settle the attempt it left behind so the runtime
+  // converges with the committed snapshot instead of stranding the goal on
+  // an activity that no later operation can clear.
+  const settleDanglingAttempt = (permit: GoalTurnPermit): Promise<void> =>
+    enqueue(async () => {
+      if (disposed) return;
+      const dangling = verificationAttempt ?? checkpointAttempt;
+      if (!dangling) return;
+      if (
+        snapshot.goal?.goalId !== permit.goalId ||
+        snapshot.goal?.revision !== permit.revision
+      ) {
+        return;
+      }
+      verificationAttempt = undefined;
+      checkpointAttempt = undefined;
+      pendingProposal = undefined;
+      snapshot = { ...snapshot, activity: 'idle' };
+      broadcast();
+      if (promoteQueuedUserTurn()) {
+        broadcast();
+      } else {
+        queueContinuation();
+      }
+    });
+
   const runVerification = async (
     attempt: VerificationAttempt,
   ): Promise<void> => {
@@ -636,7 +663,14 @@ export function createGoalRuntime(
       }
     }
     const checkpoint = await recordVerificationOutcome(attempt, outcome);
-    if (checkpoint) await runCheckpoint(checkpoint);
+    if (!checkpoint) return;
+    try {
+      await runCheckpoint(checkpoint);
+    } catch {
+      // Same contract as finishTurn: the verifier outcome committed, so a
+      // failed checkpoint recording settles instead of escaping.
+      await settleDanglingAttempt(checkpoint.permit);
+    }
   };
 
   const finishCheckpointCheck = async (
@@ -916,16 +950,11 @@ export function createGoalRuntime(
         if (!attempt) return;
         try {
           await runCheckpoint(attempt);
-        } catch (error) {
-          if (checkpointAttempt === attempt) {
-            checkpointAttempt = undefined;
-          }
-          snapshot = { ...snapshot, activity: 'idle' };
-          recoveryError = new GoalPersistenceUnavailableError(
-            error instanceof Error ? error.message : String(error),
-            { cause: error },
-          );
-          throw recoveryError;
+        } catch {
+          // Recovery committed before the replay began, so a failed replay
+          // degrades instead of bricking the runtime: drop the pending
+          // checkpoint and let the restored goal continue.
+          await settleDanglingAttempt(attempt.permit);
         }
       });
     },
@@ -1117,8 +1146,15 @@ export function createGoalRuntime(
       return finish.then(async (attempts) => {
         if (attempts.verification) {
           await runVerification(attempts.verification);
-        } else if (attempts.checkpoint) {
+          return;
+        }
+        if (!attempts.checkpoint) return;
+        try {
           await runCheckpoint(attempts.checkpoint);
+        } catch {
+          // The turn already committed; a failed checkpoint recording must
+          // not surface as a failed turn or leave the goal verifying.
+          await settleDanglingAttempt(attempts.checkpoint.permit);
         }
       });
     },

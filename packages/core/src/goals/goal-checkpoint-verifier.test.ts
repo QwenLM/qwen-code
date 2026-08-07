@@ -141,14 +141,17 @@ describe('createGoalCheckpointVerifier', () => {
   });
 
   it('aborts the side query when the verifier timeout fires', async () => {
-    const generateText = vi.fn().mockImplementation(
-      (request: { abortSignal: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          request.abortSignal.addEventListener('abort', () => {
-            reject(request.abortSignal.reason);
+    let captured: AbortSignal | undefined;
+    const generateText = vi
+      .fn()
+      .mockImplementation((request: { abortSignal?: AbortSignal }) => {
+        captured = request.abortSignal;
+        return new Promise((_resolve, reject) => {
+          request.abortSignal?.addEventListener('abort', () => {
+            reject(request.abortSignal?.reason);
           });
-        }),
-    );
+        });
+      });
     const baseLlmClient = {
       generateText,
       generateJson: vi.fn(),
@@ -164,6 +167,9 @@ describe('createGoalCheckpointVerifier', () => {
       createGoalCheckpointVerifier(config, { timeoutMs: 1 })(input()),
     ).rejects.toThrow('Goal checkpoint verifier timed out after 1ms');
     expect(generateText).toHaveBeenCalledOnce();
+    // The abort signal is the only cancellation mechanism for the side
+    // query, so the timeout must actually abort it.
+    expect(captured?.aborted).toBe(true);
   });
 
   it('measures the claim limit after trimming, in code points', () => {

@@ -167,9 +167,7 @@ describe('Goal evidence catalog', () => {
         ...input,
         proposal: complete(['evidence-0']),
       }),
-    ).toThrowError(
-      expect.objectContaining({ code: 'reference_not_catalogued' }),
-    );
+    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
   });
 
   it('scopes the truncated catalog gate to full-window coverage proposals', () => {
@@ -197,9 +195,9 @@ describe('Goal evidence catalog', () => {
       }),
     ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
 
-    // A repeated blocker only has to cover the newest three turns, which
-    // truncation keeps, so it reaches the coverage check instead of dying
-    // at the truncation gate.
+    // A repeated blocker only has to cover the newest three turns, and the
+    // bounded catalog still holds that coverage here, so it reaches the
+    // coverage check instead of dying at the truncation gate.
     expect(() =>
       validateGoalEvidenceReferences({
         ...input,
@@ -208,6 +206,147 @@ describe('Goal evidence catalog', () => {
     ).toThrowError(
       expect.objectContaining({ code: 'repeated_blocker_turn_coverage' }),
     );
+  });
+
+  it('keeps the catalog whole when only ineligible records sit past the entry cap', () => {
+    const records = [
+      record('cursor', 'system', {
+        provenance: 'goal_control',
+        subtype: 'goal_state',
+      }),
+      record('runtime-prompt', 'user', {
+        provenance: 'goal_runtime',
+        subtype: 'goal_runtime',
+        turnId: 'turn-3',
+        text: 'Continue working on the active Goal.',
+      }),
+      ...Array.from({ length: 100 }, (_, index) =>
+        record(`evidence-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: `output ${index}`,
+        }),
+      ),
+    ];
+    const input = { records, goal: goal(), permit: permit() };
+
+    expect(buildGoalEvidenceCatalog(input).truncated).toBe(false);
+    expect(buildGoalEvidenceCheckpointWindow(input)).toMatchObject({
+      truncated: false,
+      shouldCheckpoint: true,
+    });
+  });
+
+  it('fails closed when truncation evicts a repeated blocker turn', () => {
+    const checkpointGoal: GoalRecord = {
+      ...goal('checkpoint-1'),
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 42,
+        claims: Array.from({ length: 32 }, (_, index) => ({
+          id: `checkpoint-1:${index + 1}`,
+          proofKind: 'external_fact' as const,
+          claim: `claim ${index + 1}`,
+          sourceRefs: [`source-${index + 1}`],
+        })),
+      },
+    };
+    const records = [
+      record('checkpoint-1', 'system', {
+        provenance: 'goal_control',
+        subtype: 'goal_state',
+      }),
+      ...Array.from({ length: 5 }, (_, index) =>
+        record(`old-${index}`, 'tool_result', {
+          provenance: 'tool_result',
+          turnId: 'turn-1',
+          toolResponse: { output: `old failure ${index}` },
+        }),
+      ),
+      ...Array.from({ length: 67 }, (_, index) =>
+        record(`mid-${index}`, 'tool_result', {
+          provenance: 'tool_result',
+          turnId: 'turn-2',
+          toolResponse: { output: `mid failure ${index}` },
+        }),
+      ),
+      record('new-0', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { output: 'new failure' },
+      }),
+    ];
+    const input = { records, goal: checkpointGoal, permit: permit() };
+
+    expect(buildGoalEvidenceCatalog(input).truncated).toBe(true);
+    // The evicted turn makes the required coverage unsatisfiable, and the
+    // gate runs before reference validation, so even a citation of the
+    // evicted record reports catalog exhaustion rather than an unknown
+    // reference.
+    expect(() =>
+      validateGoalEvidenceReferences({
+        ...input,
+        proposal: blocked('repeated', ['old-0', 'mid-0', 'new-0']),
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
+    expect(() =>
+      validateGoalEvidenceReferences({
+        ...input,
+        proposal: blocked('repeated', ['mid-0', 'new-0']),
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
+  });
+
+  it('keeps a repeated blocker validatable while its turns stay catalogued', () => {
+    const checkpointGoal: GoalRecord = {
+      ...goal('checkpoint-1'),
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 42,
+        claims: Array.from({ length: 32 }, (_, index) => ({
+          id: `checkpoint-1:${index + 1}`,
+          proofKind: 'external_fact' as const,
+          claim: `claim ${index + 1}`,
+          sourceRefs: [`source-${index + 1}`],
+        })),
+      },
+    };
+    const records = [
+      record('checkpoint-1', 'system', {
+        provenance: 'goal_control',
+        subtype: 'goal_state',
+      }),
+      ...Array.from({ length: 5 }, (_, index) =>
+        record(`old-${index}`, 'tool_result', {
+          provenance: 'tool_result',
+          turnId: 'turn-1',
+          toolResponse: { output: `old failure ${index}` },
+        }),
+      ),
+      ...Array.from({ length: 66 }, (_, index) =>
+        record(`mid-${index}`, 'tool_result', {
+          provenance: 'tool_result',
+          turnId: 'turn-2',
+          toolResponse: { output: `mid failure ${index}` },
+        }),
+      ),
+      record('new-0', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { output: 'new failure' },
+      }),
+    ];
+    const input = { records, goal: checkpointGoal, permit: permit() };
+
+    // The entry cap still evicts older records of the oldest turn, but the
+    // turn itself stays catalogued, so the coverage check remains reachable.
+    expect(buildGoalEvidenceCatalog(input).truncated).toBe(true);
+    expect(
+      validateGoalEvidenceReferences({
+        ...input,
+        proposal: blocked('repeated', ['old-4', 'mid-0', 'new-0']),
+      }).citedRecords,
+    ).toHaveLength(3);
   });
 
   it('does not expand records older than the bounded catalog window', () => {

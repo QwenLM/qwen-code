@@ -1371,7 +1371,7 @@ describe('goal runtime', () => {
     expect(restoredHost.started).toHaveLength(1);
   });
 
-  it('degrades recovery when the recovery checkpoint write fails', async () => {
+  it('keeps a restored goal serviceable when the recovery checkpoint write fails', async () => {
     const result = deferred<GoalCheckpointVerificationResult>();
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
@@ -1434,25 +1434,89 @@ describe('goal runtime', () => {
     });
     restored.bindHost(restoredHost);
 
-    await expect(restored.restore(recoveryRecords)).rejects.toMatchObject({
-      name: 'GoalPersistenceUnavailableError',
-      message: 'writer lease inactive',
-      cause: expect.objectContaining({ message: 'writer lease inactive' }),
-    });
+    await restored.restore(recoveryRecords);
     expect(restoredCheckpointVerifier).toHaveBeenCalledOnce();
     expect(restoredJournal.appended).toEqual([]);
+    // Recovery committed before the replay began, so the failed replay
+    // degrades instead of bricking the runtime: the pending checkpoint is
+    // dropped, the verifying activity rewinds, and the restored goal stays
+    // active and serviceable.
     expect(restored.getSnapshot()).toMatchObject({
-      activity: 'idle',
+      activity: 'running',
       goal: { status: 'active' },
     });
-    expect(restoredHost.started).toEqual([]);
+    expect(restoredHost.started).toHaveLength(1);
     await expect(
       restored.dispatch({
         action: 'clear',
         expectedGoalId: permit.goalId,
         expectedRevision: permit.revision,
       }),
-    ).rejects.toBeInstanceOf(GoalPersistenceUnavailableError);
+    ).rejects.toMatchObject({ message: 'writer lease inactive' });
+  });
+
+  it('settles a post-commit checkpoint write failure instead of stalling', async () => {
+    const journal = fakeGoalJournal({
+      appendErrors: [
+        undefined, // create
+        undefined, // turn_finished
+        undefined, // verifier_reject with checkpointPending
+        new Error('writer lease lost'), // checkpoint record
+        new Error('writer lease lost'), // usage_limited fallback
+      ],
+    });
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'reject' as const,
+      reason: 'More work remains',
+    }));
+    const checkpointVerifier = vi.fn(async () => ({
+      claims: [
+        {
+          proofKind: 'delivered_output' as const,
+          claim: 'The implementation result was delivered.',
+          sourceRefs: ['assistant-evidence-79'],
+        },
+      ],
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier,
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    records = verifierEvidenceWindow(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      80,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['assistant-evidence-79'],
+    });
+
+    // The turn already committed; the post-commit bookkeeping failure must
+    // not reject it or leave the goal stranded on a verifying activity.
+    await expect(runtime.finishTurn(permit)).resolves.toBeUndefined();
+
+    expect(checkpointVerifier).toHaveBeenCalledOnce();
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'verifier_reject',
+    ]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active', lastReason: 'More work remains' },
+    });
+    expect(host.started).toHaveLength(2);
+    expect(host.inputs[1]?.verifierFeedback).toBe('More work remains');
   });
 
   it('checkpoints before continuing after the terminal verifier rejects', async () => {

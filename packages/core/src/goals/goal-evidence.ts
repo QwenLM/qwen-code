@@ -221,19 +221,25 @@ export function validateGoalEvidenceReferences(
   }
 
   const analysis = analyzeEvidence(input);
-  const citedRecords = references.map((reference) =>
-    validateReference(reference, input, analysis),
-  );
-  // Truncation drops the oldest post-cursor evidence, so fail closed only
-  // when the proposal's coverage depends on that full window. A repeated
-  // blocker is validated against the newest three turns, which truncation
-  // keeps.
-  if (analysis.catalogTruncated && !isRepeatedBlockerProposal(input.proposal)) {
+  // Truncation drops the oldest post-cursor evidence, so fail closed unless
+  // the bounded catalog can still satisfy the proposal's required coverage.
+  // A repeated blocker only needs the newest three turns, and only when each
+  // of them still holds evidence the coverage check can actually cite.
+  if (
+    analysis.catalogTruncated &&
+    !(
+      isRepeatedBlockerProposal(input.proposal) &&
+      repeatedBlockerCoverageCatalogued(analysis)
+    )
+  ) {
     throw new InvalidGoalEvidenceReferenceError(
       'catalog_truncated',
       GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
     );
   }
+  const citedRecords = references.map((reference) =>
+    validateReference(reference, input, analysis),
+  );
   const evidenceBytes = citedRecords.reduce(
     (total, record) => total + Buffer.byteLength(record.content, 'utf8'),
     0,
@@ -313,11 +319,17 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     CATALOG_ENTRY_LIMIT - checkpointEntries.length,
   );
   for (let index = input.records.length - 1; index > cursorIndex; index -= 1) {
+    const record = input.records[index]!;
     if (selectedEvidence.length >= rawEntryLimit) {
-      catalogTruncated = true;
-      break;
+      // The entry cap keeps the newest evidence; only call the catalog
+      // truncated when eligible evidence is actually left behind.
+      if (hasCatalogEligibleEvidence(record, input)) {
+        catalogTruncated = true;
+        break;
+      }
+      continue;
     }
-    const evidence = catalogEvidence(input.records[index]!, input);
+    const evidence = catalogEvidence(record, input);
     if (!evidence) continue;
     const entryBytes = Buffer.byteLength(JSON.stringify(evidence), 'utf8');
     if (catalogBytes + entryBytes > CATALOG_BYTE_LIMIT) {
@@ -475,6 +487,20 @@ function validateReference(
   return { ...catalogEntry, content };
 }
 
+function repeatedBlockerCoverageCatalogued(
+  analysis: EvidenceAnalysis,
+): boolean {
+  const requiredTurnIds = analysis.lineageTurnIds.slice(-3);
+  const currentTurnId = requiredTurnIds.at(-1);
+  return requiredTurnIds.every((turnId) =>
+    analysis.catalog.some(
+      (entry) =>
+        entry.turnId === turnId &&
+        (turnId === currentTurnId || entry.provenance !== 'assistant_output'),
+    ),
+  );
+}
+
 function validateBlockerCoverage(
   proposal: GoalTerminalProposal,
   citedRecords: readonly ValidatedGoalEvidenceRecord[],
@@ -554,6 +580,35 @@ function checkpointCatalogEntries(
     preview: claim.claim.slice(0, CATALOG_PREVIEW_LIMIT),
     proofKind: claim.proofKind,
   }));
+}
+
+function hasCatalogEligibleEvidence(
+  record: GoalEvidenceRecord,
+  input: GoalEvidenceContext,
+): boolean {
+  const provenance = coherentEvidenceProvenance(record);
+  if (!provenance) return false;
+  const context = parseGoalContext(record.goalContext);
+  if (
+    !context ||
+    context.goalId !== input.goal.goalId ||
+    context.revision !== input.goal.revision
+  ) {
+    return false;
+  }
+  for (const part of record.message?.parts ?? []) {
+    if (part.thought !== true && typeof part.text === 'string' && part.text) {
+      return true;
+    }
+    if (
+      provenance === 'tool_result' &&
+      part.functionResponse &&
+      part.functionResponse.response !== undefined
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function catalogEvidence(

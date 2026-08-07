@@ -314,6 +314,60 @@ describe('resumeHistoryUtils', () => {
     expect(userItem.text).toBe('post-gap message');
   });
 
+  it('does not suppress a post-gap Goal lifecycle card with the pre-gap baseline', () => {
+    // The gap swallowed the pause record, so the post-gap resume snapshot is
+    // shape-equal to the pre-gap create snapshot; the gap boundary must reset
+    // the displayed baseline so the resume card is not treated as
+    // bookkeeping.
+    const goal: NonNullable<GoalSnapshotV2['goal']> = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the feature',
+      status: 'active',
+      evidenceCursor: { recordId: 'goal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const goalRecord = (
+      uuid: string,
+      cause: 'create' | 'resume',
+      snapshotGoal: GoalSnapshotV2['goal'],
+    ) => ({
+      uuid,
+      type: 'system' as const,
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause,
+        snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+      },
+    });
+    const conversation = {
+      messages: [
+        goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-resume', 'resume', goal),
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      {
+        conversation,
+        historyGaps: [
+          { childUuid: 'goal-resume', missingParentUuid: 'goal-pause' },
+        ],
+      } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items.filter((item) => item.type === 'goal_state')).toMatchObject([
+      { cause: 'create' },
+      { cause: 'resume' },
+    ]);
+  });
+
   describe('UserPromptSubmit hook context provenance', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
