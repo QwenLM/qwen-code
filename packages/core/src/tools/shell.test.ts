@@ -7117,9 +7117,8 @@ describe('ShellTool', () => {
     });
 
     // Regression coverage for issue #8582: both bypass forms must ask.
-    // Variant 1 is caught by the substitution gate (tree-sitter cannot see
-    // a `$(` split across a line continuation); variant 2 is caught by the
-    // AST classifier downgrading `@`-transformed expansions to unknown.
+    // Both are caught by the pre-AST substitution gate; the AST
+    // @-transformation downgrade is a secondary layer.
     it('asks for $(...) hidden by a line continuation (issue #8582)', async () => {
       const invocation = shellTool.build({
         command: 'echo "$\\\n(touch /tmp/pwned)"',

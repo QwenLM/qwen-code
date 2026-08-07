@@ -17,7 +17,10 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  hasShellSubstitution,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -186,6 +189,14 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
+    if (
+      ctx.toolName === 'monitor' &&
+      ctx.command !== undefined &&
+      hasShellSubstitution(ctx.command)
+    ) {
+      return 'ask';
+    }
+
     ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
 

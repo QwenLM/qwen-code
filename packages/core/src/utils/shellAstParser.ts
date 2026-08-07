@@ -1151,9 +1151,13 @@ async function classifyInternal(command: string): Promise<Safety> {
     // evaluated to `unknown`; merging (instead of overriding) preserves a
     // `write` verdict — plan mode distinguishes it from `unknown` (#8590
     // review).
-    const hasNestedComment =
-      collectDescendants(root, new Set(['comment'])).length > 0;
-    return hasNestedComment ? mergeSafety(safety, 'unknown') : safety;
+    const hasNestedContinuationComment = collectDescendants(
+      root,
+      new Set(['comment']),
+    ).some((comment) => comment.text.endsWith('\\'));
+    return hasNestedContinuationComment
+      ? mergeSafety(safety, 'unknown')
+      : safety;
   } finally {
     tree.delete();
   }
@@ -1179,21 +1183,25 @@ function isShellCommandReadOnlyFallback(command: string): boolean {
   // parsing) and subscripts of any depth or quoting. The `@` pre-filter
   // keeps commands without one off the scan entirely.
   if (command.includes('@')) {
-    let index = command.indexOf('${');
+    let index = command.indexOf('$');
     while (index !== -1) {
-      const headEnd = matchParameterExpansionHead(command, index + 1);
+      const braceIndex = skipLineContinuations(command, index + 1);
+      if (command[braceIndex] !== '{') {
+        index = command.indexOf('$', index + 1);
+        continue;
+      }
+
+      const headEnd = matchParameterExpansionHead(command, braceIndex);
       // An unterminated subscript cannot be classified: fail closed.
       if (headEnd === -2) return false;
-      if (
-        headEnd >= 0 &&
-        command[headEnd] === '@' &&
-        /[A-Za-z]/.test(
-          command[skipLineContinuations(command, headEnd + 1)] ?? '',
-        )
-      ) {
+      const operatorIndex =
+        headEnd >= 0 && command[headEnd] === '@'
+          ? skipLineContinuations(command, headEnd + 1)
+          : headEnd;
+      if (operatorIndex >= 0 && /[A-Za-z]/.test(command[operatorIndex] ?? '')) {
         return false;
       }
-      index = command.indexOf('${', index + 1);
+      index = command.indexOf('$', index + 1);
     }
   }
   return isShellCommandReadOnly(command);

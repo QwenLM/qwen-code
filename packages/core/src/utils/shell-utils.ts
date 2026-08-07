@@ -1529,13 +1529,85 @@ export function skipLineContinuations(text: string, index: number): number {
 }
 
 function consumeParameterName(text: string, index: number): number {
-  let i = index;
+  let i = skipLineContinuations(text, index);
   if (/[A-Za-z_]/.test(text[i] ?? '')) {
-    while (/[A-Za-z0-9_]/.test(text[i] ?? '')) i++;
+    while (/[A-Za-z0-9_]/.test(text[i] ?? '')) {
+      i = skipLineContinuations(text, i + 1);
+    }
   } else if (/[0-9]/.test(text[i] ?? '')) {
-    while (/[0-9]/.test(text[i] ?? '')) i++;
+    while (/[0-9]/.test(text[i] ?? '')) {
+      i = skipLineContinuations(text, i + 1);
+    }
   }
   return i;
+}
+
+function skipNestedParameterExpansion(
+  text: string,
+  dollarIndex: number,
+): number {
+  let braceIndex = skipLineContinuations(text, dollarIndex + 1);
+  if (text[braceIndex] !== '{') return dollarIndex + 1;
+  let depth = 1;
+  let inSingleQuotes = false;
+  let inDoubleQuotes = false;
+  let i = skipLineContinuations(text, braceIndex + 1);
+
+  while (i < text.length) {
+    const char = text[i]!;
+    if (inSingleQuotes) {
+      if (char === "'") inSingleQuotes = false;
+      i++;
+      continue;
+    }
+    if (inDoubleQuotes) {
+      const next = text[i + 1];
+      if (
+        char === '\\' &&
+        (next === '$' ||
+          next === '`' ||
+          next === '"' ||
+          next === '\\' ||
+          next === '\n')
+      ) {
+        i += 2;
+        continue;
+      }
+      if (char === '"') inDoubleQuotes = false;
+      i++;
+      continue;
+    }
+    if (char === '\\') {
+      i = skipLineContinuations(text, i);
+      if (text[i] === '\\') i += 2;
+      continue;
+    }
+    if (char === "'") {
+      inSingleQuotes = true;
+      i++;
+      continue;
+    }
+    if (char === '"') {
+      inDoubleQuotes = true;
+      i++;
+      continue;
+    }
+    if (char === '$') {
+      braceIndex = skipLineContinuations(text, i + 1);
+      if (text[braceIndex] === '{') {
+        depth++;
+        i = skipLineContinuations(text, braceIndex + 1);
+        continue;
+      }
+    }
+    if (char === '}') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+    i++;
+  }
+
+  return -1;
 }
 
 /**
@@ -1577,7 +1649,8 @@ function matchParameterSubscript(text: string, openIndex: number): number {
     }
     if (char === '\\') {
       // Also skips `\<newline>`: bash removes the pair before parsing.
-      i += 2;
+      i = skipLineContinuations(text, i);
+      if (text[i] === '\\') i += 2;
       continue;
     }
     if (char === "'") {
@@ -1589,6 +1662,13 @@ function matchParameterSubscript(text: string, openIndex: number): number {
       inDoubleQuotes = true;
       i++;
       continue;
+    }
+    if (char === '$') {
+      const afterExpansion = skipNestedParameterExpansion(text, i);
+      if (afterExpansion !== -1) {
+        i = afterExpansion;
+        continue;
+      }
     }
     if (char === '[') {
       depth++;
@@ -1733,7 +1813,7 @@ export function detectCommandSubstitution(command: string): boolean {
   };
 
   const isWordBoundary = (char: string): boolean => {
-    if (char === ' ' || char === '\t' || char === '\n' || char === '\r') {
+    if (char === ' ' || char === '\t' || char === '\n') {
       return true;
     }
     // Shell metacharacters that would terminate a WORD token in this context.
@@ -1745,11 +1825,21 @@ export function detectCommandSubstitution(command: string): boolean {
     startIndex: number,
   ): { nextIndex: number; heredoc: PendingHeredoc } | null => {
     // startIndex points at the first '<' of the `<<` operator.
+    const secondIndex = skipLineContinuations(command, startIndex + 1);
+    const afterSecondIndex = skipLineContinuations(command, secondIndex + 1);
+    let previousIndex = startIndex - 1;
+    while (
+      previousIndex >= 1 &&
+      command[previousIndex] === '\n' &&
+      command[previousIndex - 1] === '\\'
+    ) {
+      previousIndex -= 2;
+    }
     if (
       command[startIndex] !== '<' ||
-      command[startIndex + 1] !== '<' ||
-      command[startIndex - 1] === '<' ||
-      command[startIndex + 2] === '<'
+      command[secondIndex] !== '<' ||
+      command[previousIndex] === '<' ||
+      command[afterSecondIndex] === '<'
     ) {
       return null;
     }
@@ -1757,7 +1847,7 @@ export function detectCommandSubstitution(command: string): boolean {
     // Bash removes `\<newline>` before recognizing the operator, so the
     // tab-strip flag may sit on the next line. Don't skip whitespace first:
     // `<< -EOF` is a literal `-EOF` delimiter without tab stripping.
-    let i = skipLineContinuations(command, startIndex + 2);
+    let i = afterSecondIndex;
     const stripLeadingTabs = command[i] === '-';
     if (stripLeadingTabs) i++;
 
@@ -1840,6 +1930,10 @@ export function detectCommandSubstitution(command: string): boolean {
         continue;
       }
       if (char === '\\') {
+        if (command[i + 1] === '\n') {
+          i += 2;
+          continue;
+        }
         // Backslash quoting is supported in double-quoted words. For our
         // purposes, treat it as quoting and include the escaped char as-is.
         isQuotedDelimiter = true;
@@ -1964,18 +2058,22 @@ export function detectCommandSubstitution(command: string): boolean {
           continue;
         }
 
-        if (newlineLength > 0 && endsWithLineContinuation(effectiveLine)) {
-          logicalLine += effectiveLine.slice(0, -1);
+        const endsWithLf = newlineLength > 0 && command[lineEnd] === '\n';
+        if (endsWithLf && endsWithLineContinuation(rawLine)) {
+          logicalLine += rawLine.slice(0, -1);
           continue;
         }
 
-        logicalLine += effectiveLine;
+        logicalLine += rawLine;
+        const effectiveLogicalLine = heredoc.stripLeadingTabs
+          ? logicalLine.replace(/^\t+/, '')
+          : logicalLine;
 
-        if (logicalLine === heredoc.delimiter) {
+        if (effectiveLogicalLine === heredoc.delimiter) {
           break;
         }
 
-        if (lineHasCommandSubstitution(logicalLine)) {
+        if (lineHasCommandSubstitution(effectiveLogicalLine)) {
           return { nextIndex: i, hasSubstitution: true };
         }
 
@@ -2140,12 +2238,15 @@ export function detectCommandSubstitution(command: string): boolean {
     }
 
     // Detect heredoc operators (`<<` / `<<-`) only in command-line context.
+    const nextOperatorCharIndex = skipLineContinuations(command, i + 1);
+    const startsHeredocOperator =
+      char === '<' &&
+      (nextChar === '<' || command[nextOperatorCharIndex] === '<');
     if (
       !inSingleQuotes &&
       !inDoubleQuotes &&
       !inBackticks &&
-      char === '<' &&
-      nextChar === '<'
+      startsHeredocOperator
     ) {
       const parsed = parseHeredocOperator(i);
       if (parsed) {

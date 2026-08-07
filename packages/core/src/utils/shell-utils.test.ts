@@ -1449,6 +1449,10 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
     expect(detectCommandSubstitution('echo \\\n# $(x)')).toBe(false);
   });
 
+  it('does not treat bare CR as a post-continuation word boundary', () => {
+    expect(detectCommandSubstitution('echo a\r\\\n#$(x)')).toBe(true);
+  });
+
   it('detects continuation-split substitution across pure-continuation heredoc lines', () => {
     const cmd = ['cat <<EOF', '$\\', '\\', '(touch /tmp/pwned)', 'EOF'].join(
       '\n',
@@ -1559,8 +1563,9 @@ describe('detectCommandSubstitution heredoc continuation joins (#8590)', () => {
   });
 
   it('treats a joined delimiter line as body, like bash', () => {
-    // bash joins `foo\` + `EOF` into the body line `fooEOF` and ends the
-    // heredoc at the second `EOF`, so the trailing substitution is live.
+    // bash joins `foo\` + `EOF` into the body line `fooEOF`, so the
+    // would-be delimiter is consumed, the heredoc stays open, and the
+    // following substitution is still inside the expanding body.
     const cmd = [
       'cat <<EOF',
       'foo\\',
@@ -1568,6 +1573,13 @@ describe('detectCommandSubstitution heredoc continuation joins (#8590)', () => {
       'echo "$(touch /tmp/pwned)"',
     ].join('\n');
     expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('ends a heredoc when continuation-joined body text equals the delimiter', () => {
+    const cmd = ['cat <<EOF', 'EO\\', 'F', "echo '$(touch /tmp/pwned)'"].join(
+      '\n',
+    );
+    expect(detectCommandSubstitution(cmd)).toBe(false);
   });
 
   it('detects substitution after a continuation-split <<- flag', () => {
@@ -1584,6 +1596,11 @@ describe('detectCommandSubstitution heredoc continuation joins (#8590)', () => {
     expect(detectCommandSubstitution(cmd)).toBe(true);
   });
 
+  it('keeps quoted continuation-split heredoc bodies inert', () => {
+    const cmd = ['cat <<\\', "-'EOF'", '$(touch /tmp/pwned)', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(false);
+  });
+
   it('does not carry continuation state across a consumed heredoc body', () => {
     // bash leaves `cat <<EOF $` with a dangling literal `$` and runs
     // `(echo hi)` as a separate command — no substitution (#8590 review).
@@ -1595,6 +1612,53 @@ describe('detectCommandSubstitution heredoc continuation joins (#8590)', () => {
   it('detects an @P operator split from the parameter name on the command line', () => {
     expect(detectCommandSubstitution('echo "${two\\\n@P}"')).toBe(true);
     expect(detectCommandSubstitution('echo "${two@\\\nP}"')).toBe(true);
+    expect(detectCommandSubstitution('echo "${va\\\nr@P}"')).toBe(true);
+    expect(detectCommandSubstitution('echo "${1\\\n1@P}"')).toBe(true);
+  });
+
+  it('does not misparse continuation-split here-strings as heredocs', () => {
+    expect(detectCommandSubstitution('cat <\\\n<<$(payload)')).toBe(true);
+    expect(detectCommandSubstitution('cat <\\\n<<`payload`')).toBe(true);
+  });
+
+  it('registers continuation-split heredoc operators', () => {
+    const cmd = ['cat <\\', '<EOF', "don't $(touch /tmp/pwned)", 'EOF'].join(
+      '\n',
+    );
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('removes line continuations inside double-quoted heredoc delimiters', () => {
+    const cmd = ['cat <<"E\\', 'F"', '$(inert)', 'EF', '$(live)'].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('does not join CRLF heredoc body lines as bash continuations', () => {
+    const falseNegative = [
+      'cat <<EOF',
+      'EO\\\r',
+      "F\r'$(touch /tmp/pwned)'",
+      'EOF',
+    ].join('\n');
+    expect(detectCommandSubstitution(falseNegative)).toBe(true);
+
+    const falsePositive = ['cat <<EOF', '$\\\r', '(touch /tmp/pwned)', 'EOF']
+      .join('\n')
+      .replace(/\n/g, '\r\n');
+    expect(detectCommandSubstitution(falsePositive)).toBe(false);
+  });
+
+  it('strips tabs after joining <<- logical body lines', () => {
+    const cmd = ['cat <<-EOF', 'E\\', '\tOF', "'$(touch /tmp/pwned)'", 'EOF']
+      .join('\n')
+      .replace(/\\t/g, '\t');
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('detects nested parameter expansions inside subscripts before @P', () => {
+    expect(detectCommandSubstitution('echo "${x[${y#]}]@P}"')).toBe(true);
+    expect(detectCommandSubstitution('echo "${x[${y:-]}]@P}"')).toBe(true);
+    expect(detectCommandSubstitution('echo "${x[${y//]/z}]@P}"')).toBe(true);
   });
 });
 
