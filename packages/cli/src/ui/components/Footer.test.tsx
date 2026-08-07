@@ -14,7 +14,13 @@ import { Footer } from './Footer.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
 import * as useStatusLineModule from '../hooks/useStatusLine.js';
+import * as useMCPHealthModule from '../hooks/useMCPHealth.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
+import {
+  BackgroundTaskViewStateContext,
+  type BackgroundTaskViewState,
+} from '../contexts/BackgroundTaskViewContext.js';
+import type { DialogEntry } from '../hooks/useBackgroundTaskView.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
@@ -27,6 +33,9 @@ const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
 vi.mock('../hooks/useStatusLine.js');
 const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
+
+vi.mock('../hooks/useMCPHealth.js');
+const useMCPHealthMock = vi.mocked(useMCPHealthModule.useMCPHealth);
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -126,11 +135,43 @@ const renderWithWidth = (
   );
 };
 
+const runningShellEntry: DialogEntry = {
+  kind: 'shell',
+  id: 'shell-1',
+  shellId: 'shell-1',
+  description: 'sleep 100',
+  command: 'sleep 100',
+  cwd: '/test/project',
+  status: 'running',
+  startTime: 0,
+  outputFile: '/tmp/shell-1.output',
+  outputPath: '/tmp/shell-1.output',
+  outputOffset: 0,
+  notified: false,
+  abortController: new AbortController(),
+};
+
+const createBackgroundTaskState = (
+  entries: readonly DialogEntry[],
+): BackgroundTaskViewState => ({
+  entries,
+  selectedIndex: 0,
+  dialogMode: 'closed',
+  dialogOpen: false,
+  pillFocused: false,
+  livePanelFocused: false,
+  livePanelSelectedIndex: 0,
+});
+
 // ink-testing-library hardcodes a 100-column layout buffer regardless of the
 // mocked useTerminalSize, so width-sensitive layout regressions cannot be
 // reproduced through it. Render through ink directly with a custom stdout so
 // the footer lays out at the requested width (DiffDialog.test.tsx pattern).
-const renderAtLayoutWidth = (columns: number, uiState: UIState) => {
+const renderAtLayoutWidth = (
+  columns: number,
+  uiState: UIState,
+  backgroundEntries: readonly DialogEntry[] = [],
+) => {
   useTerminalSizeMock.mockReturnValue({ columns, rows: 24 });
   let lastFrame = '';
   const stdout = Object.assign(new EventEmitter(), {
@@ -156,13 +197,23 @@ const renderAtLayoutWidth = (columns: number, uiState: UIState) => {
     read: () => null,
   });
   const mockSettings = createMockSettings();
+  const footer =
+    backgroundEntries.length > 0 ? (
+      <BackgroundTaskViewStateContext.Provider
+        value={createBackgroundTaskState(backgroundEntries)}
+      >
+        <Footer />
+      </BackgroundTaskViewStateContext.Provider>
+    ) : (
+      <Footer />
+    );
   const instance = inkRender(
     <SettingsContext.Provider value={mockSettings}>
       <ConfigContext.Provider value={createMockConfig() as never}>
         <KeypressProvider kittyProtocolEnabled={false}>
           <VimModeProvider settings={mockSettings}>
             <UIStateContext.Provider value={uiState}>
-              <Footer />
+              {footer}
             </UIStateContext.Provider>
           </VimModeProvider>
         </KeypressProvider>
@@ -189,6 +240,14 @@ describe('<Footer />', () => {
       useThemeColors: false,
       respectUserColors: false,
       hideContextIndicator: false,
+    });
+    // Healthy by default so MCPHealthPill renders null, matching the
+    // unconfigured registry the real hook sees in these tests.
+    useMCPHealthMock.mockReturnValue({
+      totalCount: 0,
+      disconnectedCount: 0,
+      connectingCount: 0,
+      connectedCount: 0,
     });
   });
 
@@ -265,14 +324,22 @@ describe('<Footer />', () => {
   });
 
   it.each([ApprovalMode.AUTO, ApprovalMode.DEFAULT])(
-    'keeps the hint row on one line at 80 columns with %s, a queued message, and a pending skill review',
+    'keeps the hint row on one line at 80 columns with %s, a queued message, active pills, and a pending skill review',
     (mode) => {
       // Regression (R2-1/R2-2 of the #8667 review): with Responding + the
       // approval-mode indicator + a non-empty queue, the badge had no `wrap`
       // prop, so the shrinkable hint row wrapped and the badge's tail dangled
       // on a second footer line, varying the footer height mid-turn. The
       // skill-pending indicator shares the row and needs the same guard
-      // (R3-1 of the #8667 review).
+      // (R3-1 of the #8667 review), and so do the two pills — the badge's
+      // ~12 columns of width pressure wraps their unguarded labels onto a
+      // second line once the queue is non-empty (R4-1 of the #8667 review).
+      useMCPHealthMock.mockReturnValue({
+        totalCount: 1,
+        disconnectedCount: 1,
+        connectingCount: 0,
+        connectedCount: 0,
+      });
       const { lastFrame, unmount } = renderAtLayoutWidth(
         80,
         createMockUIState({
@@ -290,6 +357,7 @@ describe('<Footer />', () => {
             ],
           },
         }),
+        [runningShellEntry],
       );
       try {
         // Trim trailing spaces/tabs per line only: `\s` also matches `\n`,
