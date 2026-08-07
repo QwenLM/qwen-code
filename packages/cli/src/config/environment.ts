@@ -39,6 +39,13 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'TEMP',
 ]);
 
+// Loader-affecting keys are rejected on every .env application path — the
+// initial load included — not just reloads. The daemon process hosts every
+// workspace, so an initial load writing them into process.env would
+// repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
+// #8653 cross-workspace vector.
+const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(INHERITED_LOADER_ENV_KEYS);
+
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
 const lastReloadSnapshot = new Map<string, string>();
@@ -370,6 +377,7 @@ function canApplyParsedEnvKey(
   options: { readonly reload?: boolean } = {},
 ): boolean {
   if (!Object.hasOwn(envFile.parsedEnv, key)) return false;
+  if (LOADER_ENV_KEYS.has(key)) return false;
   if (options.reload && RELOAD_EXCLUDED_KEYS.has(key)) return false;
   if (
     !envFile.isHomeScopedEnvFile &&

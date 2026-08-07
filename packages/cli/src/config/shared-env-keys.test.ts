@@ -45,11 +45,22 @@ describe('scrubInheritedLoaderEnv', () => {
       QWEN_SERVER_TOKEN: 'leave-secret-scrubbing-to-other-layers',
     };
 
-    scrubInheritedLoaderEnv(env);
+    const removedKeys = scrubInheritedLoaderEnv(env);
 
     for (const key of INHERITED_LOADER_ENV_KEYS) {
       expect(env[key]).toBeUndefined();
     }
+    // The removed-key list backs the startup breadcrumb and must only name
+    // keys that were actually present.
+    expect(removedKeys).toEqual([
+      'NODE_OPTIONS',
+      'NODE_PATH',
+      'LD_PRELOAD',
+      'DYLD_INSERT_LIBRARIES',
+      'BASH_ENV',
+      'ENV',
+    ]);
+    expect(scrubInheritedLoaderEnv(env)).toEqual([]);
     // PATH/HOME are launch-environment facts the session still needs; only
     // loader-class keys are scrubbed.
     expect(env['PATH']).toBe('/other-checkout/node_modules/.bin:/usr/bin');

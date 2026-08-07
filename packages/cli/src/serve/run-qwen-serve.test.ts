@@ -7138,11 +7138,25 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       '--import file:///other-checkout/register.mjs';
     process.env['NODE_PATH'] = '/other-checkout/node_modules';
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
     try {
       const handle = await bootHandle({ serveWebShell: false });
       try {
         expect(process.env['NODE_OPTIONS']).toBeUndefined();
         expect(process.env['NODE_PATH']).toBeUndefined();
+        // The scrub must leave a breadcrumb naming the removed keys so a
+        // subprocess missing an inherited var can be traced back to it.
+        expect(stderrWrites.join('')).toContain(
+          'scrubbed inherited loader env vars',
+        );
+        expect(stderrWrites.join('')).toContain('NODE_OPTIONS');
+        expect(stderrWrites.join('')).toContain('NODE_PATH');
         const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
           'sourceEnv'
         ] as NodeJS.ProcessEnv | undefined;
@@ -7154,6 +7168,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         await handle.close();
       }
     } finally {
+      stderrWrite.mockRestore();
       if (previousNodeOptions === undefined) {
         delete process.env['NODE_OPTIONS'];
       } else {

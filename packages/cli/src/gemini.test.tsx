@@ -519,6 +519,65 @@ describe('gemini.tsx main function', () => {
     },
   );
 
+  // Regression for #8653: every daemon-hosted session runs in an ACP child,
+  // so the scrub at that boundary must not silently disappear. The positive
+  // case fails if the call is deleted; the negative case pins the isAcpMode
+  // gate (non-ACP launches keep their own loader vars).
+  it.each([
+    ['scrubs', { acp: true } as CliArgs, true],
+    ['keeps', {} as CliArgs, false],
+  ])(
+    'inherited loader env vars past the ACP handoff (%s)',
+    async (_mode, argv, expectScrubbed) => {
+      vi.stubEnv(
+        'NODE_OPTIONS',
+        '--import file:///other-checkout/register.mjs',
+      );
+      vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+
+      const { parseArguments, loadCliConfig } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue(argv);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: {
+          advanced: {},
+          security: { auth: {} },
+          ui: {},
+        },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      // loadCliConfig is the first expensive call past the relaunch/sandbox
+      // handoff — the scrub must have run by here.
+      vi.mocked(loadCliConfig).mockImplementation(async () => {
+        if (expectScrubbed) {
+          expect(process.env['NODE_OPTIONS']).toBeUndefined();
+          expect(process.env['NODE_PATH']).toBeUndefined();
+        } else {
+          expect(process.env['NODE_OPTIONS']).toBe(
+            '--import file:///other-checkout/register.mjs',
+          );
+        }
+        throw new Error('stop after loader env scrub check');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow(
+          'stop after loader env scrub check',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it('keeps the external Guard token available to command parsing and scrubs it before settings load', async () => {
     vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     const { parseArguments } = await import('./config/config.js');

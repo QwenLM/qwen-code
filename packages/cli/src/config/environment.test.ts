@@ -21,7 +21,9 @@ const TRACKED_ENV = [
   'RUNTIME_SETTINGS',
   'RUNTIME_SETTINGS_ONLY',
   'BASH_ENV',
+  'LD_PRELOAD',
   'NODE_OPTIONS',
+  'NODE_PATH',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'QWEN_HOME',
@@ -235,5 +237,31 @@ describe('loadEnvironment', () => {
     expect(process.env['BASH_ENV']).toBeUndefined();
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  // Regression for #8653: the daemon scrubs loader vars from process.env,
+  // but daemon-side loadSettings() calls for trusted workspaces re-run the
+  // initial .env load afterwards. That load must not refill the scrubbed
+  // slots, or one workspace's .env loader hook reaches every other
+  // workspace's session subprocesses through the shared daemon env.
+  it('never applies loader-affecting keys from .env files, even on initial load', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
+        'NODE_PATH=/workspace-a/node_modules',
+        'LD_PRELOAD=/workspace-a/hijack.so',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['NODE_PATH']).toBeUndefined();
+    expect(process.env['LD_PRELOAD']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 });

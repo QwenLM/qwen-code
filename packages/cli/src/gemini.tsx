@@ -678,7 +678,14 @@ export async function main() {
     // process.env and still need the loader to boot, and the respawned child
     // re-runs this scrub itself. Only the final process (no relaunch) reaches
     // here.
-    scrubInheritedLoaderEnv(process.env);
+    const scrubbedLoaderEnvKeys = scrubInheritedLoaderEnv(process.env);
+    if (scrubbedLoaderEnvKeys.length > 0) {
+      writeStderrLine(
+        `qwen: scrubbed inherited loader env vars from the ACP child ` +
+          `process; session subprocesses will not inherit them: ` +
+          scrubbedLoaderEnvKeys.join(', '),
+      );
+    }
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve

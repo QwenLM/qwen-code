@@ -2083,7 +2083,14 @@ async function runQwenServeImpl(
   // boot with the harness loader, but the daemon process itself is done with
   // them: session-shell subprocesses run here with process.env while their
   // cwd is another workspace.
-  scrubInheritedLoaderEnv(process.env);
+  const scrubbedLoaderEnvKeys = scrubInheritedLoaderEnv(process.env);
+  if (scrubbedLoaderEnvKeys.length > 0) {
+    writeStderrLine(
+      `qwen serve: scrubbed inherited loader env vars from the daemon ` +
+        `process; session subprocesses will not inherit them: ` +
+        scrubbedLoaderEnvKeys.join(', '),
+    );
+  }
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the

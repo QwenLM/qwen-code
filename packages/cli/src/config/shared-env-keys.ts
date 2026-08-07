@@ -43,8 +43,8 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // ACP child needs them only for its own boot (e.g. the dev harness tsx
 // loader); left in process.env they propagate into session subprocesses whose
 // cwd is another workspace and hijack module resolution there. This is the
-// loader subset of RELOAD_EXCLUDED_KEYS (environment.ts), which only guards
-// .env/settings.env reloads — not the inherited launch environment.
+// loader subset of RELOAD_EXCLUDED_KEYS (environment.ts), which guards
+// .env/settings.env application — not the inherited launch environment.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
   'NODE_PATH',
@@ -57,8 +57,13 @@ export const INHERITED_LOADER_ENV_KEYS = [
   'ENV',
 ] as const;
 
-export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): void {
+export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): string[] {
+  const removedKeys: string[] = [];
   for (const key of INHERITED_LOADER_ENV_KEYS) {
-    delete env[key];
+    if (Object.hasOwn(env, key)) {
+      delete env[key];
+      removedKeys.push(key);
+    }
   }
+  return removedKeys;
 }
