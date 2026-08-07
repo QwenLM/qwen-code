@@ -149,6 +149,9 @@ export class FeishuChannel extends ChannelBase {
   private botOpenId?: string;
   private tokenCache?: { token: string; expiresAt: number };
   private tokenRefreshPromise?: Promise<string | undefined>;
+  // Core (non-silent) callers waiting on the shared token refresh, so a
+  // silent-initiated refresh still logs token errors for them.
+  private tokenRefreshHasCoreWaiters = false;
   private readonly observedUserNames = new Map<string, string>();
   private readonly observedChatNames = new Map<string, string>();
   private readonly observedUserLookups = new Map<
@@ -650,21 +653,20 @@ export class FeishuChannel extends ChannelBase {
       return this.tokenCache.token;
     }
 
+    if (!options?.silent) this.tokenRefreshHasCoreWaiters = true;
     if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
-    this.tokenRefreshPromise = this.refreshToken(options);
+    this.tokenRefreshPromise = this.refreshToken();
     try {
       return await this.tokenRefreshPromise;
     } finally {
       this.tokenRefreshPromise = undefined;
+      this.tokenRefreshHasCoreWaiters = false;
     }
   }
 
-  private async refreshToken(options?: {
-    silent?: boolean;
-  }): Promise<string | undefined> {
-    // Best-effort label enrichment must stay silent on failure; core delivery
-    // paths keep logging token errors.
-    const silent = options?.silent === true;
+  private async refreshToken(): Promise<string | undefined> {
+    // Best-effort label enrichment initiates silent refreshes; failures must
+    // still surface when a core delivery caller initiated or joined it.
     try {
       const resp = await fetch(
         `${BASE_URL}/auth/v3/tenant_access_token/internal`,
@@ -680,7 +682,7 @@ export class FeishuChannel extends ChannelBase {
       );
 
       if (!resp.ok) {
-        if (!silent) {
+        if (this.tokenRefreshHasCoreWaiters) {
           process.stderr.write(
             `[Feishu:${this.name}] getTenantAccessToken failed: HTTP ${resp.status}\n`,
           );
@@ -700,7 +702,7 @@ export class FeishuChannel extends ChannelBase {
       };
       return this.tokenCache.token;
     } catch (err) {
-      if (!silent) {
+      if (this.tokenRefreshHasCoreWaiters) {
         process.stderr.write(
           `[Feishu:${this.name}] getTenantAccessToken error: ${err}\n`,
         );
@@ -749,12 +751,15 @@ export class FeishuChannel extends ChannelBase {
   }
 
   /** Evicts the oldest-inserted entries once a runtime cache exceeds the cap. */
-  private capObservedCache(cache: Map<string, unknown>): void {
+  private capObservedCache(cache: Map<string, unknown>): boolean {
+    let evicted = false;
     while (cache.size > OBSERVED_LABEL_CACHE_LIMIT) {
       const oldest = cache.keys().next();
       if (oldest.done) break;
       cache.delete(oldest.value);
+      evicted = true;
     }
+    return evicted;
   }
 
   private observedUserName(userId: string): Promise<string | undefined> {
@@ -814,6 +819,8 @@ export class FeishuChannel extends ChannelBase {
     request: (token: string) => Promise<Response>;
     extractName: (body: unknown) => string | undefined;
   }): Promise<string | undefined> {
+    const cached = options.names.get(options.id);
+    if (cached) return Promise.resolve(cached);
     const existing = options.lookups.get(options.id);
     if (existing) return existing;
 
@@ -839,7 +846,12 @@ export class FeishuChannel extends ChannelBase {
         const label = sanitizeSenderName(name);
         if (label === 'unknown') return undefined;
         options.names.set(options.id, label);
-        this.capObservedCache(options.names);
+        // Evicting a resolved label drops the next envelope back to the raw
+        // ID, and the initial persistence write would clobber the persisted
+        // label, so re-hydrate from the registry on the next message.
+        if (this.capObservedCache(options.names)) {
+          this.hydratedObservedNames = false;
+        }
         return label;
       } catch {
         return undefined;

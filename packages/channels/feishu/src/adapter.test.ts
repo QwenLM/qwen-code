@@ -592,6 +592,7 @@ describe('FeishuChannel', () => {
         await expect(observedUserName('ou_user')).resolves.toBeUndefined();
         await expect(observedUserName('ou_user')).resolves.toBe('Alice');
         expect(fetchSpy).toHaveBeenCalledTimes(3);
+        expect(stderrSpy).not.toHaveBeenCalled();
       } finally {
         fetchSpy.mockRestore();
         stderrSpy.mockRestore();
@@ -670,6 +671,7 @@ describe('FeishuChannel', () => {
           'Project Group',
         );
         expect(fetchSpy).toHaveBeenCalledTimes(3);
+        expect(stderrSpy).not.toHaveBeenCalled();
       } finally {
         fetchSpy.mockRestore();
         stderrSpy.mockRestore();
@@ -740,6 +742,73 @@ describe('FeishuChannel', () => {
         expect(
           (channel as unknown as Record<string, unknown>)['observedUserNames'],
         ).toEqual(new Map([['ou_user', 'Evil Name']]));
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('reuses a cached label without a new lookup after lookup entries evict', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Alice' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_user')).resolves.toBe('Alice');
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+        // Simulate FIFO eviction of the resolved lookup entry while the
+        // cached label survives.
+        (
+          (channel as unknown as Record<string, unknown>)[
+            'observedUserLookups'
+          ] as Map<string, unknown>
+        ).clear();
+
+        await expect(observedUserName('ou_user')).resolves.toBe('Alice');
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('keeps the ID label when a resolved name sanitizes to unknown', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: '\u200b\u200c\u200d' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_user')).resolves.toBeUndefined();
+        expect(
+          (channel as unknown as Record<string, unknown>)['observedUserNames'],
+        ).toEqual(new Map());
       } finally {
         fetchSpy.mockRestore();
       }
@@ -1027,9 +1096,73 @@ describe('FeishuChannel', () => {
           group: { id: 'oc_group', label: 'Project Group' },
         });
         expect(list).toHaveBeenCalledTimes(1);
+        // Hydrated labels short-circuit the enrichment lookups.
+        expect(fetchSpy).toHaveBeenCalledTimes(0);
+
+        // Labels persisted by another channel instance must not hydrate into
+        // this channel's caches.
+        const foreign = feishuGroupMessage('message_3');
+        (foreign['message'] as Record<string, unknown>)['chat_id'] =
+          'oc_foreign';
+        (foreign['sender'] as Record<string, unknown>)['sender_id'] = {
+          open_id: 'ou_foreign',
+        };
+        onMessage(foreign);
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(3);
+          expect(bridge.prompt).toHaveBeenCalledTimes(3);
+        });
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_foreign', label: 'ou_foreign' },
+          group: { id: 'oc_foreign', label: 'oc_foreign' },
+        });
+        expect(bridge.prompt).toHaveBeenNthCalledWith(
+          3,
+          expect.any(String),
+          expect.stringContaining('[ou_foreign]'),
+          expect.anything(),
+        );
+        expect(list).toHaveBeenCalledTimes(1);
         expect(fetchSpy).toHaveBeenCalledTimes(2);
       } finally {
         fetchSpy.mockRestore();
+      }
+    });
+
+    it('still processes messages when persisted observations cannot be listed', async () => {
+      const observe = vi.fn();
+      const list = vi.fn((): ObservedChannelContactGraph => {
+        throw new Error('Invalid observed contact registry.');
+      });
+      const { channel, bridge } = createObservedContactChannel(observe, list);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(jsonResponse('rate limited', 429));
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+        expect(list).toHaveBeenCalledTimes(1);
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
       }
     });
 
@@ -1129,6 +1262,38 @@ describe('FeishuChannel', () => {
       }
     });
 
+    it('logs token errors for core callers that join a silent-initiated refresh', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: undefined,
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(jsonResponse('unavailable', 503));
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const getTenantAccessToken = getPrivateMethod<
+        (options?: { silent?: boolean }) => Promise<string | undefined>
+      >(channel, 'getTenantAccessToken').bind(channel);
+
+      try {
+        const results = await Promise.all([
+          getTenantAccessToken({ silent: true }),
+          getTenantAccessToken(),
+        ]);
+
+        expect(results).toEqual([undefined, undefined]);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(stderrSpy).toHaveBeenCalledTimes(1);
+        expect(String(stderrSpy.mock.calls[0][0])).toContain('HTTP 503');
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
     it('prefers the newest persisted label when hydrating overlapping contacts', async () => {
       const observe = vi.fn();
       const list = vi.fn(
@@ -1208,6 +1373,81 @@ describe('FeishuChannel', () => {
       expect(cache.has('id_24')).toBe(false);
       expect(cache.has('id_25')).toBe(true);
       expect(cache.has('id_524')).toBe(true);
+    });
+
+    it('re-hydrates persisted labels after in-lifetime cache eviction', async () => {
+      const observe = vi.fn();
+      const list = vi.fn(
+        (): ObservedChannelContactGraph => ({
+          users: [
+            {
+              channelName: 'test',
+              id: 'ou_user',
+              label: 'Alice',
+              lastObservedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          groups: [],
+        }),
+      );
+      const { channel, bridge } = createObservedContactChannel(observe, list);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            if (String(init?.body).includes('ou_new')) {
+              return jsonResponse({
+                code: 0,
+                data: { users: [{ name: 'New User' }] },
+              });
+            }
+            return jsonResponse('rate limited', 429);
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        onMessage(feishuDmMessage('dm_1'));
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+        });
+
+        // Churn the label cache past the cap so the hydrated entry evicts
+        // when the next successful lookup is cached.
+        const names = (channel as unknown as Record<string, unknown>)[
+          'observedUserNames'
+        ] as Map<string, string>;
+        for (let i = 0; i < 500; i++) {
+          names.set(`ou_filler_${i}`, `User ${i}`);
+        }
+        await expect(observedUserName('ou_new')).resolves.toBe('New User');
+        expect(names.has('ou_user')).toBe(false);
+
+        onMessage(feishuDmMessage('dm_2'));
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(2);
+          expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        });
+        expect(observe).toHaveBeenNthCalledWith(2, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+        });
+        expect(list).toHaveBeenCalledTimes(2);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 
