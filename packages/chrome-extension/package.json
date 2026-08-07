@@ -33,6 +33,7 @@
     "test": "vitest run --config vitest.config.ts",
     "test:ci": "vitest run --config vitest.config.ts",
     "test:e2e:chrome": "node ../cli/src/serve/cdp-tunnel/acceptance/run-real-chrome.mjs",
+    "test:e2e:webbridge": "node ../cli/src/serve/cdp-tunnel/acceptance/run-webbridge-real-chrome.mjs",
     "test:release": "npm run test:ci && npm run typecheck && npm run package && npm run scan:artifacts",
     "scan:artifacts": "node scripts/artifact-scan.js",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",

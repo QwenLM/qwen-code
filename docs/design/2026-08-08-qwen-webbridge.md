@@ -1,0 +1,222 @@
+# Qwen WebBridge
+
+## Context
+
+Issue [#8699](https://github.com/QwenLM/qwen-code/issues/8699) asks for a
+Kimi WebBridge-style path that controls the user's real Chrome profile without
+making MCP, Puppeteer, or the daemon's browser-level CDP emulator part of the
+required execution path.
+
+Qwen Code already has the two expensive pieces:
+
+- `qwen serve` owns a long-running authenticated HTTP server and the reverse
+  `/acp` WebSocket used by the Chrome extension.
+- The extension already attaches `chrome.debugger`, forwards arbitrary CDP
+  commands, handles debugger detach, reconnects, and keeps its MV3 worker alive.
+
+The missing layer is an Agent-friendly command contract, task-scoped tab state,
+and the high-level browser actions currently supplied only through an external
+MCP adapter.
+
+## Compatibility target
+
+The target is the observable Kimi WebBridge v1.11.5 browser contract, not its
+branding, update service, telemetry, private Kimi Work orchestration, or
+bug-for-bug implementation details. The implementation is clean-room: public
+documentation and independently recorded input/output behavior define the
+contract; no proprietary source is copied.
+
+The compatibility surface contains seventeen actions:
+
+| Area            | Actions                                                           |
+| --------------- | ----------------------------------------------------------------- |
+| Tabs and tasks  | `navigate`, `find_tab`, `list_tabs`, `close_tab`, `close_session` |
+| Page inspection | `snapshot`, `evaluate`                                            |
+| Interaction     | `click`, `fill`, `mouse_click`, `key_type`, `send_keys`           |
+| Debugging       | `network`, `cdp`                                                  |
+| Artifacts       | `screenshot`, `save_as_pdf`, `upload`                             |
+
+The documented request envelope is:
+
+```json
+{
+  "action": "navigate",
+  "args": { "url": "https://example.com", "newTab": true },
+  "session": "task-name"
+}
+```
+
+## Goals
+
+- Expose `POST /command` and `GET /status` from `qwen serve`, plus namespaced
+  `/webbridge/command` and `/webbridge/status` aliases.
+- Keep the Agent path direct:
+  `Agent/Skill -> HTTP -> daemon -> reverse WebSocket -> extension -> Chrome`.
+- Operate the user's real Chrome profile and login state.
+- Implement all seventeen actions and preserve the published session, tab,
+  accessibility-ref, artifact-path, and error semantics.
+- Reuse the existing `/acp` authentication, origin checks, reconnect behavior,
+  and `chrome.debugger` transport.
+- Keep the existing `/cdp` and MCP adapter path working as an optional
+  compatibility surface.
+
+## Non-goals
+
+- Reproducing Moonshot's binary, source layout, telemetry, updater, store
+  identity, prompts, model decisions, or private cloud integrations.
+- Hiding Chrome's debugging banner or bypassing DevTools attachment conflicts.
+- Automating Chrome internal pages, operating-system dialogs, passkeys,
+  captchas, or other surfaces that Chrome does not expose to extensions/CDP.
+- Supporting a remote Agent and remote browser in the first version. File paths
+  in `upload`, `screenshot`, and `save_as_pdf` refer to the daemon/browser host.
+
+## Architecture
+
+```text
+Qwen Agent / bundled Skill
+        | POST /command {action,args,session}
+        v
+qwen serve WebBridgeService (process-global browser ownership)
+        | webbridge_call / webbridge_result over authenticated /acp WS
+        v
+Qwen Chrome extension action registry
+        | chrome.tabs / chrome.windows / chrome.tabGroups
+        | chrome.debugger.sendCommand(CDP)
+        v
+User's real Chrome profile
+```
+
+MCP is outside this path. The current `/cdp` tunnel remains available, but a
+bound `/cdp` client and a WebBridge command cannot own the single extension
+debugger simultaneously; the daemon rejects the second owner rather than
+silently switching its tab.
+
+## Ownership and trust boundaries
+
+`/command` is **process-global browser scoped**. It is not workspace scoped and
+must never fall back to a secondary workspace runtime. It is mounted after the
+existing host allowlist, browser-origin denial, bearer middleware, JSON parser,
+and rate limiter. With the default loopback/no-token daemon, local processes are
+trusted in the same way as existing session mutation routes. With a configured
+token, the existing bearer middleware protects the endpoint.
+
+The extension connection is accepted only after ACP initialization with
+`clientInfo.name = qwen-cdp-bridge`. Normal Web Shell and IDE clients cannot
+claim the browser bridge. Reconnect is last-writer-wins; replacing or losing the
+active extension rejects every pending command.
+
+`upload` passes local absolute paths to Chrome's `DOM.setFileInputFiles`.
+`screenshot` and `save_as_pdf` may write a caller-selected path. These are
+intentional local-machine capabilities and therefore inherit the daemon's
+authentication boundary. Default artifact paths are generated below the OS
+temporary directory. PDF decoding is capped at 100 MiB.
+
+## Daemon protocol and state
+
+The extension transport adds two frames:
+
+```json
+{
+  "type": "webbridge_call",
+  "requestId": "uuid",
+  "payload": { "name": "snapshot", "args": { "_tabId": 42 } }
+}
+```
+
+```json
+{
+  "type": "webbridge_result",
+  "responseToRequestId": "uuid",
+  "payload": { "data": {} }
+}
+```
+
+Artifact data larger than one frame is sent as ordered
+`webbridge_result_chunk` frames followed by a `webbridge_result` carrying
+metadata and `chunked:true`. An error result carries `payload.error` instead of
+`payload.data`. Calls time out and pending calls fail immediately when the
+extension disconnects.
+
+The daemon owns this task state:
+
+```text
+session -> {
+  currentTabId,
+  ownedTabIds,
+  borrowedTabId?,
+  groupTitle?
+}
+```
+
+Before forwarding an action it injects `_session`, `_tabId`, and `_tabIds`.
+The extension never receives daemon filesystem or workspace authority. The
+daemon updates ownership only after successful `navigate`, `find_tab`,
+`close_tab`, or `close_session` results. Borrowed tabs are never included in
+`close_session`.
+
+All WebBridge commands are serialized process-wide. The extension keeps direct
+attachments for tabs with active WebBridge state, so process-wide ordering
+prevents commands from different sessions targeting the wrong tab. The legacy
+raw tunnel and direct commands mutually exclude one another while a command is
+running.
+
+## Extension behavior
+
+The extension owns the action registry, matching the reference architecture.
+It shares the existing debugger attachment and event forwarding code instead
+of creating a second `chrome.debugger` owner.
+
+- Tab actions use `chrome.tabs`, `chrome.windows`, and `chrome.tabGroups`.
+- `snapshot` uses `Accessibility.getFullAXTree` and records per-tab `@e` refs
+  backed by `backendDOMNodeId`.
+- `click` and `fill` use DOM-level synthetic interaction for compatibility with
+  the documented behavior.
+- `mouse_click`, `key_type`, and `send_keys` use the CDP `Input` domain.
+- `evaluate` uses `Runtime.evaluate` with promise awaiting and by-value results.
+- `network` owns bounded, session-isolated request maps populated from
+  `Network` events.
+- `cdp` is an unrestricted passthrough to the CDP domains Chrome exposes to
+  `chrome.debugger`.
+- Screenshots and PDFs return chunked base64 to the daemon; the daemon owns
+  filesystem writes and removes base64 from the HTTP response.
+
+The accessibility-ref map is per tab and is replaced by each new snapshot.
+Navigation or debugger detach invalidates it.
+
+## Failure behavior
+
+- Invalid envelopes or arguments return HTTP 400.
+- No connected extension returns HTTP 503.
+- Command timeout, extension disconnect, protected page, missing/stale tab,
+  invalid ref, and CDP errors return HTTP 500 with a stable `{error}` body.
+- A stale current tab during `navigate` is removed from the session and retried
+  once as a new owned tab.
+- Unknown actions are rejected by the extension and are never interpreted as
+  raw CDP. Raw CDP requires the explicit `cdp` action.
+
+## Agent integration
+
+A bundled `qwen-webbridge` Skill documents the command envelope, one-task/one-
+session rule, tab ownership, artifacts, and recovery. It calls the daemon with
+`curl`; `QWEN_WEBBRIDGE_URL` can override the default
+`http://127.0.0.1:4170`, and `QWEN_SERVER_TOKEN` supplies bearer auth when set.
+
+## Verification
+
+Each implementation stage has a runnable gate:
+
+1. Protocol/session tests: registration, replacement, disconnect, timeout,
+   input validation, tab ownership, borrowed-tab preservation, and artifacts.
+2. Extension unit tests: every action family against mocked Chrome APIs/CDP,
+   including navigation invalidation and network event capture.
+3. Daemon/extension integration: a fake extension initializes over `/acp`, an
+   HTTP `/command` round-trip reaches it, and the result updates session state.
+4. Real-Chrome acceptance: fixture pages exercise all seventeen actions using
+   the packaged MV3 extension and a real `qwen serve` daemon.
+5. Release gate: focused tests, nearby daemon/extension suites, formatting,
+   lint, typecheck, build, extension packaging, and artifact scan.
+
+The compatibility claim is bounded and testable: all normalized inputs,
+outputs, errors, and browser side effects in the v1.11.5 conformance matrix
+must pass. Dynamic tab IDs, request IDs, temporary paths, timestamps, and page
+timing are normalized rather than compared byte-for-byte.

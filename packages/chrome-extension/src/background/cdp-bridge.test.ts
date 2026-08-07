@@ -166,6 +166,75 @@ describe('CDP bridge', () => {
     bridge.shutdownCdpBridge();
   });
 
+  it('runs direct WebBridge commands through the shared attachment', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+
+    await bridge.withCdpTab(7, (send) =>
+      send('Runtime.evaluate', { expression: 'document.title' }),
+    );
+    await bridge.withCdpTab(7, async () => undefined);
+
+    expect(chromeHarness.attach).toHaveBeenCalledOnce();
+    expect(chromeHarness.sendCommand).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Runtime.evaluate',
+      { expression: 'document.title' },
+      expect.any(Function),
+    );
+    bridge.shutdownCdpBridge();
+  });
+
+  it('keeps direct WebBridge tabs attached while switching targets', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+
+    await bridge.withCdpTab(7, async () => undefined);
+    await bridge.withCdpTab(8, async () => undefined);
+
+    expect(chromeHarness.attach).toHaveBeenCalledTimes(2);
+    expect(chromeHarness.detach).not.toHaveBeenCalled();
+    bridge.shutdownCdpBridge();
+    expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 });
+    expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 8 });
+  });
+
+  it('rejects a raw CDP attach while WebBridge is attaching', async () => {
+    const chromeHarness = installChromeHarness({ deferAttach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    const direct = bridge.withCdpTab(7, async () => undefined);
+    await vi.waitFor(() => expect(chromeHarness.attach).toHaveBeenCalledOnce());
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 2 }), send);
+
+    expect(send).toHaveBeenCalledWith({
+      type: 'cdp_attached',
+      id: 2,
+      error: { message: 'WebBridge is currently controlling the browser' },
+    });
+    chromeHarness.finishAttach();
+    await direct;
+    bridge.shutdownCdpBridge();
+  });
+
+  it('releases raw ownership without detaching a direct WebBridge tab', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    await bridge.withCdpTab(7, async () => undefined);
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    bridge.handleCdpFrame(frame({ type: 'cdp_release' }), send);
+
+    expect(chromeHarness.detach).not.toHaveBeenCalled();
+    await expect(
+      bridge.withCdpTab(7, (command) => command('Runtime.evaluate')),
+    ).resolves.toEqual({ value: 'ok' });
+    bridge.shutdownCdpBridge();
+  });
+
   it('notifies the daemon when Chrome detaches the debugger', async () => {
     const chromeHarness = installChromeHarness();
     const bridge = await loadBridge();

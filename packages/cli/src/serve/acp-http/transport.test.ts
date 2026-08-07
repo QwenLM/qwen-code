@@ -65,6 +65,7 @@ import {
 } from '../workspace-service/types.js';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
+import { WebBridgeRegistry } from '../web-bridge/web-bridge-registry.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
@@ -8558,6 +8559,7 @@ describe('ACP WebSocket transport security', () => {
   let server: Server;
   let port: number;
   let bridge: FakeBridge;
+  let webBridgeRegistry: WebBridgeRegistry;
   let previousCdpMcpCommand: string | undefined;
 
   beforeEach(() => {
@@ -8579,6 +8581,7 @@ describe('ACP WebSocket transport security', () => {
   ) {
     return new Promise<void>((resolve) => {
       bridge = new FakeBridge();
+      webBridgeRegistry = new WebBridgeRegistry(1_000);
       const app = express();
       app.use(express.json());
       const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
@@ -8593,6 +8596,7 @@ describe('ACP WebSocket transport security', () => {
         ),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        webBridgeRegistry,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -8675,6 +8679,47 @@ describe('ACP WebSocket transport security', () => {
       },
     });
   }
+
+  it('round-trips a WebBridge command over the initialized extension socket', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    const outbound = new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) => resolve(JSON.parse(data.toString())));
+    });
+    const result = webBridgeRegistry.call('snapshot', {
+      _session: 'test',
+    });
+    const call = await outbound;
+    expect(call).toMatchObject({
+      type: 'webbridge_call',
+      payload: { name: 'snapshot', args: { _session: 'test' } },
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: 'webbridge_result',
+        responseToRequestId: call['requestId'],
+        payload: { data: { title: 'Example' } },
+      }),
+    );
+    await expect(result).resolves.toEqual({ title: 'Example' });
+    ws.close();
+  });
+
+  it('rejects pending WebBridge commands when the extension disconnects', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    const pending = webBridgeRegistry.call('snapshot', {});
+    ws.close();
+
+    await expect(pending).rejects.toThrow('disconnected');
+  });
 
   // ── Host allowlist ──────────────────────────────────────────────────
   it('accepts WS upgrade with loopback Host header', async () => {
