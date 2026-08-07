@@ -2586,6 +2586,40 @@ describe('SessionService', () => {
       expect(history).toEqual([recordA1.message, assistantA1.message]);
     });
 
+    it('keeps Realtime dialogue out of backend model history', () => {
+      const realtimeUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'realtime-user',
+        subtype: 'realtime_message',
+        message: { role: 'user', parts: [{ text: 'voice question' }] },
+      };
+      const realtimeAssistant: ChatRecord = {
+        ...recordB2,
+        uuid: 'realtime-assistant',
+        parentUuid: realtimeUser.uuid,
+        sessionId: sessionIdA,
+        subtype: 'realtime_message',
+        message: { role: 'model', parts: [{ text: 'voice answer' }] },
+      };
+      const backendUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'backend-user',
+        parentUuid: realtimeAssistant.uuid,
+        message: { role: 'user', parts: [{ text: 'backend task' }] },
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [realtimeUser, realtimeAssistant, backendUser],
+      };
+
+      expect(buildApiHistoryFromConversation(conversation)).toEqual([
+        backendUser.message,
+      ]);
+    });
+
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
       const largePayload = {
         output: 'x'.repeat(128 * 1024),
