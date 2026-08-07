@@ -652,7 +652,10 @@
             },
             body: JSON.stringify({
               cwd: $('new-session-cwd').value.trim(),
-              scope: 'single',
+              // 'thread' = a genuinely NEW independent session each click, so
+              // the button matches its label. ('single' would coalesce onto
+              // the workspace's existing session and replay old history.)
+              scope: 'thread',
             }),
           });
           if (res.status === 200) {
