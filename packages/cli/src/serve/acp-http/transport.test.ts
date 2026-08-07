@@ -337,6 +337,14 @@ class FakeBridge {
             currentValue: 'default',
             options: [],
           },
+          {
+            id: 'mode',
+            name: 'Mode',
+            category: 'mode',
+            type: 'select',
+            currentValue: 'default',
+            options: [],
+          },
         ],
       },
     };
@@ -1292,6 +1300,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.result.sessionId).toBe('sess-1');
     expect(frame.result.configOptions.map((option) => option.id)).toEqual([
       'model',
+      'mode',
     ]);
   });
 
@@ -4716,6 +4725,32 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       error: { code: number };
     }>;
     expect(frame.error.code).toBe(-32602);
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/set_config_option rejects ids outside the routable set', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 44,
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'sess-1',
+        configId: 'reasoning_effort',
+        value: 'high',
+      },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('Unknown configId: reasoning_effort');
+    expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
 

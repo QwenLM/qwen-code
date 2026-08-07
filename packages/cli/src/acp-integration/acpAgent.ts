@@ -92,6 +92,7 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
+  applyReasoningEffort,
   REASONING_EFFORT_TIERS,
   extractDaemonTraceContext,
   withDaemonSpan,
@@ -5194,11 +5195,7 @@ class QwenAgent implements Agent {
             `Unknown reasoning effort: ${value}`,
           );
         }
-        session.getConfig().setReasoningEffort(effort);
-        if (
-          effort !== undefined &&
-          session.getConfig().getReasoningEffort() !== effort
-        ) {
+        if (!applyReasoningEffort(session.getConfig(), effort)) {
           throw RequestError.invalidParams(
             undefined,
             'Reasoning effort cannot be applied while thinking is disabled',

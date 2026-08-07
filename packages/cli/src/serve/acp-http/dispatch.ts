@@ -385,6 +385,14 @@ const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
 const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 const MAX_FILE_LINE_LIMIT = 2000;
 
+/**
+ * Config-option ids this HTTP transport's `session/set_config_option` can
+ * route. Shared by the setter's accepted-id check and `configOptionsFor`'s
+ * advertisement filter so the settable set and the advertised set cannot
+ * drift apart.
+ */
+const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = ['model', 'mode'];
+
 class AcpParamError extends Error {}
 
 function parseOptionalPositiveInteger(
@@ -984,7 +992,10 @@ export class AcpDispatcher {
    * The session's ACP-shaped config options supported by this HTTP transport
    * (currently model and mode), read from the child's own session state.
    * Returned in `session/new` and as the result of
-   * `session/set_config_option`. Best-effort — `undefined` on error.
+   * `session/set_config_option`. Raw-state surfaces (context status, REST
+   * load/resume state) intentionally carry the child's full unfiltered set —
+   * they report session state; only these setter-paired responses are gated
+   * to the ids the transport can route. Best-effort — `undefined` on error.
    */
   private async configOptionsFor(
     sessionId: string,
@@ -998,7 +1009,7 @@ export class AcpDispatcher {
         ? co.filter(
             (option) =>
               isObject(option) &&
-              (option['id'] === 'model' || option['id'] === 'mode'),
+              HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string),
           )
         : undefined;
     } catch (err) {
@@ -2205,6 +2216,22 @@ export class AcpDispatcher {
               }
               return;
             }
+            if (!HTTP_ACP_CONFIG_OPTION_IDS.includes(configId)) {
+              if (id !== undefined) {
+                this.replySession(
+                  conn,
+                  sessionId,
+                  id,
+                  undefined,
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    `Unknown configId: ${configId}`,
+                  ),
+                );
+              }
+              return;
+            }
             if (configId === 'model') {
               await this.bridge.setSessionModel(
                 sessionId,
@@ -2213,7 +2240,8 @@ export class AcpDispatcher {
                 >[1],
                 ctx,
               );
-            } else if (configId === 'mode') {
+            } else {
+              // 'mode' — the only other id in HTTP_ACP_CONFIG_OPTION_IDS.
               if (!APPROVAL_MODES.includes(rawValue as ApprovalMode)) {
                 if (id !== undefined) {
                   this.replySession(
@@ -2236,21 +2264,6 @@ export class AcpDispatcher {
                 { persist: params['persist'] === true },
                 ctx,
               );
-            } else {
-              if (id !== undefined) {
-                this.replySession(
-                  conn,
-                  sessionId,
-                  id,
-                  undefined,
-                  error(
-                    id,
-                    RPC.INVALID_PARAMS,
-                    `Unknown configId: ${configId}`,
-                  ),
-                );
-              }
-              return;
             }
             // Response returns the updated config option set (per ACP).
             const configOptions = await this.configOptionsFor(sessionId);

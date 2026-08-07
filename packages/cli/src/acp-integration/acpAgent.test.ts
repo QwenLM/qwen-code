@@ -224,6 +224,16 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
+  applyReasoningEffort: (
+    config: {
+      setReasoningEffort(effort: string | undefined): void;
+      getReasoningEffort(): string | undefined;
+    },
+    effort: string | undefined,
+  ) => {
+    config.setReasoningEffort(effort);
+    return config.getReasoningEffort() === effort;
+  },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
   ApprovalMode: { YOLO: 'yolo' },
   isGatedMcpScope: (scope: unknown) =>
