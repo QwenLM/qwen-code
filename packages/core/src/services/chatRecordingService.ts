@@ -459,6 +459,11 @@ export interface SlashCommandRecordPayload {
   /** Whether the visible slash-command invocation reached model history. */
   sentToModel?: boolean;
   /**
+   * Whether the UI intentionally hid this invocation from visible history,
+   * so resume/preview reconstruction skips the user row as well.
+   */
+  hiddenInvocation?: boolean;
+  /**
    * History items the UI displayed for this command, in the same shape used by
    * the CLI (without IDs). Stored as plain objects for replay on resume.
    */

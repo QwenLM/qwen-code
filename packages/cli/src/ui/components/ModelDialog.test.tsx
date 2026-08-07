@@ -1281,6 +1281,18 @@ describe('<ModelDialog />', () => {
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
 
+    // A second Escape byte in the same stdin chunk must not double-report.
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+
     keyPressHandler({
       name: 'a',
       ctrl: false,
@@ -1340,6 +1352,64 @@ describe('<ModelDialog />', () => {
       expect(props.onClose).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('reports the active runtime model when closing the primary picker', () => {
+    const { mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'configured-model'),
+      getActiveRuntimeModelSnapshot: vi.fn(() => ({
+        id: '$runtime|qwen-oauth|runtime-model',
+        authType: AuthType.QWEN_OAUTH,
+        modelId: 'runtime-model',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      { type: 'info', text: 'Kept model as runtime-model' },
+      expect.any(Number),
+    );
+  });
+
+  it('does not report the unchanged model when a selection is made', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Kept model as'),
+      }),
+      expect.any(Number),
+    );
+  });
 
   it('updates initialIndex when config context changes', () => {
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);

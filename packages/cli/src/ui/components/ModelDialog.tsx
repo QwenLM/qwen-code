@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import process from 'node:process';
-import { useCallback, useContext, useMemo, useState } from 'react';
+import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   AuthType,
@@ -657,18 +657,26 @@ export function ModelDialog({
                   )
                 : '';
 
+  // Escape can arrive twice in one stdin chunk before the parent unmounts
+  // the dialog; latch so the close feedback and onClose fire only once.
+  const closeLatchRef = useRef(false);
   const closeWithoutSelection = useCallback(() => {
+    if (closeLatchRef.current) return;
+    closeLatchRef.current = true;
     if (!isAuxiliaryModelMode) {
       uiState?.historyManager.addItem(
         {
           type: 'info',
-          text: t('Kept model as {{model}}', { model: preferredModelId }),
+          text: t('Kept model as {{model}}', {
+            model: activeRuntimeSnapshot?.modelId ?? preferredModelId,
+          }),
         },
         Date.now(),
       );
     }
     onClose();
   }, [
+    activeRuntimeSnapshot,
     isAuxiliaryModelMode,
     onClose,
     preferredModelId,

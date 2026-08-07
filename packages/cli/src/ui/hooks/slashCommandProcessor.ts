@@ -130,6 +130,7 @@ const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
 ]);
 const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'effort',
+  'model',
   'stats',
   'statusline',
 ]);
@@ -144,8 +145,12 @@ function shouldHideSlashCommandInvocation(
     return false;
   }
 
-  const root = canonicalPath[0] ?? '';
-  if (SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(root)) {
+  // Bare-root match only: subcommands that produce output (e.g. `/status
+  // paths`) keep their invocation like any other work-performing command.
+  if (
+    canonicalPath.length === 1 &&
+    SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(canonicalPath[0] ?? '')
+  ) {
     return true;
   }
 
@@ -901,15 +906,14 @@ export const useSlashCommandProcessor = (
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
       let invocationSentToModel = false;
-      if (
-        !isBtwCommand(trimmed) &&
-        !shouldHideSlashCommandInvocation(
+      const hideInvocation =
+        isBtwCommand(trimmed) ||
+        shouldHideSlashCommandInvocation(
           commandToExecute,
           resolvedCommandPath,
           args,
-        ) &&
-        invocationItemId === undefined
-      ) {
+        );
+      if (!hideInvocation && invocationItemId === undefined) {
         invocationItemId = addItemWithRecording(
           { type: MessageType.USER, text: trimmed, sentToModel: false },
           userMessageTimestamp,
@@ -1332,8 +1336,8 @@ export const useSlashCommandProcessor = (
                       output.getAdditionalContext(),
                     );
                   }
+                  invocationSentToModel = true;
                   if (invocationItemId !== undefined) {
-                    invocationSentToModel = true;
                     debugLogger.debug(
                       `Marked slash command invocation as model-sent: /${resolvedCommandPath.join(
                         ' ',
@@ -1504,6 +1508,7 @@ export const useSlashCommandProcessor = (
                 phase: 'invocation',
                 rawCommand: trimmed,
                 sentToModel: invocationSentToModel,
+                hiddenInvocation: hideInvocation,
               });
               const outputItems = recordedItems
                 .filter((item) => item.type !== 'user')

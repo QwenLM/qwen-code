@@ -768,6 +768,7 @@ describe('useSlashCommandProcessor', () => {
           phase: 'invocation',
           rawCommand: input,
           sentToModel: false,
+          hiddenInvocation: true,
         });
       },
     );
@@ -814,7 +815,7 @@ describe('useSlashCommandProcessor', () => {
       },
     );
 
-    it.each(['/effort', '/stats', '/statusline'])(
+    it.each(['/effort', '/model', '/stats', '/statusline'])(
       'hides the invocation for the bare %s picker',
       async (input) => {
         const [name] = input.slice(1).split(' ');
@@ -850,6 +851,7 @@ describe('useSlashCommandProcessor', () => {
 
     it.each([
       ['/effort high', 'effort'],
+      ['/model qwen3-max', 'model'],
       ['/statusline make it compact', 'statusline'],
       ['/stats export', 'stats export'],
     ])(
@@ -870,6 +872,35 @@ describe('useSlashCommandProcessor', () => {
           { type: MessageType.USER, text: input, sentToModel: false },
           expect.any(Number),
         );
+      },
+    );
+
+    it.each(['/status paths', '/stats model'])(
+      'keeps the invocation for the %s subcommand',
+      async (input) => {
+        const command = createTestCommandPath(input.slice(1));
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockAddItem).toHaveBeenCalledTimes(1);
+        expect(mockAddItem).toHaveBeenCalledWith(
+          { type: MessageType.USER, text: input, sentToModel: false },
+          expect.any(Number),
+        );
+        expect(
+          mockConfig.getChatRecordingService()?.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: input,
+          sentToModel: false,
+          hiddenInvocation: false,
+        });
       },
     );
 
@@ -898,6 +929,14 @@ describe('useSlashCommandProcessor', () => {
     });
 
     it('keeps the invocation for a file command that overrides status', async () => {
+      const builtinStatus = createTestCommand({
+        name: 'status',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'builtin status output',
+        }),
+      });
       const command = createTestCommand(
         {
           name: 'status',
@@ -909,13 +948,15 @@ describe('useSlashCommandProcessor', () => {
         },
         CommandKind.FILE,
       );
-      const result = setupProcessorHook([], [command]);
+      const result = setupProcessorHook([builtinStatus], [command]);
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       await act(async () => {
         await result.current.handleSlashCommand('/status');
       });
 
+      expect(command.action).toHaveBeenCalledTimes(1);
+      expect(builtinStatus.action).not.toHaveBeenCalled();
       expect(mockAddItem).toHaveBeenNthCalledWith(
         1,
         { type: MessageType.USER, text: '/status', sentToModel: false },
@@ -1353,6 +1394,41 @@ describe('useSlashCommandProcessor', () => {
         phase: 'invocation',
         rawCommand: '/filecmd',
         sentToModel: true,
+        hiddenInvocation: false,
+      });
+    });
+
+    it('classifies a hidden invocation as model-sent when it submits a prompt', async () => {
+      const command = createTestCommand({
+        name: 'status',
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'hidden but submitted' }],
+        }),
+      });
+
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/status');
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: 'hidden but submitted' }],
+      });
+      expect(mockAddItem).not.toHaveBeenCalled();
+      expect(mockUpdateItem).not.toHaveBeenCalled();
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/status',
+        sentToModel: true,
+        hiddenInvocation: true,
       });
     });
 
@@ -1833,6 +1909,7 @@ describe('useSlashCommandProcessor', () => {
         phase: 'invocation',
         rawCommand: '/shellcmd',
         sentToModel: true,
+        hiddenInvocation: false,
       });
     });
 
@@ -1885,6 +1962,7 @@ describe('useSlashCommandProcessor', () => {
         phase: 'invocation',
         rawCommand: '/actioncmd',
         sentToModel: true,
+        hiddenInvocation: false,
       });
     });
 
