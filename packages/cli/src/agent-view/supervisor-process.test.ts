@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import type { Socket } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -66,15 +67,27 @@ describe('Agent View supervisor process helpers', () => {
   });
 
   it('uses a private runtime fallback directory by default', () => {
+    const runtimeDir = '/tmp';
     const socketPath = getAgentViewSupervisorSocketPath({
-      globalDir: path.join(os.tmpdir(), 'a'.repeat(140)),
+      globalDir: path.join(runtimeDir, 'a'.repeat(140)),
       platform: 'linux',
+      runtimeDir,
     });
-    expect(path.dirname(socketPath)).toEqual(
-      expect.stringMatching(
-        new RegExp(`^${escapeRegExp(os.tmpdir())}${escapeRegExp(path.sep)}`),
-      ),
-    );
+    if (process.getuid === undefined) {
+      expect(path.dirname(socketPath)).toEqual(
+        expect.stringMatching(
+          new RegExp(
+            `^${escapeRegExp(runtimeDir)}${escapeRegExp(
+              path.sep,
+            )}qwen-agent-view-[a-f0-9]{16}$`,
+          ),
+        ),
+      );
+    } else {
+      expect(path.dirname(socketPath)).toBe(
+        path.join(runtimeDir, `qwen-agent-view-${process.getuid()}`),
+      );
+    }
     expect(path.basename(socketPath)).toMatch(/^[a-z0-9-]+\.sock$/);
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
@@ -96,7 +109,7 @@ describe('Agent View supervisor process helpers', () => {
       ),
     ).toBe('/tmp/qwen-agent-view.sock.stale-pid_42');
 
-    const longPath = path.join('/tmp', `${'a'.repeat(120)}.sock`);
+    const longPath = `/tmp/${'a'.repeat(120)}.sock`;
     const stalePath = getAgentViewSupervisorStaleSocketPath(longPath, 'pid:42');
     expect(stalePath).toMatch(
       /^\/tmp\/qwen-agent-view-stale-[a-f0-9]{16}\.sock$/,
@@ -179,7 +192,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewWorker(sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      hostPid: process.pid,
+      hostPid: 999_999_001,
       workerPid: 1234,
     });
     await expect(handler.list()).resolves.toEqual([
@@ -502,7 +515,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewWorker(sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      hostPid: process.pid,
+      hostPid: 999_999_001,
       workerPid: 1234,
     });
 
@@ -1174,7 +1187,11 @@ describe('Agent View supervisor process helpers', () => {
     await writeAttachedStateForTest(result.sessionId, globalDir);
     await expect(
       handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
-    ).rejects.toThrow('currently attached elsewhere');
+    ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
+    await handler.workerControl?.({
+      sessionId: result.sessionId,
+      token,
+    });
 
     await writeDetachedStateForTest(result.sessionId, globalDir);
     await handler.workerEvent?.({
@@ -1555,19 +1572,15 @@ describe('Agent View supervisor process helpers', () => {
       id: 'request-1',
       ok: false,
       error: {
-        code: 'stale_host',
-        message: expect.stringContaining('has no live PTY host'),
+        code: 'pty_launch_failed',
+        message: expect.stringContaining('is still starting'),
       },
     });
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      sessionState: 'failed',
-      processState: 'exited',
-      lastError: {
-        code: 'stale_host',
-        message: expect.stringContaining('stale PTY host'),
-      },
+      sessionState: 'starting',
+      processState: 'starting',
     });
 
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -1727,6 +1740,7 @@ describe('Agent View supervisor process helpers', () => {
         sessionState: 'starting',
         processState: 'starting',
         attachState: 'attached',
+        updatedAt: '1970-01-01T00:00:00.000Z',
       },
       { globalDir },
     );
@@ -2779,6 +2793,84 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('does not auto-exit when disabled, empty, or a worker is still alive', async () => {
+    const emptyDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const emptyShutdown = vi.fn();
+    const emptyHandler = createAgentViewSupervisorHandler({
+      globalDir: emptyDir,
+      platform: 'linux',
+      onShutdown: emptyShutdown,
+      hibernationPolicy: { idleMs: 1000, autoExitGraceMs: 0 },
+      now: () => new Date('2026-07-17T00:00:10.000Z'),
+    });
+    await expect(emptyHandler.tickIdleHibernation()).resolves.toEqual({
+      hibernated: [],
+      shutdownRequested: false,
+    });
+    expect(emptyShutdown).not.toHaveBeenCalled();
+    await fs.rm(emptyDir, { recursive: true, force: true });
+
+    const activeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const activeShutdown = vi.fn();
+    const activeHandler = createAgentViewSupervisorHandler({
+      globalDir: activeDir,
+      platform: 'linux',
+      onShutdown: activeShutdown,
+      hibernationPolicy: { idleMs: 1000, autoExitGraceMs: 0 },
+      now: () => new Date('2026-07-17T00:00:10.000Z'),
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    await activeHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: activeDir,
+    });
+    await expect(activeHandler.tickIdleHibernation()).resolves.toEqual({
+      hibernated: [],
+      shutdownRequested: false,
+    });
+    expect(activeShutdown).not.toHaveBeenCalled();
+    await fs.rm(activeDir, { recursive: true, force: true });
+
+    const disabledDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const disabledShutdown = vi.fn();
+    const disabledHandler = createAgentViewSupervisorHandler({
+      globalDir: disabledDir,
+      platform: 'linux',
+      onShutdown: disabledShutdown,
+      hibernationPolicy: {
+        idleMs: 1000,
+        autoExit: false,
+        autoExitGraceMs: 0,
+      },
+      now: () => new Date('2026-07-17T00:00:10.000Z'),
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await disabledHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: disabledDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, disabledDir);
+    await disabledHandler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: disabledDir,
+      at: '2026-07-17T00:00:00.000Z',
+    });
+    await expect(disabledHandler.tickIdleHibernation()).resolves.toEqual({
+      hibernated: [result.sessionId],
+      shutdownRequested: false,
+    });
+    expect(disabledShutdown).not.toHaveBeenCalled();
+    await fs.rm(disabledDir, { recursive: true, force: true });
+  });
+
   it('waits through the default supervisor auto-exit grace period', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -2906,6 +2998,8 @@ describe('Agent View supervisor process helpers', () => {
       shuttingDown: true,
       keepWorkers: true,
     });
+    expect(hosts).toHaveLength(2);
+    expect(hosts[1]?.killedWith).toBeUndefined();
     expect(onShutdown).toHaveBeenCalledTimes(2);
 
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -2924,7 +3018,7 @@ function fakePtyHost(workerPid = 1234): FakePtyHost {
   let resolveExit: (exit: { exitCode: number }) => void = () => {};
   let dataCallbacks: Array<(data: string) => void> = [];
   const host: FakePtyHost = {
-    pid: process.pid,
+    pid: 999_999_001,
     workerPid,
     command: ['fake'],
     output: new BoundedOutputRing(100),
@@ -3045,7 +3139,10 @@ function shortHostSocketPath(): string {
   if (process.platform === 'win32') {
     return `\\\\.\\pipe\\${unique}`;
   }
-  return path.join(os.tmpdir(), `${unique}.sock`);
+  return path.join(
+    fsSync.mkdtempSync(path.join(os.tmpdir(), `${unique}-`)),
+    'host.sock',
+  );
 }
 
 function escapeRegExp(value: string): string {

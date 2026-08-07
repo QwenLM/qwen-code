@@ -169,6 +169,11 @@ describe('agent view supervisor store', () => {
       }),
       { globalDir: tempDir },
     );
+    await expect(readAgentViewRoster({ globalDir: tempDir })).resolves.toEqual(
+      expect.objectContaining({
+        sessions: [expect.objectContaining({ sessionId: 'mysession' })],
+      }),
+    );
 
     await expect(
       updateAgentViewRosterEntry(
@@ -181,6 +186,11 @@ describe('agent view supervisor store', () => {
         { globalDir: tempDir },
       ),
     ).resolves.toMatchObject({ sessionId: 'mysession', pinned: true });
+    await expect(
+      updateAgentViewRosterEntry('missing', (entry) => entry, {
+        globalDir: tempDir,
+      }),
+    ).resolves.toBeUndefined();
     await expect(
       removeAgentViewRosterEntry('MySession', { globalDir: tempDir }),
     ).resolves.toMatchObject({ sessions: [] });
@@ -301,6 +311,17 @@ describe('agent view supervisor store', () => {
       }),
       { globalDir: tempDir },
     );
+    await writeAgentViewWorker(
+      'session-1',
+      {
+        schemaVersion: 1,
+        hostAuthToken: 'host-secret',
+        protocolVersion: 1,
+        platform: process.platform,
+        recentOutputBytes: 0,
+      },
+      { globalDir: tempDir },
+    );
 
     const snapshots = await listAgentViewSessionSnapshots({
       globalDir: tempDir,
@@ -317,6 +338,7 @@ describe('agent view supervisor store', () => {
         env: {},
       }),
     });
+    expect(snapshots[0]?.worker).not.toHaveProperty('hostAuthToken');
   });
 
   it('round trips launch, activity, worker, and supervisor files', async () => {
@@ -382,6 +404,50 @@ describe('agent view supervisor store', () => {
     expect(getAgentViewSessionPaths('ABC123', { globalDir: tempDir })).toEqual(
       getAgentViewSessionPaths('abc123', { globalDir: tempDir }),
     );
+  });
+
+  it('strips wrong-typed optional fields during normalization', async () => {
+    const paths = getAgentViewSessionPaths('session-1', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.sessionDir, { recursive: true });
+    fs.writeFileSync(
+      paths.activityPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        summary: 42,
+        waitingFor: true,
+        queuedPromptCount: '1',
+        lastActivityAt: '2026-07-16T00:00:00.000Z',
+        capabilities: ['state'],
+      }),
+    );
+    fs.writeFileSync(
+      paths.launchPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        sessionId: 'session-1',
+        argv: ['qwen'],
+        env: {},
+        entrypoint: '/tmp/qwen',
+        initialPrompt: 42,
+        projectCwd: tempDir,
+        activeCwd: tempDir,
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
+      }),
+    );
+
+    const activity = await readAgentViewActivity('session-1', {
+      globalDir: tempDir,
+    });
+    expect(activity).not.toHaveProperty('summary');
+    expect(activity).not.toHaveProperty('waitingFor');
+    expect(activity).not.toHaveProperty('queuedPromptCount');
+    const launch = await readAgentViewLaunch('session-1', {
+      globalDir: tempDir,
+    });
+    expect(launch).not.toHaveProperty('initialPrompt');
   });
 });
 

@@ -222,6 +222,13 @@ function deriveRecoverability(
   if (state.processState === 'alive') {
     return 'live';
   }
+  if (
+    state.processState === 'starting' ||
+    state.processState === 'restarting' ||
+    state.processState === 'hibernating'
+  ) {
+    return 'blocked';
+  }
   if (taskState === 'waiting' && inputState !== 'soft_question') {
     return 'blocked';
   }

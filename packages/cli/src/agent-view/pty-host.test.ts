@@ -174,8 +174,12 @@ describe('launchAgentViewPtyHost', () => {
     const pty = createFakePty();
     const originalTerm = process.env['TERM'];
     const originalNoColor = process.env['NO_COLOR'];
+    const originalForceColor = process.env['FORCE_COLOR'];
+    const originalCi = process.env['CI'];
     process.env['TERM'] = 'dumb';
     process.env['NO_COLOR'] = '1';
+    process.env['FORCE_COLOR'] = '0';
+    process.env['CI'] = '1';
     try {
       await launchAgentViewPtyHost(createLaunch(), { pty });
     } finally {
@@ -189,11 +193,38 @@ describe('launchAgentViewPtyHost', () => {
       } else {
         process.env['NO_COLOR'] = originalNoColor;
       }
+      if (originalForceColor === undefined) {
+        delete process.env['FORCE_COLOR'];
+      } else {
+        process.env['FORCE_COLOR'] = originalForceColor;
+      }
+      if (originalCi === undefined) {
+        delete process.env['CI'];
+      } else {
+        process.env['CI'] = originalCi;
+      }
     }
 
     expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
     expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
     expect(pty.spawnCalls[0]?.options.env['NO_COLOR']).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['FORCE_COLOR']).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['CI']).toBe('1');
+  });
+
+  it('falls back when launch TERM is empty', async () => {
+    const pty = createFakePty();
+
+    await launchAgentViewPtyHost(
+      {
+        ...createLaunch(),
+        env: { TERM: '' },
+      },
+      { pty },
+    );
+
+    expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
+    expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
   });
 
   it('exposes PTY write, data subscription, and resize controls', async () => {
