@@ -6130,7 +6130,17 @@ exit 1
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
-    expect(workflow).not.toContain("runner.environment == 'self-hosted'");
+    // What this line guarded is the STEP the dedicated-runner design added —
+    // a `command -v node` check gated on `runner.environment == 'self-hosted'`
+    // that duplicated setup-node and was removed in #6261. That step is
+    // pinned out by name on the next line, so guarding the bare expression as
+    // a substring only forbids the `runner` context by accident: this same
+    // test requires `RUNNER_ENVIRONMENT: '${{ runner.environment }}'` below,
+    // and the npm-cache choice needs the same fact. Guard the shape that was
+    // actually reverted — a step whose whole `if:` is that expression.
+    expect(workflow).not.toMatch(
+      /if: \|-\n\s+\$\{\{ runner\.environment == 'self-hosted' \}\}/,
+    );
     expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
     expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
     expect(workflow).toContain(
@@ -6267,7 +6277,13 @@ exit 1
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
       expect(step).toContain("node-version: '22.x'");
-      expect(step).toContain("cache: 'npm'");
+      // The cache is the one input that is NOT the same on both pools — see
+      // 'does not restore the remote npm cache on the persistent pool'. The
+      // expression is still identical across the three, which is what this
+      // test is for.
+      expect(step).toContain(
+        `cache: "\${{ runner.environment == 'self-hosted' && '' || 'npm' }}"`,
+      );
       expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
@@ -7019,6 +7035,33 @@ exit 1
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('does not restore the remote npm cache on the persistent pool', () => {
+    // Measured on one review-address leg: `Set up Node.js` took 339s, of
+    // which Node itself was free (already in the runner tool cache) and
+    // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
+    // an `npm ci` that took 29s in the very next step. Every leg pays it,
+    // up to ten per scan, plus build-cli and issue-autofix.
+    const setupSteps = [
+      ...workflow.matchAll(
+        /- name: 'Set up Node\.js'\n[\s\S]*?cache-dependency-path: '[^']*'\n/g,
+      ),
+    ].map((m) => m[0]);
+    // All three consumers, so adding a fourth job that hardcodes the cache
+    // fails here rather than quietly paying 2.65 GB per run.
+    expect(setupSteps).toHaveLength(3);
+    for (const step of setupSteps) {
+      expect(step).toContain(
+        `cache: "\${{ runner.environment == 'self-hosted' && '' || 'npm' }}"`,
+      );
+      // Keyed on the RUNNER, not on a copy of the job's runs-on expression:
+      // those differ per job here and would drift out of sync silently.
+      expect(step).not.toContain("cache: 'npm'");
+    }
+    // The hosted fallback is ephemeral and still wants the cache — a blanket
+    // removal would trade a fast restore for a cold install there.
+    expect(setupSteps[0]).toContain("|| 'npm' }}");
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
