@@ -178,6 +178,80 @@ const nodeSetupSteps =
   workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
 
+// GitHub Actions expressions return operand VALUES from &&/||, not
+// booleans: && yields the first falsy operand (else the last operand), ||
+// the first truthy (else the last), '' is falsy, and && binds tighter
+// than ||. A ternary can therefore read right and evaluate wrong, which
+// text pins cannot see — so the cache choice is also pinned semantically
+// with this minimal evaluator.
+function evalGhaExpression(expression, facts) {
+  let pos = 0;
+  const truthy = (value) =>
+    value !== false && value !== null && value !== 0 && value !== '';
+  const skipSpace = () => {
+    while (/\s/.test(expression[pos] ?? '')) {
+      pos += 1;
+    }
+  };
+  const parsePrimary = () => {
+    skipSpace();
+    if (expression[pos] === "'") {
+      const end = expression.indexOf("'", pos + 1);
+      const value = expression.slice(pos + 1, end);
+      pos = end + 1;
+      return value;
+    }
+    const name = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(expression.slice(pos))[0];
+    pos += name.length;
+    if (name === 'true') {
+      return true;
+    }
+    if (name === 'false') {
+      return false;
+    }
+    if (name === 'null') {
+      return null;
+    }
+    return facts[name];
+  };
+  const parseComparison = () => {
+    const left = parsePrimary();
+    skipSpace();
+    const op = expression.slice(pos, pos + 2);
+    if (op !== '==' && op !== '!=') {
+      return left;
+    }
+    pos += 2;
+    const right = parsePrimary();
+    return op === '==' ? left === right : left !== right;
+  };
+  const parseAnd = () => {
+    let left = parseComparison();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '&&') {
+        return left;
+      }
+      pos += 2;
+      const right = parseComparison();
+      left = truthy(left) ? right : left;
+    }
+  };
+  const parseOr = () => {
+    let left = parseAnd();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '||') {
+        return left;
+      }
+      pos += 2;
+      const right = parseAnd();
+      left = truthy(left) ? left : right;
+    }
+  };
+  return parseOr();
+}
+
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
@@ -6136,10 +6210,12 @@ exit 1
     // pinned out by name on the next line, so guarding the bare expression as
     // a substring only forbids the `runner` context by accident: this same
     // test requires `RUNNER_ENVIRONMENT: '${{ runner.environment }}'` below,
-    // and the npm-cache choice needs the same fact. Guard the shape that was
-    // actually reverted — a step whose whole `if:` is that expression.
+    // and the npm-cache choice reads the same fact. Guard the shape that was
+    // actually reverted — an `if:` that tests that fact — in every spelling:
+    // single-line or block scalar, wrapped `${{ }}`, extra conjuncts, either
+    // operand order, arbitrary spacing.
     expect(workflow).not.toMatch(
-      /if: \|-\n\s+\$\{\{ runner\.environment == 'self-hosted' \}\}/,
+      /if:\s*(?:\|-\s*)?\$\{\{[^}]*(?:runner\.environment\s*==\s*'self-hosted'|'self-hosted'\s*==\s*runner\.environment)/,
     );
     expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
     expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
@@ -6269,21 +6345,22 @@ exit 1
     // Node bump applied to two of the three jobs) must not ship green.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
-      // Unconditional: re-adding the hosted-only `if` skips setup-node on
-      // every ECS-routed run and leaves the job on whatever Node the pool
-      // image happens to ship, while every recipe assertion stays green.
-      expect(step).not.toContain("runner.environment == 'github-hosted'");
+      // Unconditional: any `if:` skips setup-node on one of the pools and
+      // leaves that job on whatever Node its image happens to ship, while
+      // every recipe assertion stays green.
+      expect(step).not.toMatch(/^\s*if:/m);
       expect(step).toContain(
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
       expect(step).toContain("node-version: '22.x'");
       // The cache is the one input that is NOT the same on both pools — see
       // 'does not restore the remote npm cache on the persistent pool'. The
-      // expression is still identical across the three, which is what this
-      // test is for.
+      // inputs are still identical across the three steps, which is what
+      // this test is for.
       expect(step).toContain(
-        `cache: "\${{ runner.environment == 'self-hosted' && '' || 'npm' }}"`,
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
       );
+      expect(step).toContain('package-manager-cache: false');
       expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
@@ -7043,25 +7120,32 @@ exit 1
     // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
     // an `npm ci` that took 29s in the very next step. Every leg pays it,
     // up to ten per scan, plus build-cli and issue-autofix.
-    const setupSteps = [
-      ...workflow.matchAll(
-        /- name: 'Set up Node\.js'\n[\s\S]*?cache-dependency-path: '[^']*'\n/g,
-      ),
-    ].map((m) => m[0]);
-    // All three consumers, so adding a fourth job that hardcodes the cache
-    // fails here rather than quietly paying 2.65 GB per run.
-    expect(setupSteps).toHaveLength(3);
-    for (const step of setupSteps) {
+    // All three consumers, so a fourth job with a hardcoded cache fails
+    // here rather than quietly paying 2.65 GB per run — counted by step
+    // name, so no choice of inputs can dodge the capture.
+    expect(nodeSetupSteps).toHaveLength(3);
+    for (const step of nodeSetupSteps) {
       expect(step).toContain(
-        `cache: "\${{ runner.environment == 'self-hosted' && '' || 'npm' }}"`,
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
       );
-      // Keyed on the RUNNER, not on a copy of the job's runs-on expression:
-      // those differ per job here and would drift out of sync silently.
-      expect(step).not.toContain("cache: 'npm'");
     }
-    // The hosted fallback is ephemeral and still wants the cache — a blanket
-    // removal would trade a fast restore for a cold install there.
-    expect(setupSteps[0]).toContain("|| 'npm' }}");
+    // Text pins cannot tell a ternary that works from one that GHA's
+    // operand-value &&/|| semantics defeat — this PR's first attempt read
+    // correctly and still restored the cache on BOTH pools. Evaluate the
+    // pinned expression the way Actions does: '' on the persistent pool,
+    // 'npm' on the ephemeral hosted fallback.
+    const cacheExpression =
+      nodeSetupSteps[0].match(/cache: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
+    for (const [environment, expected] of [
+      ['self-hosted', ''],
+      ['github-hosted', 'npm'],
+    ]) {
+      expect(
+        evalGhaExpression(cacheExpression, {
+          'runner.environment': environment,
+        }),
+      ).toBe(expected);
+    }
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
