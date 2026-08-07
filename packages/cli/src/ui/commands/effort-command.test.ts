@@ -106,6 +106,12 @@ describe('effortCommand', () => {
 
     const res = await effortCommand.action!(context, 'max');
 
+    expect(setReasoningEffort).toHaveBeenCalledWith('max');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      'max',
+    );
     expect(res).toMatchObject({ messageType: 'info' });
     expect((res as { content: string }).content).toContain('higher priority');
     expect((res as { content: string }).content).toContain(

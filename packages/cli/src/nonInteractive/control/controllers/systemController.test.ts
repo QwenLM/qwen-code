@@ -29,6 +29,7 @@ function createContext(
       setModel: vi.fn(),
       setReasoningEffort: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
+      getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
       getAvailableModels: vi.fn().mockReturnValue([]),
     } as unknown as IControlContext['config'],
     streamJson: {
@@ -274,6 +275,7 @@ describe('SystemController', () => {
         subtype: 'set_effort',
         effort: 'high',
         applied: true,
+        override: null,
       });
     });
 
@@ -297,6 +299,40 @@ describe('SystemController', () => {
         subtype: 'set_effort',
         effort: 'high',
         applied: false,
+        override: null,
+      });
+    });
+
+    it('returns the higher-priority wire override', async () => {
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('high');
+      (
+        context.config.getReasoningEffortOverride as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        source: 'samplingParams',
+        field: 'enable_thinking',
+      });
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'set_effort', effort: 'high' },
+        'effort-override',
+      );
+
+      expect(result).toEqual({
+        subtype: 'set_effort',
+        effort: 'high',
+        applied: false,
+        override: {
+          source: 'samplingParams',
+          field: 'enable_thinking',
+        },
       });
     });
 
@@ -449,6 +485,11 @@ describe('SystemController', () => {
       expect(context.config.setReasoningEffort).toHaveBeenCalledWith('high');
       expect(result).toHaveProperty('subtype', 'initialize');
       expect(result).toHaveProperty('session_id', 'test-session-id');
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: true,
+        override: null,
+      });
     });
 
     it('warns when effort not applied during initialize (thinking disabled)', async () => {

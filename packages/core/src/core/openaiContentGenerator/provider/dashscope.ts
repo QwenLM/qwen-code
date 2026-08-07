@@ -26,6 +26,64 @@ import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
+export type DashScopeThinkingKnobSelection = {
+  source: 'extra_body' | 'samplingParams' | 'reasoning';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+  value: unknown;
+};
+
+/**
+ * Select the effective tiered-Qwen thinking knob using the same layer and
+ * same-layer precedence as the request builder. Keeping this decision shared
+ * lets UI reporters describe the value that will actually reach the wire.
+ */
+export function selectDashScopeThinkingKnob(
+  model: string | undefined,
+  extraBody: Record<string, unknown> | undefined,
+  samplingParams: Record<string, unknown> | undefined,
+  reasoningEffort: unknown,
+): DashScopeThinkingKnobSelection | undefined {
+  if (!isTieredEffortWireModel((model ?? '').toLowerCase())) {
+    return undefined;
+  }
+
+  const selectFromLayer = (
+    source: 'extra_body' | 'samplingParams',
+    layer: Record<string, unknown> | undefined,
+  ): DashScopeThinkingKnobSelection | undefined => {
+    if (layer?.['enable_thinking'] === false) {
+      return { source, field: 'enable_thinking', value: false };
+    }
+    if (layer?.['reasoning_effort'] !== undefined) {
+      return {
+        source,
+        field: 'reasoning_effort',
+        value: layer['reasoning_effort'],
+      };
+    }
+    if (layer?.['thinking_budget'] !== undefined) {
+      return {
+        source,
+        field: 'thinking_budget',
+        value: layer['thinking_budget'],
+      };
+    }
+    return undefined;
+  };
+
+  return (
+    selectFromLayer('extra_body', extraBody) ??
+    selectFromLayer('samplingParams', samplingParams) ??
+    (reasoningEffort !== undefined
+      ? {
+          source: 'reasoning',
+          field: 'reasoning_effort',
+          value: reasoningEffort,
+        }
+      : undefined)
+  );
+}
+
 /**
  * Official DashScope regional API hosts (matched exactly or as a parent
  * domain of the endpoint hostname). Shared with the WebSearch side channel's
@@ -254,26 +312,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const isTieredQwenModel = isTieredEffortWireModel(
       this.resolveWireModel(request.model),
     );
-    const extraBodyDisablesThinking =
-      isTieredQwenModel && extraBody?.['enable_thinking'] === false;
-    const extraBodyHasEffort = extraBody?.['reasoning_effort'] !== undefined;
-    const extraBodyHasBudget = extraBody?.['thinking_budget'] !== undefined;
-    const requestHasEffort = requestParams['reasoning_effort'] !== undefined;
-    const requestHasBudget = requestParams['thinking_budget'] !== undefined;
-    const extraBodyKnob = extraBodyHasEffort
-      ? 'reasoning_effort'
-      : extraBodyHasBudget
-        ? 'thinking_budget'
-        : undefined;
-    const requestKnob = requestHasEffort
-      ? 'reasoning_effort'
-      : requestHasBudget
-        ? 'thinking_budget'
-        : undefined;
-    const preferredThinkingKnob =
-      isTieredQwenModel && !extraBodyDisablesThinking
-        ? (extraBodyKnob ?? requestKnob)
-        : undefined;
+    const selectedThinkingKnob = isTieredQwenModel
+      ? selectDashScopeThinkingKnob(
+          this.resolveWireModel(request.model),
+          extraBody,
+          requestParams,
+          qwenEffortConfig['reasoning_effort'],
+        )
+      : undefined;
 
     if (this.isVisionModel(request.model)) {
       // DashScope-exclusive fields not present in the OpenAI SDK types; spread
@@ -302,7 +348,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         visionResult,
         extraBody,
         request.model,
-        preferredThinkingKnob,
+        selectedThinkingKnob,
       );
     }
 
@@ -329,7 +375,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       result,
       extraBody,
       request.model,
-      preferredThinkingKnob,
+      selectedThinkingKnob,
     );
   }
 
@@ -341,7 +387,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     result: Record<string, unknown>,
     extraBody: Record<string, unknown> | undefined,
     model: string | undefined,
-    preferredThinkingKnob: 'reasoning_effort' | 'thinking_budget' | undefined,
+    selectedThinkingKnob: DashScopeThinkingKnobSelection | undefined,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const merged: Record<string, unknown> = {
       ...result,
@@ -350,13 +396,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
     if (
-      preferredThinkingKnob === 'thinking_budget' &&
+      selectedThinkingKnob?.field === 'thinking_budget' &&
       reasoningEffort !== undefined
     ) {
       dropped.add('reasoning_effort');
     }
     if (
-      preferredThinkingKnob === 'reasoning_effort' &&
+      selectedThinkingKnob?.field === 'reasoning_effort' &&
       merged['thinking_budget'] !== undefined
     ) {
       dropped.add('thinking_budget');
@@ -364,7 +410,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     for (const key of dropped) {
       delete merged[key];
     }
-    for (const key of this.dropConflictingThinkingKnobs(model, merged)) {
+    for (const key of this.dropConflictingThinkingKnobs(
+      model,
+      merged,
+      selectedThinkingKnob,
+    )) {
       dropped.add(key);
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
@@ -425,6 +475,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private dropConflictingThinkingKnobs(
     model: string | undefined,
     merged: Record<string, unknown>,
+    selectedThinkingKnob?: DashScopeThinkingKnobSelection,
   ): string[] {
     const effort = merged['reasoning_effort'];
     if (typeof effort !== 'string') {
@@ -442,6 +493,33 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
     const dropped: string[] = [];
     if (isTieredEffortWireModel(wireModel)) {
+      if (selectedThinkingKnob?.field === 'enable_thinking') {
+        merged['reasoning_effort'] = 'none';
+        dropped.push('enable_thinking');
+        if (merged['thinking_budget'] !== undefined) {
+          dropped.push('thinking_budget');
+        }
+      } else if (selectedThinkingKnob?.field === 'reasoning_effort') {
+        if ('enable_thinking' in merged) {
+          dropped.push('enable_thinking');
+        }
+        if (merged['thinking_budget'] !== undefined) {
+          dropped.push('thinking_budget');
+        }
+      } else if (
+        selectedThinkingKnob?.field === 'thinking_budget' &&
+        merged['enable_thinking'] === false
+      ) {
+        // A lower-priority samplingParams disable must not override a winning
+        // extra_body budget.
+        dropped.push('enable_thinking');
+      }
+      if (dropped.length > 0) {
+        for (const key of dropped) {
+          delete merged[key];
+        }
+        return dropped;
+      }
       if ('enable_thinking' in merged) {
         if (merged['enable_thinking'] === false) {
           merged['reasoning_effort'] = 'none';

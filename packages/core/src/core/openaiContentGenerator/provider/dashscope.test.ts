@@ -1027,6 +1027,51 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['enable_thinking']).toBeUndefined();
     });
 
+    it('honours samplingParams enable_thinking: false over the configured tier', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('none');
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
+    it('keeps extra_body effort over a lower-priority samplingParams disable', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'high' },
+          extra_body: { reasoning_effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          enable_thinking: false,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('max');
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
     it('keeps higher-priority extra_body thinking knobs over a configured tier', () => {
       // Both extra_body fields outrank the configured reasoning effort, so
       // the lower-priority tier is removed without discarding user knobs.

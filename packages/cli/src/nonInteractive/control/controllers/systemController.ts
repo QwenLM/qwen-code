@@ -161,6 +161,16 @@ export class SystemController extends BaseController {
     }
 
     this.context.config.setSdkMode(true);
+    let effortStatus:
+      | {
+          effort: string;
+          applied: boolean;
+          override: {
+            source: 'extra_body' | 'samplingParams';
+            field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+          } | null;
+        }
+      | undefined;
 
     const canUseToolTimeout = payload.timeout?.canUseTool;
     if (
@@ -177,8 +187,14 @@ export class SystemController extends BaseController {
       if (normalized) {
         try {
           this.context.config.setReasoningEffort(normalized);
+          const override =
+            this.context.config.getReasoningEffortOverride?.() ?? null;
+          const applied =
+            this.context.config.getReasoningEffort() === normalized &&
+            override === null;
+          effortStatus = { effort: normalized, applied, override };
 
-          if (this.context.config.getReasoningEffort() !== normalized) {
+          if (!applied) {
             debugLogger.warn(
               `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
             );
@@ -311,6 +327,7 @@ export class SystemController extends BaseController {
       subtype: 'initialize',
       session_id: this.context.config.getSessionId(),
       capabilities,
+      ...(effortStatus ? { effort_status: effortStatus } : {}),
     };
   }
 
@@ -534,8 +551,11 @@ export class SystemController extends BaseController {
 
     try {
       this.context.config.setReasoningEffort(normalized);
-
-      const applied = this.context.config.getReasoningEffort() === normalized;
+      const override =
+        this.context.config.getReasoningEffortOverride?.() ?? null;
+      const applied =
+        this.context.config.getReasoningEffort() === normalized &&
+        override === null;
 
       debugLogger.info(
         `[SystemController] Reasoning effort set to: ${normalized} (applied: ${applied})`,
@@ -545,6 +565,7 @@ export class SystemController extends BaseController {
         subtype: 'set_effort',
         effort: normalized,
         applied,
+        override,
       };
     } catch (error) {
       const errorMessage =
