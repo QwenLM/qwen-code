@@ -14,6 +14,7 @@ import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
+import type { ChildHeapPolicy } from './child-heap-policy.js';
 
 let cachedMemoryArgs: string[] | undefined;
 export function getAcpMemoryArgs(): string[] {
@@ -108,6 +109,17 @@ export interface SpawnChannelFactoryOptions {
   pipeHooks?: NdJsonStreamHooks;
   sourceEnv?: Readonly<NodeJS.ProcessEnv>;
   processRegistry?: ProcessRegistry;
+  /**
+   * Daemon child-heap policy. Only meaningful together with a **shared**
+   * `processRegistry`: the factory otherwise builds its own, every spawn sees
+   * a concurrent count of 1, and each child is handed the whole pool — the
+   * current overcommit, now with a policy object attesting to it. All three
+   * daemon factories pass the same registry.
+   *
+   * Omitted by every single-child caller (interactive CLI, IDE companion,
+   * direct-embed), which keeps the host-derived ceiling.
+   */
+  childHeapPolicy?: ChildHeapPolicy;
 }
 
 /**
@@ -136,13 +148,25 @@ export function createSpawnChannelFactory(
     );
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
 
-    const memoryArgs = getAcpMemoryArgs();
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
     );
+    // Reserve BEFORE deciding: the reservation is what makes this spawn
+    // visible to any other spawn racing it, so the count below includes this
+    // child and two concurrent spawns cannot both be told they are alone.
     const reservation = processRegistry.reserve();
     let child;
+    // Everything between `reserve()` and `attach()` belongs inside this try.
+    // `childHeapPolicy` is a public `createSpawnChannelFactory` option, so an
+    // externally supplied `decide()` can throw; outside the try that would
+    // reject the spawn while leaving the reservation held forever, inflating
+    // `committedProcessCount` for every later spawn.
     try {
+      // Observation only: the policy is asked what it *would* decide so the
+      // refusal count is real, but nothing here acts on the answer — no
+      // derived ceiling reaches the child and no spawn is refused.
+      options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
+      const memoryArgs = getAcpMemoryArgs();
       child = spawn(
         process.execPath,
         [
