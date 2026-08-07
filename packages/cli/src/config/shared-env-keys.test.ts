@@ -23,4 +23,10 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
       'NODE_TLS_REJECT_UNAUTHORIZED',
     );
   });
+
+  it('excludes QWEN_CODE_WARNINGS_FILE so a project .env cannot redirect temp warnings', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WARNINGS_FILE',
+    );
+  });
 });

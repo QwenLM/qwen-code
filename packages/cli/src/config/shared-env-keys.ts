@@ -19,6 +19,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // This points to a host temp file that carries build warnings. A project
+  // `.env` must not redirect it to an arbitrary file to read or delete.
+  'QWEN_CODE_WARNINGS_FILE',
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
