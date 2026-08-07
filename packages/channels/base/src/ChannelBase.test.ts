@@ -11202,10 +11202,11 @@ describe('ChannelBase', () => {
     });
 
     it('keeps the mention marker format uniform for long ID lists', async () => {
-      // Pre-fix, the marker rode inside `text`, so sanitizePromptText stripped
-      // its brackets only when the content was <=64 chars — short ID lists
-      // arrived bracket-less while long ones kept brackets. The marker is now
-      // injected after sanitization, so both lengths deliver identically.
+      // The PR's first revision rode the marker inside `text`, so
+      // sanitizePromptText stripped its brackets only when the content was
+      // <=64 chars — short ID lists arrived bracket-less while long ones kept
+      // brackets. The marker is now injected after sanitization, so both
+      // lengths deliver identically.
       const longIds = [
         'staff-id-aaaaaaaaaa',
         'staff-id-bbbbbbbbbb',
@@ -11246,17 +11247,40 @@ describe('ChannelBase', () => {
     });
 
     it('omits the mention marker when all IDs sanitize to empty', async () => {
+      // A junk-only ID OVER the 64-cp cap truncates to a bare '…' (U+2026 is
+      // not whitespace, so trim() keeps it) — the emptiness filter must drop
+      // it exactly like short junk-only IDs, or the marker would advertise a
+      // phantom member with no identifier.
       const ch = createChannel({ groupPolicy: 'open' });
       await ch.handleInbound(
         groupEnv({
           senderName: 'Alice',
           text: 'hi',
-          mentionedMemberIds: ['[', ']'],
+          mentionedMemberIds: ['[', ']', '['.repeat(70)],
         }),
       );
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
       expect(promptText).toBe('[Alice] hi');
+    });
+
+    it('caps each mention ID at 64 code points', async () => {
+      // The per-ID cap is a call-site argument (64). Mutation check: raising
+      // or removing it delivers the full ID and this fails.
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Alice',
+          text: 'hi',
+          // 100 code points — truncated to 63 + the ellipsis.
+          mentionedMemberIds: [`member-${'x'.repeat(93)}`],
+        }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe(
+        `[Mentioned 1 other group member: member-${'x'.repeat(56)}…]\n\n[Alice] hi`,
+      );
     });
 
     /**
@@ -11295,6 +11319,27 @@ describe('ChannelBase', () => {
       const ch = createChannel({ groupPolicy: 'open' });
       await ch.handleInbound(
         groupEnv({ senderName: 'Alice', text: '/compress now' }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('/compress now');
+    });
+
+    it('suppresses the mention marker for a recognized slash command', async () => {
+      // The marker renders only INSIDE the attribution gate, which a recognized
+      // command skips (the types.ts field doc names the same gate). Group
+      // adapters collect mentions unconditionally, so a marker block hoisted
+      // out of the gate would prepend a line that stops the CLI from parsing
+      // the command. Mutation check: hoisting the block re-adds the marker
+      // here and this fails.
+      setAvailableCommands('compress');
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Alice',
+          text: '/compress now',
+          mentionedMemberIds: ['member-x'],
+        }),
       );
       const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
@@ -11859,6 +11904,77 @@ describe('ChannelBase', () => {
       expect(coalesced).toContain('[Mentioned 1 other group member: member-b]');
       expect(coalesced).toContain('[Mentioned 1 other group member: member-c]');
       expect(coalesced.match(/Mentioned/g)?.length).toBe(2);
+    });
+
+    it('collect: loop drain does not re-render the last buffered mention marker', async () => {
+      // drainCollectBufferForCurrentPrompt (the drain shared by loop/webhook
+      // turns) re-enters with a synthetic envelope that clears
+      // `mentionedMemberIds`; a stale re-render there would attribute the last
+      // buffered message's mentions to the whole coalesced text.
+      let resolveLoop!: (v: string) => void;
+      const loopPrompt = new Promise<string>((r) => {
+        resolveLoop = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return loopPrompt;
+        return Promise.resolve('drained response');
+      });
+
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { dispatchMode: 'collect' } },
+      });
+      ch.proactiveSupported = true;
+
+      const job: ChannelLoop = {
+        id: 'loop-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'g1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+
+      // The loop turn holds the group session active, so collect-mode
+      // messages buffer instead of running.
+      const loopRun = ch.runLoopPrompt(job);
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      await ch.handleInbound(groupEnv({ senderName: 'Bob', text: 'second' }));
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Carol',
+          text: 'third',
+          mentionedMemberIds: ['member-c'],
+        }),
+      );
+
+      expect(callCount).toBe(1);
+      resolveLoop('loop done');
+      await loopRun;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const drained = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      // Carol's marker was rendered once before buffering; the drain must not
+      // re-render a stale one from the synthetic envelope.
+      expect(drained).toContain('[Bob] second');
+      expect(drained).toContain('[Mentioned 1 other group member: member-c]');
+      expect(drained.match(/Mentioned/g)?.length).toBe(1);
     });
 
     it('sanitizes the sender name so it cannot break out of the prefix tag', async () => {
