@@ -129,17 +129,16 @@ export function materializeGoalEvidenceCheckpoint(input: {
         );
       }
     }
-    const checkpointClaim: GoalEvidenceCheckpointClaim = {
+    // Count only claim text: the verifier prompt advertises that budget,
+    // while Core-assigned ids and cited source refs add per-claim overhead
+    // the producer cannot anticipate.
+    checkpointBytes += Buffer.byteLength(claim, 'utf8');
+    return {
       id: `${input.checkpointId}:${index + 1}`,
       proofKind: value['proofKind'],
       claim,
       sourceRefs: sourceRefs.slice(),
     };
-    checkpointBytes += Buffer.byteLength(
-      JSON.stringify(checkpointClaim),
-      'utf8',
-    );
-    return checkpointClaim;
   });
   if (checkpointBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) {
     throw new InvalidGoalCheckpointError(

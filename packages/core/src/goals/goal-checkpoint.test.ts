@@ -97,4 +97,36 @@ describe('materializeGoalEvidenceCheckpoint', () => {
       new RegExp(`exceeds the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte`),
     );
   });
+
+  it('enforces the byte limit on claim text, not serialization overhead', () => {
+    // The verifier prompt advertises a budget over claim text, so compliant
+    // output must clear the cap even when Core-assigned ids and cited source
+    // refs push the serialized checkpoint above it.
+    const wideEvidence = Array.from({ length: 8 }, (_unused, index) => ({
+      uuid: `tool-${index}`,
+      provenance: 'tool_result' as const,
+      turnId: 'turn-1',
+      preview: `preview ${index}`,
+      proofKind: 'external_fact' as const,
+      content: `content ${index}`,
+    }));
+    const claims = Array.from({ length: 32 }, (_unused, index) => ({
+      proofKind: 'external_fact' as const,
+      claim: `Claim ${index}: ${'x'.repeat(400)}`,
+      sourceRefs: wideEvidence.map(({ uuid }) => uuid),
+    }));
+
+    const checkpoint = materializeGoalEvidenceCheckpoint({
+      checkpointId: 'checkpoint-1',
+      createdAt: 42,
+      previousClaims: [],
+      evidence: wideEvidence,
+      result: { claims },
+    });
+
+    expect(checkpoint.claims).toHaveLength(32);
+    expect(
+      Buffer.byteLength(JSON.stringify(checkpoint.claims), 'utf8'),
+    ).toBeGreaterThan(GOAL_CHECKPOINT_CLAIM_MAX_BYTES);
+  });
 });

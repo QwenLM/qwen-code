@@ -11,6 +11,7 @@ import {
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  isGoalEvidenceProofKind,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -521,9 +522,7 @@ function isGoalEvidenceCheckpoint(
       !isRecord(claim) ||
       !hasOnlyKeys(claim, ['id', 'proofKind', 'claim', 'sourceRefs']) ||
       claim['id'] !== `${value['checkpointId']}:${index + 1}` ||
-      (claim['proofKind'] !== 'user_input' &&
-        claim['proofKind'] !== 'delivered_output' &&
-        claim['proofKind'] !== 'external_fact') ||
+      !isGoalEvidenceProofKind(claim['proofKind']) ||
       typeof claim['claim'] !== 'string' ||
       claim['claim'].trim().length === 0 ||
       [...claim['claim']].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS ||
@@ -537,9 +536,7 @@ function isGoalEvidenceCheckpoint(
     ) {
       return false;
     }
-    checkpointBytes += new TextEncoder().encode(
-      JSON.stringify(claim),
-    ).byteLength;
+    checkpointBytes += new TextEncoder().encode(claim['claim']).byteLength;
     if (checkpointBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) return false;
   }
   return true;

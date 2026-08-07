@@ -378,6 +378,17 @@ describe('Goal evidence catalog', () => {
         proposal: blocked('repeated', ['old-4', 'mid-0', 'new-0']),
       }).citedRecords,
     ).toHaveLength(3);
+    // Once the relaxed truncation gate lets the proposal through, citing a
+    // record the entry cap evicted surfaces as an ordinary retryable
+    // reference failure rather than catalog exhaustion.
+    expect(() =>
+      validateGoalEvidenceReferences({
+        ...input,
+        proposal: blocked('repeated', ['old-0', 'mid-0', 'new-0']),
+      }),
+    ).toThrowError(
+      expect.objectContaining({ code: 'reference_not_catalogued' }),
+    );
   });
 
   it('does not expand records older than the bounded catalog window', () => {
