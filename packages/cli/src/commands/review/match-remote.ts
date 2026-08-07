@@ -24,25 +24,37 @@ import type { CommandModule } from 'yargs';
 import { git, gitOpt } from './lib/git.js';
 import { matchRemotes } from './lib/remote-match.js';
 import {
-  writeStdoutLineSafe,
+  writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 
 interface MatchRemoteArgs {
   owner: string;
   repo: string;
-  host: string;
+  /** Absent means inherit an operator-exported GH_HOST, else github.com. */
+  host?: string;
 }
 
 export function runMatchRemote(args: MatchRemoteArgs): void {
-  const insideWorkTree = gitOpt('rev-parse', '--is-inside-work-tree');
-  if (insideWorkTree !== 'true') {
+  // The gate is "git works here", not "this is a work tree": a bare clone
+  // (mirror/CI-style checkout) serves the whole flow — `git remote -v`,
+  // fetch-pr's fetch, and `git worktree add` all succeed inside one — so
+  // `--is-inside-work-tree` printing `false` must not stop the review.
+  // `gitOpt` returns null only when git itself fails: no repository, or no
+  // binary.
+  if (gitOpt('rev-parse', '--is-inside-work-tree') === null) {
     writeStderrLineSafe(
-      'match-remote: not inside a git repository — cannot resolve a remote.',
+      'match-remote: not a git repository, or git is unavailable — cannot resolve a remote.',
     );
     process.exitCode = 1;
     return;
   }
+
+  // Same resolution as submit: an explicit flag wins, else an
+  // operator-exported GH_HOST, else github.com. `|| undefined`, not `??`:
+  // an exported-but-empty GH_HOST must fall through to the default.
+  const host =
+    args.host ?? (process.env['GH_HOST']?.trim() || undefined) ?? 'github.com';
 
   let remoteV: string;
   try {
@@ -58,18 +70,21 @@ export function runMatchRemote(args: MatchRemoteArgs): void {
   const { matched } = matchRemotes(remoteV, {
     owner: args.owner,
     repo: args.repo,
-    host: args.host,
+    host,
   });
 
+  // Loud `writeStdoutLine`, not the `*Safe` variant: this line is the
+  // command's load-bearing result. If the write fails, the orchestrator
+  // must see a non-zero exit (fail-closed), not exit 0 with empty output.
   if (matched.length === 1) {
-    writeStdoutLineSafe(matched[0]);
+    writeStdoutLine(matched[0]);
     return;
   }
 
   if (matched.length === 0) {
-    writeStdoutLineSafe('none');
+    writeStdoutLine('none');
     writeStderrLineSafe(
-      `match-remote: no remote matches ${args.host}/${args.owner}/${args.repo} ` +
+      `match-remote: no remote matches ${host}/${args.owner}/${args.repo} ` +
         'by exact host + owner/repo equality — the PR is not served by any ' +
         'remote of this repository.',
     );
@@ -78,10 +93,10 @@ export function runMatchRemote(args: MatchRemoteArgs): void {
   }
 
   for (const name of matched) {
-    writeStdoutLineSafe(name);
+    writeStdoutLine(name);
   }
   writeStderrLineSafe(
-    `warning: ${matched.length} remotes match ${args.host}/${args.owner}/${args.repo} ` +
+    `warning: ${matched.length} remotes match ${host}/${args.owner}/${args.repo} ` +
       `(${matched.join(', ')}); refusing to pick one — the review stops here.`,
   );
   process.exitCode = 7;
@@ -105,15 +120,14 @@ export const matchRemoteCommand: CommandModule = {
       })
       .option('host', {
         type: 'string',
-        default: 'github.com',
         describe:
-          "The PR URL's host (GitHub Enterprise passes its own; bare PR numbers stay on github.com)",
+          "The PR URL's host (GitHub Enterprise passes its own; bare PR numbers inherit GH_HOST, else github.com)",
       }),
   handler: (argv) => {
     runMatchRemote({
       owner: String(argv['owner']),
       repo: String(argv['repo']),
-      host: String(argv['host']),
+      host: (argv as { host?: string }).host,
     });
   },
 };

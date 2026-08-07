@@ -150,6 +150,24 @@ describe('matchRemotes', () => {
     expect(matched).toEqual([]);
   });
 
+  it('strips an explicit port from the input host before comparing', () => {
+    // parse-args' PR_URL_RE keeps `host:port` in the verdict and lib/gh.ts'
+    // HOSTNAME_RE accepts it, but a parsed remote URL never carries a port —
+    // without the strip, a port-bearing GHE review could never match its own
+    // remote and would be demoted to lightweight mode.
+    const remotes = [
+      'origin\thttps://ghe.example.com/team/repo.git (fetch)',
+      'origin\thttps://ghe.example.com/team/repo.git (push)',
+    ].join('\n');
+    expect(
+      matchRemotes(remotes, {
+        owner: 'team',
+        repo: 'repo',
+        host: 'ghe.example.com:8443',
+      }).matched,
+    ).toEqual(['origin']);
+  });
+
   it('does not match a different host', () => {
     const { matched } = matchRemotes(FORK_LAYOUT, {
       owner: 'QwenLM',

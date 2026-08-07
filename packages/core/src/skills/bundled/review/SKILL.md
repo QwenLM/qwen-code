@@ -125,7 +125,7 @@ Based on the parsed `target.type`:
     gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'
     ```
 
-    That is the same command Step 7 already uses to decide where to post, and it resolves through `gh`'s default-repo — which in a fork clone is the **upstream**, where the PR actually lives. Then resolve the remote with the same matcher Step 1's pr-url path uses — same rule, same exit codes (`--host` stays at its github.com default; that is where a bare PR number resolves):
+    That is the same command Step 7 already uses to decide where to post, and it resolves through `gh`'s default-repo — which in a fork clone is the **upstream**, where the PR actually lives. Then resolve the remote with the same matcher Step 1's pr-url path uses — same rule, same exit codes (`--host` is omitted: the matcher then inherits an operator-exported `GH_HOST` — the same env the `gh repo view` above resolved through — else github.com):
 
     ```bash
     "${QWEN_CODE_CLI:-qwen}" review match-remote \

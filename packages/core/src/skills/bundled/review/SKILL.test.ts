@@ -80,4 +80,18 @@ describe('bundled review skill', () => {
     expect(body).toContain('`fetch-pr` before all of them');
     expect(body).toContain('`agent-prompt --roster` after the rules load');
   });
+
+  it('routes both remote-resolution paths through match-remote', () => {
+    // The pr-url path (Step 1) and the bare-PR-number path both resolve the
+    // remote via the deterministic matcher. A later edit reverting either
+    // hunk to the old model-prose rule must fail a test, not slip through.
+    const body = skillBody();
+    const invocations =
+      body.match(/"\$\{QWEN_CODE_CLI:-qwen\}" review match-remote/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    expect(body).toContain('Exit 6 means no remote matches');
+    expect(body).toContain(
+      'the matcher exits 6 (no remote matches) or 7 (several do)',
+    );
+  });
 });

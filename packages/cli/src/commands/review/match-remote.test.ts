@@ -5,7 +5,7 @@
  */
 
 // Real `git` around the pure core (covered by lib/remote-match.test.ts):
-// the worktree gate, the `git remote -v` read, and the exit-code contract
+// the repository gate, the `git remote -v` read, and the exit-code contract
 // the /review skill's Step 1 branches on. A mocked child_process would pass
 // while the real invocation breaks — the class of bug the parse-args suite
 // exists for.
@@ -19,7 +19,7 @@ import { join } from 'node:path';
 const stdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 const stderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({
-  writeStdoutLineSafe: stdoutSpy,
+  writeStdoutLine: stdoutSpy,
   writeStderrLineSafe: stderrSpy,
 }));
 
@@ -109,7 +109,47 @@ describe('runMatchRemote (real git)', () => {
       expect(process.exitCode).toBe(1);
       expect(stdoutSpy).not.toHaveBeenCalled();
     } finally {
+      process.chdir(savedCwd);
       rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves from a bare repository too — a mirror checkout is still a git repo', () => {
+    // The exit-1 contract is "not a git repository / git unavailable"; a
+    // bare clone is neither — `git remote -v` and the fetch/worktree steps
+    // the flow runs next all succeed inside one.
+    const bareRepo = mkdtempSync(join(tmpdir(), 'match-remote-bare-'));
+    try {
+      execFileSync('git', ['init', '-q', '--bare', bareRepo]);
+      execFileSync(
+        'git',
+        ['remote', 'add', 'origin', 'git@github.com:QwenLM/qwen-code.git'],
+        { cwd: bareRepo, stdio: 'ignore' },
+      );
+      process.chdir(bareRepo);
+      run();
+      expect(stdoutSpy).toHaveBeenCalledWith('origin');
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      process.chdir(savedCwd);
+      rmSync(bareRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('inherits an operator-exported GH_HOST when --host is absent', () => {
+    // The bare-PR-number path omits --host; a GHE operator who exports
+    // GH_HOST must not be rematched against github.com and hard-stopped.
+    git('remote', 'add', 'origin', 'git@ghe.example.com:QwenLM/qwen-code.git');
+    process.chdir(repo);
+    const savedGhHost = process.env['GH_HOST'];
+    process.env['GH_HOST'] = 'ghe.example.com';
+    try {
+      run({ host: undefined });
+      expect(stdoutSpy).toHaveBeenCalledWith('origin');
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      if (savedGhHost === undefined) delete process.env['GH_HOST'];
+      else process.env['GH_HOST'] = savedGhHost;
     }
   });
 

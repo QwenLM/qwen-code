@@ -2,7 +2,8 @@
 
 **Status:** implemented & verified (2026-08-07) — workstream A closed by
 measurement (no client change); workstream B shipped as `match-remote`,
-E2E-verified through the skill (see `.qwen/e2e-tests/review-cpu-for-tokens.md`)
+E2E-verified through the skill (see `.qwen/e2e-tests/review-cpu-for-tokens.md`
+— an untracked, machine-local run archive, not committed)
 **Date:** 2026-08-07
 **Scope:** `/review` token economy — two workstreams, one measurement-gated,
 one deterministic.
@@ -168,9 +169,11 @@ qwen review match-remote --owner <owner> --repo <repo> [--host <host>]
 **SKILL.md delta:** Step 1's two prose paragraphs (exact-segment parse, fork
 layout, guessing prohibition) collapse to "run `match-remote`; a printed
 name means worktree flow, exit 6 means lightweight mode". Net prompt size
-goes down — the rule text it replaces is longer than the command's usage
-line. `fetch-pr`'s interface is unchanged (still takes `--remote`), and the
-lightweight-mode branch keeps its current shape, so no other step moves.
+is roughly neutral (measured from this PR's SKILL.md hunks: ~230 chars
+added net) — the bash invocation and exit-code prose offset the removed
+rule text; the win is determinism and tests, not size. `fetch-pr`'s
+interface is unchanged (still takes `--remote`), and the lightweight-mode
+branch keeps its current shape, so no other step moves.
 
 **Tests:** table-driven, mirroring parse-args' suite style — the two URL
 shapes, `.git` suffix, case-insensitivity, the `shao/qwen-code` vs
@@ -178,13 +181,14 @@ shapes, `.git` suffix, case-insensitivity, the `shao/qwen-code` vs
 target), GHE host mismatch, multiple-match, zero-match, malformed remote
 URLs. The bug history supplies the first rows.
 
-**Known limitation (pre-existing, pinned not created):** a bare PR number
-matches against `--host`'s github.com default. The pipeline already treats
-bare numbers as github.com everywhere else (pr-context, comment-status,
-fetch-pr metadata all default the host for them), so a bare number on a
-GitHub Enterprise clone was already unsupported downstream; the matcher
-defaulting to github.com makes that explicit instead of matching a GHE
-remote that the rest of Step 1 could not have served.
+**Host resolution for bare PR numbers:** the matcher resolves `--host` the
+same way its siblings do — an explicit flag wins, else an operator-exported
+`GH_HOST`, else github.com (pr-context, comment-status, and fetch-pr all
+declare `--host` with no default and inherit `GH_HOST` when it is omitted).
+A bare number on a GitHub Enterprise clone therefore matches the GHE remote
+exactly when the rest of the pipeline is already routed there by `GH_HOST`
+— the matcher and the `gh` calls cannot disagree about which site the
+number belongs to.
 
 ### Files affected
 

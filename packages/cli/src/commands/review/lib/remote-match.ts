@@ -106,7 +106,11 @@ export function matchRemotes(
 ): RemoteMatchOutcome {
   const wantOwner = normalizeSegment(owner);
   const wantRepo = normalizeSegment(repo);
-  const wantHost = normalizeSegment(host);
+  // A PR URL's host can carry an explicit port (parse-args' PR_URL_RE keeps
+  // it, lib/gh.ts' HOSTNAME_RE accepts it), but a parsed remote host never
+  // does — compare the hostname part only, or a port-bearing GHE review
+  // could never match its own remote.
+  const wantHost = normalizeSegment(host.replace(/:\d+$/, ''));
 
   const matched: string[] = [];
 
