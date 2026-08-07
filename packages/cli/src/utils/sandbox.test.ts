@@ -87,9 +87,13 @@ describe('start_sandbox', () => {
       '--env',
       PRIVATE_ACP_CAPABILITY_ENV,
     ]);
-    expect(args).toContain(
+    const warningsFlagIndex = args.indexOf(
       'QWEN_CODE_WARNINGS_FILE=/tmp/qwen-code-warnings-test.txt',
     );
+    expect(args.slice(warningsFlagIndex - 1, warningsFlagIndex + 1)).toEqual([
+      '--env',
+      'QWEN_CODE_WARNINGS_FILE=/tmp/qwen-code-warnings-test.txt',
+    ]);
     expect(options).toEqual(
       expect.objectContaining({
         env: expect.objectContaining({
