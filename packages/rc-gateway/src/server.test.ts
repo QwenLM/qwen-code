@@ -167,6 +167,37 @@ describe('gateway app', () => {
     expect(text).toContain('"text":"one"');
   });
 
+  it("PROOF (stale-UI diagnosis): bare /session/:id/events routes; the UI's /rc/session/:id/events 404s", async () => {
+    // The shipped public/index.html + sw.js call /rc/session/:id/{events,prompt,
+    // permission,...}, but commit 6ae9154d4 (2026-07-09) migrated those routes
+    // to the BARE /session/:id/* namespace and the web UI was never updated.
+    // This locks the mismatch: authenticated, so a 404 is a *routing* miss (no
+    // such route), not an auth rejection — proving the phone UI's per-session
+    // calls are dead until repointed. See task #37.
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'phone' }),
+    });
+    const { token } = (await redeem.json()) as { token: string };
+    const sid = '11111111111111111111111111111111';
+    const auth = { Authorization: `Bearer ${token}` };
+
+    // Bare namespace (server's real mount) → routed, streams.
+    const bare = await fetch(`${url}/session/${sid}/events`, { headers: auth });
+    expect(bare.status).toBe(200);
+    await bare.text(); // drain the SSE body so the socket closes
+
+    // The UI's stale prefix → no such route. 404 (not 401/403) confirms the
+    // request got PAST auth and died at routing.
+    const prefixed = await fetch(`${url}/rc/session/${sid}/events`, {
+      headers: auth,
+    });
+    expect(prefixed.status).toBe(404);
+  });
+
   it('a bridge-scope token can stream a session (the bundle includes session:read)', async () => {
     // add-bridge-protocol slice 1: a `bridge` grant expands to the concrete
     // {bridge, session:read, approve, write} bundle, so a bridge can subscribe
