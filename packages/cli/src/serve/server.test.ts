@@ -449,6 +449,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_approval_mode_control',
   'workspace_tool_toggle',
   'workspace_skill_toggle',
+  'workspace_skill_batch_toggle',
   'workspace_skill_manage',
   'workspace_permissions',
   'workspace_trust',

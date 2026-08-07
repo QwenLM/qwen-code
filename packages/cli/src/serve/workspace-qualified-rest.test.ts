@@ -970,6 +970,47 @@ describe('workspace-qualified core REST', () => {
         sessionsFailed: 0,
       });
 
+      const batch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review', 'deploy'], enabled: false });
+      expect(batch.status).toBe(200);
+      expect(batch.body).toEqual({
+        enabled: false,
+        results: [
+          {
+            skillName: 'review',
+            enabled: false,
+            changed: true,
+            activation: 'deferred',
+            sessionsRefreshed: 0,
+            sessionsFailed: 0,
+          },
+          {
+            skillName: 'deploy',
+            enabled: false,
+            changed: true,
+            activation: 'deferred',
+            sessionsRefreshed: 0,
+            sessionsFailed: 0,
+          },
+        ],
+        errors: [],
+      });
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
+      ).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        'review',
+        false,
+      );
+
       vi.mocked(
         h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
       ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));

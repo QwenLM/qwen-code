@@ -2497,6 +2497,26 @@ export interface DaemonSkillToggleResult {
   sessionsFailed: number;
 }
 
+export type DaemonSkillBatchToggleErrorCode =
+  | 'skill_not_found'
+  | 'skill_not_toggleable'
+  | 'skill_inactive_extension'
+  | 'skill_toggle_failed';
+
+export interface DaemonSkillBatchToggleError {
+  skillName: string;
+  code: DaemonSkillBatchToggleErrorCode;
+  error: string;
+  reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
+}
+
+export interface DaemonSkillBatchToggleResult {
+  enabled: boolean;
+  results: DaemonSkillToggleResult[];
+  errors: DaemonSkillBatchToggleError[];
+}
+
 export type DaemonSkillScope = 'workspace' | 'global';
 
 export type DaemonSkillInstallSource =
