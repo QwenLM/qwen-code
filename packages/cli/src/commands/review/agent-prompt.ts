@@ -65,7 +65,15 @@ import {
   scheduleReverseAuditRound,
   type RoundSchedule,
 } from './lib/retirement.js';
-import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
+import {
+  BRIEFS,
+  isRepositoryContextRoleId,
+  type RoleId,
+} from './lib/agent-briefs.js';
+import {
+  repositoryContextOf,
+  type RepositoryContext,
+} from './lib/repository-context.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
   requiredAgents,
@@ -118,6 +126,7 @@ interface PlanReport {
   ownerRepo?: unknown;
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -371,6 +380,11 @@ export function buildChunkAgentPrompt(
     parts.push('', '## Project rules', '', rules.trim());
   }
 
+  const repositoryContext = repositoryContextOf(report);
+  if (repositoryContext) {
+    parts.push('', ...repositoryContextBlock(repositoryContext));
+  }
+
   // Deliberately NOT included: a sentence for the agent to recite when it finds
   // nothing. Every real launch handed the agent its own receipt text — `If you
   // find no issues, say "No issues found — reviewed chunk 13 (...)"` — and an
@@ -488,7 +502,13 @@ export function buildWholeDiffBlock(
   rules?: string,
 ): string {
   const diffPath = requireDiffPath(report);
-  return [...diffReadingBlock(report, diffPath), ...tail(rules)].join('\n');
+  const parts = [...diffReadingBlock(report, diffPath)];
+  const repositoryContext = repositoryContextOf(report);
+  if (repositoryContext) {
+    parts.push('', ...repositoryContextBlock(repositoryContext));
+  }
+  parts.push(...tail(rules));
+  return parts.join('\n');
 }
 
 /** The diff path, or the error this whole command exists to make impossible. */
@@ -729,6 +749,42 @@ function invariantFileBlock(
   return parts;
 }
 
+function contextList(values: string[]): string[] {
+  return values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
+}
+
+function repositoryContextBlock(context: RepositoryContext): string[] {
+  return [
+    `## ${context.label} repository context`,
+    '',
+    `Domains: ${context.domains.join(', ') || '(none)'}`,
+    '',
+    'Related paths:',
+    ...contextList(context.relatedPaths),
+    '',
+    `Recommended tests: ${context.recommendedTests.join(', ') || '(none)'}`,
+    `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
+    '',
+    'Unverified dimensions:',
+    ...contextList(context.unverifiedDimensions),
+    '',
+    'Verification notes:',
+    ...contextList(context.verificationNotes),
+  ];
+}
+
+function repositoryBuildBoundary(context: RepositoryContext): string[] {
+  return [
+    '## Repository-specific verification boundary',
+    '',
+    `Recommended tests: ${context.recommendedTests.join(', ') || '(none)'}`,
+    `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
+    '',
+    'Verification notes:',
+    ...contextList(context.verificationNotes),
+  ];
+}
+
 /**
  * The launch prompt for any role that is not a territory agent.
  *
@@ -774,6 +830,20 @@ export function buildRoleBrief(
   }
 
   parts.push('## Your dimension', '', brief.brief);
+  const repositoryContext = repositoryContextOf(report);
+  if (role === '7') {
+    if (repositoryContext) {
+      parts.push('', ...repositoryBuildBoundary(repositoryContext));
+    }
+  } else if (
+    brief.reviewsCode ||
+    (isRepositoryContextRoleId(role) &&
+      repositoryContext?.requiredAgents.includes(role))
+  ) {
+    if (repositoryContext) {
+      parts.push('', ...repositoryContextBlock(repositoryContext));
+    }
+  }
 
   // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
   // one, and the degradation used to be a sentence the orchestrator was told to add
