@@ -35,6 +35,7 @@ describe('effortCommand', () => {
         config: {
           getReasoningEffort,
           setReasoningEffort,
+          getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
         } as unknown as Config,
         settings: {
           setValue,
@@ -91,6 +92,24 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ messageType: 'info' });
     expect((res as { content: string }).content).toContain(
       'thinking is currently disabled',
+    );
+  });
+
+  it('reports a higher-priority static thinking knob', async () => {
+    const getReasoningEffortOverride = vi.fn().mockReturnValue({
+      source: 'extra_body',
+      field: 'thinking_budget',
+    });
+    (context.services.config as unknown as Record<string, unknown>)[
+      'getReasoningEffortOverride'
+    ] = getReasoningEffortOverride;
+
+    const res = await effortCommand.action!(context, 'max');
+
+    expect(res).toMatchObject({ messageType: 'info' });
+    expect((res as { content: string }).content).toContain('higher priority');
+    expect((res as { content: string }).content).toContain(
+      'will remain effective',
     );
   });
 

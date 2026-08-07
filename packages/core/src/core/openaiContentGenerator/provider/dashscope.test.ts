@@ -734,6 +734,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         expectedBudget: undefined,
         expectedThinking: undefined,
       },
+      {
+        name: 'request-level effort over a same-layer thinking_budget',
+        extraBody: undefined,
+        requestFields: {
+          reasoning_effort: 'high',
+          thinking_budget: 1024,
+        },
+        configuredReasoning: false,
+        expectedEffort: 'high',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
     ])('resolves $name', (testCase) => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {
@@ -1017,7 +1029,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
     });
 
-    it('keeps a request-level none sentinel and drops a higher-priority budget', () => {
+    it('keeps a higher-priority budget over a request-level none sentinel', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,
@@ -1035,16 +1047,34 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('none');
-      expect(result['thinking_budget']).toBeUndefined();
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['thinking_budget']).toBe(4096);
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
           reasoningEffort: 'none',
-          dropped: ['thinking_budget'],
+          dropped: ['reasoning_effort'],
         },
       );
+    });
+
+    it('keeps a legacy Qwen budget over an opaque none effort', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.7-max',
+          extra_body: { thinking_budget: 4096, reasoning_effort: 'none' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen3.7-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['thinking_budget']).toBe(4096);
     });
 
     it('drops every conflicting knob when extra_body explicitly disables thinking', () => {

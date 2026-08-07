@@ -119,6 +119,18 @@ export const effortCommand: SlashCommand = {
       };
     }
 
+    const override = config.getReasoningEffortOverride?.();
+    if (override) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'Reasoning effort: {{tier}} requested, but {{source}}.{{field}} has higher priority for the active DashScope Qwen model; that configured value will remain effective.',
+          { tier, source: override.source, field: override.field },
+        ),
+      };
+    }
+
     // Report the requested tier, not an effective one: provider adapters clamp
     // per active model (e.g. 'max' → 'high' on most Anthropic models, xhigh/max
     // → HIGH on Gemini), and that resolution happens per request at send time,

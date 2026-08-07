@@ -4299,6 +4299,52 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('reasoning effort override', () => {
+    it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { thinking_budget: 4096 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+    });
+
+    it('does not report an identical static effort or a non-tiered model', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { reasoning_effort: 'max' },
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+
+      config.getContentGeneratorConfig().model = 'qwen3.7-max';
+      config.getContentGeneratorConfig().extra_body = {
+        thinking_budget: 4096,
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
+  });
+
   describe('refreshAuth', () => {
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);

@@ -45,6 +45,8 @@ import {
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
+import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -4202,6 +4204,54 @@ export class Config {
       return undefined;
     }
     return reasoning.effort;
+  }
+
+  /**
+   * Return a higher-priority static DashScope knob that shadows the current
+   * global effort on qwen3.8-max, so interactive callers can report the
+   * effective outcome instead of confirming a tier that will not reach the
+   * wire. The provider resolves extra_body before samplingParams before the
+   * unified reasoning setting; same-layer explicit effort still wins budget.
+   */
+  getReasoningEffortOverride():
+    | {
+        source: 'extra_body' | 'samplingParams';
+        field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+      }
+    | undefined {
+    const cfg = this.getContentGeneratorConfig();
+    if (
+      !cfg ||
+      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
+      !isTieredEffortWireModel(cfg.model)
+    ) {
+      return undefined;
+    }
+
+    const currentEffort = this.getReasoningEffort();
+    const extraBody = cfg.extra_body;
+    if (extraBody?.['enable_thinking'] === false) {
+      return { source: 'extra_body', field: 'enable_thinking' };
+    }
+    if (extraBody?.['reasoning_effort'] !== undefined) {
+      return extraBody['reasoning_effort'] === currentEffort
+        ? undefined
+        : { source: 'extra_body', field: 'reasoning_effort' };
+    }
+    if (extraBody?.['thinking_budget'] !== undefined) {
+      return { source: 'extra_body', field: 'thinking_budget' };
+    }
+
+    const samplingParams = cfg.samplingParams;
+    if (samplingParams?.['reasoning_effort'] !== undefined) {
+      return samplingParams['reasoning_effort'] === currentEffort
+        ? undefined
+        : { source: 'samplingParams', field: 'reasoning_effort' };
+    }
+    if (samplingParams?.['thinking_budget'] !== undefined) {
+      return { source: 'samplingParams', field: 'thinking_budget' };
+    }
+    return undefined;
   }
 
   /**

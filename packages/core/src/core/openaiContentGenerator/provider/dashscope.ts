@@ -348,28 +348,26 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...(extraBody ? extraBody : {}),
     };
     const reasoningEffort = merged['reasoning_effort'];
-    const dropped: string[] = [];
-    if (reasoningEffort === 'none' && merged['thinking_budget'] !== undefined) {
-      // 'none' is the canonical tiered-model disable. Keep that sentinel but
-      // never ship it with a budget: DashScope rejects the pair.
-      dropped.push('thinking_budget');
-    } else if (
+    const dropped = new Set<string>();
+    if (
       preferredThinkingKnob === 'thinking_budget' &&
       reasoningEffort !== undefined
     ) {
-      dropped.push('reasoning_effort');
+      dropped.add('reasoning_effort');
     }
     if (
       preferredThinkingKnob === 'reasoning_effort' &&
       merged['thinking_budget'] !== undefined
     ) {
-      dropped.push('thinking_budget');
+      dropped.add('thinking_budget');
     }
     for (const key of dropped) {
       delete merged[key];
     }
-    dropped.push(...this.dropConflictingThinkingKnobs(model, merged));
-    this.warnConflictingKnobDrop(model, reasoningEffort, dropped);
+    for (const key of this.dropConflictingThinkingKnobs(model, merged)) {
+      dropped.add(key);
+    }
+    this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
@@ -429,14 +427,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     merged: Record<string, unknown>,
   ): string[] {
     const effort = merged['reasoning_effort'];
-    // Value check, not presence: 'none' is an explicit disable that stays on
-    // the wire (same semantics as the pipeline's reasoning_effort guards),
-    // not a tier that overrides the thinking knobs.
-    if (typeof effort !== 'string' || effort === 'none') {
+    if (typeof effort !== 'string') {
       return [];
     }
     const wireModel = this.resolveWireModel(model);
     if (!isQwenFamilyWireModel(wireModel)) {
+      return [];
+    }
+    // `none` is a real disable only for the tiered family. On legacy Qwen
+    // models reasoning_effort is opaque, so preserve the meaningful budget
+    // and drop the inert field just like any other effort value.
+    if (isTieredEffortWireModel(wireModel) && effort === 'none') {
       return [];
     }
     const dropped: string[] = [];
