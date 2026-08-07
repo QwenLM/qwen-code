@@ -138,6 +138,15 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Ensure the latest assistant message starts with its first contiguous
+   * thinking/redacted-thinking run. Anthropic manual extended thinking
+   * requires the final assistant turn in a tool loop to begin with thinking;
+   * adaptive thinking does not. Gate this on the outgoing request's actual
+   * `thinking.type === 'enabled'` mode so adaptive histories keep their exact
+   * chronological block order.
+   */
+  ensureLeadingAssistantThinking?: boolean;
+  /**
    * Strip a trailing assistant message that would otherwise be sent as an
    * "assistant-turn prefill" (a request whose final message has
    * `role: 'assistant'`). Anthropic Opus/Sonnet 4.6+ (and every 5.x
@@ -291,6 +300,21 @@ export class AnthropicContentConverter {
     if (options.dropUnsignedAssistantThinking) {
       messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
     }
+    // Must run BEFORE dropEmptyTextThinkingBlocks: that pass computes
+    // "the latest assistant message" once and skips stripping an
+    // empty-text thinking block only from that index -- if a genuinely
+    // empty trailing assistant message (a leftover prefill artifact) gets
+    // popped here AFTER dropEmptyTextThinkingBlocks already ran, the
+    // message it promotes to "new latest" would have had its own
+    // empty-text signed thinking block stripped under the now-stale
+    // premise that it wasn't the latest turn, violating manual-mode
+    // thinking's leading-thinking requirement if that promoted message
+    // also carries a tool_use. Running this first ensures
+    // dropEmptyTextThinkingBlocks's one-shot "latest" computation reflects
+    // the array's true final shape.
+    if (options.stripTrailingAssistantPrefill) {
+      this.stripTrailingAssistantPrefill(messages);
+    }
     // Defense-in-depth against an empty-text thinking block surviving into
     // a non-latest turn (see dropEmptyTextThinkingBlocks's doc) -- e.g. one
     // that DOES carry a signature, so dropUnsignedThinkingFromAssistant...
@@ -307,8 +331,8 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
-    if (options.stripTrailingAssistantPrefill) {
-      this.stripTrailingAssistantPrefill(messages);
+    if (options.ensureLeadingAssistantThinking) {
+      ensureLeadingThinkingOnLatestAssistantMessage(messages);
     }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
@@ -1362,9 +1386,19 @@ export class AnthropicContentConverter {
  * pairing and cause HTTP 400 "tool_use ids were found without tool_result
  * blocks immediately after".
  *
- * Thinking blocks must come first in Anthropic's content array, so merged
- * blocks are reordered: all thinking blocks (from both messages) precede
- * non-thinking blocks (text, tool_use, etc.).
+ * Concatenates each side's blocks in original order rather than hoisting
+ * every thinking block to the front. "Thinking blocks must come first" only
+ * holds for classic (non-interleaved) extended thinking; this generator
+ * unconditionally enables interleaved-thinking-2025-05-14 whenever
+ * `thinking` is set (see buildPerRequestHeaders), and interleaved
+ * thinking's entire point is allowing thinking blocks between tool_use
+ * blocks in original generation order — hoisting all thinking blocks ahead
+ * of both messages' other content destroys that order (e.g. a leading
+ * `[text, thinkingX]` merged with `[thinkingY, tool_use]` previously
+ * produced `[thinkingX, thinkingY, text, tool_use]`, moving `text` after
+ * `thinkingY` even though it chronologically preceded it). The classic
+ * single-leading-thinking-block case is unaffected by this change since
+ * there is nothing to reorder in that shape either way.
  *
  * Mirrors the same-name function in the OpenAI converter.
  */
@@ -1387,17 +1421,10 @@ function mergeConsecutiveAssistantMessages(
         const lastBlocks = lastMessage.content as AnthropicContentBlockParam[];
         const currentBlocks = message.content as AnthropicContentBlockParam[];
 
-        const isThinking = (b: AnthropicContentBlockParam): boolean => {
-          const t = (b as { type?: string }).type;
-          return t === 'thinking' || t === 'redacted_thinking';
-        };
-
         const seenToolUseIds = new Set<string>();
         const combined: AnthropicContentBlockParam[] = [
-          ...lastBlocks.filter(isThinking),
-          ...currentBlocks.filter(isThinking),
-          ...lastBlocks.filter((b) => !isThinking(b)),
-          ...currentBlocks.filter((b) => !isThinking(b)),
+          ...lastBlocks,
+          ...currentBlocks,
         ].filter((b) => {
           const t = (b as { type?: string }).type;
           if (t === 'tool_use') {
@@ -1418,6 +1445,60 @@ function mergeConsecutiveAssistantMessages(
   }
 
   return merged;
+}
+
+/**
+ * Relocate the most recent assistant message's first contiguous run of
+ * `thinking`/`redacted_thinking` blocks to the front of its content array,
+ * if it doesn't already start with one.
+ *
+ * See {@link ConvertGeminiRequestToAnthropicOptions.ensureLeadingAssistantThinking}
+ * for why this is needed: `mergeConsecutiveAssistantMessages`'s straight
+ * concatenation can leave a leading text block ahead of a later thinking
+ * run, which is chronologically correct but invalid on the wire for
+ * Anthropic's manual-mode extended thinking. Only the first thinking run
+ * moves; every other block -- including any later thinking blocks and
+ * their relative order -- is untouched, and nothing is fabricated when the
+ * message has no thinking block at all.
+ *
+ * Scoped to the single most recent assistant message: only the final turn
+ * actually sent on the wire is subject to Anthropic's leading-thinking
+ * requirement. Earlier turns are replay, not the active turn, and adaptive
+ * mode explicitly permits them not to start with thinking.
+ */
+function ensureLeadingThinkingOnLatestAssistantMessage(
+  messages: AnthropicMessageParam[],
+): void {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant') continue;
+    if (!Array.isArray(message.content)) return;
+
+    const blocks = message.content as AnthropicContentBlockParam[];
+    const isThinking = (b: AnthropicContentBlockParam) => {
+      const t = (b as { type?: string }).type;
+      return t === 'thinking' || t === 'redacted_thinking';
+    };
+
+    if (blocks.length === 0 || isThinking(blocks[0]!)) {
+      return;
+    }
+
+    const runStart = blocks.findIndex(isThinking);
+    if (runStart === -1) {
+      return;
+    }
+
+    let runEnd = runStart;
+    while (runEnd < blocks.length && isThinking(blocks[runEnd]!)) {
+      runEnd++;
+    }
+
+    const run = blocks.slice(runStart, runEnd);
+    const rest = [...blocks.slice(0, runStart), ...blocks.slice(runEnd)];
+    message.content = [...run, ...rest];
+    return;
+  }
 }
 
 /**
@@ -1618,18 +1699,23 @@ function cleanOrphanedToolCalls(
 
 /**
  * Drops any `thinking` block with empty text from a non-latest assistant
- * turn (dropping the whole message if that empties it out). An Anthropic
- * `thinking` block's signature is computed over its own text content; a
- * block with no text at all cannot represent valid signed reasoning
- * regardless of whether a signature is present. This arises when a
- * `redacted_thinking` block -- whose opaque `data` doesn't survive the
- * Gemini-`Part` round trip, see
+ * turn (dropping the whole message if that empties it out). This arises
+ * when a `redacted_thinking` block -- whose opaque `data` doesn't survive
+ * the Gemini-`Part` round trip, see
  * {@link AnthropicContentConverter.convertAnthropicResponseToGemini} --
  * is replayed back through history construction as an empty-text
  * `thinking` block.
  *
  * Scoped to non-latest assistant turns, matching Anthropic's contract that
- * the latest assistant turn's signatures must replay byte-exact.
+ * the latest assistant turn's signatures must replay byte-exact: a
+ * signed, empty-text `thinking` block is not inherently invalid (see
+ * geminiChat.ts's flushThoughtEpisode, which deliberately keeps this same
+ * shape as still potentially replayable when it belongs to the ACTIVE
+ * turn). This pass drops it only from earlier, non-latest turns, where
+ * Anthropic doesn't require prior thinking to survive verbatim -- do not
+ * broaden it to the latest turn on the theory that the shape itself is
+ * unreplayable; that would delete a legitimately signed episode from an
+ * active tool loop.
  *
  * This was originally one guard inside a larger `pruneUntrustworthyThinking`
  * pass that also tried to detect and downgrade a non-latest, thinking-only
