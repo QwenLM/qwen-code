@@ -5,11 +5,90 @@
  */
 
 import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { vi } from 'vitest';
 import {
+  AssistantMessage,
+  AssistantMessageContent,
   ThinkMessage,
   ThinkMessageContent,
   toggleKeyHint,
 } from './ConversationMessages.js';
+
+vi.mock('../TerminalImage.js', () => ({
+  TerminalImage: ({
+    image,
+    availableTerminalHeight,
+  }: {
+    image: { mimeType: string };
+    availableTerminalHeight?: number;
+  }) => (
+    <Text>
+      MockTerminalImage:{image.mimeType}:height=
+      {availableTerminalHeight ?? 'undef'}
+    </Text>
+  ),
+}));
+
+describe('<AssistantMessage />', () => {
+  it('routes assistant images through TerminalImage', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+
+  it('renders the number of omitted images', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text=""
+        omittedImageCount={2}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('[+2 more images]');
+  });
+
+  it('shares the pending height budget across assistant images', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text="streaming"
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+        isPending={true}
+        availableTerminalHeight={20}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=6');
+  });
+});
+
+describe('<AssistantMessageContent />', () => {
+  it('routes continuation images through TerminalImage', () => {
+    const { lastFrame } = render(
+      <AssistantMessageContent
+        text=""
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+        isPending={false}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+});
 
 describe('<ThinkMessage />', () => {
   const defaultProps = {

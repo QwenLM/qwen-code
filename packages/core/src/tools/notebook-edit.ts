@@ -402,6 +402,15 @@ async function checkPriorNotebookRead(
     });
   }
 
+  if (status.state === 'unverifiable') {
+    return rejectNotebookPriorRead(notebookPath, 'unverifiable-cache-entry', {
+      ok: false,
+      type: ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      rawMessage: `Notebook ${notebookPath} is on a filesystem that does not provide a verifiable inode identity (ino=0), so NotebookEdit cannot safely confirm a prior read. Use a different mechanism to edit this notebook.`,
+      displayMessage: `cannot verify prior read of ${notebookPath}; use a different mechanism to edit it.`,
+    });
+  }
+
   return rejectNotebookPriorRead(notebookPath, `cache-${status.state}`, {
     ok: false,
     type: ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
