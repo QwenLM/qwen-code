@@ -731,7 +731,7 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
-  it('skips hidden slash command invocations on resume', () => {
+  it('skips hidden slash command invocations but replays their results on resume', () => {
     const conversation = {
       messages: [
         {
@@ -739,9 +739,20 @@ describe('resumeHistoryUtils', () => {
           subtype: 'slash_command',
           systemPayload: {
             phase: 'invocation',
-            rawCommand: '/theme',
+            rawCommand: '/model',
             sentToModel: false,
             hiddenInvocation: true,
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/model',
+            outputHistoryItems: [
+              { type: 'info', text: 'Kept model as qwen3-max' },
+            ],
           },
         },
         {
@@ -759,8 +770,9 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 40);
 
     expect(items).toEqual([
+      { id: 41, type: 'info', text: 'Kept model as qwen3-max' },
       {
-        id: 41,
+        id: 42,
         type: 'gemini',
         text: 'Follow-up',
         timestamp: new Date('2026-01-15T19:00:00.000Z').getTime(),
