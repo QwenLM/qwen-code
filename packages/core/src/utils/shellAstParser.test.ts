@@ -1244,7 +1244,7 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     );
   });
 
-  it('fails closed on non-@P subscript transforms that reach fallback mode', async () => {
+  it('fails closed on non-@P subscript transforms when the parser is marked failed', async () => {
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('echo "${qa["a]b"]@Q}"')).toBe(
       false,
@@ -1258,6 +1258,16 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
   it('fails closed on continuation-split @P when both scanner and parser are blind', async () => {
     expect(await isShellCommandReadOnlyAST('echo "$\\\n{va\\\nr@P}"')).toBe(
       false,
+    );
+  });
+
+  it('fails closed on continuation-split non-@P transforms with the working parser', async () => {
+    // tree-sitter emits no expansion node for a `$\<newline>{...}` shape,
+    // so the shared transformation scan must downgrade it exactly like
+    // degraded mode (#8590 review).
+    expect(await isShellCommandReadOnlyAST('echo "$\\\n{two@Q}"')).toBe(false);
+    expect(await classifyShellCommandSafety('echo "$\\\n{two@Q}"')).toBe(
+      'unknown',
     );
   });
 

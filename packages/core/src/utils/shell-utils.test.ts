@@ -1449,6 +1449,12 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
     expect(detectCommandSubstitution('echo \\\n# $(x)')).toBe(false);
   });
 
+  it('does not treat bare CR as a comment boundary', () => {
+    // bash keeps CR as a word constituent, so the `#` stays mid-word and
+    // the substitution still executes (#8590 review).
+    expect(detectCommandSubstitution('echo a\r#$(x)')).toBe(true);
+  });
+
   it('does not treat bare CR as a post-continuation word boundary', () => {
     expect(detectCommandSubstitution('echo a\r\\\n#$(x)')).toBe(true);
   });
@@ -1653,6 +1659,30 @@ describe('detectCommandSubstitution heredoc continuation joins (#8590)', () => {
       .join('\n')
       .replace(/\\t/g, '\t');
     expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('ends CRLF heredocs at their delimiter line', () => {
+    // bash keeps CR in both the delimiter word and the body line, so the
+    // heredoc still ends at the `EOF` line; the scanner strips CR on both
+    // sides and must keep scanning after the body ends (#8590 review).
+    const quotedInert = ['cat <<"EOF"', '$(inert)', 'EOF'].join('\r\n');
+    expect(detectCommandSubstitution(quotedInert)).toBe(false);
+
+    const quotedTrailing = [
+      'cat <<"EOF"',
+      'hello',
+      'EOF',
+      'echo $(touch /tmp/pwned)',
+    ].join('\r\n');
+    expect(detectCommandSubstitution(quotedTrailing)).toBe(true);
+
+    const unquotedTrailing = [
+      'cat <<EOF',
+      'hello',
+      'EOF',
+      "echo '$(touch /tmp/pwned)'",
+    ].join('\r\n');
+    expect(detectCommandSubstitution(unquotedTrailing)).toBe(false);
   });
 
   it('detects nested parameter expansions inside subscripts before @P', () => {

@@ -1803,7 +1803,7 @@ export function detectCommandSubstitution(command: string): boolean {
     if (index === 0) return true;
 
     const prev = command[index - 1]!;
-    if (prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r') {
+    if (prev === ' ' || prev === '\t' || prev === '\n') {
       return true;
     }
 
@@ -1813,7 +1813,7 @@ export function detectCommandSubstitution(command: string): boolean {
   };
 
   const isWordBoundary = (char: string): boolean => {
-    if (char === ' ' || char === '\t' || char === '\n') {
+    if (char === ' ' || char === '\t' || char === '\n' || char === '\r') {
       return true;
     }
     // Shell metacharacters that would terminate a WORD token in this context.
@@ -2156,10 +2156,13 @@ export function detectCommandSubstitution(command: string): boolean {
       // before the continuation was a word boundary (#8582):
       // `$\<newline>#foo` joins into `$#foo` (mid-word `#`, no comment)
       // while `echo \<newline># foo` joins into `echo # foo` (comment).
+      // CR is not a bash metacharacter, so it joins the word too.
       const continuationJoinsWord =
         justAfterContinuation &&
         lastSignificantChar !== '' &&
-        (lastSignificantWasEscaped || !isWordBoundary(lastSignificantChar));
+        (lastSignificantWasEscaped ||
+          lastSignificantChar === '\r' ||
+          !isWordBoundary(lastSignificantChar));
       if (!inComment && !continuationJoinsWord && isCommentStart(i)) {
         inComment = true;
         i++;

@@ -1162,6 +1162,36 @@ async function classifyInternal(command: string): Promise<Safety> {
     tree.delete();
   }
 }
+
+// True when `command` contains a parameter transformation (`@` operator
+// inside a brace expansion) or an unterminated subscript, including shapes
+// split by `\<newline>` (bash removes continuations before parsing).
+// Reuses the scanner's parameter-expansion grammar so the classifier
+// cannot drift from it (#8590 review).
+function hasParameterTransformationText(command: string): boolean {
+  let index = command.indexOf('$');
+  while (index !== -1) {
+    const braceIndex = skipLineContinuations(command, index + 1);
+    if (command[braceIndex] !== '{') {
+      index = command.indexOf('$', index + 1);
+      continue;
+    }
+
+    const headEnd = matchParameterExpansionHead(command, braceIndex);
+    // An unterminated subscript cannot be classified: fail closed.
+    if (headEnd === -2) return true;
+    const operatorIndex =
+      headEnd >= 0 && command[headEnd] === '@'
+        ? skipLineContinuations(command, headEnd + 1)
+        : headEnd;
+    if (operatorIndex >= 0 && /[A-Za-z]/.test(command[operatorIndex] ?? '')) {
+      return true;
+    }
+    index = command.indexOf('$', index + 1);
+  }
+  return false;
+}
+
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
@@ -1170,41 +1200,11 @@ export async function classifyShellCommandSafety(
     (): ShellCommandSafety => 'unknown',
   );
   // Preserve `write`: plan mode distinguishes it from `unknown`.
-  return classification === 'read-only' && hasShellSubstitution(command)
+  return classification === 'read-only' &&
+    (hasShellSubstitution(command) ||
+      (command.includes('@') && hasParameterTransformationText(command)))
     ? 'unknown'
     : classification;
-}
-
-function isShellCommandReadOnlyFallback(command: string): boolean {
-  // The regex checker cannot model Bash parameter transformations. Reuse
-  // the scanner's parameter-expansion grammar so the two cannot drift
-  // (#8590 review): any `${parameter@operator}` fails closed, including
-  // shapes split by `\<newline>` (bash removes continuations before
-  // parsing) and subscripts of any depth or quoting. The `@` pre-filter
-  // keeps commands without one off the scan entirely.
-  if (command.includes('@')) {
-    let index = command.indexOf('$');
-    while (index !== -1) {
-      const braceIndex = skipLineContinuations(command, index + 1);
-      if (command[braceIndex] !== '{') {
-        index = command.indexOf('$', index + 1);
-        continue;
-      }
-
-      const headEnd = matchParameterExpansionHead(command, braceIndex);
-      // An unterminated subscript cannot be classified: fail closed.
-      if (headEnd === -2) return false;
-      const operatorIndex =
-        headEnd >= 0 && command[headEnd] === '@'
-          ? skipLineContinuations(command, headEnd + 1)
-          : headEnd;
-      if (operatorIndex >= 0 && /[A-Za-z]/.test(command[operatorIndex] ?? '')) {
-        return false;
-      }
-      index = command.indexOf('$', index + 1);
-    }
-  }
-  return isShellCommandReadOnly(command);
 }
 
 /**
@@ -1226,11 +1226,17 @@ export async function isShellCommandReadOnlyAST(
   if (typeof command !== 'string' || !command.trim()) return false;
   if (hasShellSubstitution(command)) return false;
 
+  // Parameter transformations fail closed in BOTH modes, so the verdict
+  // cannot depend on whether the WASM parser is available (#8590 review).
+  if (command.includes('@') && hasParameterTransformationText(command)) {
+    return false;
+  }
+
   // If the WASM parser is permanently unavailable (e.g. WASM file missing
   // after a symlinked install), fall back to the regex-based checker so the
   // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
-    return isShellCommandReadOnlyFallback(command);
+    return isShellCommandReadOnly(command);
   }
 
   try {
@@ -1238,7 +1244,7 @@ export async function isShellCommandReadOnlyAST(
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.
-    return isShellCommandReadOnlyFallback(command);
+    return isShellCommandReadOnly(command);
   }
 }
 
