@@ -114,6 +114,10 @@ describe('useAuthCommand', () => {
       modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     };
 
+    act(() => {
+      result.current.openAuthDialog();
+    });
+
     await act(async () => {
       await result.current.handleProviderSubmit(deepseekProvider, inputs);
     });
@@ -150,6 +154,33 @@ describe('useAuthCommand', () => {
         }),
       ],
     });
+  });
+
+  it('keeps live feedback but skips the /auth record when the dialog auto-opened', async () => {
+    const settings = createSettings();
+    const recordSlashCommand = vi.fn();
+    const config = createConfig(recordSlashCommand);
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(deepseekProvider, {
+        baseUrl: resolveBaseUrl(deepseekProvider),
+        apiKey: 'sk-deepseek',
+        modelIds: ['deepseek-v4-flash'],
+      });
+    });
+
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Successfully configured DeepSeek'),
+      }),
+      expect.any(Number),
+    );
+    expect(recordSlashCommand).not.toHaveBeenCalled();
   });
 
   it('configures OpenRouter via the unified provider submit', async () => {

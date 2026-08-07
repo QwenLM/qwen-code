@@ -25,6 +25,10 @@ is dismissed without a selection.
   commands only hide their bare picker form; for example, `/effort` is hidden
   while `/effort high` remains visible, and `/model` is hidden while
   `/model <id>` remains visible.
+- Commands that fail before opening their dialog keep the invocation paired
+  with the failure message: `/theme` under `NO_COLOR` is not hidden because it
+  prints feedback instead of opening the picker, and a hidden picker-shaped
+  `/model` invocation is revealed when its arguments are rejected.
 - Record the hiding decision in the chat record (`hiddenInvocation`) so
   `/resume`, `/branch`, and session previews reconstruct the same history the
   live session displayed instead of bringing the bare invocation row back.

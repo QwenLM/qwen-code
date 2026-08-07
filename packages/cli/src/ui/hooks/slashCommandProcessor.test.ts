@@ -5,6 +5,7 @@
  */
 
 import { act, renderHook, waitFor } from '@testing-library/react';
+import process from 'node:process';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import {
   useSlashCommandProcessor,
@@ -891,6 +892,75 @@ describe('useSlashCommandProcessor', () => {
         rawCommand: input,
         sentToModel: false,
         hiddenInvocation: false,
+      });
+    });
+
+    it('keeps the invocation for /theme when NO_COLOR blocks the dialog', async () => {
+      process.env['NO_COLOR'] = '1';
+      try {
+        const command = createTestCommand({
+          name: 'theme',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'info',
+            content:
+              'Theme configuration unavailable due to NO_COLOR env variable.',
+          }),
+        });
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand('/theme');
+        });
+
+        expect(mockAddItem).toHaveBeenCalledWith(
+          { type: MessageType.USER, text: '/theme', sentToModel: false },
+          expect.any(Number),
+        );
+        expect(
+          mockConfig.getChatRecordingService()?.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: '/theme',
+          sentToModel: false,
+          hiddenInvocation: false,
+        });
+      } finally {
+        delete process.env['NO_COLOR'];
+      }
+    });
+
+    it('records the rejection message in the result record for resume', async () => {
+      const input = '/model --project --global';
+      const command = createTestCommand({
+        name: 'model',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'Cannot use both --project and --global',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(input);
+      });
+
+      expect(
+        mockConfig.getChatRecordingService()?.recordSlashCommand,
+      ).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: input,
+        outputHistoryItems: [
+          {
+            type: MessageType.ERROR,
+            text: 'Cannot use both --project and --global',
+          },
+        ],
       });
     });
 

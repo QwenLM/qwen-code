@@ -14,6 +14,7 @@ import {
   type MutableRefObject,
 } from 'react';
 import { type PartListUnion } from '@google/genai';
+import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
 import {
@@ -152,6 +153,12 @@ function shouldHideSlashCommandInvocation(
     canonicalPath.length === 1 &&
     SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(canonicalPath[0] ?? '')
   ) {
+    // NO_COLOR prevents the theme dialog from opening, so /theme prints
+    // feedback instead and keeps its invocation like any work-performing
+    // command.
+    if (canonicalPath[0] === 'theme' && process.env['NO_COLOR']) {
+      return false;
+    }
     return true;
   }
 
@@ -1129,23 +1136,20 @@ export const useSlashCommandProcessor = (
                   // the invocation in both live and reconstructed history.
                   revealHiddenInvocation();
                   if (result.messageType === 'info') {
-                    addMessage({
-                      type: MessageType.INFO,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.INFO, text: result.content },
+                      Date.now(),
+                    );
                   } else if (result.messageType === 'warning') {
-                    addMessage({
-                      type: MessageType.WARNING,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.WARNING, text: result.content },
+                      Date.now(),
+                    );
                   } else {
-                    addMessage({
-                      type: MessageType.ERROR,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.ERROR, text: result.content },
+                      Date.now(),
+                    );
                   }
                   return { type: 'handled' };
                 case 'goal_control': {

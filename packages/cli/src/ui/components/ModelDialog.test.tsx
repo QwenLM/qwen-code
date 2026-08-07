@@ -1615,6 +1615,50 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('ignores a second selection while a model switch is in flight', async () => {
+    let resolveSwitch: (() => void) | undefined;
+    const switchModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const { props, mockHistoryManager, recordSlashCommand } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            description: 'GPT-4 model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+        })),
+      } as unknown as Partial<Config>,
+    );
+
+    const onSelect = mockedSelect.mock.calls[0][0].onSelect;
+    const firstSelection = onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+    await onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+
+    resolveSwitch?.();
+    await firstSelection;
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+  });
+
   it('updates initialIndex when config context changes', () => {
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     const mockGetAuthType = vi.fn(() => 'qwen-oauth');

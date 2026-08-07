@@ -744,6 +744,7 @@ export function ModelDialog({
 
   const handleSelect = useCallback(
     async (selected: string) => {
+      if (selectionInFlightRef.current) return;
       setErrorMessage(null);
       const selectedEntry = availableModelEntries.find(
         ({ authType: t2, model, isRuntime, snapshotId }) => {

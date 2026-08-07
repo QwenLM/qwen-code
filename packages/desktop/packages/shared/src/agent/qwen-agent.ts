@@ -4549,7 +4549,7 @@ export class QwenAgent extends BaseAgent {
     const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
     if (!existsSync(transcriptPath)) return [];
 
-    const recordsByUuid = new Map<string, JsonRecord>();
+    const parentUuidByUuid = new Map<string, string>();
     const invocations = new Map<string, SlashCommandInvocation>();
     const seenResults = new Set<string>();
     const messages: Message[] = [];
@@ -4569,7 +4569,10 @@ export class QwenAgent extends BaseAgent {
         }
 
         const uuid = asString(record.uuid);
-        if (uuid) recordsByUuid.set(uuid, record);
+        if (uuid) {
+          const parentUuidValue = asString(record.parentUuid);
+          if (parentUuidValue) parentUuidByUuid.set(uuid, parentUuidValue);
+        }
 
         if (record.type !== 'system' || record.subtype !== 'slash_command')
           continue;
@@ -4622,9 +4625,7 @@ export class QwenAgent extends BaseAgent {
             }
             break;
           }
-          ancestorUuid = asString(
-            recordsByUuid.get(ancestorUuid)?.parentUuid,
-          );
+          ancestorUuid = parentUuidByUuid.get(ancestorUuid);
         }
         if (invocation && !invocation.hidden) {
           messages.push({
