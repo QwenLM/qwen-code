@@ -25,7 +25,8 @@ export const LIVE_HOST_RELEASE_BASE_URL =
 export const LIVE_HOST_OSS_BASE_URL =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/live-host';
 export const LIVE_HOST_MANIFEST_NAME = 'Qwen-Live-Host-manifest.json';
-export const LIVE_HOST_FETCH_TIMEOUT_MS = 60 * 60 * 1000;
+export const LIVE_HOST_MANIFEST_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+export const LIVE_HOST_DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000;
 
 const LIVE_HOST_APP_NAME = 'Qwen Live Host.app';
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
@@ -67,21 +68,40 @@ export interface LiveHostReleaseManifest {
   assets: Record<LiveHostArchitecture, LiveHostReleaseAsset>;
 }
 
-export function resolveLiveHostManifestUrls(): string[] {
+interface LiveHostReleaseSource {
+  name: 'OSS' | 'GitHub';
+  manifestUrl: string;
+  assetUrl: (version: string, assetName: string) => string;
+}
+
+function liveHostReleaseSources(): LiveHostReleaseSource[] {
   return [
-    `${LIVE_HOST_OSS_BASE_URL}/latest/${LIVE_HOST_MANIFEST_NAME}`,
-    `${LIVE_HOST_RELEASE_BASE_URL}/${LIVE_HOST_MANIFEST_NAME}`,
+    {
+      name: 'OSS',
+      manifestUrl: `${LIVE_HOST_OSS_BASE_URL}/latest/${LIVE_HOST_MANIFEST_NAME}`,
+      assetUrl: (version, assetName) =>
+        `${LIVE_HOST_OSS_BASE_URL}/v${version}/${assetName}`,
+    },
+    {
+      name: 'GitHub',
+      manifestUrl: `${LIVE_HOST_RELEASE_BASE_URL}/${LIVE_HOST_MANIFEST_NAME}`,
+      assetUrl: (_version, assetName) =>
+        `${LIVE_HOST_RELEASE_BASE_URL}/${assetName}`,
+    },
   ];
+}
+
+export function resolveLiveHostManifestUrls(): string[] {
+  return liveHostReleaseSources().map(({ manifestUrl }) => manifestUrl);
 }
 
 export function resolveLiveHostAssetUrls(
   version: string,
   assetName: string,
 ): string[] {
-  return [
-    `${LIVE_HOST_OSS_BASE_URL}/v${version}/${assetName}`,
-    `${LIVE_HOST_RELEASE_BASE_URL}/${assetName}`,
-  ];
+  return liveHostReleaseSources().map(({ assetUrl }) =>
+    assetUrl(version, assetName),
+  );
 }
 
 interface InstalledLiveHost {
@@ -232,29 +252,18 @@ async function inspectInstalledHost(): Promise<InstalledLiveHost | undefined> {
   }
 }
 
-async function fetchManifest(
-  fetchImpl: typeof fetch = fetch,
+async function fetchManifestFromUrl(
+  url: string,
+  fetchImpl: typeof fetch,
 ): Promise<LiveHostReleaseManifest> {
-  let lastError: unknown;
-  for (const url of resolveLiveHostManifestUrls()) {
-    try {
-      const response = await fetchImpl(url, {
-        signal: AbortSignal.timeout(LIVE_HOST_FETCH_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        await response.body?.cancel().catch(() => {});
-        throw new Error(
-          `Live Host manifest download failed (${response.status}).`,
-        );
-      }
-      return parseLiveHostReleaseManifest(await response.json());
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw new Error('Live Host manifest download failed from all sources.', {
-    cause: lastError,
+  const response = await fetchImpl(url, {
+    signal: AbortSignal.timeout(LIVE_HOST_MANIFEST_FETCH_TIMEOUT_MS),
   });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`Live Host manifest download failed (${response.status}).`);
+  }
+  return parseLiveHostReleaseManifest(await response.json());
 }
 
 async function downloadAssetFromUrl(
@@ -265,7 +274,7 @@ async function downloadAssetFromUrl(
   fetchImpl: typeof fetch,
 ): Promise<void> {
   const response = await fetchImpl(url, {
-    signal: AbortSignal.timeout(LIVE_HOST_FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(LIVE_HOST_DOWNLOAD_TIMEOUT_MS),
   });
   if (!response.ok || !response.body) {
     await response.body?.cancel().catch(() => {});
@@ -304,49 +313,56 @@ async function downloadAssetFromUrl(
   }
 }
 
-async function downloadAsset(
-  version: string,
-  asset: LiveHostReleaseAsset,
+async function downloadRelease(
+  currentArchitecture: LiveHostArchitecture,
   destination: string,
   onProgress: (progress: number) => void,
   fetchImpl: typeof fetch = fetch,
-): Promise<void> {
-  let lastError: unknown;
-  for (const url of resolveLiveHostAssetUrls(version, asset.name)) {
+): Promise<{
+  manifest: LiveHostReleaseManifest;
+  asset: LiveHostReleaseAsset;
+}> {
+  const errors: Error[] = [];
+  for (const source of liveHostReleaseSources()) {
     await fsp.rm(destination, { force: true }).catch(() => {});
     onProgress(0);
     try {
+      const manifest = await fetchManifestFromUrl(
+        source.manifestUrl,
+        fetchImpl,
+      );
+      const asset = manifest.assets[currentArchitecture];
       await downloadAssetFromUrl(
-        url,
+        source.assetUrl(manifest.version, asset.name),
         asset,
         destination,
         onProgress,
         fetchImpl,
       );
-      return;
+      return { manifest, asset };
     } catch (error) {
-      lastError = error;
+      errors.push(
+        new Error(`${source.name}: ${errorMessage(error)}`, { cause: error }),
+      );
     }
   }
   await fsp.rm(destination, { force: true }).catch(() => {});
-  throw new Error('Live Host download failed from all sources.', {
-    cause: lastError,
-  });
+  throw new AggregateError(
+    errors,
+    'Live Host download failed from all sources.',
+  );
 }
 
-export const fetchLiveHostManifestForTesting = fetchManifest;
-export const downloadLiveHostAssetForTesting = downloadAsset;
+export const downloadLiveHostReleaseForTesting = downloadRelease;
 
 async function installLatestHost(
   currentArchitecture: LiveHostArchitecture,
   onStatus: (status: LiveHostInstallStatus) => void,
 ): Promise<InstalledLiveHost> {
-  const manifest = await fetchManifest();
-  const asset = manifest.assets[currentArchitecture];
   const temporaryDirectory = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-live-host-'),
   );
-  const archivePath = path.join(temporaryDirectory, asset.name);
+  const archivePath = path.join(temporaryDirectory, 'Qwen-Live-Host.zip');
   const extractedPath = path.join(temporaryDirectory, 'extracted');
   const candidatePath = path.join(extractedPath, LIVE_HOST_APP_NAME);
   const stagingPath = `/Applications/.Qwen Live Host.install-${randomUUID()}.app`;
@@ -355,9 +371,13 @@ async function installLatestHost(
   let installedCandidate = false;
   try {
     onStatus({ state: 'downloading', progress: 0 });
-    await downloadAsset(manifest.version, asset, archivePath, (progress) => {
-      onStatus({ state: 'downloading', progress });
-    });
+    const { manifest } = await downloadRelease(
+      currentArchitecture,
+      archivePath,
+      (progress) => {
+        onStatus({ state: 'downloading', progress });
+      },
+    );
     onStatus({ state: 'verifying' });
     await fsp.mkdir(extractedPath, { mode: 0o700 });
     await run('/usr/bin/ditto', ['-x', '-k', archivePath, extractedPath]);
@@ -403,6 +423,12 @@ async function launchInstalledHost(): Promise<void> {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof AggregateError) {
+    const details = error.errors
+      .map((item) => (item instanceof Error ? item.message : String(item)))
+      .filter(Boolean);
+    return [error.message, ...details].join(' ');
+  }
   if (error instanceof Error && error.message) return error.message;
   return 'Qwen Live Host setup failed.';
 }

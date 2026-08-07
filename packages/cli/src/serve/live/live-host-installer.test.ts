@@ -11,11 +11,11 @@ import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 import {
-  downloadLiveHostAssetForTesting,
-  fetchLiveHostManifestForTesting,
+  downloadLiveHostReleaseForTesting,
   isExpectedLiveHostSignature,
   LiveHostInstaller,
-  LIVE_HOST_FETCH_TIMEOUT_MS,
+  LIVE_HOST_DOWNLOAD_TIMEOUT_MS,
+  LIVE_HOST_MANIFEST_FETCH_TIMEOUT_MS,
   LIVE_HOST_OSS_BASE_URL,
   LIVE_HOST_RELEASE_BASE_URL,
   parseLiveHostReleaseManifest,
@@ -46,6 +46,26 @@ function manifest() {
   };
 }
 
+function manifestForBytes(version: string, bytes: Buffer) {
+  const checksum = createHash('sha256').update(bytes).digest('hex');
+  return {
+    ...manifest(),
+    version,
+    assets: {
+      arm64: {
+        name: 'Qwen-Live-Host-arm64.zip',
+        size: bytes.byteLength,
+        sha256: checksum,
+      },
+      x64: {
+        name: 'Qwen-Live-Host-x64.zip',
+        size: bytes.byteLength,
+        sha256: checksum,
+      },
+    },
+  };
+}
+
 describe('LiveHostInstaller', () => {
   it('prefers OSS and retains the independent GitHub release fallback', () => {
     expect(LIVE_HOST_OSS_BASE_URL).toBe(
@@ -66,64 +86,141 @@ describe('LiveHostInstaller', () => {
     ]);
   });
 
-  it('allows slow Live Host downloads to finish', () => {
-    expect(LIVE_HOST_FETCH_TIMEOUT_MS).toBe(60 * 60 * 1000);
-  });
-
-  it('falls back to GitHub when the OSS manifest is unavailable', async () => {
-    const expected = manifest();
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(null, { status: 503 }))
-      .mockResolvedValueOnce(Response.json(expected));
-
-    await expect(fetchLiveHostManifestForTesting(fetchImpl)).resolves.toEqual(
-      expected,
-    );
-    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual(
-      resolveLiveHostManifestUrls(),
-    );
-  });
-
-  it('removes a corrupt OSS download before falling back to GitHub', async () => {
+  it('uses bounded manifest requests and allows slow archive downloads', async () => {
     const bytes = Buffer.from('signed-live-host-archive');
-    const asset = {
-      name: 'Qwen-Live-Host-arm64.zip',
-      size: bytes.byteLength,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-    };
+    const expected = manifestForBytes('0.1.0', bytes);
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(Buffer.alloc(bytes.byteLength), {
-          headers: { 'content-length': String(bytes.byteLength) },
-        }),
-      )
+      .mockResolvedValueOnce(Response.json(expected))
       .mockResolvedValueOnce(
         new Response(bytes, {
           headers: { 'content-length': String(bytes.byteLength) },
         }),
       );
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
     const directory = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'live-host-download-test-'),
     );
-    const destination = path.join(directory, asset.name);
+    const destination = path.join(directory, 'host.zip');
 
     try {
-      await downloadLiveHostAssetForTesting(
-        '0.1.0',
-        asset,
+      await downloadLiveHostReleaseForTesting(
+        'arm64',
         destination,
         () => {},
         fetchImpl,
       );
-      await expect(fsp.readFile(destination)).resolves.toEqual(bytes);
-      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual(
-        resolveLiveHostAssetUrls('0.1.0', asset.name),
+      expect(timeout).toHaveBeenNthCalledWith(
+        1,
+        LIVE_HOST_MANIFEST_FETCH_TIMEOUT_MS,
       );
+      expect(timeout).toHaveBeenNthCalledWith(2, LIVE_HOST_DOWNLOAD_TIMEOUT_MS);
+    } finally {
+      timeout.mockRestore();
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back with a matching GitHub manifest and asset pair', async () => {
+    const ossBytes = Buffer.from('sealed-oss-archive');
+    const githubBytes = Buffer.from('current-github-archive');
+    const ossManifest = manifestForBytes('0.1.0', ossBytes);
+    const githubManifest = manifestForBytes('0.2.0', githubBytes);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(ossManifest))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(Response.json(githubManifest))
+      .mockResolvedValueOnce(
+        new Response(githubBytes, {
+          headers: { 'content-length': String(githubBytes.byteLength) },
+        }),
+      );
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      const release = await downloadLiveHostReleaseForTesting(
+        'arm64',
+        destination,
+        () => {},
+        fetchImpl,
+      );
+      expect(release.manifest).toEqual(githubManifest);
+      await expect(fsp.readFile(destination)).resolves.toEqual(githubBytes);
+      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+        resolveLiveHostManifestUrls()[0],
+        resolveLiveHostAssetUrls(
+          ossManifest.version,
+          ossManifest.assets.arm64.name,
+        )[0],
+        resolveLiveHostManifestUrls()[1],
+        resolveLiveHostAssetUrls(
+          githubManifest.version,
+          githubManifest.assets.arm64.name,
+        )[1],
+      ]);
     } finally {
       await fsp.rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('removes a partial archive after all sources fail', async () => {
+    const bytes = Buffer.from('signed-live-host-archive');
+    const expected = manifestForBytes('0.1.0', bytes);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(expected))
+      .mockResolvedValueOnce(
+        new Response(Buffer.alloc(bytes.byteLength), {
+          headers: { 'content-length': String(bytes.byteLength) },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      await expect(
+        downloadLiveHostReleaseForTesting(
+          'arm64',
+          destination,
+          () => {},
+          fetchImpl,
+        ),
+      ).rejects.toBeInstanceOf(AggregateError);
+      await expect(fsp.stat(destination)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces the failure from each release source', async () => {
+    const installer = new LiveHostInstaller({
+      platform: 'darwin',
+      architecture: 'arm64',
+      inspectInstalled: async () => undefined,
+      installLatest: async () => {
+        throw new AggregateError(
+          [
+            new Error('OSS: checksum mismatch.'),
+            new Error('GitHub: HTTP 503.'),
+          ],
+          'Live Host download failed from all sources.',
+        );
+      },
+      launch: async () => {},
+    });
+
+    const status = await installer.ensureInstalled();
+    expect(status.message).toContain('OSS: checksum mismatch.');
+    expect(status.message).toContain('GitHub: HTTP 503.');
   });
 
   it('accepts only the Qwen Developer ID team', () => {

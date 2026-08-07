@@ -313,15 +313,16 @@ Stable release publishing mirrors only the installer ZIPs and manifest to the
 public `qwen-code-assets` OSS bucket. Each version is sealed under
 `live-host/v<version>/`; an existing version manifest makes that prefix
 immutable. The workflow re-downloads and verifies both public ZIPs before it
-updates `live-host/latest/Qwen-Live-Host-manifest.json`. The installer resolves
-the latest manifest from OSS before GitHub, then resolves the selected
-versioned OSS ZIP before the GitHub stable-feed ZIP. A failed response,
+updates `live-host/latest/Qwen-Live-Host-manifest.json`. The installer tries the
+OSS latest manifest and its versioned ZIP as one source, then the GitHub
+stable-feed manifest and ZIP as the independent fallback. A failed response,
 truncated download, size mismatch, or checksum mismatch removes the temporary
 archive and advances to the next source. Bundle identity, Developer ID,
 Gatekeeper, protocol, version, size, and SHA-256 verification remain mandatory
 regardless of source. The workflow changes the latest pointer only after the
-versioned assets pass public verification, so earlier failures leave the
-previous pointer intact. GitHub remains the independent release origin.
+versioned assets pass public verification and never points it to an older
+version, so earlier failures and old-version re-mirrors leave the previous
+pointer intact. GitHub remains the independent release origin.
 
 Enabling or disabling Live is hot-applied. A user must not restart the daemon:
 the same process publishes or removes Host discovery, creates the projectless

@@ -41,7 +41,7 @@ permissions:
   contents: 'read'
 
 concurrency:
-  group: 'sync-live-host-to-oss-${{ inputs.version }}'
+  group: 'sync-live-host-to-oss'
   cancel-in-progress: false
 
 env:
@@ -62,8 +62,8 @@ jobs:
           VERSION: '${{ inputs.version }}'
         run: |
           set -euo pipefail
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid Qwen Live Host version: $VERSION"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Only a stable Qwen Live Host version can be mirrored: $VERSION"
             exit 1
           fi
           if [ "$SOURCE" != 'artifact' ] && [ "$SOURCE" != 'release' ]; then
@@ -123,6 +123,16 @@ jobs:
           }
           NODE
 
+      - name: 'Check immutable version prefix without writing'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          VERSION: '${{ inputs.version }}'
+        run: |
+          node scripts/check-live-host-oss-state.js prefix \
+            --base-url "$ALIYUN_OSS_PUBLIC_BASE_URL" \
+            --version "$VERSION" \
+            --manifest release-assets/Qwen-Live-Host-manifest.json
+
       - name: 'Report planned OSS objects'
         env:
           VERSION: '${{ inputs.version }}'
@@ -157,8 +167,8 @@ jobs:
           VERSION: '${{ inputs.version }}'
         run: |
           set -euo pipefail
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid Qwen Live Host version: $VERSION"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Only a stable Qwen Live Host version can be mirrored: $VERSION"
             exit 1
           fi
           if [ "$SOURCE" != 'artifact' ] && [ "$SOURCE" != 'release' ]; then
@@ -228,11 +238,13 @@ jobs:
           base="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/live-host/v${VERSION}"
           existing="$RUNNER_TEMP/existing-live-host"
           mkdir -p "$existing"
-          if curl -fsSL --connect-timeout 15 --max-time 60 "$base/Qwen-Live-Host-manifest.json" -o "$existing/Qwen-Live-Host-manifest.json"; then
-            if ! cmp -s release-assets/Qwen-Live-Host-manifest.json "$existing/Qwen-Live-Host-manifest.json"; then
-              echo '::error::The immutable OSS version manifest already exists with different contents.'
-              exit 1
-            fi
+          sealed="$(node scripts/check-live-host-oss-state.js prefix \
+            --base-url "$ALIYUN_OSS_PUBLIC_BASE_URL" \
+            --version "$VERSION" \
+            --manifest release-assets/Qwen-Live-Host-manifest.json)"
+          if [ "$sealed" = 'true' ]; then
+            cp release-assets/Qwen-Live-Host-manifest.json \
+              "$existing/Qwen-Live-Host-manifest.json"
             for architecture in arm64 x64; do
               curl -fsSL --connect-timeout 15 --max-time 3600 \
                 "$base/Qwen-Live-Host-${architecture}.zip" \
@@ -255,10 +267,8 @@ jobs:
                 }
               }
             '
-            echo 'sealed=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'sealed=false' >> "$GITHUB_OUTPUT"
           fi
+          echo "sealed=$sealed" >> "$GITHUB_OUTPUT"
 
       - name: 'Install ossutil'
         env:
@@ -345,7 +355,18 @@ jobs:
           }
           NODE
 
+      - name: 'Check latest manifest version'
+        id: 'latest'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |
+          update="$(node scripts/check-live-host-oss-state.js latest \
+            --base-url "$ALIYUN_OSS_PUBLIC_BASE_URL" \
+            --manifest release-assets/Qwen-Live-Host-manifest.json)"
+          echo "update=$update" >> "$GITHUB_OUTPUT"
+
       - name: 'Update latest manifest'
+        if: "${{ steps.latest.outputs.update == 'true' }}"
         env:
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
         run: |
@@ -356,6 +377,7 @@ jobs:
             release-assets/Qwen-Live-Host-manifest.json
 
       - name: 'Verify latest manifest'
+        if: "${{ steps.latest.outputs.update == 'true' }}"
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
         run: |

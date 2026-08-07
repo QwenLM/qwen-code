@@ -278,6 +278,8 @@ jobs:
     env:
       GH_REPO: '${{ github.repository }}'
     steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
       - uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           path: 'release-assets'
@@ -286,6 +288,17 @@ jobs:
       - name: 'Generate checksums'
         working-directory: 'release-assets'
         run: 'sha256sum -- * > SHA256SUMS.txt'
+
+      - name: 'Check immutable OSS prefix before publishing'
+        if: '${{ inputs.draft == false && inputs.prerelease == false }}'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+        run: |
+          node scripts/check-live-host-oss-state.js prefix \
+            --base-url "$ALIYUN_OSS_PUBLIC_BASE_URL" \
+            --version "$RELEASE_VERSION" \
+            --manifest release-assets/Qwen-Live-Host-manifest.json
 
       - name: 'Create GitHub release'
         id: 'release'
@@ -371,4 +384,3 @@ jobs:
       version: '${{ needs.prepare.outputs.version }}'
       dry_run: false
       source: 'artifact'
-    secrets: 'inherit'

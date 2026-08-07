@@ -19,9 +19,10 @@ daemon 和其他操作系统不会显示入口。
 1. 在 WebShell 打开 **设置 → 实验性功能 → Qwen Live**。
 2. 输入专用于 Realtime 模型的 DashScope API key；快捷键默认是
    `Command+E`，可在同一处修改。
-3. 打开开关并确认安装。WebShell 会从独立的 `live-host-latest` release 下载当前
-   架构的签名 Host，校验 manifest、SHA-256、bundle identity、Developer ID 签名
-   和 Gatekeeper，然后原子安装到 `/Applications/Qwen Live Host.app` 并启动。
+3. 打开开关并确认安装。WebShell 会优先从 OSS 镜像下载当前架构的签名 Host，失败时
+   使用独立的 `live-host-latest` release 作为完整回退来源。每个来源的 manifest 和
+   ZIP 成对校验 SHA-256、bundle identity、Developer ID 签名和 Gatekeeper，然后原子
+   安装到 `/Applications/Qwen Live Host.app` 并启动。
 4. 按 Host 引导完成麦克风、辅助功能和屏幕录制授权。授权只能由用户在 macOS
    完成；全部 readiness 通过前 Live 不可使用。
 
@@ -54,8 +55,9 @@ Developer ID 签名、notarization、Gatekeeper 和 stapler 验证。
 
 版本发布使用 `live-host-vX.Y.Z` tag，包含两个 DMG、两个 ZIP、
 `Qwen-Live-Host-manifest.json` 和 `SHA256SUMS.txt`。非 draft、非 prerelease 的
-正式版本还会更新固定的 `live-host-latest` feed；WebShell 自动安装只读取该 feed
-中的 manifest 和两个 ZIP。
+正式版本还会更新固定的 `live-host-latest` feed，并将 manifest 和两个 ZIP 镜像到
+OSS。WebShell 自动安装优先读取 OSS 的 latest manifest 和对应版本 ZIP；完整 OSS
+来源不可用时，再读取 GitHub feed 的 manifest 和 ZIP。
 
 构建会把仓库内的 Objective-C++ Appshot 源码编译成一个 universal N-API 模块，
 并随 Host 一起签名。模块在 Host 主进程内调用 macOS 截屏与 AX API；没有额外 Appshot
