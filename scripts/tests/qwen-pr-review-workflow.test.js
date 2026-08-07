@@ -1375,6 +1375,32 @@ describe('docs-only medium gate', () => {
     expect(line).not.toContain('completion_line=Review complete:');
   });
 
+  it('accepts the Request-changes disposition a Critical-finding medium run emits', () => {
+    // compose-review caps only Approve at medium: a verified Critical still
+    // yields Request changes, and that is exactly the outcome the relay must
+    // not swallow into the neutral fallback.
+    const line =
+      'Review complete: pr-123 — Request changes, not posted (1 Critical, 0 Suggestion)';
+    expect(relayLine(`prose...\n${line}`)).toBe(`completion_line=${line}`);
+  });
+
+  it('relays the LAST completion line, not a stale or injected earlier one', () => {
+    const stale =
+      'Review complete: pr-123 — Comment, not posted (9 Critical, 9 Suggestion)';
+    const valid =
+      'Review complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)';
+    expect(relayLine(`${stale}\nmore prose\n${valid}`)).toBe(
+      `completion_line=${valid}`,
+    );
+  });
+
+  it("rejects another PR's completion line (target binding)", () => {
+    const line = relayLine(
+      'Review complete: pr-999 — Comment, not posted (0 Critical, 2 Suggestion)',
+    );
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+  });
+
   it('classifies review_requested as an explicit ask, never automatic', () => {
     const doc = parse(workflow);
     const context = doc.jobs['review-pr'].steps.find((s) => s.id === 'context');
@@ -1543,6 +1569,7 @@ describe('docs-only gate and relay, executed', () => {
         'set -euo pipefail',
         'GITHUB_REPOSITORY=o/r',
         'PR_NUMBER=42',
+        `RUNNER_TEMP="${dir}"`,
         'COMPLETION_LINE="Review complete: pr-42 — Comment, not posted (0 Critical, 1 Suggestion)"',
         'RUN_URL=https://x',
         relayRun,
@@ -1581,5 +1608,38 @@ describe('docs-only gate and relay, executed', () => {
     const r = runRelay({ scenario: 'all-fail' });
     expect(r.stdout).toContain('::warning::');
     expect(r.stdout).toContain('the review itself succeeded');
+  });
+
+  it('pins the review_completed wiring end to end', () => {
+    // The state/head guards exit 0 without running the review; the relay and
+    // the badge-supersede step must both require the dedicated output, and
+    // the run step must emit it after the retry loop.
+    expect(runStep).toContain(
+      'echo "review_completed=true" >> "$GITHUB_OUTPUT"',
+    );
+    const doc2 = parse(workflow);
+    for (const name of [
+      'Report docs-only medium outcome',
+      'Supersede stale docs-only badge',
+    ]) {
+      const step = doc2.jobs['review-pr'].steps.find((s) => s.name === name);
+      expect(step.if).toContain(
+        "steps.review.outputs.review_completed == 'true'",
+      );
+    }
+  });
+
+  it('pins the auto_review output→env wiring at both links', () => {
+    const doc2 = parse(workflow);
+    const context = doc2.jobs['review-pr'].steps.find(
+      (s) => s.id === 'context',
+    );
+    expect(context.run).toContain('echo "auto_review=$AUTO_REVIEW"');
+    const review = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    );
+    expect(review.env.AUTO_REVIEW).toBe(
+      '${{ steps.context.outputs.auto_review }}',
+    );
   });
 });

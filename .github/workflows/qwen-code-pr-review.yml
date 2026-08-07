@@ -1226,12 +1226,14 @@ jobs:
             # form, which deliberately does NOT start with the reserved
             # `Review complete: ` prefix so log scrapers never parse it.
             COMPLETION_LINE="$(printf '%s\n' "$RESULT_TEXT" | grep -E '^Review complete: ' | tail -n1 || true)"
-            # Bound to THIS PR's target and to the only verdict a medium run
-            # can produce (medium caps at Comment): a stale line for another
-            # PR, or an injection-steered Approve/Request-changes shape,
-            # must not be republished under the bot's name.
+            # Bound to THIS PR's target and to the verdicts a medium run can
+            # produce: Comment, or Request changes when it verified a Critical
+            # (compose-review caps only Approve at medium — a docs-only run
+            # that found a blocker is exactly the outcome the relay must not
+            # swallow). A stale line for another PR, or an Approve-shaped
+            # injection, must not be republished under the bot's name.
             if ! printf '%s' "$COMPLETION_LINE" \
-              | grep -qE "^Review complete: pr-${PR_NUMBER} — Comment, not posted \([0-9]+ Critical, [0-9]+ Suggestion\)$"; then
+              | grep -qE "^Review complete: pr-${PR_NUMBER} — (Comment|Request changes), not posted \([0-9]+ Critical, [0-9]+ Suggestion\)$"; then
               COMPLETION_LINE=""
             fi
             echo "completion_line=${COMPLETION_LINE:-(no relayable \"Review complete:\" line in the run output — see the run log)}" >> "$GITHUB_OUTPUT"
@@ -1274,54 +1276,63 @@ jobs:
             "📄 **纯文档变更** —— 自动评审以 \`--effort medium\` 运行（发现已验证、无反向审计；medium 不发布行内评论），结果见上方引用行。完整报告见 [workflow 运行](${RUN_URL})；如需带行内评论的完整高强度（high-effort）评审，请评论 \`@qwen-code /review\`。" \
             '' \
             '</details>')"
-          # Upsert by marker AND author, mirroring the queued-acknowledgement
-          # step: each push of a docs-only PR re-runs the automatic review, and
-          # without the PATCH branch every run would stack another
-          # near-identical relay comment on the PR page. The author filter is
-          # load-bearing — a PR participant can post the marker themselves, and
-          # an author-blind `last` match would then PATCH user-owned content
-          # (or fail on it forever, suppressing the authoritative relay).
-          BOT_LOGIN="$(gh api user --jq '.login')" || BOT_LOGIN=""
-          # Bounded retry, and never fail the job over the relay: the review
-          # itself succeeded, and a failing step here would trip the
-          # post-failure fallback into announcing a review failure that never
-          # happened. Losing the relay costs a comment; the outcome line below
-          # keeps it recoverable from the job log. The lookup is re-resolved
-          # on every attempt — a transient failure on the listing GET must not
-          # settle the loop into the POST branch (a permanent duplicate), and
-          # a comment deleted between attempts must fall back to POST rather
-          # than PATCHing a 404 three times.
-          posted=false
-          for attempt in 1 2 3; do
-            EXISTING_ID="$(
-              gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-                --method GET \
-                --paginate \
-                -F per_page=100 \
-                | jq -sr --arg bot "$BOT_LOGIN" '[.[][]
-                    | select((.user.login // "") == $bot)
-                    | select(.body | contains("<!-- qwen-review docs-only-medium -->"))]
-                  | last | .id // empty'
-            )" || EXISTING_ID=""
-            if [ -n "$EXISTING_ID" ]; then
-              if gh api --method PATCH \
-                "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
-                -f body="$BODY" >/dev/null; then
-                posted=true
-                break
-              fi
-            elif gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              -f body="$BODY" >/dev/null; then
-              posted=true
-              break
-            fi
-            sleep 10
-          done
-          if [ "$posted" = "true" ]; then
+          # The shared upsert protocol (.github/scripts/upsert-bot-comment.sh)
+          # carries the load-bearing properties: author-scoped lookup (a PR
+          # participant posting the marker can never capture the upsert),
+          # per-attempt re-resolution, and bounded retry. Never fail the job
+          # over the relay: the review itself succeeded, and a failing step
+          # here would trip the post-failure fallback into announcing a
+          # review failure that never happened — losing the relay costs a
+          # comment, and the outcome line below keeps it recoverable from
+          # the job log.
+          printf '%s' "$BODY" > "${RUNNER_TEMP}/docs-only-relay-body.md"
+          if .github/scripts/upsert-bot-comment.sh \
+            "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
+            '<!-- qwen-review docs-only-medium -->' \
+            "${RUNNER_TEMP}/docs-only-relay-body.md"; then
             echo "docs-only medium outcome relayed to PR #${PR_NUMBER}."
           else
             echo "::warning::Docs-only relay comment could not be posted after 3 attempts; the review itself succeeded. Outcome: ${COMPLETION_LINE}"
           fi
+
+      - name: 'Supersede stale docs-only badge'
+        if: |-
+          steps.context.outputs.should_run == 'true' &&
+          steps.review.outcome == 'success' &&
+          steps.review.outputs.review_completed == 'true' &&
+          steps.review.outputs.docs_only_medium == 'false' &&
+          steps.context.outputs.auto_review == 'true' &&
+          steps.context.outputs.pr_number != ''
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+        run: |-
+          set -euo pipefail
+          # A docs-only badge is upserted only by docs-only runs; when a later
+          # push makes the PR non-docs-only, the full automatic review runs
+          # here — and without this step the stale badge would keep asserting
+          # that the automatic review ran at medium with no reverse audit, a
+          # misrepresentation of the current head's review state that nothing
+          # ever corrects. --update-only makes this a strict no-op on PRs
+          # that never carried the badge; failure is best-effort (the badge
+          # is cosmetic next to the posted full review).
+          BODY="$(printf '%s\n' \
+            '<!-- qwen-review docs-only-medium -->' \
+            '' \
+            '📄 ~~Docs-only change~~ **(superseded)** — a later push made this PR no longer docs-only; the automatic review for the current head ran the full high-effort pipeline. See the posted review on this PR.' \
+            '' \
+            '<details><summary>中文说明</summary>' \
+            '' \
+            '📄 ~~纯文档变更~~ **（已失效）** —— 后续推送使本 PR 不再是纯文档变更；当前 head 的自动评审已运行完整 high-effort 流水线，结论见本 PR 上发布的评审。' \
+            '' \
+            '</details>')"
+          printf '%s' "$BODY" > "${RUNNER_TEMP}/docs-only-supersede-body.md"
+          .github/scripts/upsert-bot-comment.sh \
+            "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
+            '<!-- qwen-review docs-only-medium -->' \
+            "${RUNNER_TEMP}/docs-only-supersede-body.md" \
+            --update-only \
+            || echo "::warning::Could not supersede the stale docs-only badge."
 
       - name: 'Post fallback comment on failure'
         if: |-

@@ -41,20 +41,29 @@ function run(scenario, { stubNodeFailure = false } = {}) {
     chmodSync(p, 0o755);
   };
   // The gh stub serves the two calls the wrapper makes: the paginated file
-  // listing (JSONL via --jq) and the PR object's changed_files count.
+  // listing and the PR object's changed_files count. For the listing it
+  // applies the wrapper's OWN `--jq` argument to a full API-shaped fixture
+  // with real jq — so the projection (the input contract this wrapper exists
+  // to be the single home of) is genuinely under test: dropping `status` or
+  // `previous_filename` from it changes what the classifier sees and turns
+  // the renamed-source scenario red, instead of the stub hardcoding the
+  // projected output and keeping every projection mutant green.
   write(
     'gh',
     [
       '#!/bin/bash',
+      'jqfilter=""; prev=""',
+      'for a in "$@"; do if [ "$prev" = "--jq" ]; then jqfilter="$a"; fi; prev="$a"; done',
       'case "$*" in',
       '  *"/files"*)',
       '    case "$SCENARIO" in',
       '      list-fail) exit 1 ;;',
-      '      docs-only) printf \'%s\\n\' \'{"filename":"docs/users/a.md","status":"modified","previous_filename":null}\' \'{"filename":"README.md","status":"modified","previous_filename":null}\' ;;',
-      '      renamed-source) printf \'%s\\n\' \'{"filename":"docs/new.md","status":"renamed","previous_filename":"packages/core/src/runtime.ts"}\' ;;',
-      '      truncated) printf \'%s\\n\' \'{"filename":"docs/users/a.md","status":"modified","previous_filename":null}\' ;;',
+      '      docs-only) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1},{"filename":"README.md","status":"modified","previous_filename":null,"sha":"y","additions":1}]\' ;;',
+      '      renamed-source) FIXTURE=\'[{"filename":"docs/new.md","status":"renamed","previous_filename":"packages/core/src/runtime.ts","sha":"z","additions":0}]\' ;;',
+      '      truncated) FIXTURE=\'[{"filename":"docs/users/a.md","status":"modified","previous_filename":null,"sha":"x","additions":1}]\' ;;',
       '      *) exit 9 ;;',
-      '    esac ;;',
+      '    esac',
+      '    printf \'%s\' "$FIXTURE" | jq -c "$jqfilter" ;;',
       '  *"repos/"*)',
       '    case "$SCENARIO" in',
       '      truncated) echo 5 ;;',
