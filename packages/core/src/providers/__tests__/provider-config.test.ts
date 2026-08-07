@@ -252,7 +252,7 @@ describe('buildInstallPlan', () => {
           config,
           'https://api.test.com/v1',
         ),
-        builtinModelIds: ['model-a'],
+        templateModelIds: ['model-a'],
       },
     });
   });
@@ -273,19 +273,24 @@ describe('buildInstallPlan', () => {
     // The persisted version hashes only the installed built-in entries, so it
     // mismatches the full template hash and findAllPendingUpdates re-offers
     // the missing built-in at next startup.
-    const version = (
-      plan.providerState?.['providerMetadata.test'] as { version: string }
-    ).version;
-    expect(version).toBe(
+    const providerState = plan.providerState?.['providerMetadata.test'] as {
+      version: string;
+      templateModelIds: string[];
+    };
+    expect(providerState.version).toBe(
       computeModelListVersion(
         buildProviderTemplate(config, 'https://api.test.com/v1').filter(
           (m) => m.id === 'model-a',
         ),
       ),
     );
-    expect(version).not.toBe(
+    expect(providerState.version).not.toBe(
       computeProviderTemplateVersion(config, 'https://api.test.com/v1'),
     );
+    // The record still names the full template membership, so a reconnect
+    // can tell this deliberate subset of the current template apart from an
+    // old full install that merely looks like one.
+    expect(providerState.templateModelIds).toEqual(['model-a', 'model-b']);
   });
 
   it('stamps the template hash regardless of the order built-in IDs arrived in', () => {
@@ -309,7 +314,7 @@ describe('buildInstallPlan', () => {
           config,
           'https://api.test.com/v1',
         ),
-        builtinModelIds: ['model-a', 'model-b', 'model-c'],
+        templateModelIds: ['model-a', 'model-b', 'model-c'],
       },
     });
   });
@@ -473,12 +478,29 @@ describe('reconcileInstallModelIds', () => {
     expect(reconcileInstallModelIds(config, ['a'])).toEqual(['a', 'b']);
   });
 
-  it('carries through an ID the template no longer ships', () => {
-    // A dropped built-in is indistinguishable from a user-added ID, so it is
-    // retained — the same tradeoff executeUpdate makes. Harmless for detection,
-    // which compares only IDs in the current built-in set.
+  it('carries through an ID the template no longer ships when nothing is recorded', () => {
+    // Without a recorded template membership a dropped built-in is
+    // indistinguishable from a user-added ID, so it is retained. Harmless for
+    // detection, which compares only IDs in the current built-in set.
     const config = makeConfig({ models: [{ id: 'a' }] });
     expect(reconcileInstallModelIds(config, ['a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  it('drops a built-in the template removed when the record proves it', () => {
+    // The recorded template membership shows 'b' shipped at install time, so
+    // it is a superseded built-in, not a custom addition — retaining it
+    // while stamping the new template hash would make the removal permanent.
+    const config = makeConfig({ models: [{ id: 'a' }] });
+    expect(reconcileInstallModelIds(config, ['a', 'b'], ['a', 'b'])).toEqual([
+      'a',
+    ]);
+  });
+
+  it('keeps custom IDs alongside a dropped built-in when the record is known', () => {
+    const config = makeConfig({ models: [{ id: 'a' }] });
+    expect(
+      reconcileInstallModelIds(config, ['a', 'b', 'mine'], ['a', 'b']),
+    ).toEqual(['a', 'mine']);
   });
 
   it('preserves user-added custom IDs after the built-ins', () => {
@@ -607,16 +629,17 @@ describe('resolveReconnectModelIds', () => {
   });
 
   it('keeps a faithfully echoed deliberately installed subset verbatim', () => {
-    // The install recorded the built-in IDs it installed, so fidelity is
-    // decided by ID set — a deliberately installed subset must not be
-    // re-expanded; update detection keeps re-offering the missing built-in.
+    // The install was recorded against the current template, so the echo is
+    // the user's current selection — a deliberately installed subset must
+    // not be re-expanded; update detection keeps re-offering the missing
+    // built-in.
     const config = makeEditableConfig();
     const mergedSettings = {
       [PROVIDER_METADATA_NS]: {
         test: {
           version: planVersion(config, ['a']),
           baseUrl,
-          builtinModelIds: ['a'],
+          templateModelIds: ['a', 'b'],
         },
       },
     };
@@ -632,8 +655,8 @@ describe('resolveReconnectModelIds', () => {
   it('keeps a faithful subset echo verbatim after built-in specs change', () => {
     // The recorded version hashes full model specs as of install time. A
     // later spec edit (contextWindowSize here) perturbs any content-based
-    // re-hash; fidelity must come from the recorded built-in ID set instead,
-    // or the deselected built-in gets silently reinstalled.
+    // re-hash; fidelity must come from the recorded template membership
+    // instead, or the deselected built-in gets silently reinstalled.
     const installTimeConfig = makeConfig({
       modelsEditable: true,
       models: [{ id: 'a', contextWindowSize: 100 }, { id: 'b' }],
@@ -647,7 +670,7 @@ describe('resolveReconnectModelIds', () => {
         test: {
           version: planVersion(installTimeConfig, ['a']),
           baseUrl,
-          builtinModelIds: ['a'],
+          templateModelIds: ['a', 'b'],
         },
       },
     };
@@ -670,7 +693,7 @@ describe('resolveReconnectModelIds', () => {
         test: {
           version: planVersion(config, ['a', 'b']),
           baseUrl,
-          builtinModelIds: ['a', 'b'],
+          templateModelIds: ['a', 'b'],
         },
       },
     };
@@ -697,7 +720,7 @@ describe('resolveReconnectModelIds', () => {
         test: {
           version: planVersion(config, ['a', 'b', 'mine']),
           baseUrl,
-          builtinModelIds: ['a', 'b'],
+          templateModelIds: ['a', 'b'],
         },
       },
     };
@@ -710,9 +733,58 @@ describe('resolveReconnectModelIds', () => {
     ).toEqual(['a', 'b', 'mine']);
   });
 
+  it('refreshes an old full-template install when the template grows', () => {
+    // Version N shipped only 'a' and the install stamped the real record for
+    // that template (real previous-template hash, not a legacy placeholder).
+    // Version N+1 adds 'b': a reconnect echoing the saved ['a'] is a stale
+    // snapshot of the old FULL template, not a deliberate subset of the new
+    // one, so the refresh must install 'b'.
+    const oldConfig = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'a' }],
+    });
+    const record = buildInstallPlan(oldConfig, {
+      baseUrl,
+      apiKey: 'sk-test',
+      modelIds: ['a'],
+    }).providerState?.[`${PROVIDER_METADATA_NS}.test`];
+    expect(record).toMatchObject({
+      version: computeProviderTemplateVersion(oldConfig, baseUrl),
+    });
+
+    const config = makeEditableConfig(); // template is now ['a', 'b']
+    expect(
+      resolveReconnectModelIds(config, inputsFor(config, ['a']), {
+        [PROVIDER_METADATA_NS]: { test: record },
+      }),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('drops a removed built-in from a stale echo when the record proves it', () => {
+    // Template N shipped 'a' and 'b'; N+1 drops 'b'. The old install echoes
+    // its full saved list back; 'b' was a built-in at install time, not a
+    // custom addition, so the refresh must not carry it through.
+    const oldConfig = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'a' }, { id: 'b' }],
+    });
+    const record = buildInstallPlan(oldConfig, {
+      baseUrl,
+      apiKey: 'sk-test',
+      modelIds: ['a', 'b'],
+    }).providerState?.[`${PROVIDER_METADATA_NS}.test`];
+
+    const config = makeConfig({ modelsEditable: true, models: [{ id: 'a' }] });
+    expect(
+      resolveReconnectModelIds(config, inputsFor(config, ['a', 'b', 'mine']), {
+        [PROVIDER_METADATA_NS]: { test: record },
+      }),
+    ).toEqual(['a', 'mine']);
+  });
+
   it('honors an explicit update-prompt skip over a stale recorded version', () => {
     // ignoredVersion matching the current template wins even for a record
-    // that predates builtinModelIds — a key rotation must not override the
+    // that predates templateModelIds — a key rotation must not override the
     // user's "skip".
     const config = makeEditableConfig();
     const mergedSettings = {
@@ -733,10 +805,10 @@ describe('resolveReconnectModelIds', () => {
     ).toEqual(['a']);
   });
 
-  it('refreshes an echo recorded before the built-in ID list was persisted', () => {
-    // A version without builtinModelIds predates the current formula (or was
-    // written by the VS Code companion's own writer): built-ins refresh,
-    // customs survive.
+  it('refreshes an echo recorded before template membership was persisted', () => {
+    // A version without templateModelIds predates the current formula (or
+    // was written by the VS Code companion's own writer): built-ins
+    // refresh, customs survive.
     const config = makeEditableConfig();
     const mergedSettings = {
       [PROVIDER_METADATA_NS]: {

@@ -242,9 +242,11 @@ function resolveProviderState(
     // template hash so update detection re-offers the missing built-ins.
     // Entries are canonicalized to template order so an install carrying the
     // full built-in set stamps the template hash regardless of the order the
-    // IDs arrived in (the wizard merges free-text typed IDs first). The
-    // built-in IDs are persisted alongside the hash so reconnects can check
-    // echo fidelity by ID set instead of re-hashing live model specs.
+    // IDs arrived in (the wizard merges free-text typed IDs first). The full
+    // template membership at install time is persisted alongside the hash so
+    // later reconnects and accepted updates can tell an old full install from
+    // a deliberate subset of the current template, and drop built-ins the
+    // template has since removed instead of mistaking them for custom IDs.
     const builtinIndex = new Map(
       getDefaultModelIds(config).map((id, index) => [id, index]),
     );
@@ -255,7 +257,7 @@ function resolveProviderState(
       [`${PROVIDER_METADATA_NS}.${key}`]: {
         version: computeModelListVersion(builtinModels),
         baseUrl,
-        builtinModelIds: builtinModels.map((model) => model.id),
+        templateModelIds: getDefaultModelIds(config),
       },
     };
   }
@@ -557,6 +559,12 @@ export function computeProviderTemplateVersion(
  * user-added custom IDs survive. For providers with no built-in list (custom
  * providers, which carry no version metadata) this is the identity.
  *
+ * `recordedTemplateIds` is the template membership persisted at install time
+ * (`templateModelIds`). With it, an ID the old template shipped but the
+ * current one no longer does is a superseded built-in and is dropped;
+ * without it (records predating the field) such an ID is indistinguishable
+ * from a user-added custom model and is kept.
+ *
  * Callers must only apply it where refreshing built-ins is the intended rule:
  * `executeUpdate` (the user accepted the offered diff) and — gated on the
  * persisted provider metadata by `resolveReconnectModelIds` — the reconnect
@@ -570,18 +578,25 @@ export function computeProviderTemplateVersion(
 export function reconcileInstallModelIds(
   config: ProviderConfig,
   requestedIds: readonly string[],
+  recordedTemplateIds?: readonly string[],
 ): string[] {
   const defaultIds = getDefaultModelIds(config);
   if (defaultIds.length === 0) return [...requestedIds];
   const builtinIds = new Set(defaultIds);
-  return [...defaultIds, ...requestedIds.filter((id) => !builtinIds.has(id))];
+  const priorTemplate = recordedTemplateIds
+    ? new Set(recordedTemplateIds)
+    : undefined;
+  const customIds = requestedIds.filter(
+    (id) => !builtinIds.has(id) && !priorTemplate?.has(id),
+  );
+  return [...defaultIds, ...customIds];
 }
 
 export interface PersistedProviderMetadata {
-  version?: unknown;
-  baseUrl?: unknown;
-  ignoredVersion?: unknown;
-  builtinModelIds?: unknown;
+  version?: string;
+  baseUrl?: string;
+  ignoredVersion?: string;
+  templateModelIds?: string[];
 }
 
 export function readPersistedProviderMetadata(
@@ -591,9 +606,28 @@ export function readPersistedProviderMetadata(
   const ns = mergedSettings?.[PROVIDER_METADATA_NS];
   if (!ns || typeof ns !== 'object') return {};
   const entry = (ns as Record<string, unknown>)[metadataKey];
-  return entry && typeof entry === 'object'
-    ? (entry as PersistedProviderMetadata)
-    : {};
+  if (!entry || typeof entry !== 'object') return {};
+  const raw = entry as Record<string, unknown>;
+  const metadata: PersistedProviderMetadata = {};
+  if (typeof raw['version'] === 'string') metadata.version = raw['version'];
+  if (typeof raw['baseUrl'] === 'string') metadata.baseUrl = raw['baseUrl'];
+  if (typeof raw['ignoredVersion'] === 'string') {
+    metadata.ignoredVersion = raw['ignoredVersion'];
+  }
+  const templateModelIds = raw['templateModelIds'];
+  if (
+    Array.isArray(templateModelIds) &&
+    templateModelIds.every((id) => typeof id === 'string')
+  ) {
+    metadata.templateModelIds = templateModelIds as string[];
+  }
+  return metadata;
+}
+
+function sameModelIdSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const ids = new Set(b);
+  return a.every((id) => ids.has(id));
 }
 
 /**
@@ -611,20 +645,23 @@ export function readPersistedProviderMetadata(
  *   The skip is scoped to that exact template version — matching the TUI,
  *   which re-offers once the template advances again — so a later template
  *   follows the staleness rules below;
- * - the install was recorded by the current formula (it persisted the
- *   built-in IDs it installed). Whatever the client submits is then its own
- *   current selection — a faithful echo or a deliberately edited list — and
- *   is installed verbatim like the TUI wizard does. The check is ID-based,
- *   so later edits to built-in model specs cannot mark a faithful echo
- *   stale;
+ * - the install was recorded against the current template (its persisted
+ *   `templateModelIds` still matches the template membership). Whatever the
+ *   client submits is then its own current selection — a faithful echo or a
+ *   deliberately edited list — and is installed verbatim like the TUI
+ *   wizard does. Membership is ID-based, so later edits to built-in model
+ *   specs cannot mark a faithful echo stale. An old install whose template
+ *   has since grown or shrunk does not qualify, even when its echo looks
+ *   like a valid subset: the record cannot prove the newer built-ins were
+ *   deliberately deselected, so it follows the staleness rules below;
  * - nothing is recorded yet and no models are stored — a fresh wizard
  *   selection, installed verbatim like the TUI wizard does.
  *
- * Otherwise the record predates `builtinModelIds` (a version hash written
- * before this formula, or stored models from before version tracking) and
- * `reconcileInstallModelIds` refreshes the built-ins; with no recorded
- * version that refresh is also the only upgrade path, since update detection
- * never runs without one.
+ * Otherwise the record predates the current template (or `templateModelIds`
+ * itself) and `reconcileInstallModelIds` refreshes the built-ins — dropping
+ * ones the record proves the template removed; with no recorded version
+ * that refresh is also the only upgrade path, since update detection never
+ * runs without one.
  */
 export function resolveReconnectModelIds(
   config: ProviderConfig,
@@ -655,9 +692,13 @@ export function resolveReconnectModelIds(
       );
       return [...echoedIds];
     }
-    if (Array.isArray(metadata.builtinModelIds)) {
+    const currentTemplateIds = getDefaultModelIds(config);
+    if (
+      metadata.templateModelIds &&
+      sameModelIdSet(metadata.templateModelIds, currentTemplateIds)
+    ) {
       debugLogger.debug(
-        `[providers] reconnect resolve for "${config.id}": install recorded by the current formula, installing echo verbatim`,
+        `[providers] reconnect resolve for "${config.id}": install recorded against the current template, installing echo verbatim`,
       );
       return [...echoedIds];
     }
@@ -668,15 +709,17 @@ export function resolveReconnectModelIds(
         ? (modelProviders as Record<string, unknown>)
         : undefined,
     );
-    if (typeof metadata.version === 'string' || existingModels) {
+    if (metadata.version || metadata.templateModelIds || existingModels) {
       debugLogger.debug(
         `[providers] reconnect resolve for "${config.id}": stale install record (version ${
-          typeof metadata.version === 'string'
-            ? metadata.version.slice(0, 12)
-            : 'none'
+          metadata.version ? metadata.version.slice(0, 12) : 'none'
         }, template ${templateVersion.slice(0, 12)}), refreshing built-ins`,
       );
-      return reconcileInstallModelIds(config, echoedIds);
+      return reconcileInstallModelIds(
+        config,
+        echoedIds,
+        metadata.templateModelIds,
+      );
     }
     debugLogger.debug(
       `[providers] reconnect resolve for "${config.id}": no install recorded, installing selection verbatim`,

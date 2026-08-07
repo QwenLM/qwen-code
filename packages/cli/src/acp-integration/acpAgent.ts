@@ -7666,24 +7666,29 @@ class QwenAgent implements Agent {
           );
         }
 
+        // The agent can outlive settings changes made by other processes
+        // (an accepted or skipped provider update, a parallel install);
+        // resolve the echo and persist against a fresh load of the requested
+        // workspace, like the serve install route does, using that same
+        // fresh object for reconciliation and persistence.
+        const settings = loadSettings(cwd);
+        this.settings = settings;
+
         const { inputs, echoedModelIds } = readProviderSetupInputs(
           providerConfig,
           params,
-          this.settings,
+          settings,
           (protocol, baseUrl) =>
             resolveExistingProviderApiKey(
               providerConfig,
-              this.settings,
+              settings,
               protocol,
               baseUrl,
             ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
-        const adapter = createLoadedSettingsAdapter(
-          this.settings,
-          persistScope,
-        );
+        const adapter = createLoadedSettingsAdapter(settings, persistScope);
         await applyProviderInstallPlan(plan, {
           settings: adapter,
           reloadModelProviders: (modelProviders) =>

@@ -321,6 +321,70 @@ describe('useProviderUpdates', () => {
     );
   });
 
+  it('drops a built-in the template removed when the user accepts the update', async () => {
+    // The recorded template membership names every ID the old template
+    // shipped. An installed ID absent from the current template is then a
+    // superseded built-in — retaining it while stamping the new template
+    // hash would make the removal permanent (no future prompt could offer
+    // it), so the accepted update must drop it while keeping custom models.
+    const removedModelId = 'qwen-removed-model';
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      templateModelIds: [...chinaTemplate.map((m) => m.id), removedModelId],
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate,
+        {
+          id: removedModelId,
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          envKey: CODING_PLAN_ENV_KEY,
+          name: `[Coding Plan] ${removedModelId}`,
+        },
+        {
+          id: 'my-custom-model',
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          envKey: CODING_PLAN_ENV_KEY,
+          name: '[Coding Plan] my-custom-model',
+        },
+      ],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    const reloadedIds = reloaded[AuthType.USE_OPENAI].map(
+      (model: { id: string }) => model.id,
+    );
+    expect(reloadedIds).toContain('my-custom-model');
+    expect(reloadedIds).not.toContain(removedModelId);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
+    );
+  });
+
   it('executes update when user confirms with "update"', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY

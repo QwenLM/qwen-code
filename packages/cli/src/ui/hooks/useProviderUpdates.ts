@@ -180,12 +180,9 @@ function findAllPendingUpdates(
       settings.merged as Record<string, unknown>,
       metadataKey,
     );
-    if (typeof metadata.version !== 'string') continue;
+    if (!metadata.version) continue;
 
-    const baseUrl =
-      typeof metadata.baseUrl === 'string' && metadata.baseUrl
-        ? metadata.baseUrl
-        : resolveBaseUrl(provider);
+    const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
     const currentVersion = computeProviderTemplateVersion(provider, baseUrl);
 
     if (metadata.version === currentVersion) continue;
@@ -227,9 +224,22 @@ export function useProviderUpdates(
         const resolved = resolveBaseUrl(providerCfg, baseUrl);
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
-        // prepend-and-remove-owned merge.
+        // prepend-and-remove-owned merge, while built-ins the template has
+        // since removed must go: the recorded template membership tells
+        // them apart from custom additions (without it they are kept).
+        const metadataKey = resolveMetadataKey(providerCfg);
+        const metadata = metadataKey
+          ? readPersistedProviderMetadata(
+              settings.merged as Record<string, unknown>,
+              metadataKey,
+            )
+          : {};
         const installedIds = readInstalledOwnedIds(settings, providerCfg);
-        const modelIds = reconcileInstallModelIds(providerCfg, installedIds);
+        const modelIds = reconcileInstallModelIds(
+          providerCfg,
+          installedIds,
+          metadata.templateModelIds,
+        );
         const addedIds = modelIds.filter((id) => !installedIds.includes(id));
         if (addedIds.length > 0) {
           debugLogger.debug(

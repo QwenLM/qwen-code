@@ -10886,6 +10886,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('qwen/providers extension methods list and connect model providers', async () => {
     const settings = makeSessionSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -10952,6 +10953,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
 
     const settings = makeSessionSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
 
@@ -11471,6 +11473,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -11518,6 +11521,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -11547,9 +11551,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('qwen/providers/connect installs a faithfully echoed subset verbatim', async () => {
-    // The user deselected 'deepseek-coder'; the install recorded the built-in
-    // IDs it installed, so a reconnect (e.g. rotating the API key) must not
-    // silently re-add it.
+    // The user deselected 'deepseek-coder'; the install was recorded against
+    // the current template, so a reconnect (e.g. rotating the API key) must
+    // not silently re-add it.
     const deepseekProvider: ProviderConfig = {
       id: 'deepseek',
       label: 'DeepSeek API Key',
@@ -11586,11 +11590,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           deepseek: {
             version: subsetVersion,
             baseUrl: 'https://api.deepseek.com',
-            builtinModelIds: ['deepseek-chat'],
+            templateModelIds: ['deepseek-chat', 'deepseek-coder'],
           },
         },
       },
     } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -11659,6 +11664,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -11690,6 +11696,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ...makeSessionSettings(),
       merged: { mcpServers: {}, env: {}, modelProviders: {} },
     } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -11752,6 +11759,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -11784,6 +11792,74 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildInstallPlan).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ apiKey: 'sk-first' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect resolves against freshly loaded settings, not the startup cache', async () => {
+    // The agent can stay running while another process accepts or skips a
+    // provider update; the connect handler must reload the requested
+    // workspace's settings instead of trusting the startup cache. Only the
+    // fresh copy carries a legacy install record — if the handler used the
+    // stale cache, nothing would be recorded and the echo would install
+    // verbatim instead of refreshing the built-ins.
+    const freshSettings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              name: '[DeepSeek] deepseek-chat',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+          ],
+        },
+        providerMetadata: {
+          deepseek: {
+            version: 'an-older-template-version',
+            baseUrl: 'https://api.deepseek.com',
+          },
+        },
+      },
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(freshSettings);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        modelIds: ['deepseek-chat'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        modelIds: ['deepseek-chat', 'deepseek-coder'],
+      }),
+    );
+    // Reconciliation and persistence must use the same fresh settings.
+    expect(applyProviderInstallPlan).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ settings: freshSettings }),
     );
 
     mockConnectionState.resolve();

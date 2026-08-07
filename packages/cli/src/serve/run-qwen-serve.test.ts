@@ -972,7 +972,7 @@ describe('buildProviderSetupInputs', () => {
   });
 
   it('keeps a faithfully echoed deliberately installed subset verbatim', () => {
-    // The install recorded the built-in IDs it installed, so reconnecting
+    // The install was recorded against the current template, so reconnecting
     // (e.g. rotating the API key) must not re-add the deselected built-in.
     const { inputs } = buildProviderSetupInputs(
       {
@@ -987,12 +987,38 @@ describe('buildProviderSetupInputs', () => {
           'test-plan': {
             version: planVersion(['builtin-a']),
             baseUrl: 'https://api.test.com/v1',
-            builtinModelIds: ['builtin-a'],
+            templateModelIds: ['builtin-a', 'builtin-b'],
           },
         },
       },
     );
     expect(inputs.modelIds).toEqual(['builtin-a']);
+  });
+
+  it('refreshes an old full-template install when the template grows', () => {
+    // The record stamped under the old template (real previous-template
+    // hash) proves the echoed ['builtin-a'] was the full install of its
+    // time, not a deliberate subset of the grown template.
+    const oldProvider: qwenCore.ProviderConfig = {
+      ...provider,
+      models: [{ id: 'builtin-a' }],
+    };
+    const record = qwenCore.buildInstallPlan(oldProvider, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['builtin-a'],
+    }).providerState?.['providerMetadata.test-plan'];
+    const { inputs } = buildProviderSetupInputs(
+      {
+        providerId: 'test-plan',
+        apiKey: 'sk-test',
+        modelIds: ['builtin-a'],
+      },
+      provider,
+      helpers,
+      { providerMetadata: { 'test-plan': record } },
+    );
+    expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b']);
   });
 
   it('honors an explicit update-prompt skip over a stale recorded version', () => {
@@ -1020,8 +1046,8 @@ describe('buildProviderSetupInputs', () => {
     expect(inputs.modelIds).toEqual(['builtin-a']);
   });
 
-  it('refreshes built-ins and dedupes for a record without builtinModelIds', () => {
-    // A version recorded before the built-in ID list was persisted (legacy
+  it('refreshes built-ins and dedupes for a record without templateModelIds', () => {
+    // A version recorded before template membership was persisted (legacy
     // formula) marks the echo stale: built-ins refresh while custom IDs
     // survive. The duplicated echo IDs are deduplicated before resolution.
     const { inputs } = buildProviderSetupInputs(
