@@ -250,9 +250,12 @@ async function evaluateScopedDecision(
       if (!opts.allowShell || !ctx.command) {
         return 'deny';
       }
+      // Managed memory agents' shell calls carry no `directory` parameter,
+      // so ctx.cwd is absent in production — fall back to the scoped
+      // execution root or the git-config probe never runs (#8575).
       const isReadOnly = await isShellCommandReadOnlyAST(
         stripShellWrapper(ctx.command),
-        ctx.cwd ? { cwd: ctx.cwd } : undefined,
+        { cwd: ctx.cwd ?? projectRoot },
       );
       return isReadOnly ? 'allow' : 'deny';
     }

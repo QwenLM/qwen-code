@@ -12,8 +12,10 @@
  * execute programs that are *configured in the repository's local config*
  * while running those otherwise read-only commands:
  *
- *   - `diff.external`, `diff.<driver>.textconv` — diff / log / show
+ *   - `diff.external`, `diff.<driver>.textconv`, `diff.<driver>.command` —
+ *     diff / log / show
  *   - `core.fsmonitor` — status
+ *   - `core.alternateRefsCommand` — `log --alternate-refs`
  *   - `core.pager`, `pager.<cmd>` — log / show / diff / blame on a TTY
  *   - `core.askpass`, `credential.helper`, `core.sshCommand`,
  *     `remote.<name>.proxy`, `ext::` remote URLs, `core.gitProxy` —
@@ -29,19 +31,21 @@
  * and linked worktrees — and the common-dir config of linked worktrees).
  * Global/system config is the user's own deliberate setup and is not an
  * attack surface of cloned repositories — it is intentionally not probed.
- * Bare repositories (no `.git` entry in the layout) are not probed either;
- * running read-only git commands inside one is exotic enough to stay out
- * of scope.
+ *
+ * Discovery mirrors git's: each ancestor is checked for a `.git` entry, and
+ * the directory itself is checked as a git directory (bare repositories and
+ * submodule storage dirs like `<repo>/.git/modules/<name>`, whose own
+ * config git reads when it stands in one).
  *
  * The probe is synchronous (bounded stat walk + small file reads) so it can
  * be shared by the AST classifier and the synchronous regex fallback
  * without changing either API's async shape.
  *
- * Known limitation: a compound command that `cd`s into a DIFFERENT
- * repository before running git (e.g. `cd ../other-repo && git status`)
- * is probed against the tool's own cwd, so the other repo's config is not
- * checked. `cd` within the same repository resolves to the same config and
- * is covered.
+ * Directory changes are tracked by both classifiers: a `cd`/`pushd` segment
+ * moves the probe to the repository the following git segments actually run
+ * in, and an unresolvable target (expansions, `~`, flag-only forms, a
+ * `||`-diverged chain) downgrades later git segments the same way a dirty
+ * config does.
  */
 
 import fs from 'node:fs';
@@ -76,6 +80,7 @@ const MAX_CONFIG_FILE_BYTES = 1 << 20; // 1 MiB
  * running a whitelisted read-only sub-command.
  */
 const PROGRAM_VALUED_KEYS = new Set([
+  'core.alternaterefscommand', // alternate-refs lister (`git log --alternate-refs`)
   'core.askpass', // credential prompts (e.g. `git remote show <url>`)
   'core.fsmonitor', // fsmonitor hook command (`git status`)
   'core.gitproxy', // git:// transport proxy (`git remote show git://…`)
@@ -184,19 +189,60 @@ function parseGitConfig(content: string): ConfigEntry[] {
   return entries;
 }
 
-/** Strip surrounding quotes from a raw config value. */
-function normalizeValue(raw: string): string {
-  let value = raw.trim();
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    value = value.slice(1, -1);
+/**
+ * Decode a raw config value the way git does: quoted and bare segments
+ * concatenate (`url = "ext::"sh` is `ext::sh` to git), and the `\b \n \t
+ * \" \\` escapes apply inside quoted segments. Returns `null` when the
+ * value cannot be decoded (unbalanced quote, other escape) — callers fail
+ * closed on it.
+ */
+function decodeGitConfigValue(raw: string): string | null {
+  const value = raw.trim();
+  let decoded = '';
+  let quoted = false;
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i]!;
+    if (!quoted) {
+      if (char === '"') {
+        quoted = true;
+      } else {
+        decoded += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = false;
+    } else if (char === '\\') {
+      switch (value[++i]) {
+        case 'b':
+          decoded += '\b';
+          break;
+        case 'n':
+          decoded += '\n';
+          break;
+        case 't':
+          decoded += '\t';
+          break;
+        case '"':
+          decoded += '"';
+          break;
+        case '\\':
+          decoded += '\\';
+          break;
+        default:
+          return null;
+      }
+    } else {
+      decoded += char;
+    }
   }
-  return value;
+  return quoted ? null : decoded;
 }
 
 /** True when any entry names a program git would execute. */
 function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
   for (const entry of entries) {
-    const value = normalizeValue(entry.value);
+    const value = decodeGitConfigValue(entry.value);
     if (value === '') continue;
 
     // Include targets can live outside `.git` (e.g. files tracked in the
@@ -209,14 +255,18 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
       // `[pager] <cmd> = <program>` overrides live in the flat section.
       if (entry.section === 'pager') {
         // true/false enable or disable paging without naming a program.
-        if (/^(?:true|false)$/i.test(value)) continue;
+        if (value !== null && /^(?:true|false)$/i.test(value)) continue;
         return true;
       }
       const name = `${entry.section}.${entry.key}`;
       if (!PROGRAM_VALUED_KEYS.has(name)) continue;
       // core.fsmonitor true/false selects the built-in daemon or disables
       // monitoring — neither executes an external program.
-      if (name === 'core.fsmonitor' && /^(?:true|false)$/i.test(value)) {
+      if (
+        name === 'core.fsmonitor' &&
+        value !== null &&
+        /^(?:true|false)$/i.test(value)
+      ) {
         continue;
       }
       return true;
@@ -224,7 +274,7 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
 
     switch (entry.section) {
       case 'diff':
-        if (entry.key === 'textconv') return true;
+        if (entry.key === 'textconv' || entry.key === 'command') return true;
         break;
       case 'credential':
         if (entry.key === 'helper') return true;
@@ -234,7 +284,9 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
         break;
       case 'remote':
         if (entry.key === 'proxy') return true;
-        if (entry.key === 'url' && /^ext::/.test(value)) return true;
+        if (entry.key === 'url' && (value === null || /^ext::/.test(value))) {
+          return true;
+        }
         break;
       case 'filter':
         // `git diff` cleans worktree content through the configured filter
@@ -251,7 +303,11 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
         // `url.<base>.insteadOf` rewrites remote URLs before connecting;
         // an ext:: rewrite target executes a program (the transport
         // block can be lifted via protocol.ext.allow in the same file).
-        if (entry.subsection!.startsWith('ext::')) return true;
+        // Git decodes subsection escapes first (`\x` → `x`), so
+        // over-approximate by dropping backslashes before comparing.
+        if (entry.subsection!.replace(/\\/g, '').startsWith('ext::')) {
+          return true;
+        }
         break;
       default:
         break;
@@ -268,13 +324,37 @@ function worktreeConfigEnabled(entries: ConfigEntry[]): boolean {
       entry.subsection === null &&
       entry.key === 'worktreeconfig'
     ) {
-      const value = normalizeValue(entry.value);
+      const value = decodeGitConfigValue(entry.value);
       // Git also accepts hexadecimal integers and k/m/g suffixes. Treat
       // anything except its definite false forms as enabled (fail closed).
-      enabled = !/^(?:false|no|off|[+-]?(?:0+|0x0+)[kmg]?)$/i.test(value);
+      enabled =
+        value === null ||
+        !/^(?:false|no|off|[+-]?(?:0+|0x0+)[kmg]?)$/i.test(value);
     }
   }
   return enabled;
+}
+
+/**
+ * git's primary discovery rule: a directory that holds a HEAD file plus
+ * objects and refs/packed-refs is itself a git directory (is_git_directory
+ * in setup.c) — a bare repository, or a submodule's storage dir like
+ * `<repo>/.git/modules/<name>` whose own config git reads while standing
+ * in it.
+ */
+function isGitDirectory(dir: string): boolean {
+  try {
+    if (!fs.statSync(path.join(dir, 'HEAD')).isFile()) return false;
+    if (!fs.statSync(path.join(dir, 'objects')).isDirectory()) return false;
+    try {
+      if (fs.statSync(path.join(dir, 'refs')).isDirectory()) return true;
+    } catch {
+      // No refs dir — packed-refs alone also qualifies.
+    }
+    return fs.statSync(path.join(dir, 'packed-refs')).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -284,17 +364,37 @@ function worktreeConfigEnabled(entries: ConfigEntry[]): boolean {
  *   - `.git` file (`gitdir: <path>`, linked worktree or submodule) →
  *     `<gitdir>/config`, `<gitdir>/config.worktree`, and the common dir's
  *     `config` when a `commondir` file marks a linked worktree.
+ *   - `cwd` itself (or an ancestor) is a git directory → its `config`, the
+ *     commondir `config` when present, and `config.worktree`.
+ *
+ * Throws when the search cannot conclude (unreadable pointer, search depth
+ * exhausted) — the caller converts that into "may execute programs".
  */
 function findLocalGitConfigFiles(cwd: string): string[] {
   let dir = path.resolve(cwd);
+  try {
+    // git resolves the physical cwd; a symlink between the execution
+    // directory and the repo root must not send the walk up the link's
+    // ancestors instead of the target's.
+    dir = fs.realpathSync(dir);
+  } catch {
+    // Absent/unresolvable path — keep the logical form.
+  }
 
-  for (let depth = 0; depth < MAX_REPO_SEARCH_DEPTH; depth++) {
+  for (let depth = 0; ; depth++) {
+    if (depth >= MAX_REPO_SEARCH_DEPTH) {
+      // git's discovery has no depth cap: exhausting the budget before
+      // reaching the filesystem root is "repository unknown", not "no
+      // repository" — fail closed.
+      throw new Error('repository search depth exhausted');
+    }
+
     const gitPath = path.join(dir, '.git');
     let stat: fs.Stats | undefined;
     try {
       stat = fs.statSync(gitPath);
     } catch {
-      // No `.git` here; walk up.
+      // No `.git` here; check the directory itself, then walk up.
     }
 
     if (stat) {
@@ -337,12 +437,26 @@ function findLocalGitConfigFiles(cwd: string): string[] {
       }
     }
 
+    if (isGitDirectory(dir)) {
+      const files = [path.join(dir, 'config')];
+      try {
+        const commonDir = fs
+          .readFileSync(path.join(dir, 'commondir'), 'utf8')
+          .trim();
+        if (commonDir) {
+          files.push(path.join(path.resolve(dir, commonDir), 'config'));
+        }
+      } catch {
+        // No commondir — the git dir's own config is the common config.
+      }
+      files.push(path.join(dir, 'config.worktree'));
+      return files;
+    }
+
     const parent = path.dirname(dir);
-    if (parent === dir) break;
+    if (parent === dir) return []; // reached the filesystem root — no repo
     dir = parent;
   }
-
-  return [];
 }
 
 /**

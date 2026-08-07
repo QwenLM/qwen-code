@@ -509,6 +509,44 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('allow');
   });
 
+  it('probes the scoped execution root when no cwd is provided (#8575)', async () => {
+    // Production shape: managed memory agents' shell calls carry no
+    // `directory` parameter, so ctx.cwd is absent and the probe must fall
+    // back to the scoped execution root.
+    const dirtyRoot = path.join(tempDir, 'dirty-root');
+    await fs.mkdir(path.join(dirtyRoot, '.git'), { recursive: true });
+    await fs.writeFile(
+      path.join(dirtyRoot, '.git', 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+    const dirty = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, dirtyRoot, {
+        allowShell: true,
+      }),
+    );
+    await expect(
+      dirty.evaluate({
+        toolName: ToolNames.SHELL,
+        command: 'git status',
+      }),
+    ).resolves.toBe('deny');
+
+    const cleanRoot = path.join(tempDir, 'clean-root');
+    await fs.mkdir(path.join(cleanRoot, '.git'), { recursive: true });
+    await fs.writeFile(path.join(cleanRoot, '.git', 'config'), '[core]\n');
+    const clean = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, cleanRoot, {
+        allowShell: true,
+      }),
+    );
+    await expect(
+      clean.evaluate({
+        toolName: ToolNames.SHELL,
+        command: 'git status',
+      }),
+    ).resolves.toBe('allow');
+  });
+
   it('lets base deny rules override scoped allows', async () => {
     const basePm: Pick<
       PermissionManager,

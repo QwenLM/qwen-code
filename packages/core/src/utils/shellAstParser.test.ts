@@ -1407,4 +1407,141 @@ describe('git config probe cd tracking (#8575)', () => {
       }),
     ).toBe(true);
   });
+
+  it('does not take cd flags as the destination directory', async () => {
+    for (const flag of ['-P', '-L', '-e', '--']) {
+      expect(
+        await isShellCommandReadOnlyAST(
+          `cd ${flag} ${dirtyRepo} && git status`,
+          {
+            cwd: cleanRepo,
+          },
+        ),
+      ).toBe(false);
+    }
+    expect(
+      await isShellCommandReadOnlyAST(`cd -- ${cleanRepo} && git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(true);
+  });
+
+  it('downgrades git after operand-less cd flag forms (cd goes to $HOME)', async () => {
+    for (const command of [
+      'cd -- && git status',
+      'cd -P && git status',
+      'cd -e && git status',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command, { cwd: cleanRepo })).toBe(
+        false,
+      );
+    }
+  });
+
+  it('tracks cd across ; and newline separators', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${dirtyRepo}; git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${dirtyRepo}\ngit status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('propagates cd out of brace groups (they run in the current shell)', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`{ cd ${dirtyRepo}; }; git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      await isShellCommandReadOnlyAST(`{ cd ${dirtyRepo}; } && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('tracks cd wrapped in redirections', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(
+        `cd ${dirtyRepo} </dev/null && git status`,
+        { cwd: cleanRepo },
+      ),
+    ).toBe(false);
+  });
+
+  it('tracks cd inside subshell bodies', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`(cd ${dirtyRepo}; git status)`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('does not propagate cd state across || (RHS runs when cd failed)', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${cleanRepo} || git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+    expect(
+      await isShellCommandReadOnlyAST(
+        `cd ${dirtyRepo} || cd ${cleanRepo} && git status`,
+        { cwd: cleanRepo },
+      ),
+    ).toBe(false);
+  });
+
+  it('downgrades git after a multi-argument cd (bash stays put)', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${cleanRepo} extra; git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('downgrades git when the cd target does not exist (bash stays put)', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd ${root}/no-such-dir; git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('treats ANSI-C-quoted and backslash-escaped cd targets as unknown', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd $'${dirtyRepo}' && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      await isShellCommandReadOnlyAST('cd dirty\\ repo && git status', {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('treats concatenated quoted/unquoted cd targets as unknown', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`cd "${root}/"dirty-repo && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('never auto-approves commands containing pushd', async () => {
+    expect(
+      await isShellCommandReadOnlyAST(`pushd ${dirtyRepo} && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      await isShellCommandReadOnlyAST(`pushd ${cleanRepo} && git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+  });
 });

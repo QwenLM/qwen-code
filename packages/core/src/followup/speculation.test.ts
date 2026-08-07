@@ -5,6 +5,9 @@
  */
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   abortSpeculation,
   ensureToolResultPairing,
@@ -106,6 +109,71 @@ describe('startSpeculation', () => {
     expect(execute).not.toHaveBeenCalled();
 
     await abortSpeculation(state);
+  });
+
+  it('stops at a boundary for shell calls when the target repo config executes programs (#8575)', async () => {
+    const dirtyRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'spec-dirty-'));
+    fs.mkdirSync(path.join(dirtyRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dirtyRepo, '.git', 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+    try {
+      const execute = vi.fn();
+      const toolRegistry = {
+        ensureTool: vi.fn().mockResolvedValue({
+          build: vi.fn().mockReturnValue({
+            params: { command: 'git status' },
+            execute,
+          }),
+        }),
+      };
+      const config = {
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+        getCwd: vi.fn().mockReturnValue(process.cwd()),
+        getTargetDir: vi.fn().mockReturnValue(dirtyRepo),
+        getFastModel: vi.fn().mockReturnValue(undefined),
+        getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+        getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
+      } as unknown as Config;
+
+      forkedAgentMocks.runForkedAgent.mockResolvedValue({
+        jsonResult: { suggestion: '' },
+      });
+      forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+        if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+          yield {
+            type: 'chunk',
+            value: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: 'call-shell-git',
+                          name: 'run_shell_command',
+                          args: { command: 'git status' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          };
+        }
+      });
+
+      const state = await startSpeculation(config, 'check the repo');
+      await vi.waitFor(() => expect(state.status).toBe('boundary'));
+
+      expect(execute).not.toHaveBeenCalled();
+
+      await abortSpeculation(state);
+    } finally {
+      fs.rmSync(dirtyRepo, { recursive: true, force: true });
+    }
   });
 
   it('proceeds to execution when the host guard allows a speculative invocation', async () => {

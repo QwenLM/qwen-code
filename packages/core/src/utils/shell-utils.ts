@@ -197,14 +197,26 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
   }
 }
 
+/** A command segment plus the control operator that terminated it. */
+export interface CommandSegment {
+  command: string;
+  /** Terminating operator (`&&`, `||`, `;`, `|`, `&`, newline) — `null` for the last segment. */
+  separator: string | null;
+}
+
 /**
- * Splits a shell command into a list of individual commands, respecting quotes.
- * This is used to separate chained commands (e.g., using &&, ||, ;).
- * @param command The shell command string to parse
- * @returns An array of individual command strings
+ * Splits a shell command into segments, respecting quotes, and records the
+ * control operator terminating each segment. @see splitCommands for the
+ * separator-free variant.
  */
-export function splitCommands(command: string): string[] {
-  const commands: string[] = [];
+export function splitCommandsWithSeparators(command: string): CommandSegment[] {
+  const commands: CommandSegment[] = [];
+  const push = (segment: string, separator: string | null): void => {
+    const trimmed = segment.trim();
+    if (trimmed) {
+      commands.push({ command: trimmed, separator });
+    }
+  };
   let currentCommand = '';
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
@@ -300,18 +312,18 @@ export function splitCommands(command: string): string[] {
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
-        commands.push(currentCommand.trim());
+        push(currentCommand, char + nextChar);
         currentCommand = '';
         i++; // Skip the next character
       } else if (char === ';') {
-        commands.push(currentCommand.trim());
+        push(currentCommand, ';');
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
         if (prevChar === '>' || prevChar === '<') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          push(currentCommand, '&');
           currentCommand = '';
         }
       } else if (char === '|') {
@@ -319,17 +331,17 @@ export function splitCommands(command: string): string[] {
         if (prevChar === '>') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          push(currentCommand, '|');
           currentCommand = '';
         }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        push(currentCommand, '\n');
         currentCommand = '';
         i++; // Skip the \n
       } else if (char === '\n') {
         // Unix-style \n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        push(currentCommand, '\n');
         currentCommand = '';
       } else {
         currentCommand += char;
@@ -340,11 +352,26 @@ export function splitCommands(command: string): string[] {
     i++;
   }
 
-  if (currentCommand.trim()) {
-    commands.push(currentCommand.trim());
-  }
+  push(currentCommand, null);
 
-  return commands.filter(Boolean); // Filter out any empty strings
+  return commands;
+}
+
+/**
+ * Splits a shell command into a list of individual commands, respecting quotes.
+ * This is used to separate chained commands (e.g., using &&, ||, ;).
+ * @param command The shell command string to parse
+ * @returns An array of individual command strings
+ */
+export function splitCommands(command: string): string[] {
+  return splitCommandsWithSeparators(command).map((entry) => entry.command);
+}
+
+/** True when a split segment changes the working directory. */
+const DIRECTORY_CHANGE_SEGMENT = /^\(*\s*(?:cd|pushd|popd)(?:[\s);]|$)/;
+
+export function isDirectoryChangeSegment(segment: string): boolean {
+  return DIRECTORY_CHANGE_SEGMENT.test(segment.trim());
 }
 
 /**

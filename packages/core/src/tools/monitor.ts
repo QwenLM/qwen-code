@@ -39,6 +39,7 @@ import {
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
+  isDirectoryChangeSegment,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
 } from '../utils/shell-utils.js';
@@ -208,28 +209,39 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const subCommands = splitCommands(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
 
+    // After a directory-changing segment the per-sub-command probe would
+    // classify against the pre-cd cwd and silently drop the git sub-command
+    // that triggered this confirmation, so everything after it stays in
+    // scope (#8575).
+    let sawDirectoryChange = false;
     for (const sub of subCommands) {
-      // Only filter out read-only commands via AST analysis.
-      // We intentionally do NOT consult pm.isCommandAllowed() here because
-      // that evaluates under 'run_shell_command' context, which would let
-      // existing Bash(...) allow rules shrink the monitor confirmation scope.
-      // Monitor is a long-running background process with a different risk
-      // profile than one-shot shell execution and should maintain its own
-      // permission boundary.
-      let isReadOnly = false;
-      try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub, { cwd });
-      } catch (e) {
-        // Conservative fallback: if AST analysis fails, keep the sub-command
-        // in the confirmation scope instead of accidentally dropping it.
-        debugLogger.warn(
-          'AST read-only check failed for monitor sub-command, falling back to ask:',
-          e,
-        );
-      }
+      const changesDirectory = isDirectoryChangeSegment(sub);
+      const filterable = !sawDirectoryChange;
+      if (changesDirectory) sawDirectoryChange = true;
 
-      if (isReadOnly) {
-        continue;
+      if (filterable) {
+        // Only filter out read-only commands via AST analysis.
+        // We intentionally do NOT consult pm.isCommandAllowed() here because
+        // that evaluates under 'run_shell_command' context, which would let
+        // existing Bash(...) allow rules shrink the monitor confirmation scope.
+        // Monitor is a long-running background process with a different risk
+        // profile than one-shot shell execution and should maintain its own
+        // permission boundary.
+        let isReadOnly = false;
+        try {
+          isReadOnly = await isShellCommandReadOnlyAST(sub, { cwd });
+        } catch (e) {
+          // Conservative fallback: if AST analysis fails, keep the sub-command
+          // in the confirmation scope instead of accidentally dropping it.
+          debugLogger.warn(
+            'AST read-only check failed for monitor sub-command, falling back to ask:',
+            e,
+          );
+        }
+
+        if (isReadOnly) {
+          continue;
+        }
       }
 
       confirmableSubCommands.push(sub);

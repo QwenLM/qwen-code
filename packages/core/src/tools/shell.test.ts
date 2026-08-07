@@ -6898,6 +6898,41 @@ describe('ShellTool', () => {
       expect(await invocation.getDefaultPermission()).toBe('allow');
     });
 
+    it('keeps probed git sub-commands in the confirmation scope (#8575)', async () => {
+      // The confirmation-scope filter must pass the cwd to the classifier:
+      // without it the probe never runs and the git sub-command that
+      // triggered the confirmation is silently filtered out of the dialog.
+      mockGitConfigMayExecutePrograms.mockReturnValue(true);
+      const invocation = shellTool.build({
+        command: 'git status && rm x',
+        is_background: false,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string };
+
+      expect(details.rootCommand).toContain('git');
+      mockGitConfigMayExecutePrograms.mockReturnValue(false);
+    });
+
+    it('keeps sub-commands after a cd in the confirmation scope (#8575)', async () => {
+      mockGitConfigMayExecutePrograms.mockReturnValue(false);
+      const invocation = shellTool.build({
+        command: 'cd /tmp/repo && git status && rm x',
+        is_background: false,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string };
+
+      // The git segment runs after the cd, so classifying it against the
+      // pre-cd cwd is unsound — it must stay in the confirmation scope.
+      expect(details.rootCommand).toContain('git');
+      expect(details.rootCommand).toContain('rm');
+    });
+
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the
     // env-prefix wrapper substitution bypass. `getDefaultPermission`
     // calls `stripShellWrapper(this.params.command)` BEFORE the AST

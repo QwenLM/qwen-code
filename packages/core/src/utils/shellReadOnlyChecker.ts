@@ -11,10 +11,11 @@
  */
 
 import { parse } from 'shell-quote';
+import fs from 'node:fs';
 import path from 'node:path';
 import {
   detectCommandSubstitution,
-  splitCommands,
+  splitCommandsWithSeparators,
   stripShellWrapper,
 } from './shell-utils.js';
 import {
@@ -351,41 +352,60 @@ function evaluateShellSegment(
 }
 
 /**
- * Update the tracked execution directory across compound segments.
- * `cd`/`pushd` with a statically resolvable target move the probe's base
- * directory; anything unresolvable (`cd` alone, `cd -`, expansions,
- * `popd`) marks the directory as unknown so later git segments are
- * downgraded (#8575).
+ * Update the tracked execution directory across compound segments. `cd`
+ * with a statically resolvable target moves the probe's base directory;
+ * anything unresolvable (`cd` alone, `cd -`, flag-only forms, multi-arg
+ * forms, expansions, a subshell-wrapped cd) marks the directory as unknown
+ * so later git segments are downgraded (#8575). `pushd`/`popd` never reach
+ * this function — they are not whitelisted read-only roots, so their
+ * segments are rejected before tracking runs.
  */
-const DIR_CHANGE_COMMAND = /^(?:cd|pushd|popd)(?:\s|$)/;
+const CD_COMMAND = /^cd(?:[)\s]|$)/;
 
 function trackDirectoryChange(
   segment: string,
   currentCwd: string | undefined,
 ): { currentCwd?: string; unknownDir: boolean } {
   const trimmed = segment.trim();
-  if (!DIR_CHANGE_COMMAND.test(trimmed)) {
+  const wrapped = trimmed.startsWith('(');
+  const bare = wrapped ? trimmed.replace(/^\(+\s*/, '') : trimmed;
+  if (!CD_COMMAND.test(bare)) {
     return { currentCwd, unknownDir: false };
   }
-  if (/^popd/.test(trimmed)) {
+  if (wrapped) {
+    // cd inside a subshell: its effect on the segments that follow the
+    // flattened split cannot be determined — fail closed.
     return { currentCwd: undefined, unknownDir: true };
   }
-  const target = trimmed.split(/\s+/)[1];
-  if (
-    target === undefined ||
-    target === '-' ||
-    target.startsWith('~') ||
-    /[$`'"\\*?[\]{}()<>|;&]/.test(target)
-  ) {
-    return { currentCwd: undefined, unknownDir: true };
+  const unknown = { currentCwd: undefined, unknownDir: true };
+  const tokens = bare.split(/\s+/).slice(1);
+  const operands: string[] = [];
+  for (const token of tokens) {
+    if (token === '-') return unknown; // `cd -` goes to OLDPWD
+    if (token.startsWith('-')) continue; // -P/-L/-e/-- are flags, not targets
+    operands.push(token);
   }
-  if (path.isAbsolute(target)) {
-    return { currentCwd: target, unknownDir: false };
+  // No operand cds to $HOME; more than one is rejected by bash (`cd: too
+  // many arguments`) or rewrites $PWD (`cd old new`) — neither resolvable.
+  if (operands.length !== 1) return unknown;
+  const target = operands[0]!;
+  if (target.startsWith('~') || /[$`'"\\*?[\]{}()<>|;&]/.test(target)) {
+    return unknown;
   }
-  if (!currentCwd) {
-    return { currentCwd: undefined, unknownDir: true };
+  const resolved = path.isAbsolute(target)
+    ? target
+    : currentCwd
+      ? path.resolve(currentCwd, target)
+      : undefined;
+  if (!resolved) return unknown;
+  // bash refuses to enter a missing target or a non-directory and stays
+  // put; fail closed regardless — the target can appear before execution.
+  try {
+    if (!fs.statSync(resolved).isDirectory()) return unknown;
+  } catch {
+    return unknown;
   }
-  return { currentCwd: `${currentCwd}/${target}`, unknownDir: false };
+  return { currentCwd: resolved, unknownDir: false };
 }
 
 /**
@@ -411,12 +431,25 @@ export function isShellCommandReadOnly(
   )
     return false;
 
-  const segments = splitCommands(command);
+  const segments = splitCommandsWithSeparators(command);
 
   let currentCwd = checkOptions?.cwd;
   let unknownDir = checkOptions?.unknownDir === true;
+  let dirChanged = false;
+  let diverged = false;
 
-  for (const segment of segments) {
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!.command;
+    // A segment after a non-`&&` operator (`;`, `||`, `|`, newline, `&`)
+    // also runs when a preceding cd did not take effect, so the tracked
+    // directory no longer applies once one was involved (#8575).
+    if (index > 0 && segments[index - 1]!.separator !== '&&' && dirChanged) {
+      diverged = true;
+    }
+    if (diverged) {
+      unknownDir = true;
+      currentCwd = undefined;
+    }
     const segmentOptions: ShellReadOnlyCheckOptions | undefined = unknownDir
       ? { cwd: undefined, unknownDir: true }
       : currentCwd
@@ -425,12 +458,18 @@ export function isShellCommandReadOnly(
     if (!evaluateShellSegment(segment, segmentOptions)) {
       return false;
     }
+    if (diverged) continue;
     const tracked = trackDirectoryChange(segment, currentCwd);
     if (tracked.unknownDir) {
       unknownDir = true;
       currentCwd = undefined;
-    } else if (tracked.currentCwd !== undefined) {
+      dirChanged = true;
+    } else if (
+      tracked.currentCwd !== undefined &&
+      tracked.currentCwd !== currentCwd
+    ) {
       currentCwd = tracked.currentCwd;
+      dirChanged = true;
     }
   }
 

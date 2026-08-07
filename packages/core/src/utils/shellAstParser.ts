@@ -676,8 +676,7 @@ type SyntaxNode = Parser.SyntaxNode;
 const SHELL_EXPANSION_TYPES = new Set(
   'simple_expansion expansion arithmetic_expansion'.split(' '),
 );
-const CHILD_STATEMENT =
-  /^(?:pipeline|list|subshell|compound_statement|negated_command)$/;
+const CHILD_STATEMENT = /^(?:pipeline|negated_command)$/;
 /** Collect all descendant nodes of given types. */
 function collectDescendants(
   node: SyntaxNode,
@@ -1116,64 +1115,229 @@ function childrenSafety(
 }
 
 /**
- * Statements in a `list` (`&&`, `||`, `;`) run sequentially, and `cd` /
- * `pushd` change the directory later segments execute in. Track the
- * directory so the git-config probe is applied to the repository each git
- * segment actually reaches (#8575). Nested lists are flattened so cd state
- * propagates across the whole chain (tree-sitter nests `a && b && c`).
+ * Statements in a sequence run one after another (`;` or newline
+ * separators at program/brace-group level), and `cd`/`pushd` change the
+ * directory later statements execute in. Track the directory so the
+ * git-config probe is applied to the repository each git statement
+ * actually reaches (#8575).
+ */
+function evaluateSequenceSafety(
+  statements: SyntaxNode[],
+  checkOptions?: ShellReadOnlyCheckOptions,
+): ShellCommandSafety {
+  let context = checkOptions;
+  let result: ShellCommandSafety = 'read-only';
+  for (const node of statements) {
+    result = mergeSafety(result, evaluateStatementSafety(node, context));
+    context = contextAfterStatement(node, context);
+  }
+  return result;
+}
+
+/**
+ * Flatten a `list` node into (statement, joining-operator) pairs. Nested
+ * lists are inlined so `a && b && c` — which tree-sitter may nest — is
+ * traversed as one chain with its operators intact.
+ */
+function* iterateListStatements(
+  node: SyntaxNode,
+  leadingOperator?: string,
+): Generator<{ statement: SyntaxNode; operator?: string }> {
+  let operator = leadingOperator;
+  for (const child of node.children) {
+    if (!child.isNamed) {
+      if (child.type === '&&' || child.type === '||' || child.type === '&') {
+        operator = child.type;
+      }
+      continue;
+    }
+    if (child.type === 'list') {
+      yield* iterateListStatements(child, operator);
+    } else {
+      yield { statement: child, operator };
+    }
+    operator = undefined;
+  }
+}
+
+/**
+ * Evaluate a `list` (`&&`/`||` chain), tracking directory changes across
+ * the segments (#8575). cd state only propagates across `&&`: the segment
+ * after `||` (or `&`) runs precisely when the preceding chain did not
+ * complete (or runs in a background subshell), so once a cd was tracked
+ * the effective directory for everything after a non-`&&` operator is
+ * unknown.
  */
 function evaluateListSafety(
   node: SyntaxNode,
   checkOptions?: ShellReadOnlyCheckOptions,
 ): ShellCommandSafety {
   let context = checkOptions;
+  let diverged = false;
+  let directoryTracked = false;
   let result: ShellCommandSafety = 'read-only';
 
-  const visit = (child: SyntaxNode): void => {
-    if (child.type === 'list') {
-      for (const nested of child.namedChildren) visit(nested);
-      return;
+  for (const { statement, operator } of iterateListStatements(node)) {
+    if (operator && operator !== '&&' && directoryTracked) {
+      diverged = true;
     }
-    if (child.type === 'command') {
-      const name = getCommandName(child);
-      if (name === 'cd' || name === 'pushd') {
-        context = resolveCdContext(child, context);
-      } else if (name === 'popd') {
-        context = { ...context, cwd: undefined, unknownDir: true };
-      }
+    if (diverged) {
+      result = mergeSafety(
+        result,
+        evaluateStatementSafety(statement, {
+          cwd: undefined,
+          unknownDir: true,
+        }),
+      );
+      continue;
     }
-    result = mergeSafety(result, evaluateStatementSafety(child, context));
-  };
-
-  for (const child of node.namedChildren) visit(child);
+    result = mergeSafety(result, evaluateStatementSafety(statement, context));
+    const next = contextAfterStatement(statement, context, true);
+    if (next !== context) {
+      context = next;
+      directoryTracked = true;
+    }
+  }
   return result;
+}
+
+/**
+ * The execution-directory context after `node` finishes, for the benefit
+ * of the statements that follow it. Returns the SAME object when the node
+ * cannot change the directory. `certain` means the next statement only
+ * runs when this one succeeded (`&&` chaining); otherwise the next
+ * statement also runs when a cd fails and bash stays put.
+ */
+function contextAfterStatement(
+  node: SyntaxNode,
+  context?: ShellReadOnlyCheckOptions,
+  certain = false,
+): ShellReadOnlyCheckOptions | undefined {
+  if (node.type === 'redirected_statement' || node.type === 'negated_command') {
+    // Redirection/negation still runs the body in the current shell.
+    const body = node.namedChildren[0];
+    return body
+      ? contextAfterStatement(body, context, certain)
+      : { ...context, cwd: undefined, unknownDir: true };
+  }
+  if (node.type === 'command') {
+    const name = getCommandName(node);
+    if (name === 'cd' || name === 'pushd') {
+      return contextAfterCd(node, context, certain);
+    }
+    if (name === 'popd') {
+      return { ...context, cwd: undefined, unknownDir: true };
+    }
+    return context;
+  }
+  if (node.type === 'compound_statement') {
+    // Brace groups run in the current shell — fold the net effect of
+    // the group's `;`/newline-separated body.
+    let ctx = context;
+    for (const child of node.namedChildren) {
+      ctx = contextAfterStatement(child, ctx);
+    }
+    return ctx;
+  }
+  if (node.type === 'subshell') {
+    // Child process — directory changes stay inside.
+    return context;
+  }
+  // if/for/while/case/function bodies run in the current shell but only
+  // conditionally — a cd inside leaves the following directory unknown.
+  return containsCurrentShellCd(node)
+    ? { ...context, cwd: undefined, unknownDir: true }
+    : context;
+}
+
+function contextAfterCd(
+  commandNode: SyntaxNode,
+  context?: ShellReadOnlyCheckOptions,
+  certain = false,
+): ShellReadOnlyCheckOptions {
+  const resolved = resolveCdContext(commandNode, context);
+  if (!resolved.cwd || resolved.unknownDir) {
+    return { ...context, cwd: undefined, unknownDir: true };
+  }
+  if (certain) return resolved;
+  // The following statement also runs when the cd fails (bash stays in
+  // the prior directory), so the prior directory must be clean too before
+  // the resolved target can be trusted.
+  const priorMayExecute =
+    context?.unknownDir === true ||
+    (!!context?.cwd && gitConfigMayExecutePrograms(context.cwd));
+  return priorMayExecute
+    ? { ...context, cwd: undefined, unknownDir: true }
+    : resolved;
+}
+
+/** True when a cd/pushd/popd runs in the current shell below `node`. */
+function containsCurrentShellCd(node: SyntaxNode): boolean {
+  if (
+    node.type === 'subshell' ||
+    node.type === 'command_substitution' ||
+    node.type === 'process_substitution'
+  ) {
+    return false; // child process
+  }
+  if (node.type === 'command') {
+    const name = getCommandName(node);
+    if (name === 'cd' || name === 'pushd' || name === 'popd') return true;
+  }
+  return node.namedChildren.some((child) => containsCurrentShellCd(child));
+}
+
+/**
+ * The directory a cd/pushd argument points to, when it can be resolved
+ * statically. Anything else (concatenated quote segments, ANSI-C quoting,
+ * backslash escapes, expansions) is unresolvable — the probe would inspect
+ * a fabricated path while bash cds to the real one.
+ */
+function staticallyResolvableCdTarget(node: SyntaxNode): string | undefined {
+  const { text } = node;
+  if (node.type === 'raw_string') return text.slice(1, -1);
+  if (node.type === 'string') {
+    const inner = text.slice(1, -1);
+    return /[\\"$`]/.test(inner) ? undefined : inner;
+  }
+  if (node.type === 'word') {
+    return /[\\"'$`]/.test(text) ? undefined : text;
+  }
+  return undefined;
 }
 
 function resolveCdContext(
   commandNode: SyntaxNode,
   context?: ShellReadOnlyCheckOptions,
-): ShellReadOnlyCheckOptions | undefined {
+): ShellReadOnlyCheckOptions {
+  const unknown = { ...context, cwd: undefined, unknownDir: true };
   const argNodes = getArgumentNodes(commandNode);
-  const target = argNodes[0] ? stripOuterQuotes(argNodes[0]!.text) : undefined;
-  if (
-    target === undefined ||
-    target === '-' || // previous directory (OLDPWD) — unknown
-    target.startsWith('~') || // home-relative — unknown without $HOME
-    argNodes.some((arg) => hasShellExpansion(arg))
-  ) {
-    return { ...context, cwd: undefined, unknownDir: true };
+  if (argNodes.some((arg) => hasShellExpansion(arg))) return unknown;
+  const operands: SyntaxNode[] = [];
+  for (const arg of argNodes) {
+    if (arg.text === '-') return unknown; // `cd -` goes to OLDPWD
+    if (arg.text.startsWith('-')) continue; // -P/-L/-e/-- are flags, not targets
+    operands.push(arg);
   }
-  if (path.isAbsolute(target)) {
-    return { ...context, cwd: target, unknownDir: false };
+  // No operand cds to $HOME; more than one is rejected by bash (`cd: too
+  // many arguments`) or rewrites $PWD (`cd old new`) — neither resolvable.
+  if (operands.length !== 1) return unknown;
+  const target = staticallyResolvableCdTarget(operands[0]!);
+  if (target === undefined || target.startsWith('~')) return unknown;
+  const resolved = path.isAbsolute(target)
+    ? target
+    : context?.cwd
+      ? path.resolve(context.cwd, target)
+      : undefined;
+  if (!resolved) return unknown;
+  // bash refuses to enter a missing target or a non-directory and stays
+  // put; fail closed regardless — the target can appear before execution.
+  try {
+    if (!fs.statSync(resolved).isDirectory()) return unknown;
+  } catch {
+    return unknown;
   }
-  if (!context?.cwd) {
-    return { ...context, cwd: undefined, unknownDir: true };
-  }
-  return {
-    ...context,
-    cwd: path.resolve(context.cwd, target),
-    unknownDir: false,
-  };
+  return { ...context, cwd: resolved, unknownDir: false };
 }
 
 function evaluateStatementSafety(
@@ -1182,6 +1346,8 @@ function evaluateStatementSafety(
 ): ShellCommandSafety {
   if (node.type === 'command') return evaluateCommandSafety(node, checkOptions);
   if (node.type === 'list') return evaluateListSafety(node, checkOptions);
+  if (node.type === 'compound_statement' || node.type === 'subshell')
+    return evaluateSequenceSafety(node.namedChildren, checkOptions);
   if (CHILD_STATEMENT.test(node.type))
     return childrenSafety(node, 'read-only', checkOptions);
   if (node.type === 'redirected_statement')
@@ -1208,11 +1374,7 @@ async function classifyInternal(
   try {
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
-    return mergeSafety(
-      ...root.namedChildren.map((child) =>
-        evaluateStatementSafety(child, checkOptions),
-      ),
-    );
+    return evaluateSequenceSafety(root.namedChildren, checkOptions);
   } finally {
     tree.delete();
   }

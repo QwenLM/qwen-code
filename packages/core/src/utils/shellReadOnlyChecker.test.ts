@@ -593,4 +593,63 @@ describe('git config probe cd tracking (#8575)', () => {
       isShellCommandReadOnly(`cd ${dirtyRepo} && ls -la`, { cwd: cleanRepo }),
     ).toBe(true);
   });
+
+  it('does not take cd flags as the destination directory', () => {
+    expect(
+      isShellCommandReadOnly(`cd -P ${dirtyRepo} && git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly(`cd -- ${cleanRepo} && git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(true);
+  });
+
+  it('downgrades git after operand-less cd flag forms (cd goes to $HOME)', () => {
+    expect(
+      isShellCommandReadOnly('cd -- && git status', { cwd: cleanRepo }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly('cd -P && git status', { cwd: cleanRepo }),
+    ).toBe(false);
+  });
+
+  it('does not propagate cd state across non-&& separators', () => {
+    expect(
+      isShellCommandReadOnly(`cd ${cleanRepo} || git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly(`cd ${dirtyRepo}; git status`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('fails closed for a subshell-wrapped cd', () => {
+    expect(
+      isShellCommandReadOnly(`(cd ${dirtyRepo} && git status)`, {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('downgrades git after a multi-argument cd (bash stays put)', () => {
+    expect(
+      isShellCommandReadOnly(`cd ${cleanRepo} extra; git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('downgrades git when the cd target does not exist (bash stays put)', () => {
+    expect(
+      isShellCommandReadOnly(`cd ${root}/no-such-dir; git status`, {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+  });
 });

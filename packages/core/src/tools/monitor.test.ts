@@ -531,6 +531,50 @@ describe('MonitorTool', () => {
       );
     });
 
+    it('lets the directory parameter win over the target dir (#8575)', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
+      const invocation = createInvocation({
+        command: 'git status',
+        directory: '/other/dir',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        expect.any(String),
+        { cwd: '/other/dir' },
+      );
+    });
+
+    it('passes the execution cwd to the confirmation-scope classifier (#8575)', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
+      const invocation = createInvocation({
+        command: 'git status && rm x',
+      });
+
+      await invocation.getConfirmationDetails(new AbortController().signal);
+
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        expect.any(String),
+        { cwd: '/test/dir' },
+      );
+    });
+
+    it('keeps sub-commands after a cd in the monitor confirmation scope (#8575)', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true); // the cd
+      const invocation = createInvocation({
+        command: 'cd /tmp/repo && git status',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string };
+
+      expect(details.rootCommand).toContain('git');
+      // Only the cd segment is classified; the segment after the cd is
+      // kept in scope instead of being re-probed against the stale cwd.
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledTimes(1);
+    });
+
     it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {
       const invocation = createInvocation({
         command: 'echo $(cat secret.txt)',

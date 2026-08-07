@@ -63,6 +63,10 @@ describe('gitConfigMayExecutePrograms', () => {
     ['[core]\n\tsshCommand = /tmp/evil\n', 'core.sshCommand'],
     ['[credential]\n\thelper = !/tmp/evil\n', 'credential.helper'],
     ['[gpg]\n\tprogram = /tmp/evil\n', 'gpg.program'],
+    [
+      '[core]\n\talternateRefsCommand = /tmp/evil\n',
+      'core.alternateRefsCommand',
+    ],
   ] as Array<[string, string]>)(
     'flags program-valued key %s',
     (config, label) => {
@@ -87,6 +91,7 @@ describe('gitConfigMayExecutePrograms', () => {
   it.each([
     ['[pager]\n\tlog = delta\n', 'pager-cmd-override'],
     ['[diff "drv"]\n\ttextconv = /tmp/evil\n', 'diff-driver-textconv'],
+    ['[diff "drv"]\n\tcommand = /tmp/evil\n', 'diff-driver-command'],
     [
       '[credential "https://example.com"]\n\thelper = store\n',
       'credential-url-helper',
@@ -147,10 +152,16 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(incIf)).toBe(true);
   });
 
-  it('flags filter clean/smudge/process programs (git diff triggers them)', () => {
-    const repo = makeRepo('filter', '[filter "evil"]\n\tclean = /tmp/evil\n');
-    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
-  });
+  it.each(['clean', 'smudge', 'process'])(
+    'flags filter %s programs (git diff triggers them)',
+    (key) => {
+      const repo = makeRepo(
+        `filter-${key}`,
+        `[filter "evil"]\n\t${key} = /tmp/evil\n`,
+      );
+      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+    },
+  );
 
   it('flags ext:: url.<base>.insteadOf rewrite targets', () => {
     const repo = makeRepo(
@@ -244,7 +255,12 @@ describe('gitConfigMayExecutePrograms', () => {
       );
       const sub = path.join(root, 'sub-checkout');
       fs.mkdirSync(sub, { recursive: true });
-      fs.writeFileSync(path.join(sub, '.git'), `gitdir: ${store}\n`);
+      // Real git writes RELATIVE pointers for submodules; resolution is
+      // against the pointer's containing directory.
+      fs.writeFileSync(
+        path.join(sub, '.git'),
+        `gitdir: ${path.relative(sub, store)}\n`,
+      );
       expect(gitConfigMayExecutePrograms(sub)).toBe(true);
     });
   });
@@ -256,25 +272,91 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
 
-  it('fails closed when the .git pointer file cannot be read', () => {
-    const repo = path.join(root, 'bad-pointer');
-    fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
-    fs.rmdirSync(path.join(repo, '.git'));
-    fs.mkdirSync(path.join(repo, '.git.d'), { recursive: true });
-    fs.writeFileSync(path.join(repo, '.git'), 'gitdir: .git.d\n');
-    fs.chmodSync(path.join(repo, '.git'), 0o000);
-    try {
-      expect(gitConfigMayExecutePrograms(repo)).toBe(true);
-    } finally {
-      fs.chmodSync(path.join(repo, '.git'), 0o644);
-    }
-  });
+  // chmod(0o000) does not block reads on Windows (only the owner-write
+  // bit is honored) or for root (DAC bypass), so the simulation only
+  // means EACCES elsewhere.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails closed when the .git pointer file cannot be read',
+    () => {
+      const repo = path.join(root, 'bad-pointer');
+      fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+      fs.rmdirSync(path.join(repo, '.git'));
+      fs.mkdirSync(path.join(repo, '.git.d'), { recursive: true });
+      fs.writeFileSync(path.join(repo, '.git'), 'gitdir: .git.d\n');
+      fs.chmodSync(path.join(repo, '.git'), 0o000);
+      try {
+        expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+      } finally {
+        fs.chmodSync(path.join(repo, '.git'), 0o644);
+      }
+    },
+  );
 
   it('fails closed on an unparseable .git pointer file', () => {
     const repo = path.join(root, 'garbage-pointer');
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, '.git'), 'not a gitdir pointer\n');
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('flags partially quoted ext:: url values (git concatenates segments)', () => {
+    const trailing = makeRepo(
+      'ext-partial-quote',
+      '[remote "origin"]\n\turl = "ext::/tmp/evil.sh" x\n',
+    );
+    expect(gitConfigMayExecutePrograms(trailing)).toBe(true);
+    const split = makeRepo(
+      'ext-split-quotes',
+      '[remote "origin"]\n\turl = "ext""::/tmp/evil.sh"\n',
+    );
+    expect(gitConfigMayExecutePrograms(split)).toBe(true);
+  });
+
+  it('flags url.<base> subsections whose ext:: prefix is escape-encoded', () => {
+    const repo = makeRepo(
+      'url-subsection-escape',
+      '[url "e\\xt::/tmp/evil.sh "]\n\tinsteadOf = https://example.com/\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('probes through a symlinked workspace directory', () => {
+    if (process.platform === 'win32') return; // symlink perms differ
+    const repo = makeRepo('sym-repo', '[diff]\n\texternal = /tmp/evil\n');
+    const link = path.join(root, 'ws-link');
+    fs.symlinkSync(repo, link);
+    expect(gitConfigMayExecutePrograms(link)).toBe(true);
+  });
+
+  it('fails closed when the repo search depth is exhausted', () => {
+    const repo = makeRepo('deep-repo', '[diff]\n\texternal = /tmp/evil\n');
+    let deep = repo;
+    for (let i = 0; i < 70; i++) {
+      deep = path.join(deep, `d${i}`);
+    }
+    fs.mkdirSync(deep, { recursive: true });
+    expect(gitConfigMayExecutePrograms(deep)).toBe(true);
+  });
+
+  it('reads the config of a git directory the cwd stands in', () => {
+    // Submodule storage layout: `<repo>/.git/modules/<name>` is itself a
+    // git directory; git reads ITS config while standing in it, not the
+    // superproject's.
+    const moduleGitDir = path.join(root, 'super', '.git', 'modules', 'sub');
+    fs.mkdirSync(path.join(moduleGitDir, 'objects'), { recursive: true });
+    fs.mkdirSync(path.join(moduleGitDir, 'refs'), { recursive: true });
+    fs.writeFileSync(path.join(moduleGitDir, 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(moduleGitDir, 'config'), '[core]\n');
+    // Clean module config, clean superproject config.
+    const superConfig = path.join(root, 'super', '.git', 'config');
+    fs.writeFileSync(superConfig, '[core]\n');
+    expect(gitConfigMayExecutePrograms(moduleGitDir)).toBe(false);
+
+    fs.writeFileSync(
+      path.join(moduleGitDir, 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+    expect(gitConfigMayExecutePrograms(moduleGitDir)).toBe(true);
   });
 
   it('fails closed on section headers it cannot parse', () => {

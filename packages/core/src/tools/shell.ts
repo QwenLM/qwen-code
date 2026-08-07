@@ -62,6 +62,7 @@ import {
   getCommandRoots,
   getShellConfiguration,
   hasShellSubstitution,
+  isDirectoryChangeSegment,
   SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
   type ShellType,
@@ -2108,28 +2109,39 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
-    // Split compound command and filter out already-allowed (read-only) sub-commands
+    // Split compound command and filter out already-allowed (read-only)
+    // sub-commands. After a directory-changing segment the per-sub-command
+    // probe would classify against the pre-cd cwd and silently drop the git
+    // sub-command that triggered this confirmation, so everything after it
+    // stays in scope (#8575).
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
+    let sawDirectoryChange = false;
     for (const sub of subCommands) {
-      let isReadOnly = false;
-      try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub, { cwd });
-      } catch {
-        // conservative: treat unknown commands as requiring confirmation
-      }
+      const changesDirectory = isDirectoryChangeSegment(sub);
+      const filterable = !sawDirectoryChange;
+      if (changesDirectory) sawDirectoryChange = true;
 
-      if (isReadOnly) {
-        continue;
-      }
-
-      if (pm) {
+      if (filterable) {
+        let isReadOnly = false;
         try {
-          if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
-            continue;
+          isReadOnly = await isShellCommandReadOnlyAST(sub, { cwd });
+        } catch {
+          // conservative: treat unknown commands as requiring confirmation
+        }
+
+        if (isReadOnly) {
+          continue;
+        }
+
+        if (pm) {
+          try {
+            if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
+              continue;
+            }
+          } catch (e) {
+            debugLogger.warn('PermissionManager command check failed:', e);
           }
-        } catch (e) {
-          debugLogger.warn('PermissionManager command check failed:', e);
         }
       }
 

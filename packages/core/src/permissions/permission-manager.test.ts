@@ -3952,4 +3952,44 @@ describe('git config execution probe wiring (#8575)', () => {
       }),
     ).resolves.toBe('allow');
   });
+
+  it('resolves compound defaults against the full command with cwd', async () => {
+    const manager = new PermissionManager(makeConfig());
+    manager.initialize();
+
+    await expect(
+      manager.evaluate({
+        toolName: 'run_shell_command',
+        command: 'git status && git diff',
+        cwd: dirtyRepo,
+      }),
+    ).resolves.toBe('ask');
+
+    await expect(
+      manager.evaluate({
+        toolName: 'run_shell_command',
+        command: 'git status && git diff',
+        cwd: cleanRepo,
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('does not let a segment rule override the cd-aware compound default', async () => {
+    // With a rule matching one segment, the other segment's 'default' must
+    // resolve against the FULL command (cd-aware), not the bare segment
+    // probed at the original cwd — otherwise `cd <dirty> && git status`
+    // auto-executes (#8575).
+    const manager = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(cd *)'] }),
+    );
+    manager.initialize();
+
+    await expect(
+      manager.evaluate({
+        toolName: 'run_shell_command',
+        command: `cd ${dirtyRepo} && git status`,
+        cwd: cleanRepo,
+      }),
+    ).resolves.toBe('ask');
+  });
 });

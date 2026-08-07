@@ -453,6 +453,17 @@ export class PermissionManager {
 
     let mostRestrictive: ResolvedDecision = 'allow';
 
+    // A 'default' sub-command resolves against the FULL original command:
+    // per-segment classification cannot see cd context across the split and
+    // would probe a stale cwd, letting `cd <dirty> && git status` auto-run
+    // whenever any rule matches a sibling segment (#8575). The
+    // whole-command classifier tracks directory changes.
+    // Called only for compound commands, so ctx.command is defined.
+    const defaultDecision = await this.resolveDefaultPermission(
+      ctx.command!,
+      this.probeCwd(ctx),
+    );
+
     for (const subCmd of subCommands) {
       const subCtx: PermissionCheckContext = {
         ...ctx,
@@ -464,7 +475,7 @@ export class PermissionManager {
       // (same logic as ShellToolInvocation.getDefaultPermission)
       const decision: ResolvedDecision =
         rawDecision === 'default'
-          ? await this.resolveDefaultPermission(subCmd, this.probeCwd(ctx))
+          ? defaultDecision
           : (rawDecision as ResolvedDecision);
 
       if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
