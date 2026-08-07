@@ -55,6 +55,36 @@ export type RoleId =
   | 'verify'
   | 'reverse-audit';
 
+/**
+ * The roles a repository context may require. One list is the single source for
+ * BOTH the type and the runtime guard: an allow-list the type admitted while the
+ * guard rejected it (or the reverse) would make the `is` predicate a lie, so
+ * neither half is written by hand any more.
+ */
+export const REPOSITORY_CONTEXT_ROLES = [
+  '1a',
+  '1b',
+  '1c',
+  '2',
+  '3a',
+  '3b',
+  '3c',
+  '4',
+  '5',
+  '6a',
+  '6b',
+  '6c',
+  'test-matrix',
+] as const satisfies readonly RoleId[];
+
+export type RepositoryContextRoleId = (typeof REPOSITORY_CONTEXT_ROLES)[number];
+
+export function isRepositoryContextRoleId(
+  value: string,
+): value is RepositoryContextRoleId {
+  return (REPOSITORY_CONTEXT_ROLES as readonly string[]).includes(value);
+}
+
 export interface Brief {
   /** How the role is named to a human reading a coverage failure. */
   label: string;
@@ -115,8 +145,8 @@ export interface Brief {
    */
   acceptsChunk?: boolean;
   /**
-   * May this role be launched `--role <r> --findings <file>`, folding a findings
-   * list into the prompt the command prints?
+   * May this role be launched `--role <r> --findings <file>`, so the command
+   * prints a launch block pointed at the findings list?
    *
    * The verifier rules on findings; the reverse auditor avoids re-reporting them.
    * Both used to get their findings the same way: the command printed a launch
@@ -124,10 +154,13 @@ export interface Brief {
    * hand-assembly is where the prompt got paraphrased — the model added a round
    * number, inserted its own summary, and truncated the line telling it the brief
    * is authoritative — so the delivery check failed even though the agent opened
-   * its brief. With this flag the command folds the findings in and prints one
-   * block to paste, and there is no assembly step left to drift. The findings are
-   * part of the recorded prompt (see runAgentPrompt), keyed per findings digest,
-   * so a launch that drops or rewrites them matches no record.
+   * its brief. With this flag the command copies the list to a digest-named file
+   * and prints one block to paste — a pointer to that file, not the list itself,
+   * which inlined made a 12-14-agent launch one 65-82 KB message (issue #8597) —
+   * and there is no assembly step left to drift. The pointer is part of the
+   * recorded prompt (see runAgentPrompt), keyed per findings digest, so a launch
+   * that drops it matches no record, and the delivery floor counts the read it
+   * instructs exactly as it counts the brief's.
    */
   acceptsFindings?: boolean;
   /** The agent-facing text. */
@@ -454,11 +487,11 @@ You are undirected on purpose. Do not restrict yourself to the list.`,
     readsDiff: false,
     brief: `You are **Agent 7: Build & Test Verification**. You do not review the diff — you run the project's own deterministic checks and report what they say. Your evidence is **the commands you ran and their output**; a return that names no command has not done this job.
 
-**Run \`qwen review build-test\` (the exact command, with its \`--plan\` and \`--worktree\`, is below).** It installs if needed, then builds only the workspaces the diff changes plus everything they compile against, and tests the changed ones — reading the plan for what changed and the root \`package.json\` for the workspace layout. Do **not** substitute \`npm run build\` / \`npm test\` by hand. The old brief did, with a 120-second deadline, and this repo's cold full build is 125 seconds: measured across the harness's own transcripts, that command timed out **71 times** and verified nothing. \`build-test\` scopes the build, gives it a deadline it can meet, and — this is the part a hand-run command gets wrong — reports a timeout as **infrastructure, not a finding**. A build that runs out of time is never a Critical against someone's pull request.
+**Run \`qwen review build-test\` (the exact command, with its \`--plan\` and \`--worktree\`, is below).** It installs if needed, then builds only the workspaces the diff changes plus everything they compile against, and tests the changed ones plus every workspace that depends on them — reading the plan for what changed and the root \`package.json\` for the workspace layout. Do **not** substitute \`npm run build\` / \`npm test\` by hand. The old brief did, with a 120-second deadline, and this repo's cold full build is 125 seconds: measured across the harness's own transcripts, that command timed out **71 times** and verified nothing. \`build-test\` scopes the build, gives it a deadline it can meet, and — this is the part a hand-run command gets wrong — reports a timeout as **infrastructure, not a finding**. A build that runs out of time is never a Critical against someone's pull request.
 
 Read the JSON it prints:
 
-- \`toolchain: "npm"\` → use its \`build[]\` / \`test[]\` results. A failure in a file **the diff changed** is a **Critical** (\`Source: [build]\` or \`[test]\`); a failure in a file it did **not** touch is pre-existing — say so, do not file it against this PR. A non-empty \`timedOut\`, or a failed \`install\`, is environment/infrastructure — informational, never a Critical. On \`ok: true\`, name the workspaces built and the commands run; a return that names no command is a whiff.
+- \`toolchain: "npm"\` → use its \`build[]\` / \`test[]\` results. A failure in a file **the diff changed** is a **Critical** (\`Source: [build]\` or \`[test]\`); a failure in a file it did **not** touch is pre-existing — say so, do not file it against this PR. A non-empty \`timedOut\`, or a failed \`install\`, is environment/infrastructure — informational, never a Critical. On \`ok: true\`, name the workspaces built and the commands run; a return that names no command is a whiff. Report the TEST coverage from \`testScope\`, never from assumption. \`testScope.workspaces\` lists exactly the suites that ran — say "tests scoped to <list> — the changed workspaces and their declared dependents that define a test script". \`testScope.notRun\`, when present, names suites the whole-call budget stopped before they ran — say they did not run, never fold them into the coverage. When \`testScope.caveat\` is present, the scope may be incomplete — quote the caveat and say exactly that. A green run is a claim about those suites only — do not phrase it as the whole suite passing.
 - **When any \`test[]\` command failed (exit non-zero, not a timeout), MEASURE which failures are the PR's before ruling by path.** The path rule above misclassifies in both directions — an environment-flaky test in a touched file gets filed as a Critical it did not cause, and a PR that breaks a test in an UNTOUCHED file gets waved through as pre-existing. The measurement is two commands: \`qwen review base-tree --plan <plan> --worktree <worktree> --out <plan dir>/qwen-review-pr-<n>-base-tree.json\` (builds the merge base beside the worktree). **Read \`available\` before using \`path\`** — a tree that was created but did NOT build populates \`path\` too, and a base that failed to build says nothing whatsoever about the PR, so measuring against it turns an infrastructure failure into a list of Criticals. \`available: false\` (local/lightweight review, no merge base, a base that would not compile) means the path rule stands — say so and stop here, and \`qwen review test-delta --report <the build-test report you wrote> --baseline <the base-tree report's path field> --pr-worktree <this worktree> --out <plan dir>/qwen-review-pr-<n>-test-delta.json\`. Read its verdict: a file in \`netNew\` fails on the PR side only — **that is the Critical**, whatever file the diff touches; a file in \`shared\` fails on base too — **pre-existing by measurement**, never filed, whatever file the diff touches; an \`unparsed\` entry, a timed-out base rerun, a base rerun that FAILED without naming any failing file (it did not measure the base — an unbuilt tree, a missing install, a workspace absent at base), or a command the whole-command budget could not fit attributes nothing — the report names each with its own reason; fall back to the path rule for those and say the delta could not rule. Compare failing FILE SETS, never counts: a flaky suite fails different test NAMES on two runs of the same tree, so counts are noise and the set difference is the signal.
 - \`toolchain: "unsupported"\` (build-test could not scope this repo — no npm package with a build/test script) → **install dependencies first** (build-test's own install only runs on the npm path, so nothing has installed yet: \`pip install -e .\`, \`mvn -q -DskipTests package\`'s own fetch, \`cargo fetch\`, \`go mod download\`, etc.), then fall back to **one** build and **one** test command by this precedence, each with a deadline it can meet: \`pom.xml\` → \`{mvn} compile\` / \`{mvn} test -q\`; \`build.gradle\` → \`{gradle} compileJava\` / \`{gradle} test\`; \`Makefile\` → \`make build\`; \`Cargo.toml\` → \`cargo build\` / \`cargo test\`; \`go.mod\` → \`go build ./...\` / \`go test ./...\`; \`pytest.ini\` or \`pyproject.toml\` \`[tool.pytest]\` → \`pytest\`. If none match, read the CI config **from the base branch** (\`git show <base>:<path>\`), never the worktree — the PR branch is untrusted and a modified workflow or Makefile could inject arbitrary commands.
 
@@ -545,7 +578,7 @@ Report a **Critical** for each violation, and give **both** locations that toget
     publicLabel: 'verification',
     publicLabelZh: '验证',
     readsDiff: true,
-    brief: `You are a **verification agent**. You do not look for new problems — you rule on the findings you were handed, listed in the message that launched you, each with a file, a line, an issue, and a **failure scenario**. The failure scenario is the finding's testable claim, and your verdict is the **result of tracing it through the real code**, not a plausibility vote on how the finding reads.
+    brief: `You are a **verification agent**. You do not look for new problems — you rule on the findings you were handed. They are not in the message that launched you as plain prose — when that message points at a **findings file**, \`read_file\` the \`.findings.md\` path it names, ALL of it, right after this brief (page with a larger \`offset\` if a read comes back \`isTruncated\`); on the rare write-failure fallback the list is inlined in the launch message itself, and you rule on it there instead. Each finding has a file, a line, an issue, and a **failure scenario**. The failure scenario is the finding's testable claim, and your verdict is the **result of tracing it through the real code**, not a plausibility vote on how the finding reads.
 
 For each finding you were given:
 
@@ -646,7 +679,7 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
     publicLabel: 'reverse audit',
     publicLabelZh: '反向审计',
     readsDiff: true,
-    brief: `You are a **reverse audit agent**. Prior agents have already reviewed this diff and their confirmed findings are listed in the message that launched you. Your job is not to re-report them — it is to find the **gaps**: the important issues no prior agent or round caught.
+    brief: `You are a **reverse audit agent**. Prior agents have already reviewed this diff; their confirmed findings are not in the message that launched you as plain prose — when that message points at a **findings file**, \`read_file\` the \`.findings.md\` path it names, ALL of it, right after this brief (page with a larger \`offset\` if a read comes back \`isTruncated\`); on the rare write-failure fallback the list is inlined in the launch message itself, and you read it there instead. An early round on a clean review names no file and tells you nothing is confirmed yet — then there is no list to avoid. Your job is not to re-report them — it is to find the **gaps**: the important issues no prior agent or round caught.
 
 - **Read your scope in full** with the diff reads the message gives you — page a truncated read rather than reasoning from its first screenful. A reverse audit that saw a fraction of its scope and returned "No issues found" is worse than none: it ends the loop on a lie.
 - **Focus exclusively on what is not already in the finding list.** Assume the obvious defects are found; look where a first pass does not: the interaction between two changes, the assumption that holds in the common case and breaks in the rare one, the removed guard whose replacement is three files away.

@@ -6,7 +6,7 @@
 
 import process from 'node:process';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { BlockList, isIP } from 'node:net';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { AvailableModel } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
@@ -24,6 +24,17 @@ const MIN_KEYTERM_ECHO_TOKENS = 8;
 const MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS = 10;
 const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
 const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
+// The address classification in this file is mirrored in
+// packages/desktop/packages/server-core/src/voice/net-guard.ts. The bun
+// workspace boundary prevents sharing a module; keep the two in sync.
+const BLOCKED_TRANSITION_IPV6_ADDRESSES = new BlockList();
+for (const [address, prefix] of [
+  ['64:ff9b:1::', 48],
+  ['2001::', 23],
+  ['2002::', 16],
+] as const) {
+  BLOCKED_TRANSITION_IPV6_ADDRESSES.addSubnet(address, prefix, 'ipv6');
+}
 
 export { resolveVoiceTransport };
 export type { VoiceTransport } from './voice-model.js';
@@ -41,6 +52,7 @@ export interface VoiceTranscriptionConfig {
   model: string;
   baseUrl: string;
   apiKey?: string;
+  allowInsecureBaseUrl?: boolean;
 }
 
 export interface VoiceStreamConfig {
@@ -49,6 +61,7 @@ export interface VoiceStreamConfig {
   apiKey?: string;
   language?: string;
   keytermsContext?: string;
+  allowInsecureBaseUrl?: boolean;
 }
 
 export interface ResolvedVoiceStreamConfig extends VoiceStreamConfig {
@@ -117,13 +130,55 @@ function normalizeBaseUrl(baseUrl: string, modelName: string): string {
   } catch {
     throw new Error(`Voice model '${modelName}' has an invalid baseUrl.`);
   }
-  url.username = '';
-  url.password = '';
+  if (url.username || url.password) {
+    throw new Error(
+      `Voice model '${modelName}' baseUrl must not contain embedded credentials.`,
+    );
+  }
   return trimTrailingSlashes(url.toString());
+}
+
+function normalizeAllowedVoiceBaseUrl(baseUrl: string): string | undefined {
+  try {
+    const url = new URL(baseUrl.trim());
+    if (url.username || url.password) {
+      return undefined;
+    }
+    return trimTrailingSlashes(url.toString());
+  } catch {
+    return undefined;
+  }
+}
+
+function isInsecureVoiceBaseUrlAllowed(
+  settings: LoadedSettings,
+  normalizedBaseUrl: string,
+): boolean {
+  const allowed = settings.merged.security?.allowedInsecureVoiceBaseUrls;
+  return (
+    Array.isArray(allowed) &&
+    allowed.some(
+      (candidate) =>
+        typeof candidate === 'string' &&
+        normalizeAllowedVoiceBaseUrl(candidate) === normalizedBaseUrl,
+    )
+  );
 }
 
 function normalizeHostname(hostname: string): string {
   return hostname.toLowerCase().replace(/^\[|\]$/g, '');
+}
+
+function normalizeIpAddress(address: string): string {
+  const host = normalizeHostname(address);
+  if (isIP(host) !== 6) {
+    return host;
+  }
+  try {
+    return normalizeHostname(new URL(`http://[${host}]/`).hostname);
+  } catch {
+    return host;
+  }
 }
 
 function isLoopbackHost(hostname: string): boolean {
@@ -131,23 +186,33 @@ function isLoopbackHost(hostname: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
+function isAwsIpv6MetadataAddress(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  if (isIP(host) !== 6) {
+    return false;
+  }
+  try {
+    return (
+      normalizeHostname(new URL(`http://[${host}]/`).hostname) ===
+      'fd00:ec2::254'
+    );
+  } catch {
+    return false;
+  }
+}
+
 function readIpv4CompatibleIpv6(host: string): string | undefined {
   if (!host.startsWith('::') || host.startsWith('::ffff:')) {
     return undefined;
   }
   const parts = host.slice(2).split(':');
-  if (parts.length === 0 || parts.length > 2 || parts.some((p) => !p)) {
+  if (parts.length === 0 || parts.length > 2 || parts.some((part) => !part)) {
     return undefined;
   }
   if (parts.some((part) => !/^[0-9a-f]{1,4}$/i.test(part))) {
     return undefined;
   }
   const hextets = parts.map((part) => Number.parseInt(part, 16));
-  if (
-    hextets.some((part) => !Number.isInteger(part) || part < 0 || part > 0xffff)
-  ) {
-    return undefined;
-  }
   const value =
     hextets.length === 1 ? hextets[0]! : (hextets[0]! << 16) | hextets[1]!;
   return [
@@ -158,27 +223,90 @@ function readIpv4CompatibleIpv6(host: string): string | undefined {
   ].join('.');
 }
 
+function readIpv4MappedIpv6(host: string): string | undefined {
+  // The dotted-quad branch is unreachable once normalizeIpAddress has
+  // canonicalized IPv6 literals to hex form; kept defensively.
+  const dotted = host.match(/^::ffff:(\d+(?:\.\d+){3})$/i);
+  if (dotted && isIP(dotted[1]!) === 4) {
+    return dotted[1];
+  }
+  const hex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!hex) {
+    return undefined;
+  }
+  return readIpv4HexPair(hex[1]!, hex[2]!);
+}
+
+function readIpv4HexPair(highHex: string, lowHex: string): string {
+  const high = Number.parseInt(highHex, 16);
+  const low = Number.parseInt(lowHex, 16);
+  return [high >>> 8, high & 0xff, low >>> 8, low & 0xff].join('.');
+}
+
+function readWellKnownNat64Ipv6(host: string): string | undefined {
+  const prefix = '64:ff9b::';
+  if (!host.startsWith(prefix)) {
+    return undefined;
+  }
+  const suffix = host.slice(prefix.length);
+  if (!suffix) {
+    return '0.0.0.0';
+  }
+  const groups = suffix.split(':');
+  if (
+    groups.length > 2 ||
+    groups.some((group) => !/^[0-9a-f]{1,4}$/i.test(group))
+  ) {
+    return undefined;
+  }
+  return groups.length === 1
+    ? readIpv4HexPair('0', groups[0]!)
+    : readIpv4HexPair(groups[0]!, groups[1]!);
+}
+
+function isBlockedTransitionIpv6Address(host: string): boolean {
+  return (
+    isIP(host) === 6 && BLOCKED_TRANSITION_IPV6_ADDRESSES.check(host, 'ipv6')
+  );
+}
+
+function unwrapIpv6TransitionStep(
+  host: string,
+): { address: string } | 'blocked' | undefined {
+  const ipv4Mapped = readIpv4MappedIpv6(host);
+  if (ipv4Mapped) {
+    return { address: ipv4Mapped };
+  }
+  const ipv4Compatible = readIpv4CompatibleIpv6(host);
+  if (ipv4Compatible) {
+    return { address: ipv4Compatible };
+  }
+  const nat64 = readWellKnownNat64Ipv6(host);
+  if (nat64) {
+    return { address: nat64 };
+  }
+  if (host.startsWith('::ffff:')) {
+    return 'blocked';
+  }
+  return undefined;
+}
+
 // Blocks IP-literal private networks only. Hostname DNS resolution and
 // rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
-  const host = normalizeHostname(hostname);
+  const host = normalizeIpAddress(hostname);
+  if (isBlockedTransitionIpv6Address(host)) {
+    return true;
+  }
   if (isLoopbackHost(host)) {
     return false;
   }
-  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Mapped) {
-    return isPrivateNetworkIp(ipv4Mapped[1]!);
-  }
-  const ipv4Compatible = host.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Compatible) {
-    return isPrivateNetworkIp(ipv4Compatible[1]!);
-  }
-  const normalizedIpv4Compatible = readIpv4CompatibleIpv6(host);
-  if (normalizedIpv4Compatible) {
-    return isPrivateNetworkIp(normalizedIpv4Compatible);
-  }
-  if (host.startsWith('::ffff:')) {
+  const step = unwrapIpv6TransitionStep(host);
+  if (step === 'blocked') {
     return true;
+  }
+  if (step) {
+    return isPrivateNetworkIp(step.address);
   }
   if (isIP(host) === 4) {
     const [first = 0, second = 0] = host.split('.').map(Number);
@@ -193,10 +321,62 @@ function isPrivateNetworkIp(hostname: string): boolean {
     );
   }
   if (isIP(host) === 6) {
-    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '', 16);
-    const isLinkLocal = firstHextet >= 0xfe80 && firstHextet <= 0xfebf;
-    const isUniqueLocal = (firstHextet & 0xfe00) === 0xfc00;
-    return host === '::' || isLinkLocal || isUniqueLocal;
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '0', 16);
+    return (
+      host === '::' ||
+      (firstHextet & 0xffc0) === 0xfe80 ||
+      (firstHextet & 0xfe00) === 0xfc00
+    );
+  }
+  return false;
+}
+
+function isAlwaysBlockedVoiceAddress(address: string): boolean {
+  const host = normalizeIpAddress(address);
+  if (isBlockedTransitionIpv6Address(host)) {
+    return true;
+  }
+  if (isLoopbackHost(host)) {
+    return true;
+  }
+  const step = unwrapIpv6TransitionStep(host);
+  if (step === 'blocked') {
+    return true;
+  }
+  if (step) {
+    return isAlwaysBlockedVoiceAddress(step.address);
+  }
+  if (isIP(host) === 4) {
+    const [first = 0, second = 0] = host.split('.').map(Number);
+    return (
+      first === 0 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      host === '100.100.100.200'
+    );
+  }
+  if (isIP(host) === 6) {
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '0', 16);
+    return (
+      host === '::' ||
+      isAwsIpv6MetadataAddress(host) ||
+      (firstHextet & 0xffc0) === 0xfe80
+    );
+  }
+  return false;
+}
+
+function isLoopbackVoiceAddress(address: string): boolean {
+  const host = normalizeIpAddress(address);
+  if (isLoopbackHost(host)) {
+    return true;
+  }
+  const step = unwrapIpv6TransitionStep(host);
+  if (step && step !== 'blocked') {
+    return isLoopbackVoiceAddress(step.address);
+  }
+  if (isIP(host) === 4) {
+    return host.startsWith('127.');
   }
   return false;
 }
@@ -217,9 +397,14 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     return;
   }
   if (isIP(hostname) !== 0) {
-    if (isPrivateNetworkIp(hostname)) {
+    if (
+      isAlwaysBlockedVoiceAddress(hostname) ||
+      (!voiceConfig.allowInsecureBaseUrl && isPrivateNetworkIp(hostname))
+    ) {
       throw new Error(
-        `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
+        isLoopbackVoiceAddress(hostname)
+          ? `Voice model '${voiceConfig.model}' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].`
+          : `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
       );
     }
     return;
@@ -254,9 +439,23 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     if (onAbort) abortSignal?.removeEventListener('abort', onAbort);
   }
   const records = Array.isArray(result) ? result : [result];
-  if (records.some((record) => isPrivateNetworkIp(record.address))) {
+  if (
+    records.some(
+      (record) =>
+        isAlwaysBlockedVoiceAddress(record.address) ||
+        (!voiceConfig.allowInsecureBaseUrl &&
+          isPrivateNetworkIp(record.address)),
+    )
+  ) {
     throw new Error(
-      `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
+      records.some((record) => isLoopbackVoiceAddress(record.address))
+        ? `Voice model '${voiceConfig.model}' resolved to a loopback address. Loopback DNS results are always blocked; to use a local ASR endpoint, configure an explicit loopback baseUrl: http://localhost, http://127.0.0.1, or http://[::1].`
+        : voiceConfig.allowInsecureBaseUrl &&
+            records.some((record) =>
+              isAlwaysBlockedVoiceAddress(record.address),
+            )
+          ? `Voice model '${voiceConfig.model}' resolved to an address that is always blocked (metadata, link-local, or transition range), even when the baseUrl is listed in security.allowedInsecureVoiceBaseUrls.`
+          : `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
     );
   }
 }
@@ -271,7 +470,12 @@ function readApiKey(
     return undefined;
   }
   const envKey = model.envKey ?? DEFAULT_OPENAI_API_KEY;
-  const envValue = (env ?? process.env)[envKey];
+  const envSource = env ?? process.env;
+  // Object.hasOwn keeps an envKey naming an inherited Object.prototype member
+  // (e.g. "constructor") from reaching .trim() as a function.
+  const envValue = Object.hasOwn(envSource, envKey)
+    ? envSource[envKey]
+    : undefined;
   if (envValue && envValue.trim().length > 0) {
     return envValue.trim();
   }
@@ -320,14 +524,41 @@ export function resolveVoiceTranscriptionConfig({
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl, voiceModel);
   const parsedBaseUrl = new URL(normalizedBaseUrl);
   const isLocalhost = isLoopbackHost(parsedBaseUrl.hostname);
-  if (parsedBaseUrl.protocol !== 'https:' && !isLocalhost) {
+  const allowInsecureBaseUrl = isInsecureVoiceBaseUrlAllowed(
+    settings,
+    normalizedBaseUrl,
+  );
+  if (
+    parsedBaseUrl.protocol !== 'http:' &&
+    parsedBaseUrl.protocol !== 'https:'
+  ) {
     throw new Error(
-      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext.`,
+      `Voice model '${voiceModel}' must use an http or https baseUrl.`,
     );
   }
-  if (isPrivateNetworkIp(parsedBaseUrl.hostname)) {
+  if (!isLocalhost && isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname)) {
     throw new Error(
-      `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
+      isLoopbackVoiceAddress(parsedBaseUrl.hostname)
+        ? `Voice model '${voiceModel}' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].`
+        : `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
+    );
+  }
+  if (
+    parsedBaseUrl.protocol !== 'https:' &&
+    !isLocalhost &&
+    !allowInsecureBaseUrl
+  ) {
+    throw new Error(
+      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
+    );
+  }
+  if (
+    !isLocalhost &&
+    !allowInsecureBaseUrl &&
+    isPrivateNetworkIp(parsedBaseUrl.hostname)
+  ) {
+    throw new Error(
+      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
     );
   }
 
@@ -340,6 +571,7 @@ export function resolveVoiceTranscriptionConfig({
     model: voiceModel,
     baseUrl: normalizedBaseUrl,
     ...(apiKey ? { apiKey } : {}),
+    ...(allowInsecureBaseUrl ? { allowInsecureBaseUrl: true } : {}),
   };
 }
 
@@ -374,6 +606,7 @@ export function resolveVoiceStreamConfig(
     baseUrl: base.baseUrl,
     model: base.model,
     ...(base.apiKey ? { apiKey: base.apiKey } : {}),
+    ...(base.allowInsecureBaseUrl ? { allowInsecureBaseUrl: true } : {}),
     ...(language ? { language } : {}),
     ...(keytermsContext ? { keytermsContext } : {}),
   };

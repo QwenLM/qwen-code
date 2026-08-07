@@ -11,7 +11,9 @@ import type {
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
+import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import {
   HistoryReplayer,
   MISSING_TOOL_RESULT_MESSAGE,
@@ -110,6 +112,40 @@ function toolResultRecord(): ChatRecord {
   };
 }
 
+function largeToolResultRecord(
+  textParts: string[],
+  resultDisplay: string,
+): ChatRecord {
+  return {
+    uuid: 'tool-record',
+    parentUuid: 'assistant-record',
+    sessionId: SESSION_ID,
+    timestamp: TIMESTAMP,
+    type: 'tool_result',
+    cwd: '/workspace',
+    version: '1.0.0',
+    message: {
+      role: 'user',
+      parts: textParts.map((output) => ({
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output },
+        },
+      })),
+    },
+    toolCallResult: {
+      callId: 'call-1',
+      responseParts: [],
+      resultDisplay,
+    },
+  };
+}
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
 function cursorState(): SessionTranscriptCursorState {
   return {
     v: 1,
@@ -143,6 +179,53 @@ afterEach(() => {
 });
 
 describe('history replay page', () => {
+  it('bounds textual tool results collected for bulk replay', async () => {
+    const source = 'x'.repeat(499_999);
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [largeToolResultRecord([source], source)],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+    const update = result.updates.find(
+      (candidate) => candidate.sessionUpdate === 'tool_call_update',
+    );
+
+    expect(update).toBeDefined();
+    const record = update as unknown as Record<string, unknown>;
+    expect(jsonBytes(record['content'])).toBeLessThanOrEqual(65_536);
+    expect(jsonBytes(record['rawOutput'])).toBeLessThanOrEqual(65_536);
+    expect(projectAcpToolResultUpdate(update!)).toBe(update);
+  });
+
+  it('bounds multi-block textual tool results in paged replay', async () => {
+    const page = recordPage({
+      records: [
+        largeToolResultRecord(
+          ['a'.repeat(300_000), 'b'.repeat(300_000)],
+          'r'.repeat(600_001),
+        ),
+      ],
+    });
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page,
+      encodeCursor: vi.fn(),
+    });
+    const update = result.updates.find(
+      (candidate) => candidate.sessionUpdate === 'tool_call_update',
+    );
+
+    expect(update).toBeDefined();
+    const record = update as unknown as Record<string, unknown>;
+    expect(jsonBytes(record['content'])).toBeLessThanOrEqual(65_536);
+    expect(jsonBytes(record['rawOutput'])).toBeLessThanOrEqual(65_536);
+    expect(
+      (record['content'] as Array<{ content: { text: string } }>).map(
+        (block) => block.content.text,
+      ),
+    ).toHaveLength(2);
+  });
+
   it('lifts record timestamps for bulk replay callers', async () => {
     const result = await collectHistoryReplayUpdates({
       sessionId: SESSION_ID,
