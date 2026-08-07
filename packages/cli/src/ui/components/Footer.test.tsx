@@ -175,6 +175,27 @@ describe('<Footer />', () => {
     expect(lastFrame()).toContain('2 queued');
   });
 
+  it('shows the queued-count badge for a single queued message', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        messageQueue: ['only queued'],
+      }),
+    );
+
+    expect(lastFrame()).toContain('1 queued');
+  });
+
+  it('shows the queued-count badge outside streaming', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({ messageQueue: ['waiting'] }),
+    );
+
+    expect(lastFrame()).toContain('1 queued');
+  });
+
   it('hides the queued-count badge when the queue is empty', () => {
     const { lastFrame } = renderWithWidth(
       120,
