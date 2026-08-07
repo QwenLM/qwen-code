@@ -21,8 +21,16 @@
 import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { App } from '../opentui/backend.js';
+import type { StreamEvent } from '../model/streamingModel.js';
 
-export async function startOpenTuiUI(): Promise<void> {
+/**
+ * @param events optional real agent-loop stream (already adapted to the
+ *   neutral `StreamEvent` via `./eventAdapter`); when omitted the backend runs
+ *   its scripted validation conversation.
+ */
+export async function startOpenTuiUI(opts?: {
+  events?: AsyncIterable<StreamEvent>;
+}): Promise<void> {
   const renderer = await createCliRenderer({
     targetFps: 60,
     useKittyKeyboard: {},
@@ -31,5 +39,5 @@ export async function startOpenTuiUI(): Promise<void> {
     externalOutputMode: 'passthrough',
     autoFocus: true,
   });
-  createRoot(renderer).render(<App />);
+  createRoot(renderer).render(<App events={opts?.events} />);
 }

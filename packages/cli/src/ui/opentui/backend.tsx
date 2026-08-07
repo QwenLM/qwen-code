@@ -188,7 +188,7 @@ function AssistantMessage(props: { item: Extract<ChatItem, { kind: "assistant" }
 // app
 // ---------------------------------------------------------------------------
 
-function App() {
+function App({ events }: { events?: AsyncIterable<StreamEvent> }) {
   const renderer = useRenderer();
   const { width } = useTerminalDimensions();
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -326,15 +326,27 @@ function App() {
     }, TOKEN_INTERVAL_MS);
   }, [applyEvent]);
 
-  // auto-start the scripted conversation
+  // Real event source (P1d seam) if provided; otherwise the scripted demo.
   useEffect(() => {
     setItems([{ kind: "user", id: nid("u"), text: "分析 VP 模式的渲染性能问题，给出优化建议" }]);
+    if (events) {
+      let cancelled = false;
+      (async () => {
+        for await (const ev of events) {
+          if (cancelled) break;
+          applyEvent(ev);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
     const t = setTimeout(startStream, 400);
     return () => {
       clearTimeout(t);
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [startStream]);
+  }, [events, startStream, applyEvent]);
 
   useKeyboard((key) => {
     if (key.name === "c" && key.ctrl) {
