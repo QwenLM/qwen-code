@@ -297,6 +297,40 @@ describe('branch points', () => {
     });
   });
 
+  it('does not let a carried name-only dangling call veto a balanced turn', () => {
+    const records = [
+      record('u0', null, 'user', [{ text: 'first' }]),
+      record('a-dangling', 'u0', 'assistant', [
+        { functionCall: { name: 'read_file', args: {} } },
+      ]),
+      record('u1', 'a-dangling', 'user', [{ text: 'second' }]),
+      record('a-tool', 'u1', 'assistant', [
+        { functionCall: { name: 'read_file', args: {} } },
+      ]),
+      record('tool', 'a-tool', 'tool_result', [
+        {
+          functionResponse: {
+            name: 'read_file',
+            response: { output: 'ok' },
+          },
+        },
+      ]),
+      record('a1', 'tool', 'assistant', [{ text: 'answer' }]),
+    ];
+
+    expect(
+      resolveCompletedTurnBranchCandidate({
+        activeChain: records,
+        startExclusiveRecordUuid: 'a-dangling',
+        endInclusiveRecordUuid: 'a1',
+      }),
+    ).toEqual({
+      startExclusiveRecordUuid: 'a-dangling',
+      endInclusiveRecordUuid: 'a1',
+      assistantRecordUuid: 'a1',
+    });
+  });
+
   it('keeps recording checkpoints after a dangling call in earlier history', () => {
     const chain: ChatRecord[] = [
       record('u0', null, 'user', [{ text: 'first' }]),

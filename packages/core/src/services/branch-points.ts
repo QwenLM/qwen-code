@@ -81,8 +81,26 @@ function hasVisibleText(record: BranchPointRecord): boolean {
   );
 }
 
+interface PendingToolCall extends ToolCallIdentity {
+  carriedFromPrefix?: boolean;
+}
+
+function uniqueNameMatch(
+  pending: readonly PendingToolCall[],
+  matchingIndexes: number[],
+): number {
+  if (matchingIndexes.length === 1) return matchingIndexes[0]!;
+  // A dangling call carried in from the pre-boundary prefix must not veto a
+  // unique in-interval match, or a crashed earlier turn would permanently
+  // disable checkpoints for later turns using the same tool.
+  const freshIndexes = matchingIndexes.filter(
+    (candidateIndex) => pending[candidateIndex]?.carriedFromPrefix !== true,
+  );
+  return freshIndexes.length === 1 ? freshIndexes[0]! : -1;
+}
+
 function closeToolCall(
-  pending: ToolCallIdentity[],
+  pending: PendingToolCall[],
   response: ToolCallIdentity,
 ): boolean {
   let index = -1;
@@ -94,13 +112,13 @@ function closeToolCall(
           ? [candidateIndex]
           : [],
       );
-      if (matchingIndexes.length === 1) index = matchingIndexes[0]!;
+      index = uniqueNameMatch(pending, matchingIndexes);
     }
   } else if (response.name !== undefined) {
     const matchingIndexes = pending.flatMap((call, candidateIndex) =>
       call.name === response.name ? [candidateIndex] : [],
     );
-    if (matchingIndexes.length === 1) index = matchingIndexes[0]!;
+    index = uniqueNameMatch(pending, matchingIndexes);
   }
   if (index < 0) return false;
   pending.splice(index, 1);
@@ -124,9 +142,10 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
   // A dangling call carried in from the pre-boundary prefix (a crashed turn
   // that never wrote its tool_result) must not permanently disable later
   // checkpoints; only calls issued inside the interval must close.
-  const pendingCalls: Array<
-    ToolCallIdentity & { carriedFromPrefix?: boolean }
-  > = pendingCallsAtStart.map((call) => ({ ...call, carriedFromPrefix: true }));
+  const pendingCalls: PendingToolCall[] = pendingCallsAtStart.map((call) => ({
+    ...call,
+    carriedFromPrefix: true,
+  }));
   let lastToolResultIndex = startIndex;
   for (let index = startIndex + 1; index <= endIndex; index++) {
     const record = activeChain[index]!;

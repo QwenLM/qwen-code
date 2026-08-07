@@ -25,11 +25,11 @@ import type {
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
 import {
-  DaemonHttpError,
   isDaemonTurnError,
+  isStaleBranchPointError,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus, isRecord } from './httpErrors.js';
+import { extractHttpStatus } from './httpErrors.js';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -1555,15 +1555,6 @@ function isAbortError(error: unknown): boolean {
   return (
     (error instanceof DOMException && error.name === 'AbortError') ||
     (error instanceof Error && error.name === 'AbortError')
-  );
-}
-
-function isStaleBranchPointError(error: unknown): error is DaemonHttpError {
-  return (
-    error instanceof DaemonHttpError &&
-    error.status === 409 &&
-    isRecord(error.body) &&
-    error.body['code'] === 'branch_point_invalid'
   );
 }
 

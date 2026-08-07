@@ -53,6 +53,7 @@ describe('SessionService', () => {
 
   let readdirSyncSpy: MockInstance<typeof fs.readdirSync>;
   let statSyncSpy: MockInstance<typeof fs.statSync>;
+  let statPromiseSpy: MockInstance<typeof fs.promises.stat>;
   let unlinkSyncSpy: MockInstance<typeof fs.unlinkSync>;
   let existsSyncSpy: MockInstance<typeof fs.existsSync>;
   let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
@@ -81,6 +82,14 @@ describe('SessionService', () => {
           isFile: () => true,
         }) as fs.Stats,
     );
+    statPromiseSpy = vi
+      .spyOn(fs.promises, 'stat')
+      .mockImplementation(async () =>
+        Promise.resolve({
+          mtimeMs: Date.now(),
+          isFile: () => true,
+        } as fs.Stats),
+      );
     unlinkSyncSpy = vi
       .spyOn(fs, 'unlinkSync')
       .mockImplementation(() => undefined);
@@ -3032,6 +3041,7 @@ describe('SessionService', () => {
       // Restore any fs spies installed by the outer beforeEach.
       vi.mocked(readdirSyncSpy).mockRestore?.();
       vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(statPromiseSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
       vi.mocked(renameSyncSpy).mockRestore?.();
       vi.mocked(rmSyncSpy).mockRestore?.();
@@ -4751,6 +4761,9 @@ describe('SessionService', () => {
         vi.spyOn(fs, 'copyFileSync'),
         vi.spyOn(fs, 'renameSync'),
         vi.spyOn(fs, 'lstatSync'),
+        vi.spyOn(fs, 'statSync'),
+        vi.spyOn(fs, 'accessSync'),
+        vi.spyOn(fs, 'realpathSync'),
         vi.spyOn(fs, 'existsSync'),
         vi.spyOn(fs, 'unlinkSync'),
         vi.spyOn(fs, 'rmSync'),
@@ -4966,10 +4979,7 @@ describe('SessionService', () => {
 
       try {
         await service['cleanupStaleBranchCreations']();
-        expect(readFileSpy).not.toHaveBeenCalledWith(
-          paths.claimPath,
-          expect.anything(),
-        );
+        expect(readFileSpy).not.toHaveBeenCalled();
       } finally {
         readFileSpy.mockRestore();
       }
@@ -5371,6 +5381,7 @@ describe('SessionService', () => {
 
       vi.mocked(readdirSyncSpy).mockRestore?.();
       vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(statPromiseSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
 
       realTmpDir = fs.mkdtempSync(
@@ -5619,6 +5630,7 @@ describe('SessionService', () => {
 
       vi.mocked(readdirSyncSpy).mockRestore?.();
       vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(statPromiseSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
 
       realTmpDir = fs.mkdtempSync(

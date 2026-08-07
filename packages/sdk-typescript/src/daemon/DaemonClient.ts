@@ -473,6 +473,24 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   );
 }
 
+/**
+ * The daemon rejected a session branch because the requested checkpoint is
+ * no longer on the session's active history path. Daemon action layers and
+ * UI shells both recover from this contract, so the predicate lives here to
+ * keep the copies from drifting.
+ */
+export function isStaleBranchPointError(
+  error: unknown,
+): error is DaemonHttpError {
+  return (
+    error instanceof DaemonHttpError &&
+    error.status === 409 &&
+    typeof error.body === 'object' &&
+    error.body !== null &&
+    (error.body as Record<string, unknown>)['code'] === 'branch_point_invalid'
+  );
+}
+
 export interface CreateSessionRequest {
   /**
    * Workspace path the daemon must have registered. When

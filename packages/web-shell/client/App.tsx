@@ -29,7 +29,11 @@ import {
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  isDaemonTurnError,
+  isStaleBranchPointError,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
@@ -5990,12 +5994,7 @@ export function App({
           ]);
         })
         .catch(async (error: unknown) => {
-          if (
-            error instanceof DaemonHttpError &&
-            error.status === 409 &&
-            isRecord(error.body) &&
-            error.body['code'] === 'branch_point_invalid'
-          ) {
+          if (isStaleBranchPointError(error)) {
             if (!transcriptReloadSupported) {
               pushToast('error', t('branch.staleUnsupported'));
               return;
@@ -6014,6 +6013,9 @@ export function App({
             } catch {
               refreshed = false;
             }
+            // A switch landing while the recovery reload is in flight
+            // supersedes it; the outcome toast belongs to the source session.
+            if (connectionRef.current.sessionId !== sourceSessionId) return;
             pushToast(
               'error',
               t(refreshed ? 'branch.stale' : 'branch.staleRefreshFailed'),

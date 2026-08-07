@@ -6441,9 +6441,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // ACP cannot cancel a branch after dispatch. Keep the queue and
           // reservation until its real outcome is known so a caller never sees
           // a timeout followed by an unobserved committed session.
-          const result = (await (isSideTask
-            ? withTimeout(mutation, initTimeoutMs, 'createSideTaskSession')
-            : mutation)) as {
+          const result = (await mutation) as {
             newSessionId: string;
             title?: string;
             displayName?: string;

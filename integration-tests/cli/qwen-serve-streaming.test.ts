@@ -553,6 +553,19 @@ describePOSIX('qwen serve — historical Assistant response branch', () => {
     expect(JSON.stringify(branchAfterContinue.events)).toContain(
       'continue the historical branch',
     );
+
+    // The source session must stay untouched by the fork's continuation.
+    const sourceAfterContinue = await client.getSessionTranscriptPage(
+      source.sessionId,
+      { limit: 500 },
+    );
+    const sourceAfterContinueText = JSON.stringify(sourceAfterContinue.events);
+    expect(sourceAfterContinueText).not.toContain(
+      'continue the historical branch',
+    );
+    expect(sourceAfterContinueText).toContain('historical branch turn one');
+    expect(sourceAfterContinueText).toContain('historical branch turn two');
+    expect(sourceAfterContinueText).toContain('historical branch turn three');
   }, 90_000);
 });
 

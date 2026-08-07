@@ -7249,13 +7249,13 @@ describe('createAcpSessionBridge', () => {
       const branchGate = deferred<void>();
       const handle = makeChannel({
         extMethodImpl: async (method, params) => {
-          if (method === 'qwen/control/session/branch') {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
             calls.push('branch');
             branchParams = params;
             await branchGate.promise;
             return { newSessionId: 'branch-before-rewind', title: 'Branch' };
           }
-          if (method === 'qwen/control/session/rewind') {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
             calls.push('rewind');
             return { targetTurnIndex: 0, filesChanged: [], filesFailed: [] };
           }
@@ -7289,12 +7289,12 @@ describe('createAcpSessionBridge', () => {
       const rewindGate = deferred<void>();
       const handle = makeChannel({
         extMethodImpl: async (method) => {
-          if (method === 'qwen/control/session/rewind') {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
             calls.push('rewind');
             await rewindGate.promise;
             return { targetTurnIndex: 0, filesChanged: [], filesFailed: [] };
           }
-          if (method === 'qwen/control/session/branch') {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
             calls.push('branch');
             return { newSessionId: 'branch-after-rewind', title: 'Branch' };
           }
@@ -11812,6 +11812,47 @@ describe('createAcpSessionBridge', () => {
 
       promptGate.resolve();
       await prompt;
+      await bridge.shutdown();
+    });
+
+    it('waits for a dispatched side-task fork instead of timing out', async () => {
+      const forkStarted = deferred<void>();
+      const forkGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionSideTask) {
+            return {};
+          }
+          forkStarted.resolve();
+          await forkGate.promise;
+          return { newSessionId: 'side-slow', title: 'Side task' };
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+      });
+      const parent = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      let settled = false;
+      const sideTask = bridge
+        .createSideTaskSession(parent.sessionId, { name: 'Side task' })
+        .finally(() => {
+          settled = true;
+        });
+      await forkStarted.promise;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(settled).toBe(false);
+
+      forkGate.resolve();
+      await expect(sideTask).resolves.toMatchObject({
+        sessionId: 'side-slow',
+        parentSessionId: parent.sessionId,
+      });
       await bridge.shutdown();
     });
 

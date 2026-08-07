@@ -11,6 +11,7 @@ export {
   WorkspaceDaemonClient,
   isDaemonTurnError,
   isNonBlockingAccepted,
+  isStaleBranchPointError,
   matchTurnEvent,
   type CreateSessionRequest,
   type DaemonClientOptions,

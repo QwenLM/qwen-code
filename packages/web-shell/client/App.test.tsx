@@ -414,8 +414,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/sdk/daemon', () => ({
-  DaemonHttpError: class DaemonHttpError extends Error {
+vi.mock('@qwen-code/sdk/daemon', () => {
+  class DaemonHttpError extends Error {
     constructor(
       readonly status: number,
       readonly body: unknown,
@@ -423,10 +423,20 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
     ) {
       super(message);
     }
-  },
-  DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
-  isDaemonTurnError: () => false,
-}));
+  }
+  return {
+    DaemonHttpError,
+    DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
+    isDaemonTurnError: () => false,
+    isStaleBranchPointError: (error: unknown): boolean =>
+      error instanceof DaemonHttpError &&
+      error.status === 409 &&
+      typeof error.body === 'object' &&
+      error.body !== null &&
+      (error.body as Record<string, unknown>)['code'] ===
+        'branch_point_invalid',
+  };
+});
 
 vi.mock('./hooks/useMessages', () => ({
   useMessages: () => testState.messages,
@@ -4490,6 +4500,58 @@ describe('App session callbacks', () => {
     expect(onToast).toHaveBeenCalledWith(
       'error',
       'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+    );
+  });
+
+  it('skips the stale-recovery toast when a switch lands during the reload', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    let rejectReload!: (error: unknown) => void;
+    mockSessionActions.reloadSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectReload = reject;
+      }),
+    );
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.reloadSession).toHaveBeenCalled(),
+    );
+
+    // The user switches away while the recovery reload is in flight, and the
+    // superseded load then rejects.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender({ onToast });
+    });
+    await flush();
+
+    await act(async () => {
+      rejectReload(new DOMException('Session load superseded', 'AbortError'));
+      await request;
+    });
+
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+    );
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path. The transcript has been refreshed.',
     );
   });
 
