@@ -39,6 +39,7 @@ export type VirtualizedListProps<T> = {
   width?: number | string;
   containerHeight?: number;
   showScrollbar?: boolean;
+  measureAtFullHeight?: boolean;
 };
 
 export type VirtualizedListRef<T> = {
@@ -117,10 +118,12 @@ const VirtualizedListItem = memo(
     onHeightChangeRef.current = onHeightChange;
 
     useLayoutEffect(() => {
-      if (hasMeasured && height > 0) {
-        onHeightChangeRef.current(itemKey, height);
+      const measuredHeight =
+        itemRef.current?.yogaNode?.getComputedHeight() ?? height;
+      if (hasMeasured && measuredHeight > 0) {
+        onHeightChangeRef.current(itemKey, measuredHeight);
       }
-    }, [itemKey, height, hasMeasured]);
+    }, [itemKey, height, hasMeasured, content]);
 
     return (
       <Box width="100%" flexDirection="column" flexShrink={0} ref={itemRef}>
@@ -211,6 +214,27 @@ function VirtualizedList<T>(
   const containerWidth = measuredContainerWidth;
 
   const [heights, setHeights] = useState<Record<string, number>>({});
+  const measureAtFullHeight = props.measureAtFullHeight === true;
+  const [fullHeightMeasurementPending, setFullHeightMeasurementPending] =
+    useState(measureAtFullHeight);
+  const [previousMeasurementInputs, setPreviousMeasurementInputs] = useState({
+    enabled: measureAtFullHeight,
+    data,
+    renderItem,
+  });
+  if (
+    previousMeasurementInputs.enabled !== measureAtFullHeight ||
+    (measureAtFullHeight &&
+      (previousMeasurementInputs.data !== data ||
+        previousMeasurementInputs.renderItem !== renderItem))
+  ) {
+    setPreviousMeasurementInputs({
+      enabled: measureAtFullHeight,
+      data,
+      renderItem,
+    });
+    setFullHeightMeasurementPending(measureAtFullHeight);
+  }
   const isInitialScrollSet = useRef(false);
 
   const onHeightChange = useCallback((key: string, height: number) => {
@@ -218,6 +242,7 @@ function VirtualizedList<T>(
       if (prev[key] === height) return prev;
       return { ...prev, [key]: height };
     });
+    setFullHeightMeasurementPending(false);
   }, []);
 
   // Prune stale height entries when the data set shrinks (`/clear`, history
@@ -877,13 +902,18 @@ function VirtualizedList<T>(
   // to that height unconditionally left a tall empty gap below short content
   // and pushed the composer far down the screen — the legacy <Static> path
   // instead grows with its content. Collapse to `totalHeight` whenever the
-  // content fits so the composer sits right beneath the conversation; only
-  // when the content overflows do we clamp to `containerHeight` and let the
-  // viewport scroll. `scrollableContainerHeight` (the scroll math) still uses
-  // the full `containerHeight`, so scrolling is unaffected.
+  // content fits so the composer sits right beneath the conversation. A
+  // caller can request one full-height measurement pass while content changes
+  // shape under a stable item key; otherwise a stale cached total can clip
+  // the new content before it is measured. The root collapses again after the
+  // measurement so short content does not leave a gap above the composer.
+  // `scrollableContainerHeight` (the scroll math) still uses the full
+  // `containerHeight`, so scrolling is unaffected.
   const rootHeight =
     props.containerHeight !== undefined
-      ? Math.min(props.containerHeight, totalHeight)
+      ? fullHeightMeasurementPending
+        ? props.containerHeight
+        : Math.min(props.containerHeight, totalHeight)
       : '100%';
 
   return (
