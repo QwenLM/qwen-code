@@ -903,7 +903,8 @@ function ToolbarPopover({
                 <PopoverContent
                   side="right"
                   align="end"
-                  sideOffset={24}
+                  alignOffset={-10}
+                  sideOffset={15}
                   collisionPadding={8}
                   collisionBoundary={collisionBoundary ?? undefined}
                   data-web-shell-toolbar-popover

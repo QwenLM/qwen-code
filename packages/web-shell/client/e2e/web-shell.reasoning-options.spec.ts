@@ -141,20 +141,33 @@ test('updates qwen3.8-max Thinking and Effort through the mock daemon', async ({
     'data-side',
     'right',
   );
+  const getModelMenuGeometry = async () => {
+    const [optionsBox, modelsBox] = await Promise.all([
+      page
+        .locator(
+          '[data-web-shell-toolbar-popover]:not([data-web-shell-model-submenu])',
+        )
+        .boundingBox(),
+      page.locator('[data-web-shell-model-submenu]').boundingBox(),
+    ]);
+    if (!optionsBox || !modelsBox) return null;
+    return {
+      gap: modelsBox.x - (optionsBox.x + optionsBox.width),
+      bottomDelta:
+        modelsBox.y + modelsBox.height - (optionsBox.y + optionsBox.height),
+    };
+  };
   await expect
-    .poll(async () => {
-      const [optionsBox, modelsBox] = await Promise.all([
-        page
-          .locator(
-            '[data-web-shell-toolbar-popover]:not([data-web-shell-model-submenu])',
-          )
-          .boundingBox(),
-        page.locator('[data-web-shell-model-submenu]').boundingBox(),
-      ]);
-      if (!optionsBox || !modelsBox) return -1;
-      return modelsBox.x - (optionsBox.x + optionsBox.width);
-    })
-    .toBeGreaterThan(0);
+    .poll(async () => (await getModelMenuGeometry())?.gap ?? -1)
+    .toBeGreaterThanOrEqual(3);
+  await expect
+    .poll(async () => (await getModelMenuGeometry())?.gap ?? 7)
+    .toBeLessThanOrEqual(6);
+  await expect
+    .poll(async () =>
+      Math.abs((await getModelMenuGeometry())?.bottomDelta ?? 2),
+    )
+    .toBeLessThanOrEqual(1);
   await expect(page.getByRole('switch', { name: 'Thinking' })).toBeVisible();
   await modelSearch.press('ArrowLeft');
   await expect(page.locator('[data-web-shell-model-submenu]')).toHaveCount(0);
