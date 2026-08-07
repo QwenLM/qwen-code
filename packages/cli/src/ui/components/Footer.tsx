@@ -273,6 +273,13 @@ export const Footer: React.FC = () => {
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {uiState.messageQueue.length > 0 && (
+            <Text color={theme.text.secondary}>
+              {` ⏸ ${t('{{count}} queued', {
+                count: String(uiState.messageQueue.length),
+              })}`}
+            </Text>
+          )}
           {!uiState.isSkillReviewDialogOpen &&
             (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
               <Text color={theme.status.warning}>

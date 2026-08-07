@@ -86,6 +86,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     ideContextState: undefined,
     startupIdeConnectionStatus: { state: 'idle' },
     isConfigInitialized: true,
+    messageQueue: [],
     ...overrides,
   }) as UIState;
 
@@ -160,6 +161,27 @@ describe('<Footer />', () => {
     );
 
     expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
+  });
+
+  it('shows a queued-count badge when messages are queued', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        messageQueue: ['first queued', 'second queued'],
+      }),
+    );
+
+    expect(lastFrame()).toContain('2 queued');
+  });
+
+  it('hides the queued-count badge when the queue is empty', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({ messageQueue: [] }),
+    );
+
+    expect(lastFrame()).not.toContain('queued');
   });
 
   it('shows mode indicator alongside steering hint during streaming', () => {
