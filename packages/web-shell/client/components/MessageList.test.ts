@@ -1440,6 +1440,31 @@ describe('applyTurnCollapse', () => {
     expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
   });
 
+  it('does not await a background launch core rejected before it started', () => {
+    const user = { ...makeUserMessage('u1'), timestamp: 1_000 };
+    const rejected = makeBackgroundAgentToolGroup('a2', 'failed');
+    if (rejected.role !== 'tool_group') {
+      throw new Error('Expected a background agent tool group');
+    }
+    // A rejected launch has no runtime output and never registered a
+    // background task, so no completion notification can ever match it.
+    delete rejected.tools[0].rawOutput;
+    const notified = [
+      user,
+      makeBackgroundAgentToolGroup('a1', 'completed'),
+      rejected,
+      makeBackgroundNotification('notification-a1', 'call-a1'),
+    ];
+    const summarized = [...notified, makeAssistantMessage('summary')];
+
+    const collapseState = (messages: Message[]) =>
+      collapseOf(collapseItems(groupParallelAgents(messages)), 'u1');
+
+    expect(collapseState(notified)?.collapsed).toBe(false);
+    expect(collapseState(summarized)?.collapsed).toBe(true);
+    expect(collapseState(summarized)?.liveStartedAt).toBeUndefined();
+  });
+
   it('keeps a terminal agent group open during automatic expansion cleanup', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),

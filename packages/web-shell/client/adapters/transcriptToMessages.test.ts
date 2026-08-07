@@ -301,6 +301,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'tool_group',
       tools: [{ callId: 'agent-call', status: 'completed', endTime: 2 }],
     });
+    expect(messages[1]).toMatchObject({
+      role: 'system',
+      source: 'background_notification',
+      data: {
+        kind: 'agent',
+        status: 'completed',
+        taskId: 'agent-task',
+        toolUseId: 'agent-call',
+      },
+    });
   });
 
   it('does not apply a non-agent background notification to an agent tool', () => {

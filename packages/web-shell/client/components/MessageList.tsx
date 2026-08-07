@@ -1383,14 +1383,23 @@ function turnHasAutomaticallyExpandedAgent(
 }
 
 function backgroundAgentCallIds(item: DisplayItem): string[] {
+  // Launches core rejected (status 'failed') never registered a background
+  // task, so no completion notification can ever arrive for them; counting
+  // them as awaited would keep the turn open forever.
   if (item.type === 'parallel_agents') {
     return item.agents
-      .filter(isBackgroundSubAgentToolCall)
+      .filter(
+        (agent) =>
+          isBackgroundSubAgentToolCall(agent) && agent.status !== 'failed',
+      )
       .map((agent) => agent.callId);
   }
   if (item.type === 'message' && item.message.role === 'tool_group') {
     return item.message.tools
-      .filter(isBackgroundSubAgentToolCall)
+      .filter(
+        (tool) =>
+          isBackgroundSubAgentToolCall(tool) && tool.status !== 'failed',
+      )
       .map((tool) => tool.callId);
   }
   return [];
