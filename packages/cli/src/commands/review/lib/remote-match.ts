@@ -90,8 +90,6 @@ export interface RemoteMatchInput {
 export interface RemoteMatchOutcome {
   /** Remote names whose FETCH url is an exact-segment match, in `git remote -v` order. */
   matched: string[];
-  /** How many `(fetch)` lines parsed into a host/owner/repo at all — for diagnostics. */
-  parsedCount: number;
 }
 
 /**
@@ -111,7 +109,6 @@ export function matchRemotes(
   const wantHost = normalizeSegment(host);
 
   const matched: string[] = [];
-  let parsedCount = 0;
 
   for (const line of remoteVOutput.split('\n')) {
     const trimmed = line.trim();
@@ -123,7 +120,6 @@ export function matchRemotes(
     if (!nameMatch) continue;
     const identity = parseRemoteUrl(nameMatch[2]);
     if (identity === null) continue;
-    parsedCount++;
     if (
       identity.host === wantHost &&
       identity.owner === wantOwner &&
@@ -133,5 +129,5 @@ export function matchRemotes(
     }
   }
 
-  return { matched, parsedCount };
+  return { matched };
 }

@@ -83,7 +83,7 @@ The parser already classified the target, so there is nothing to disambiguate by
      --owner <the verdict's owner> --repo <the verdict's repo> --host <the verdict's host>
    ```
 
-   Exit 0 prints the matching remote's name — forks included: a clone whose `upstream` points to the target repository matches that repository's PRs exactly. Exit 6 means no remote matches — go to item 3. Exit 2 means several match; tell the user and stop rather than picking one. Any other exit is fail-closed like the other gates: report it and stop.
+   Exit 0 prints the matching remote's name — forks included: a clone whose `upstream` points to the target repository matches that repository's PRs exactly. Exit 6 means no remote matches — go to item 3. Exit 7 means several match; tell the user and stop rather than picking one. Any other exit is fail-closed like the other gates: report it and stop.
 
 2. If a matching remote is found, proceed with the **normal worktree flow** — use that remote name (instead of hardcoded `origin`) for `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>`. In Step 7, use the owner/repo from the URL for posting comments.
 
@@ -130,7 +130,7 @@ Based on the parsed `target.type`:
 
     Do not default to `origin`: in the standard fork layout `origin` is the _fork_, which has no `pull/<n>/head` ref for an upstream PR, and `fetch-pr` fails. In an upstream-as-`origin` clone the matcher lands on `origin` anyway, so one procedure is correct for both.
 
-    Guessing the owner/repo here is not a recoverable mistake — a guessed repo has already stopped a review before it read a line of code (measured; DESIGN.md — The guessed fork repo). If `gh repo view` fails, or the matcher exits 6 (no remote matches) or 2 (several do), say so and stop rather than picking one.
+    Guessing the owner/repo here is not a recoverable mistake — a guessed repo has already stopped a review before it read a line of code (measured; DESIGN.md — The guessed fork repo). If `gh repo view` fails, or the matcher exits 6 (no remote matches) or 7 (several do), say so and stop rather than picking one.
 
     Read `.qwen/tmp/qwen-review-pr-<n>-fetch.json` for: `worktreePath`, `baseRefName`, `headRefName`, `fetchedSha` (use as the **HEAD commit SHA** for Step 7), `isCrossRepository`, `diffStat` (files / additions / deletions), `emptyDiff` (**stop here**: the branch tree is byte-identical to its merge base — the work already landed or was superseded; tell the user and recommend close-as-superseded instead of fanning out agents over zero hunks), `collapsedFromUpstream` (disclose in the summary: overlapping merged PRs have collapsed this one to a residual — the review scope is the recomputed diff, and body claims about the rest are description-of-history, which Agent 0 should read accordingly), and `prDescriptionHasHan` (the PR description contains Chinese — every posted inline comment must then be bilingual; see Step 7). If the command fails (auth, network, PR not found), inform the user and stop.
 

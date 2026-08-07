@@ -14,10 +14,11 @@
 //
 // Outcomes: exactly one matching remote — its name on stdout, exit 0. No
 // match — `none` on stdout, exit 6 (the lightweight-mode signal). Several —
-// every name on stdout, exit 2; picking among them is not this command's
+// every name on stdout, exit 7; picking among them is not this command's
 // call, and the review stops rather than guesses (the same rule the prose
-// had). Not a git repository, or git unavailable — exit 1, fail closed like
-// the other gates.
+// had). 7, not 2 — 2 stays reserved for shell-level misuse, like run's
+// 3-not-2 choice. Not a git repository, or git unavailable — exit 1, fail
+// closed like the other gates.
 
 import type { CommandModule } from 'yargs';
 import { git, gitOpt } from './lib/git.js';
@@ -83,13 +84,13 @@ export function runMatchRemote(args: MatchRemoteArgs): void {
     `warning: ${matched.length} remotes match ${args.host}/${args.owner}/${args.repo} ` +
       `(${matched.join(', ')}); refusing to pick one — the review stops here.`,
   );
-  process.exitCode = 2;
+  process.exitCode = 7;
 }
 
 export const matchRemoteCommand: CommandModule = {
   command: 'match-remote',
   describe:
-    'Print the git remote whose URL matches an owner/repo by exact host + owner/repo equality (exit 6 when none, exit 2 when several)',
+    'Print the git remote whose URL matches an owner/repo by exact host + owner/repo equality (exit 6 when none, exit 7 when several)',
   builder: (yargs) =>
     yargs
       .option('owner', {

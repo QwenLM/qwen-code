@@ -159,7 +159,7 @@ qwen review match-remote --owner <owner> --repo <repo> [--host <host>]
   containment is exactly what shipped the wrong-repo bug; the parser never
   does it.
 - Exactly one match → print its name, exit 0. Zero → exit 6 with `none` on
-  stdout (the lightweight-mode signal). Multiple → print all, exit 2 with a
+  stdout (the lightweight-mode signal). Multiple → print all, exit 7 with a
   `warning:` line; the orchestrator stops rather than picks (same rule as
   today's prose).
 - Not a git repository / git unavailable → exit 1 (fail-closed, like the
@@ -215,6 +215,6 @@ remote that the rest of Step 1 could not have served.
    not worth a mechanism.
 2. **Exit-code numbering** — the review subcommands already use 3
    (gate refusal / not covered), 4 (budget), 5 (converged) for
-   structured outcomes; this doc claims 6 for "no matching remote" and keeps
-   1/2 for error/misuse. Conflicts checked against the current suite; the
-   implementation pins them.
+   structured outcomes; this doc claims 6 for "no matching remote" and 7
+   for "several match", keeping 1/2 for error/misuse. Conflicts checked
+   against the current suite; the implementation pins them.

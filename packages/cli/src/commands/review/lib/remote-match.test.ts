@@ -219,27 +219,25 @@ describe('matchRemotes', () => {
     expect(matched).toEqual([]);
   });
 
-  it('skips unparsable remotes and counts the parsable ones', () => {
+  it('skips unparsable remotes', () => {
     const remotes = [
       'local\t/srv/git/qwen-code.git (fetch)',
       'local\t/srv/git/qwen-code.git (push)',
       'origin\tgit@github.com:QwenLM/qwen-code.git (fetch)',
       'origin\tgit@github.com:QwenLM/qwen-code.git (push)',
     ].join('\n');
-    const { matched, parsedCount } = matchRemotes(remotes, {
+    const { matched } = matchRemotes(remotes, {
       owner: 'QwenLM',
       repo: 'qwen-code',
     });
     expect(matched).toEqual(['origin']);
-    expect(parsedCount).toBe(1);
   });
 
   it('handles empty output', () => {
-    const { matched, parsedCount } = matchRemotes('', {
+    const { matched } = matchRemotes('', {
       owner: 'QwenLM',
       repo: 'qwen-code',
     });
     expect(matched).toEqual([]);
-    expect(parsedCount).toBe(0);
   });
 });

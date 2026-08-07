@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -82,14 +82,14 @@ describe('runMatchRemote (real git)', () => {
     expect(process.exitCode).toBe(6);
   });
 
-  it('prints every match and exits 2 when several remotes serve the repo', () => {
+  it('prints every match and exits 7 when several remotes serve the repo', () => {
     git('remote', 'add', 'upstream', 'https://github.com/QwenLM/qwen-code.git');
     git('remote', 'add', 'mirror', 'git@github.com:QwenLM/qwen-code.git');
     process.chdir(repo);
     run();
     expect(stdoutSpy).toHaveBeenCalledWith('upstream');
     expect(stdoutSpy).toHaveBeenCalledWith('mirror');
-    expect(process.exitCode).toBe(2);
+    expect(process.exitCode).toBe(7);
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('warning:'));
   });
 
@@ -119,7 +119,7 @@ describe('runMatchRemote (real git)', () => {
     // like `git remote -v` typed there.
     git('remote', 'add', 'origin', 'git@github.com:QwenLM/qwen-code.git');
     const sub = join(repo, 'packages', 'core');
-    execFileSync('mkdir', ['-p', sub]);
+    mkdirSync(sub, { recursive: true });
     process.chdir(sub);
     run();
     expect(stdoutSpy).toHaveBeenCalledWith('origin');
