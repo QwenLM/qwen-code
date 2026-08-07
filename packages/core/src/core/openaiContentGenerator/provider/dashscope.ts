@@ -54,6 +54,13 @@ export function selectDashScopeThinkingKnob(
     if (layer?.['enable_thinking'] === false) {
       return { source, field: 'enable_thinking', value: false };
     }
+    return selectValueFromLayer(source, layer) ?? selectOnSwitch(source, layer);
+  };
+
+  const selectValueFromLayer = (
+    source: 'extra_body' | 'samplingParams',
+    layer: Record<string, unknown> | undefined,
+  ): DashScopeThinkingKnobSelection | undefined => {
     if (layer?.['reasoning_effort'] != null) {
       return {
         source,
@@ -68,27 +75,48 @@ export function selectDashScopeThinkingKnob(
         value: layer['thinking_budget'],
       };
     }
-    // A solitary on-switch still represents its layer so a higher-priority
-    // `true` beats a lower-priority disable; it ranks below the value knobs
-    // in its own layer because, unlike the off-switch, it never rewrites
-    // the shipping tier.
+    return undefined;
+  };
+
+  const selectOnSwitch = (
+    source: 'extra_body' | 'samplingParams',
+    layer: Record<string, unknown> | undefined,
+  ): DashScopeThinkingKnobSelection | undefined => {
     if (layer?.['enable_thinking'] === true) {
       return { source, field: 'enable_thinking', value: true };
     }
     return undefined;
   };
 
-  return (
-    selectFromLayer('extra_body', extraBody) ??
-    selectFromLayer('samplingParams', samplingParams) ??
-    (reasoningEffort !== undefined
+  const reasoningSelection: DashScopeThinkingKnobSelection | undefined =
+    reasoningEffort !== undefined
       ? {
           source: 'reasoning',
           field: 'reasoning_effort',
           value: reasoningEffort,
         }
-      : undefined)
-  );
+      : undefined;
+  const extraBodySelection = selectFromLayer('extra_body', extraBody);
+  if (
+    extraBodySelection?.field === 'enable_thinking' &&
+    extraBodySelection.value === true
+  ) {
+    // An on-switch blocks lower-priority off-switches but does not choose the
+    // effort tier or budget. Let the next value-bearing layer decide.
+    return (
+      selectValueFromLayer('samplingParams', samplingParams) ??
+      reasoningSelection ??
+      extraBodySelection
+    );
+  }
+  if (extraBodySelection) {
+    return extraBodySelection;
+  }
+  const samplingSelection = selectFromLayer('samplingParams', samplingParams);
+  return samplingSelection?.field === 'enable_thinking' &&
+    samplingSelection.value === true
+    ? (reasoningSelection ?? samplingSelection)
+    : (samplingSelection ?? reasoningSelection);
 }
 
 function withoutNullishThinkingKnobs(

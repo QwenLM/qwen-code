@@ -1166,9 +1166,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(mockDebugLogger.warn).not.toHaveBeenCalled();
     });
 
-    it('keeps the tier and drops a lower-priority budget under an extra_body enable_thinking: true', () => {
-      // The on-switch outranks the budget cross-layer; the rejected
-      // effort + budget pair never ships — the tier survives alone.
+    it('keeps a samplingParams budget over the configured tier under an extra_body on-switch', () => {
+      // The on-switch blocks lower-priority off-switches but does not choose
+      // a value, so the next value-bearing layer still wins over reasoning.
       const generator = new DashScopeOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,
@@ -1187,15 +1187,15 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('high');
-      expect(result['enable_thinking']).toBeUndefined();
-      expect(result['thinking_budget']).toBeUndefined();
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['thinking_budget']).toBe(2048);
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
           reasoningEffort: 'high',
-          dropped: ['enable_thinking', 'thinking_budget'],
+          dropped: ['reasoning_effort'],
         },
       );
     });

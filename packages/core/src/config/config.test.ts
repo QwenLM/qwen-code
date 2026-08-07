@@ -4397,6 +4397,12 @@ describe('Server Config (config.ts)', () => {
         samplingParams: { reasoning_effort: 'high' },
         expected: { source: 'samplingParams', field: 'reasoning_effort' },
       },
+      {
+        name: 'samplingParams budget under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
     ])('resolves $name', ({ extra_body, samplingParams, expected }) => {
       const config = new Config({
         ...baseParams,
