@@ -114,6 +114,19 @@ export interface Envelope {
   isReplyToBot: boolean;
   /** Text of the message being replied to (quoted/referenced message). */
   referencedText?: string;
+  /**
+   * Stable identifiers (staffId preferred, platform ID fallback) of non-bot
+   * members mentioned alongside the bot in a group message, deduplicated and
+   * excluding the bot itself. Kept separate from `text` (like `metadata`) so
+   * slash-command parsing sees the message body alone; ChannelBase renders it
+   * as a `[Mentioned …]` wrapper AFTER prompt sanitization so the delivered
+   * format stays uniform regardless of the identifier list length.
+   * Rendered only when sender attribution is rendered (group/single-scope,
+   * not `alreadyPrefixed`, not a recognized slash command) — self-prefixing
+   * adapters must render it themselves. Group history backfill records the
+   * message body only; mention IDs are intentionally not persisted.
+   */
+  mentionedMemberIds?: string[];
   /** Base64-encoded image data (e.g. from WeChat CDN download). */
   imageBase64?: string;
   /** MIME type for the image (e.g. "image/jpeg", "image/png"). */
