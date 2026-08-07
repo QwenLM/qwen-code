@@ -5121,10 +5121,10 @@ export abstract class ChannelBase {
       );
       promptText = `[${who}] ${sanitizePromptText(promptText)}`;
       // Render the non-bot mention marker AFTER sanitization (like the
-      // [Replying to:] wrapper below). The first revision of this PR rode the
-      // marker inside `text`, so sanitizePromptText stripped its brackets only
-      // when the ID list was short (<=64 chars) and folded its newline, making
-      // the delivered format length-dependent. IDs are platform-controlled, so
+      // [Replying to:] wrapper below). Inside `text` it would pass through
+      // sanitizePromptText, which strips brackets only on content <=64 chars
+      // and folds its newline — so with IDs included, the delivered format
+      // would depend on the ID list's length. IDs are platform-controlled, so
       // neutralize them like quoted text before they bypass the sanitizer here.
       if (envelope.mentionedMemberIds?.length) {
         const ids = envelope.mentionedMemberIds

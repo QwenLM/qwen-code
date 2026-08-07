@@ -11202,11 +11202,10 @@ describe('ChannelBase', () => {
     });
 
     it('keeps the mention marker format uniform for long ID lists', async () => {
-      // The PR's first revision rode the marker inside `text`, so
-      // sanitizePromptText stripped its brackets only when the content was
-      // <=64 chars — short ID lists arrived bracket-less while long ones kept
-      // brackets. The marker is now injected after sanitization, so both
-      // lengths deliver identically.
+      // Inside `text`, sanitizePromptText would strip the marker's brackets
+      // only when the content is <=64 chars, so short ID lists would arrive
+      // bracket-less while long ones kept brackets. The marker is injected
+      // after sanitization, so both lengths deliver identically.
       const longIds = [
         'staff-id-aaaaaaaaaa',
         'staff-id-bbbbbbbbbb',

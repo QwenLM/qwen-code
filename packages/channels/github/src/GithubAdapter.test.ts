@@ -3447,6 +3447,35 @@ describe('GithubChannel', () => {
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
     });
 
+    it('blocks cursor commit when a persisted envelope has a non-array mentionedMemberIds', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([
+        {
+          ...task,
+          envelope: { ...task.envelope, mentionedMemberIds: 'not-an-array' },
+        },
+      ]);
+      const privateChannel = channel as unknown as {
+        inboundRecoveryPending: boolean;
+      };
+      privateChannel.inboundRecoveryPending = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+
+      await pollOnce();
+
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    });
+
     it('persists cancellation as a terminal task state', async () => {
       await initWithoutLoop();
       writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);

@@ -372,6 +372,7 @@ function isInboundEnvelope(value: unknown): value is Envelope | undefined {
       typeof envelope.messageId === 'string') &&
     (envelope.referencedText === undefined ||
       typeof envelope.referencedText === 'string') &&
+    isOptionalStringArray(envelope.mentionedMemberIds) &&
     (envelope.imageBase64 === undefined ||
       typeof envelope.imageBase64 === 'string') &&
     (envelope.imageMimeType === undefined ||
