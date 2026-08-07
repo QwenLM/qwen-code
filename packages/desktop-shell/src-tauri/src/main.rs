@@ -4,7 +4,7 @@ mod desktop_state;
 mod runtime;
 
 use desktop_state::{default_window_size, restore_window, SettingsStore};
-use runtime::DesktopRuntime;
+use runtime::{resolve_workspace, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -307,22 +307,10 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
     let _ = app.emit("runtime-starting", workspace.to_string_lossy().into_owned());
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<ApplicationState>();
-        let canonical = match fs::canonicalize(&workspace) {
-            Ok(path) if path.is_dir() => path,
-            Ok(path) => {
-                emit_runtime_failure(
-                    &app,
-                    generation,
-                    format!("Workspace is not a directory: {}", path.display()),
-                );
-                return;
-            }
+        let canonical = match resolve_workspace(&workspace) {
+            Ok(path) => path,
             Err(error) => {
-                emit_runtime_failure(
-                    &app,
-                    generation,
-                    format!("Failed to open workspace {}: {error}", workspace.display()),
-                );
+                emit_runtime_failure(&app, generation, error);
                 return;
             }
         };

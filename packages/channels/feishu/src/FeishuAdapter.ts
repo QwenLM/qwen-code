@@ -10,6 +10,7 @@ import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
+  sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
 import { downloadMedia } from './media.js';
@@ -97,6 +98,12 @@ interface CardSessionState {
 
 /** Track seen message IDs to deduplicate retried events. */
 const DEDUP_TTL_MS = 5 * 60 * 1000;
+/**
+ * Runtime label/lookup caches are bounded like the persisted observed-contact
+ * registry (500 observations) so a long-running daemon does not retain every
+ * user/chat/thread ID it ever sees.
+ */
+const OBSERVED_LABEL_CACHE_LIMIT = 500;
 
 /** Minimum interval between card updates (ms) to avoid API rate limiting. */
 const CARD_UPDATE_INTERVAL_MS = 1500;
@@ -174,6 +181,24 @@ export class FeishuChannel extends ChannelBase {
   private tokenCache?: { token: string; expiresAt: number };
   private tokenRefreshPromise?: Promise<string | undefined>;
   private questionCardController: FeishuQuestionCardController;
+  // Core (non-silent) callers waiting on the shared token refresh, so a
+  // silent-initiated refresh still logs token errors for them.
+  private tokenRefreshHasCoreWaiters = false;
+  private readonly observedUserNames = new Map<string, string>();
+  private readonly observedChatNames = new Map<string, string>();
+  private readonly observedUserLookups = new Map<
+    string,
+    Promise<string | undefined>
+  >();
+  private readonly observedChatLookups = new Map<
+    string,
+    Promise<string | undefined>
+  >();
+  private readonly observedContactWrites = new Map<
+    string,
+    { senderName: string; chatName: string | undefined }
+  >();
+  private hydratedObservedNames = false;
 
   private collapsible: boolean;
   private collapsibleThreshold: number;
@@ -680,21 +705,27 @@ export class FeishuChannel extends ChannelBase {
     return text.trim() || undefined;
   }
 
-  private async getTenantAccessToken(): Promise<string | undefined> {
+  private async getTenantAccessToken(options?: {
+    silent?: boolean;
+  }): Promise<string | undefined> {
     if (this.tokenCache && Date.now() < this.tokenCache.expiresAt) {
       return this.tokenCache.token;
     }
 
+    if (!options?.silent) this.tokenRefreshHasCoreWaiters = true;
     if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
     this.tokenRefreshPromise = this.refreshToken();
     try {
       return await this.tokenRefreshPromise;
     } finally {
       this.tokenRefreshPromise = undefined;
+      this.tokenRefreshHasCoreWaiters = false;
     }
   }
 
   private async refreshToken(): Promise<string | undefined> {
+    // Best-effort label enrichment initiates silent refreshes; failures must
+    // still surface when a core delivery caller initiated or joined it.
     try {
       const resp = await fetch(
         `${BASE_URL}/auth/v3/tenant_access_token/internal`,
@@ -710,9 +741,11 @@ export class FeishuChannel extends ChannelBase {
       );
 
       if (!resp.ok) {
-        process.stderr.write(
-          `[Feishu:${this.name}] getTenantAccessToken failed: HTTP ${resp.status}\n`,
-        );
+        if (this.tokenRefreshHasCoreWaiters) {
+          process.stderr.write(
+            `[Feishu:${this.name}] getTenantAccessToken failed: HTTP ${resp.status}\n`,
+          );
+        }
         if (resp.status === 401) this.tokenCache = undefined;
         return undefined;
       }
@@ -728,11 +761,211 @@ export class FeishuChannel extends ChannelBase {
       };
       return this.tokenCache.token;
     } catch (err) {
-      process.stderr.write(
-        `[Feishu:${this.name}] getTenantAccessToken error: ${err}\n`,
-      );
+      if (this.tokenRefreshHasCoreWaiters) {
+        process.stderr.write(
+          `[Feishu:${this.name}] getTenantAccessToken error: ${err}\n`,
+        );
+      }
       return undefined;
     }
+  }
+
+  private hydrateObservedNames(): void {
+    if (this.hydratedObservedNames) return;
+    this.hydratedObservedNames = true;
+    const graph = this.persistedObservedContacts();
+    if (!graph) return;
+    // Select the newest non-ID label per contact so an older observation
+    // (for example a stale group membership) cannot overwrite a more recent
+    // one during the traversal.
+    const newestUser = new Map<string, { label: string; at: string }>();
+    const newestChat = new Map<string, { label: string; at: string }>();
+    const consider = (
+      best: Map<string, { label: string; at: string }>,
+      id: string,
+      label: string,
+      at: string,
+    ): void => {
+      if (label === id) return;
+      const current = best.get(id);
+      if (!current || at >= current.at) best.set(id, { label, at });
+    };
+    for (const user of graph.users) {
+      consider(newestUser, user.id, user.label, user.lastObservedAt);
+    }
+    for (const group of graph.groups) {
+      consider(newestChat, group.id, group.label, group.lastObservedAt);
+      for (const member of group.users) {
+        consider(newestUser, member.id, member.label, member.lastObservedAt);
+      }
+    }
+    for (const [id, entry] of newestUser) {
+      this.observedUserNames.set(id, entry.label);
+    }
+    for (const [id, entry] of newestChat) {
+      this.observedChatNames.set(id, entry.label);
+    }
+    this.capObservedCache(this.observedUserNames);
+    this.capObservedCache(this.observedChatNames);
+  }
+
+  /** Evicts the oldest-inserted entries once a runtime cache exceeds the cap. */
+  private capObservedCache(cache: Map<string, unknown>): boolean {
+    let evicted = false;
+    while (cache.size > OBSERVED_LABEL_CACHE_LIMIT) {
+      const oldest = cache.keys().next();
+      if (oldest.done) break;
+      cache.delete(oldest.value);
+      evicted = true;
+    }
+    return evicted;
+  }
+
+  private observedUserName(userId: string): Promise<string | undefined> {
+    const userIdType = userId.startsWith('ou_')
+      ? 'open_id'
+      : userId.startsWith('on_')
+        ? 'union_id'
+        : 'user_id';
+    return this.observedNameLookup({
+      lookups: this.observedUserLookups,
+      names: this.observedUserNames,
+      id: userId,
+      request: (token) =>
+        fetch(
+          `${BASE_URL}/contact/v3/users/basic_batch?user_id_type=${userIdType}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ user_ids: [userId] }),
+            signal: AbortSignal.timeout(15_000),
+          },
+        ),
+      extractName: (body) => {
+        const data = body as {
+          code?: number;
+          data?: { users?: Array<{ name?: string }> };
+        };
+        return data.code === 0 ? data.data?.users?.[0]?.name : undefined;
+      },
+    });
+  }
+
+  private observedChatName(chatId: string): Promise<string | undefined> {
+    return this.observedNameLookup({
+      lookups: this.observedChatLookups,
+      names: this.observedChatNames,
+      id: chatId,
+      request: (token) =>
+        fetch(`${BASE_URL}/im/v1/chats/${encodeURIComponent(chatId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(15_000),
+        }),
+      extractName: (body) => {
+        const data = body as { code?: number; data?: { name?: string } };
+        return data.code === 0 ? data.data?.name : undefined;
+      },
+    });
+  }
+
+  private observedNameLookup(options: {
+    lookups: Map<string, Promise<string | undefined>>;
+    names: Map<string, string>;
+    id: string;
+    request: (token: string) => Promise<Response>;
+    extractName: (body: unknown) => string | undefined;
+  }): Promise<string | undefined> {
+    const cached = options.names.get(options.id);
+    if (cached) return Promise.resolve(cached);
+    const existing = options.lookups.get(options.id);
+    if (existing) return existing;
+
+    const lookup = (async () => {
+      try {
+        const token = await this.getTenantAccessToken({ silent: true });
+        if (!token) {
+          options.lookups.delete(options.id);
+          return undefined;
+        }
+
+        const response = await options.request(token);
+        if (!response.ok) {
+          if (response.status === 401) {
+            this.tokenCache = undefined;
+            options.lookups.delete(options.id);
+          }
+          return undefined;
+        }
+
+        const name = options.extractName(await response.json())?.trim();
+        if (!name) return undefined;
+        const label = sanitizeSenderName(name);
+        if (label === 'unknown') return undefined;
+        options.names.set(options.id, label);
+        // Evicting a resolved label drops the next envelope back to the raw
+        // ID, and the initial persistence write would clobber the persisted
+        // label, so re-hydrate from the registry on the next message.
+        if (this.capObservedCache(options.names)) {
+          this.hydratedObservedNames = false;
+        }
+        return label;
+      } catch {
+        return undefined;
+      }
+    })();
+    options.lookups.set(options.id, lookup);
+    this.capObservedCache(options.lookups);
+    return lookup;
+  }
+
+  protected override onObservedContact(envelope: Envelope): void {
+    this.observedContactWrites.set(this.observedContactKey(envelope), {
+      senderName: envelope.senderName,
+      chatName: envelope.chatName,
+    });
+    this.capObservedCache(this.observedContactWrites);
+    void this.enrichObservedContact(envelope).catch(() => {});
+  }
+
+  private observedContactKey(envelope: Envelope): string {
+    return envelope.isGroup
+      ? `${envelope.senderId}\u0000${envelope.chatId}\u0000${
+          envelope.threadId ?? ''
+        }`
+      : envelope.senderId;
+  }
+
+  private async enrichObservedContact(envelope: Envelope): Promise<void> {
+    const [senderName, chatName] = await Promise.all([
+      this.observedUserName(envelope.senderId),
+      envelope.isGroup
+        ? this.observedChatName(envelope.chatId)
+        : Promise.resolve(undefined),
+    ]);
+    if (!senderName && !chatName) return;
+    const key = this.observedContactKey(envelope);
+    const nextLabels = {
+      senderName: senderName ?? envelope.senderName,
+      chatName: chatName ?? envelope.chatName,
+    };
+    const persistedLabels = this.observedContactWrites.get(key);
+    if (
+      persistedLabels &&
+      persistedLabels.senderName === nextLabels.senderName &&
+      persistedLabels.chatName === nextLabels.chatName
+    ) {
+      return;
+    }
+    this.observedContactWrites.set(key, nextLabels);
+    this.capObservedCache(this.observedContactWrites);
+    await this.recordObservedContact({
+      ...envelope,
+      ...(senderName ? { senderName } : {}),
+      ...(chatName ? { chatName } : {}),
+    });
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -2179,6 +2412,9 @@ export class FeishuChannel extends ChannelBase {
         sender.sender_id?.user_id ||
         sender.sender_id?.union_id ||
         '';
+      this.hydrateObservedNames();
+      const senderName = this.observedUserNames.get(senderId) || senderId;
+      const chatName = isGroup ? this.observedChatNames.get(chatId) : undefined;
 
       // Parse message content
       const content = this.extractContent(msg.message_type, msg.content);
@@ -2223,8 +2459,9 @@ export class FeishuChannel extends ChannelBase {
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
-        senderName: senderId,
+        senderName,
         chatId,
+        ...(chatName ? { chatName } : {}),
         text: cleanText,
         messageId: msgId,
         threadId: msg.root_id || undefined,

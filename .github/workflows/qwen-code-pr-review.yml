@@ -686,6 +686,40 @@ jobs:
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
           TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
+          # Timeout headroom for CI reviews, measured against the PR 8507
+          # double-abort (2026-08-07):
+          # - Request timeout (connect + TTFB), 120s default -> 10 minutes:
+          #   a large-PR review turn carries a million-token (mostly cached)
+          #   context plus a long thinking phase, and under upstream load the
+          #   first byte alone can exceed 120s; the SDK's internal retries
+          #   turned three ~120s TTFB timeouts into a 483s visible abort on
+          #   an early, small turn. QWEN_CODE_API_TIMEOUT_MS is the env knob
+          #   for ContentGeneratorConfig.timeout and outranks settings, so no
+          #   settings.json write is needed.
+          # - Stream idle window, 240s default -> 10 minutes: tolerates a
+          #   long thinking phase between chunks; the PR 8507 fan-out
+          #   generation on a ~1.27M-token context stalled past the default
+          #   while the upstream was degraded, and the pipeline-level retry
+          #   doubled the loss (~16 minutes) before aborting the run.
+          # - Lifetime cap at 30 minutes: the hard bound for drip-fed
+          #   streams; MUST exceed the idle window (a single legitimate gap
+          #   is charged against both).
+          # Accepted trade-offs: a dead-but-accepting upstream now costs up
+          # to ~4 x 30 minutes per LLM turn for a drip-fed generation (the
+          # lifetime cap bounds one attempt; the guard's ETIMEDOUT rides the
+          # transport replay/continuation budget) or ~4 x 10 minutes per
+          # TTFB-hung SDK call (DEFAULT_MAX_RETRIES = 3), with the pipeline
+          # retry on top, before a visible abort —
+          # hang-detection latency degrades for that rare case; and
+          # LoggingContentGenerator's hardcoded 5-minute stream-span idle
+          # timer fires before these guards, closing the LLM request span as
+          # an idle-timeout failure and skipping its api_response log even
+          # when the generation succeeds. The outer GNU timeout and the
+          # review deadline still bound the job — these knobs trade
+          # hang-detection latency for survival on slow-but-alive upstreams.
+          QWEN_CODE_API_TIMEOUT_MS: '600000'
+          QWEN_STREAM_IDLE_TIMEOUT_MS: '600000'
+          QWEN_STREAM_MAX_LIFETIME_MS: '1800000'
           # Evidence-image destination for `qwen review publish-assets` —
           # OPT-IN by design: the command refuses to push images anywhere the
           # user did not designate, so with the repository variable unset the
