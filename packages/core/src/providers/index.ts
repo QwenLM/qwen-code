@@ -29,12 +29,14 @@ export {
   getDefaultModelIds,
   providerMatchesCredentials,
   PROVIDER_METADATA_NS,
+  readPersistedProviderMetadata,
   reconcileInstallModelIds,
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
   resolveReconnectModelIds,
   shouldShowStep,
+  type PersistedProviderMetadata,
 } from './provider-config.js';
 
 // Provider registry

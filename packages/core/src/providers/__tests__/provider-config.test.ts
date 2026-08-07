@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  applyProviderInstallPlan,
   AuthType,
   buildInstallPlan,
   buildProviderTemplate,
@@ -21,7 +22,9 @@ import {
   shouldShowStep,
   providerMatchesCredentials,
   type ProviderConfig,
+  type ProviderSettingsAdapter,
 } from '@qwen-code/qwen-code-core';
+import type { ModelProvidersConfig } from '../../models/types.js';
 import {
   TOKEN_PLAN_CHINA_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
@@ -249,6 +252,7 @@ describe('buildInstallPlan', () => {
           config,
           'https://api.test.com/v1',
         ),
+        builtinModelIds: ['model-a'],
       },
     });
   });
@@ -282,6 +286,32 @@ describe('buildInstallPlan', () => {
     expect(version).not.toBe(
       computeProviderTemplateVersion(config, 'https://api.test.com/v1'),
     );
+  });
+
+  it('stamps the template hash regardless of the order built-in IDs arrived in', () => {
+    // The wizard merges free-text typed IDs first and never re-sorts, so an
+    // install can carry the full built-in set in non-template order. The
+    // persisted hash must canonicalize to template order or update detection
+    // re-offers an update that changes nothing (the #8504 prompt loop).
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }],
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-b', 'model-c', 'model-a'],
+    });
+    expect(plan.providerState).toEqual({
+      'providerMetadata.test': {
+        baseUrl: 'https://api.test.com/v1',
+        version: computeProviderTemplateVersion(
+          config,
+          'https://api.test.com/v1',
+        ),
+        builtinModelIds: ['model-a', 'model-b', 'model-c'],
+      },
+    });
   });
 });
 
@@ -522,6 +552,43 @@ describe('resolveReconnectModelIds', () => {
       }
     ).version;
 
+  function createInMemorySettings(): {
+    data: Record<string, unknown>;
+    adapter: ProviderSettingsAdapter;
+  } {
+    const data: Record<string, unknown> = {};
+    const read = (key: string): unknown =>
+      key
+        .split('.')
+        .reduce<unknown>(
+          (node, part) =>
+            node && typeof node === 'object'
+              ? (node as Record<string, unknown>)[part]
+              : undefined,
+          data,
+        );
+    const adapter: ProviderSettingsAdapter = {
+      getValue: read,
+      setValue: (key, value) => {
+        const parts = key.split('.');
+        let node = data;
+        parts.forEach((part, index) => {
+          if (index === parts.length - 1) {
+            node[part] = value;
+            return;
+          }
+          const next = node[part];
+          node[part] = next && typeof next === 'object' ? next : {};
+          node = node[part] as Record<string, unknown>;
+        });
+      },
+      getModelProviders: () =>
+        (data['modelProviders'] ?? {}) as ModelProvidersConfig,
+      persist: () => {},
+    };
+    return { data, adapter };
+  }
+
   it('falls back to the default model IDs when the echo is empty', () => {
     const config = makeEditableConfig();
     expect(resolveReconnectModelIds(config, inputsFor(config, []), {})).toEqual(
@@ -540,13 +607,17 @@ describe('resolveReconnectModelIds', () => {
   });
 
   it('keeps a faithfully echoed deliberately installed subset verbatim', () => {
-    // The persisted version is exactly what the verbatim install would stamp
-    // again, so the echo reproduces the recorded install and must not be
-    // re-expanded — update detection keeps re-offering the missing built-in.
+    // The install recorded the built-in IDs it installed, so fidelity is
+    // decided by ID set — a deliberately installed subset must not be
+    // re-expanded; update detection keeps re-offering the missing built-in.
     const config = makeEditableConfig();
     const mergedSettings = {
       [PROVIDER_METADATA_NS]: {
-        test: { version: planVersion(config, ['a']), baseUrl },
+        test: {
+          version: planVersion(config, ['a']),
+          baseUrl,
+          builtinModelIds: ['a'],
+        },
       },
     };
     expect(
@@ -558,11 +629,76 @@ describe('resolveReconnectModelIds', () => {
     ).toEqual(['a']);
   });
 
+  it('keeps a faithful subset echo verbatim after built-in specs change', () => {
+    // The recorded version hashes full model specs as of install time. A
+    // later spec edit (contextWindowSize here) perturbs any content-based
+    // re-hash; fidelity must come from the recorded built-in ID set instead,
+    // or the deselected built-in gets silently reinstalled.
+    const installTimeConfig = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'a', contextWindowSize: 100 }, { id: 'b' }],
+    });
+    const currentConfig = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'a', contextWindowSize: 200 }, { id: 'b' }],
+    });
+    const mergedSettings = {
+      [PROVIDER_METADATA_NS]: {
+        test: {
+          version: planVersion(installTimeConfig, ['a']),
+          baseUrl,
+          builtinModelIds: ['a'],
+        },
+      },
+    };
+    expect(
+      resolveReconnectModelIds(
+        currentConfig,
+        inputsFor(currentConfig, ['a']),
+        mergedSettings,
+      ),
+    ).toEqual(['a']);
+  });
+
+  it('installs a deliberately edited selection verbatim against a recorded install', () => {
+    // The desktop connect form pre-fills an editable list from stored models;
+    // a submission that deviates from the recorded install is the user's new
+    // selection, not a stale snapshot, and must not be re-expanded.
+    const config = makeEditableConfig();
+    const mergedSettings = {
+      [PROVIDER_METADATA_NS]: {
+        test: {
+          version: planVersion(config, ['a', 'b']),
+          baseUrl,
+          builtinModelIds: ['a', 'b'],
+        },
+      },
+    };
+    expect(
+      resolveReconnectModelIds(
+        config,
+        inputsFor(config, ['a']),
+        mergedSettings,
+      ),
+    ).toEqual(['a']);
+    expect(
+      resolveReconnectModelIds(
+        config,
+        inputsFor(config, ['a', 'mine']),
+        mergedSettings,
+      ),
+    ).toEqual(['a', 'mine']);
+  });
+
   it('keeps a faithfully echoed full template plus custom IDs verbatim', () => {
     const config = makeEditableConfig();
     const mergedSettings = {
       [PROVIDER_METADATA_NS]: {
-        test: { version: planVersion(config, ['a', 'b', 'mine']), baseUrl },
+        test: {
+          version: planVersion(config, ['a', 'b', 'mine']),
+          baseUrl,
+          builtinModelIds: ['a', 'b'],
+        },
       },
     };
     expect(
@@ -575,9 +711,9 @@ describe('resolveReconnectModelIds', () => {
   });
 
   it('honors an explicit update-prompt skip over a stale recorded version', () => {
-    // ignoredVersion matching the current template wins even when the
-    // recorded version would mark the echo stale — a key rotation must not
-    // override the user's "skip".
+    // ignoredVersion matching the current template wins even for a record
+    // that predates builtinModelIds — a key rotation must not override the
+    // user's "skip".
     const config = makeEditableConfig();
     const mergedSettings = {
       [PROVIDER_METADATA_NS]: {
@@ -597,9 +733,10 @@ describe('resolveReconnectModelIds', () => {
     ).toEqual(['a']);
   });
 
-  it('refreshes an echo whose recorded version no longer matches', () => {
-    // A version written before the built-in-only formula (or a drifted
-    // client copy) marks the echo stale: built-ins refresh, customs survive.
+  it('refreshes an echo recorded before the built-in ID list was persisted', () => {
+    // A version without builtinModelIds predates the current formula (or was
+    // written by the VS Code companion's own writer): built-ins refresh,
+    // customs survive.
     const config = makeEditableConfig();
     const mergedSettings = {
       [PROVIDER_METADATA_NS]: {
@@ -640,6 +777,26 @@ describe('resolveReconnectModelIds', () => {
     expect(
       resolveReconnectModelIds(config, inputsFor(config, ['only-mine']), {}),
     ).toEqual(['only-mine']);
+  });
+
+  it('keeps a subset install verbatim through an install→reconnect round trip', async () => {
+    // Real writer and real reader: apply a subset install to an in-memory
+    // settings tree, then resolve a reconnect echo against what was written.
+    const config = makeEditableConfig();
+    const { data, adapter } = createInMemorySettings();
+    await applyProviderInstallPlan(
+      buildInstallPlan(config, {
+        baseUrl,
+        apiKey: 'sk-test',
+        modelIds: ['a'],
+      }),
+      { settings: adapter, doRefreshAuth: false },
+    );
+    delete process.env['TEST_API_KEY'];
+
+    expect(
+      resolveReconnectModelIds(config, inputsFor(config, ['a']), data),
+    ).toEqual(['a']);
   });
 });
 

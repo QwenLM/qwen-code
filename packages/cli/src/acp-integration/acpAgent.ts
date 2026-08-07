@@ -2110,7 +2110,7 @@ function readProviderSetupInputs(
     protocol: ProviderConfig['protocol'],
     baseUrl: string,
   ) => string | undefined,
-): ProviderSetupInputs {
+): { inputs: ProviderSetupInputs; echoedModelIds: string[] } {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
     | undefined;
@@ -2177,11 +2177,14 @@ function readProviderSetupInputs(
   }
 
   return {
-    ...(protocol ? { protocol } : {}),
-    baseUrl,
-    apiKey,
-    modelIds: resolvedModelIds,
-    ...(advancedConfig ? { advancedConfig } : {}),
+    inputs: {
+      ...(protocol ? { protocol } : {}),
+      baseUrl,
+      apiKey,
+      modelIds: resolvedModelIds,
+      ...(advancedConfig ? { advancedConfig } : {}),
+    },
+    echoedModelIds: modelIds,
   };
 }
 
@@ -7663,7 +7666,7 @@ class QwenAgent implements Agent {
           );
         }
 
-        const inputs = readProviderSetupInputs(
+        const { inputs, echoedModelIds } = readProviderSetupInputs(
           providerConfig,
           params,
           this.settings,
@@ -7691,10 +7694,12 @@ class QwenAgent implements Agent {
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => this.config.refreshAuth(authType),
         });
-        const echoedModelIds = readStringArray(params['modelIds'], 'modelIds');
-        const addedModelIds = inputs.modelIds.filter(
-          (id) => !echoedModelIds.includes(id),
-        );
+        // An empty echo installs provider defaults without any
+        // reconciliation — only a non-empty echo can have additions.
+        const addedModelIds =
+          echoedModelIds.length > 0
+            ? inputs.modelIds.filter((id) => !echoedModelIds.includes(id))
+            : [];
         if (addedModelIds.length > 0) {
           debugLogger.debug(
             `[providers] reconnect install for "${providerConfig.id}" refreshed built-in models, added: ${addedModelIds.join(', ')}`,

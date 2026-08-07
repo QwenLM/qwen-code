@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   ModelSpec,
   ProviderConfig,
@@ -14,6 +15,8 @@ import type {
   ProviderModelConfig,
   ProviderSetupInputs,
 } from './types.js';
+
+const debugLogger = createDebugLogger('PROVIDERS');
 
 // ---------------------------------------------------------------------------
 // Build model configs from a ProviderConfig + user inputs
@@ -237,13 +240,22 @@ function resolveProviderState(
     // must not perturb the hash (they re-opened the #8504 prompt loop), while
     // a deliberately installed subset must keep differing from the full
     // template hash so update detection re-offers the missing built-ins.
-    const builtinIds = new Set(getDefaultModelIds(config));
+    // Entries are canonicalized to template order so an install carrying the
+    // full built-in set stamps the template hash regardless of the order the
+    // IDs arrived in (the wizard merges free-text typed IDs first). The
+    // built-in IDs are persisted alongside the hash so reconnects can check
+    // echo fidelity by ID set instead of re-hashing live model specs.
+    const builtinIndex = new Map(
+      getDefaultModelIds(config).map((id, index) => [id, index]),
+    );
+    const builtinModels = models
+      .filter((model) => builtinIndex.has(model.id))
+      .sort((a, b) => builtinIndex.get(a.id)! - builtinIndex.get(b.id)!);
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        version: computeModelListVersion(
-          models.filter((model) => builtinIds.has(model.id)),
-        ),
+        version: computeModelListVersion(builtinModels),
         baseUrl,
+        builtinModelIds: builtinModels.map((model) => model.id),
       },
     };
   }
@@ -565,12 +577,14 @@ export function reconcileInstallModelIds(
   return [...defaultIds, ...requestedIds.filter((id) => !builtinIds.has(id))];
 }
 
-interface PersistedProviderMetadata {
+export interface PersistedProviderMetadata {
   version?: unknown;
+  baseUrl?: unknown;
   ignoredVersion?: unknown;
+  builtinModelIds?: unknown;
 }
 
-function readPersistedProviderMetadata(
+export function readPersistedProviderMetadata(
   mergedSettings: Record<string, unknown> | undefined,
   metadataKey: string,
 ): PersistedProviderMetadata {
@@ -593,17 +607,21 @@ function readPersistedProviderMetadata(
  * stale snapshot:
  *
  * - the user explicitly skipped the current template (`ignoredVersion`
- *   matches it), so a key rotation or reconnect never overrides the skip;
- * - the persisted install `version` equals the hash the verbatim install
- *   would stamp again, i.e. the echo reproduces the recorded install. This
- *   keeps a deliberately installed subset intact — its built-in-only version
- *   hash keeps differing from the template hash so update detection
- *   re-offers the missing built-ins (see `resolveProviderState`);
+ *   matches it), so a key rotation or reconnect never overrides the skip.
+ *   The skip is scoped to that exact template version — matching the TUI,
+ *   which re-offers once the template advances again — so a later template
+ *   follows the staleness rules below;
+ * - the install was recorded by the current formula (it persisted the
+ *   built-in IDs it installed). Whatever the client submits is then its own
+ *   current selection — a faithful echo or a deliberately edited list — and
+ *   is installed verbatim like the TUI wizard does. The check is ID-based,
+ *   so later edits to built-in model specs cannot mark a faithful echo
+ *   stale;
  * - nothing is recorded yet and no models are stored — a fresh wizard
  *   selection, installed verbatim like the TUI wizard does.
  *
- * Otherwise the echo is stale (a version hash written before the
- * built-in-only formula, or a drifted client-side copy) and
+ * Otherwise the record predates `builtinModelIds` (a version hash written
+ * before this formula, or stored models from before version tracking) and
  * `reconcileInstallModelIds` refreshes the built-ins; with no recorded
  * version that refresh is also the only upgrade path, since update detection
  * never runs without one.
@@ -614,35 +632,56 @@ export function resolveReconnectModelIds(
   mergedSettings?: Record<string, unknown>,
 ): string[] {
   const echoedIds = inputs.modelIds;
-  if (echoedIds.length === 0) return getDefaultModelIds(config);
+  if (echoedIds.length === 0) {
+    debugLogger.debug(
+      `[providers] reconnect resolve for "${config.id}": no echoed model IDs, using provider defaults`,
+    );
+    return getDefaultModelIds(config);
+  }
 
   const key = resolveMetadataKey(config);
   if (key) {
     const metadata = readPersistedProviderMetadata(mergedSettings, key);
+    const templateVersion = computeProviderTemplateVersion(
+      config,
+      inputs.baseUrl,
+    );
     if (
       typeof metadata.ignoredVersion === 'string' &&
-      metadata.ignoredVersion ===
-        computeProviderTemplateVersion(config, inputs.baseUrl)
+      metadata.ignoredVersion === templateVersion
     ) {
+      debugLogger.debug(
+        `[providers] reconnect resolve for "${config.id}": honoring update-prompt skip of template ${templateVersion.slice(0, 12)}, installing echo verbatim`,
+      );
       return [...echoedIds];
     }
-    if (typeof metadata.version === 'string') {
-      const verbatimVersion = buildInstallPlan(config, inputs).providerState?.[
-        `${PROVIDER_METADATA_NS}.${key}`
-      ]?.['version'];
-      if (metadata.version === verbatimVersion) return [...echoedIds];
+    if (Array.isArray(metadata.builtinModelIds)) {
+      debugLogger.debug(
+        `[providers] reconnect resolve for "${config.id}": install recorded by the current formula, installing echo verbatim`,
+      );
+      return [...echoedIds];
+    }
+    const modelProviders = mergedSettings?.['modelProviders'];
+    const existingModels = findExistingProviderModels(
+      config,
+      modelProviders && typeof modelProviders === 'object'
+        ? (modelProviders as Record<string, unknown>)
+        : undefined,
+    );
+    if (typeof metadata.version === 'string' || existingModels) {
+      debugLogger.debug(
+        `[providers] reconnect resolve for "${config.id}": stale install record (version ${
+          typeof metadata.version === 'string'
+            ? metadata.version.slice(0, 12)
+            : 'none'
+        }, template ${templateVersion.slice(0, 12)}), refreshing built-ins`,
+      );
       return reconcileInstallModelIds(config, echoedIds);
     }
+    debugLogger.debug(
+      `[providers] reconnect resolve for "${config.id}": no install recorded, installing selection verbatim`,
+    );
   }
 
-  const modelProviders = mergedSettings?.['modelProviders'];
-  const existingModels = findExistingProviderModels(
-    config,
-    modelProviders && typeof modelProviders === 'object'
-      ? (modelProviders as Record<string, unknown>)
-      : undefined,
-  );
-  return existingModels
-    ? reconcileInstallModelIds(config, echoedIds)
-    : [...echoedIds];
+  return [...echoedIds];
 }

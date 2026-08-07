@@ -99,6 +99,7 @@ describe('token plan provider', () => {
       'providerMetadata.token-plan': {
         baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
         version,
+        builtinModelIds: getDefaultModelIds(tokenPlanProvider),
       },
     });
   });
@@ -136,6 +137,7 @@ describe('token plan provider', () => {
       'providerMetadata.token-plan': {
         baseUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
         version,
+        builtinModelIds: getDefaultModelIds(tokenPlanProvider),
       },
     });
   });

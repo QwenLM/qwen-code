@@ -927,12 +927,17 @@ export function buildProviderSetupInputs(
     resolveReconnectModelIds: CoreRuntime['resolveReconnectModelIds'];
   },
   mergedSettings: Record<string, unknown> | undefined,
-): ProviderSetupInputs {
+): { inputs: ProviderSetupInputs; echoedIds: string[] } {
   const protocol = (req.protocol ?? provider.protocol) as AuthType;
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
-  const echoedIds = (req.modelIds ?? [])
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0);
+  // Dedupe before resolution so a duplicated echo cannot install duplicate
+  // model entries or perturb the stamped install record (the route parser
+  // already dedupes; this guards direct callers of the exported helper).
+  const echoedIds = [
+    ...new Set(
+      (req.modelIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0),
+    ),
+  ];
   const inputs: ProviderSetupInputs = {
     ...(provider.protocolOptions ? { protocol } : {}),
     baseUrl,
@@ -945,12 +950,15 @@ export function buildProviderSetupInputs(
   // choices — a recorded subset, an explicit skip, a fresh selection —
   // verbatim.
   return {
-    ...inputs,
-    modelIds: [
-      ...new Set(
-        helpers.resolveReconnectModelIds(provider, inputs, mergedSettings),
+    inputs: {
+      ...inputs,
+      modelIds: helpers.resolveReconnectModelIds(
+        provider,
+        inputs,
+        mergedSettings,
       ),
-    ],
+    },
+    echoedIds,
   };
 }
 
@@ -5575,7 +5583,7 @@ async function runQwenServeImpl(
               throw new Error(`Unsupported auth provider: ${req.providerId}`);
             }
             const fresh = loadSettingsForPersistence(boundWorkspace);
-            const inputs = buildProviderSetupInputs(
+            const { inputs, echoedIds } = buildProviderSetupInputs(
               req,
               provider,
               {
@@ -5594,12 +5602,13 @@ async function runQwenServeImpl(
               doRefreshAuth: false,
             });
             assertGenerationOpen?.();
-            const echoedIds = (req.modelIds ?? [])
-              .map((id) => id.trim())
-              .filter((id) => id.length > 0);
-            const addedModelIds = inputs.modelIds.filter(
-              (id) => !echoedIds.includes(id),
-            );
+            // An empty echo installs provider defaults without any
+            // reconciliation — reporting every default as a reconciled
+            // addition would corrupt the audit field.
+            const addedModelIds =
+              echoedIds.length > 0
+                ? inputs.modelIds.filter((id) => !echoedIds.includes(id))
+                : [];
             core.emitDaemonLog('Auth provider installed.', {
               'qwen-code.daemon.auth.provider_id': provider.id,
               'qwen-code.daemon.auth.auth_type': plan.authType,

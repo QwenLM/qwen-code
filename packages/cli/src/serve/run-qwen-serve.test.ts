@@ -940,20 +940,21 @@ describe('buildProviderSetupInputs', () => {
 
   it('falls back to the default model IDs when the request has none', () => {
     for (const modelIds of [undefined, [], ['  ']]) {
-      const inputs = buildProviderSetupInputs(
+      const { inputs, echoedIds } = buildProviderSetupInputs(
         { providerId: 'test-plan', apiKey: 'sk-test', modelIds },
         provider,
         helpers,
         {},
       );
       expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b']);
+      expect(echoedIds).toEqual([]);
     }
   });
 
   it('installs a fresh selection verbatim when nothing is recorded', () => {
     // No providerMetadata and no stored models: the request carries the
     // user's new wizard selection, which must not be re-expanded.
-    const inputs = buildProviderSetupInputs(
+    const { inputs, echoedIds } = buildProviderSetupInputs(
       {
         providerId: 'test-plan',
         apiKey: ' sk-test ',
@@ -965,15 +966,15 @@ describe('buildProviderSetupInputs', () => {
     );
 
     expect(inputs.modelIds).toEqual(['builtin-a', 'my-custom']);
+    expect(echoedIds).toEqual(['builtin-a', 'my-custom']);
     expect(inputs.apiKey).toBe('sk-test');
     expect(inputs.baseUrl).toBe('https://api.test.com/v1');
   });
 
   it('keeps a faithfully echoed deliberately installed subset verbatim', () => {
-    // The recorded version equals what the verbatim install would stamp
-    // again, so reconnecting (e.g. rotating the API key) must not re-add
-    // the deselected built-in.
-    const inputs = buildProviderSetupInputs(
+    // The install recorded the built-in IDs it installed, so reconnecting
+    // (e.g. rotating the API key) must not re-add the deselected built-in.
+    const { inputs } = buildProviderSetupInputs(
       {
         providerId: 'test-plan',
         apiKey: 'sk-test',
@@ -986,6 +987,7 @@ describe('buildProviderSetupInputs', () => {
           'test-plan': {
             version: planVersion(['builtin-a']),
             baseUrl: 'https://api.test.com/v1',
+            builtinModelIds: ['builtin-a'],
           },
         },
       },
@@ -994,7 +996,7 @@ describe('buildProviderSetupInputs', () => {
   });
 
   it('honors an explicit update-prompt skip over a stale recorded version', () => {
-    const inputs = buildProviderSetupInputs(
+    const { inputs } = buildProviderSetupInputs(
       {
         providerId: 'test-plan',
         apiKey: 'sk-test',
@@ -1018,11 +1020,11 @@ describe('buildProviderSetupInputs', () => {
     expect(inputs.modelIds).toEqual(['builtin-a']);
   });
 
-  it('refreshes built-ins and dedupes when the recorded version is stale', () => {
-    // A version hash that no longer matches the echo (legacy formula or
-    // drifted client copy) marks the echo stale: built-ins refresh while
-    // custom IDs survive.
-    const inputs = buildProviderSetupInputs(
+  it('refreshes built-ins and dedupes for a record without builtinModelIds', () => {
+    // A version recorded before the built-in ID list was persisted (legacy
+    // formula) marks the echo stale: built-ins refresh while custom IDs
+    // survive. The duplicated echo IDs are deduplicated before resolution.
+    const { inputs } = buildProviderSetupInputs(
       {
         providerId: 'test-plan',
         apiKey: 'sk-test',
@@ -1042,6 +1044,34 @@ describe('buildProviderSetupInputs', () => {
     expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b', 'my-custom']);
   });
 
+  it('refreshes a legacy install that has stored models but no version', () => {
+    // Mirror of the ACP "legacy install with no recorded version" test at
+    // the serve boundary: without a version update detection never runs, so
+    // the reconnect refresh is the only upgrade path.
+    const { inputs } = buildProviderSetupInputs(
+      {
+        providerId: 'test-plan',
+        apiKey: 'sk-test',
+        modelIds: ['builtin-a'],
+      },
+      provider,
+      helpers,
+      {
+        modelProviders: {
+          openai: [
+            {
+              id: 'builtin-a',
+              name: '[Test Plan] builtin-a',
+              baseUrl: 'https://api.test.com/v1',
+              envKey: 'TEST_PLAN_KEY',
+            },
+          ],
+        },
+      },
+    );
+    expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b']);
+  });
+
   it('keeps the requested IDs untouched for a provider without built-ins', () => {
     const customProvider: qwenCore.ProviderConfig = {
       ...provider,
@@ -1049,7 +1079,7 @@ describe('buildProviderSetupInputs', () => {
       models: undefined,
       baseUrl: undefined,
     };
-    const inputs = buildProviderSetupInputs(
+    const { inputs } = buildProviderSetupInputs(
       {
         providerId: 'custom',
         baseUrl: 'https://custom.example/v1',

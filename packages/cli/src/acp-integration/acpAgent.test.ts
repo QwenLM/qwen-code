@@ -11547,9 +11547,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('qwen/providers/connect installs a faithfully echoed subset verbatim', async () => {
-    // The user deselected 'deepseek-coder'; the recorded version equals what
-    // the verbatim install would stamp again, so a reconnect (e.g. rotating
-    // the API key) must not silently re-add it.
+    // The user deselected 'deepseek-coder'; the install recorded the built-in
+    // IDs it installed, so a reconnect (e.g. rotating the API key) must not
+    // silently re-add it.
     const deepseekProvider: ProviderConfig = {
       id: 'deepseek',
       label: 'DeepSeek API Key',
@@ -11586,6 +11586,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           deepseek: {
             version: subsetVersion,
             baseUrl: 'https://api.deepseek.com',
+            builtinModelIds: ['deepseek-chat'],
           },
         },
       },

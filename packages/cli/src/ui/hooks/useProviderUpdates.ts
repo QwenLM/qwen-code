@@ -19,6 +19,7 @@ import {
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
+  readPersistedProviderMetadata,
   reconcileInstallModelIds,
   resolveBaseUrl,
   resolveMetadataKey,
@@ -57,27 +58,6 @@ export interface ProviderUpdateRequest {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-interface ProviderMetadata {
-  version?: string;
-  baseUrl?: string;
-  ignoredVersion?: string;
-}
-
-function getProviderMetadata(
-  settings: LoadedSettings,
-  metadataKey: string,
-): ProviderMetadata {
-  const mergedSettings = settings.merged as Record<string, unknown>;
-  const ns = mergedSettings[PROVIDER_METADATA_NS] as
-    | Record<string, unknown>
-    | undefined;
-  if (!ns) return {};
-  const metadata = ns[metadataKey];
-  return metadata && typeof metadata === 'object'
-    ? (metadata as ProviderMetadata)
-    : {};
-}
 
 // ---------------------------------------------------------------------------
 // Migration: move legacy top-level keys into providerMetadata namespace
@@ -196,10 +176,16 @@ function findAllPendingUpdates(
     const metadataKey = resolveMetadataKey(provider);
     if (!metadataKey) continue;
 
-    const metadata = getProviderMetadata(settings, metadataKey);
-    if (!metadata.version) continue;
+    const metadata = readPersistedProviderMetadata(
+      settings.merged as Record<string, unknown>,
+      metadataKey,
+    );
+    if (typeof metadata.version !== 'string') continue;
 
-    const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
+    const baseUrl =
+      typeof metadata.baseUrl === 'string' && metadata.baseUrl
+        ? metadata.baseUrl
+        : resolveBaseUrl(provider);
     const currentVersion = computeProviderTemplateVersion(provider, baseUrl);
 
     if (metadata.version === currentVersion) continue;
