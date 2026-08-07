@@ -1808,7 +1808,7 @@ export class ExtensionManager {
       signal?.throwIfAborted();
       try {
         const sourceBeforeConversion = localSourcePath;
-        const { extensionDir, originSource } =
+        const { extensionDir, originSource, requiresClaudeFileAdaptation } =
           await convertGeminiOrClaudeExtension(
             sourceBeforeConversion,
             installMetadata.pluginName,
@@ -1954,8 +1954,9 @@ export class ExtensionManager {
             : null;
 
         if (
-          (originSource === 'Claude' && fs.existsSync(hooksDir)) ||
-          (originSource === 'Claude' &&
+          ((originSource === 'Claude' || requiresClaudeFileAdaptation) &&
+            fs.existsSync(hooksDir)) ||
+          ((originSource === 'Claude' || requiresClaudeFileAdaptation) &&
             configHooksPath &&
             fs.existsSync(configHooksPath))
         ) {

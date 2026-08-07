@@ -279,6 +279,66 @@ describe('convertClaudePluginPackage', () => {
     }
   });
 
+  it('treats a marketplace entry without source as the marketplace root', async () => {
+    const marketplaceDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'root-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [{ name: 'root-plugin', version: '1.0.0' }],
+      }),
+    );
+
+    const result = await convertClaudePluginPackage(testDir, 'root-plugin');
+    try {
+      expect(result.config.name).toBe('root-plugin');
+      expect(result.config.version).toBe('1.0.0');
+    } finally {
+      fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans the marketplace staging directory when conversion fails', async () => {
+    const marketplaceDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'strict-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [
+          {
+            name: 'strict-root',
+            version: '1.0.0',
+            source: './',
+            strict: true,
+          },
+        ],
+      }),
+    );
+    const createTmpDir = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+    const tempDirs: string[] = [];
+    const createTmpDirSpy = vi
+      .spyOn(ExtensionStorage, 'createTmpDir')
+      .mockImplementation(async () => {
+        const tempDir = await createTmpDir();
+        tempDirs.push(tempDir);
+        return tempDir;
+      });
+
+    try {
+      await expect(
+        convertClaudePluginPackage(testDir, 'strict-root'),
+      ).rejects.toThrow('Strict mode requires plugin.json');
+      expect(tempDirs).toHaveLength(1);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+    } finally {
+      createTmpDirSpy.mockRestore();
+    }
+  });
+
   it('should only collect specified skills when config provides explicit list', async () => {
     // Setup: Create a plugin source with multiple skills
     const pluginSourceDir = path.join(testDir, 'plugin-source');

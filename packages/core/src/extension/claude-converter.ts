@@ -102,7 +102,7 @@ export type ClaudePluginSource =
     };
 
 export interface ClaudeMarketplacePluginConfig extends ClaudePluginConfig {
-  source: string | ClaudePluginSource;
+  source?: string | ClaudePluginSource;
   category?: string;
   strict?: boolean;
   tags?: string[];
@@ -1039,6 +1039,10 @@ async function resolvePluginSource(
 ): Promise<string> {
   signal?.throwIfAborted();
   const source = pluginConfig.source;
+
+  // A marketplace entry without `source` describes a plugin at the
+  // marketplace root.
+  if (source === undefined || source === null) return marketplaceDir;
 
   // Handle string source (relative path or URL)
   if (typeof source === 'string') {

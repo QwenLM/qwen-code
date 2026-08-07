@@ -770,6 +770,72 @@ describe('git extension helpers', () => {
       }
     });
 
+    it('forwards extension-root kind when checking a local archive update', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-root-alias-update-test-'),
+      );
+      try {
+        const archivePath = path.join(tempDir, 'root-alias.zip');
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: '.claude-plugin/plugin.json',
+            content: JSON.stringify({
+              name: 'root-plugin',
+              version: '1.0.0',
+            }),
+          },
+          {
+            name: '.claude-plugin/marketplace.json',
+            content: JSON.stringify({
+              name: 'root-marketplace',
+              owner: { name: 'Owner' },
+              plugins: [
+                {
+                  name: 'root-alias',
+                  version: '2.0.0',
+                  source: './plugins/root-alias',
+                },
+              ],
+            }),
+          },
+          {
+            name: 'plugins/root-alias/.claude-plugin/plugin.json',
+            content: JSON.stringify({
+              name: 'child-plugin',
+              version: '2.0.0',
+            }),
+          },
+        ]);
+        await fs.writeFile(archivePath, archive);
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: archivePath,
+            pluginName: 'root-alias',
+            pluginSourceKind: 'extension-root',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) =>
+              JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ),
+          ),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('should return UPDATE_AVAILABLE for local archive extension with different version', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'local-archive-update-test-'),
