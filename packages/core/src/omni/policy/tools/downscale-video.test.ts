@@ -88,6 +88,7 @@ describe('OmniDownscaleVideoTool', () => {
           required: true,
           lossy: true,
         },
+        { kind: 'text', role: 'disclosure', required: true },
       ],
       settingsSchema: expect.objectContaining({ type: 'object' }),
     });

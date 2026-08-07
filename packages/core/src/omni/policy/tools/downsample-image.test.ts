@@ -94,6 +94,7 @@ describe('OmniDownsampleImageTool', () => {
           required: true,
           lossy: true,
         },
+        { kind: 'text', role: 'disclosure', required: true },
       ],
       settingsSchema: expect.objectContaining({ type: 'object' }),
     });

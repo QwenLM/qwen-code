@@ -81,6 +81,26 @@ function normalize(
 
 describe('normalizeOmniProcessingConfig', () => {
   describe('system defaults', () => {
+    it('normalizes against the REAL degradation tools, not just stubs', async () => {
+      // The stub lookup above can drift from the shipped tool descriptors;
+      // this is the startup path every real CLI run takes, so a descriptor
+      // that fails §13 validation (e.g. a lossy output without a declared
+      // disclosure) must fail HERE, not at first launch.
+      const [image, video, audio] = await Promise.all([
+        import('./tools/downsample-image.js'),
+        import('./tools/downscale-video.js'),
+        import('./tools/downsample-audio.js'),
+      ]);
+      const real: Record<string, ToolStub> = {
+        omni_downsample_image: new image.OmniDownsampleImageTool({}),
+        omni_downscale_video: new video.OmniDownscaleVideoTool({}),
+        omni_downsample_audio: new audio.OmniDownsampleAudioTool({}),
+      };
+      const config = normalize({}, real);
+      expect(config.fixedPolicies).toHaveLength(3);
+      expect(config.transportGuardPolicies).toHaveLength(3);
+    });
+
     it('produces the three default fixed policies with when-thresholds', () => {
       const config = normalize();
       expect(config.fixedPolicies.map((p) => p.id).sort()).toEqual([

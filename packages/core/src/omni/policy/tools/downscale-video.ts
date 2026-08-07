@@ -98,6 +98,7 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
       required: true,
       lossy: true,
     },
+    { kind: 'text', role: 'disclosure', required: true },
   ],
   settingsSchema: {
     type: 'object',
