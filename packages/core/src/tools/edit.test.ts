@@ -1288,6 +1288,47 @@ describe('EditTool', () => {
       expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
     });
 
+    it('rejects an edit terminally when the filesystem reports ino 0', async () => {
+      // FAT/exFAT and some SMB mounts report `ino: 0` for every file, so
+      // the cache cannot prove the model read *this* file. Re-reading
+      // would not help, so the model must be told to stop rather than be
+      // sent round the "re-read it first" loop forever.
+      fs.writeFileSync(filePath, 'untouched content', 'utf8');
+      seedPriorRead(filePath);
+      const nativeStat = fs.promises.stat;
+      const stat = vi
+        .spyOn(fs.promises, 'stat')
+        .mockImplementation(async (target: fs.PathLike) => {
+          const stats = await nativeStat(target);
+          if (target === filePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+
+      try {
+        const result = await tool
+          .build({
+            file_path: filePath,
+            old_string: 'untouched',
+            new_string: 'modified',
+          })
+          .execute(abortSignal);
+
+        expect(result.error?.type).toBe(
+          ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+        );
+        expect(result.error?.message).toMatch(/does not provide a verifiable/);
+        expect(result.error?.message).toMatch(/use a different mechanism/i);
+        // Not the message that tells the model to re-read — that would
+        // loop, because the re-read cannot change the inode.
+        expect(result.error?.message).not.toMatch(/Re-read it with/);
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
+      } finally {
+        stat.mockRestore();
+      }
+    });
+
     it('allows an edit after a ranged (offset/limit) read', async () => {
       // A partial read still counts as a prior read: requiring the
       // model to re-read multi-thousand-line files just to change one
