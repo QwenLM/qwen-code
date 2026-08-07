@@ -1830,9 +1830,15 @@ describe('modelConfigUtils', () => {
       function resolveForModel(
         model: string,
         modelSettings: Settings['model'],
+        reasoning?: false,
       ) {
         vi.mocked(resolveModelConfig).mockReturnValue({
-          config: { model, apiKey: '', baseUrl: '' },
+          config: {
+            model,
+            apiKey: '',
+            baseUrl: '',
+            ...(reasoning === false ? { reasoning } : {}),
+          },
           sources: {},
           warnings: [],
         });
@@ -1883,6 +1889,31 @@ describe('modelConfigUtils', () => {
             },
           }).generationConfig.reasoning,
         ).toBe(false);
+      });
+
+      it('preserves an explicit provider reasoning opt-out by default', () => {
+        expect(
+          resolveForModel('qwen3.8-max', { name: 'qwen3.8-max' }, false)
+            .generationConfig.reasoning,
+        ).toBe(false);
+      });
+
+      it('lets an explicit model preference re-enable provider reasoning', () => {
+        expect(
+          resolveForModel(
+            'qwen3.8-max',
+            {
+              name: 'qwen3.8-max',
+              reasoningPreferences: {
+                'qwen3.8-max': {
+                  thinkingEnabled: true,
+                  effort: 'medium',
+                },
+              },
+            },
+            false,
+          ).generationConfig.reasoning,
+        ).toEqual({ effort: 'medium' });
       });
 
       it.each(['qwen3.8-max-preview', 'qwen3.8-max-latest'])(

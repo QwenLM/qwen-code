@@ -527,6 +527,7 @@ export function createDaemonSessionActions({
         'Set model failed',
         'switch_model',
       );
+      const reasoningBeforeSwitch = getConnection().reasoning;
       try {
         const result = await withActionTimeout(
           session.setModel(modelId),
@@ -536,7 +537,10 @@ export function createDaemonSessionActions({
           ...current,
           currentModel: modelId,
           reasoning:
-            current.currentModel === modelId ? current.reasoning : undefined,
+            current.currentModel === modelId ||
+            current.reasoning !== reasoningBeforeSwitch
+              ? current.reasoning
+              : undefined,
         }));
         return result;
       } catch (error) {

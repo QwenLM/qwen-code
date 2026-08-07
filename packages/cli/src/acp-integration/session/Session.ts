@@ -6949,10 +6949,14 @@ export class Session implements SessionContext {
   async sendConfigOptionsUpdate(
     configOptions: SessionConfigOption[],
   ): Promise<void> {
-    await this.sendUpdate({
-      sessionUpdate: 'config_option_update',
-      configOptions,
-    });
+    try {
+      await this.sendUpdate({
+        sessionUpdate: 'config_option_update',
+        configOptions,
+      });
+    } catch (error) {
+      debugLogger.debug('config-option update notification failed', error);
+    }
   }
 
   /**

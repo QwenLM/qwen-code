@@ -2763,6 +2763,23 @@ describe('Session', () => {
   });
 
   describe('qwen3.8-max reasoning options', () => {
+    it('does not fail a completed mutation when its update cannot be delivered', async () => {
+      vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
+        new Error('transport closed'),
+      );
+
+      await expect(
+        session.sendConfigOptionsUpdate([]),
+      ).resolves.toBeUndefined();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [],
+        },
+      });
+    });
+
     it('restores the persisted effort while thinking starts disabled', () => {
       currentModel = 'qwen3.8-max';
       const restoredSettings = {

@@ -2068,6 +2068,10 @@ export class Config {
   private compactionModel?: string;
   private imageModel?: string;
   private reasoningEffortPreference?: ReasoningEffort;
+  private reasoningConfigPreference?: Exclude<
+    ContentGeneratorConfig['reasoning'],
+    false | undefined
+  >;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
@@ -4255,17 +4259,31 @@ export class Config {
 
   /** Enable or disable thinking for subsequent requests. */
   setThinkingEnabled(enabled: boolean, fallbackEffort?: ReasoningEffort): void {
-    const activeEffort = this.getReasoningEffort();
+    const activeReasoning = this.getContentGeneratorConfig()?.reasoning;
+    if (activeReasoning) {
+      this.reasoningConfigPreference = { ...activeReasoning };
+    }
+    const activeEffort = activeReasoning ? activeReasoning.effort : undefined;
     if (activeEffort) {
       this.reasoningEffortPreference = activeEffort;
     }
     const effort =
       fallbackEffort ?? this.reasoningEffortPreference ?? activeEffort;
+    const restoredReasoning = {
+      ...(this.reasoningConfigPreference ?? {}),
+      ...(effort ? { effort } : {}),
+    };
+    const enabledReasoning =
+      Object.keys(restoredReasoning).length > 0 ? restoredReasoning : undefined;
     const apply = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
     ): void => {
       if (!cfg) return;
-      cfg.reasoning = enabled ? (effort ? { effort } : undefined) : false;
+      cfg.reasoning = enabled
+        ? enabledReasoning
+          ? { ...enabledReasoning }
+          : undefined
+        : false;
     };
     apply(this.contentGeneratorConfig);
     const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;

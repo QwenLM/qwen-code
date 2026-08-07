@@ -630,6 +630,44 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().reasoning).toEqual(targetReasoning);
   });
 
+  it('preserves target reasoning received before model_switched', async () => {
+    const session = createMockSession('session-a');
+    const targetReasoning = {
+      thinking: { enabled: true },
+      effort: {
+        value: 'xhigh' as const,
+        options: ['low', 'medium', 'xhigh'] as const,
+      },
+    };
+    const { actions, getConnection, setConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        currentModel: 'previous-model',
+      },
+    });
+    session.setModel.mockImplementationOnce(async () => {
+      setConnection((current) => ({
+        ...current,
+        reasoning: {
+          thinking: targetReasoning.thinking,
+          effort: {
+            value: targetReasoning.effort.value,
+            options: [...targetReasoning.effort.options],
+          },
+        },
+      }));
+      return { modelId: 'next-model' };
+    });
+
+    await actions.setModel('next-model');
+
+    expect(getConnection()).toMatchObject({
+      currentModel: 'next-model',
+      reasoning: targetReasoning,
+    });
+  });
+
   it('reports getTasks failures by default', async () => {
     const session = createMockSession('session-a');
     const addNotice = vi.fn((notice) => notice);

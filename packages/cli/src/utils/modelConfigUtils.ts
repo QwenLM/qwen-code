@@ -442,22 +442,38 @@ export function resolveCliGenerationConfig(
       ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
   if (reasoningRegistration) {
+    const reasoningPreference = getModelReasoningPreference(
+      settings,
+      resolved.config.model || '',
+    );
+    const thinkingPreference =
+      reasoningPreference &&
+      typeof reasoningPreference === 'object' &&
+      !Array.isArray(reasoningPreference)
+        ? (reasoningPreference as Record<string, unknown>)['thinkingEnabled']
+        : undefined;
     const resolvedReasoning = resolveModelReasoningControls(
       resolved.config.model,
-      getModelReasoningPreference(settings, resolved.config.model || ''),
+      reasoningPreference,
     );
-    if (resolvedReasoning?.thinkingEnabled === false) {
-      generationConfig.reasoning = false;
-    } else if (resolvedReasoning?.effort) {
-      generationConfig.reasoning = {
-        ...(generationConfig.reasoning || {}),
-        effort: resolvedReasoning.effort,
-      };
-    } else if (
-      reasoningRegistration.thinking &&
-      generationConfig.reasoning === false
-    ) {
-      generationConfig.reasoning = undefined;
+    const canApplyRegisteredReasoning =
+      generationConfig.reasoning !== false ||
+      (reasoningRegistration.thinking &&
+        typeof thinkingPreference === 'boolean');
+    if (canApplyRegisteredReasoning) {
+      if (resolvedReasoning?.thinkingEnabled === false) {
+        generationConfig.reasoning = false;
+      } else if (resolvedReasoning?.effort) {
+        generationConfig.reasoning = {
+          ...(generationConfig.reasoning || {}),
+          effort: resolvedReasoning.effort,
+        };
+      } else if (
+        reasoningRegistration.thinking &&
+        generationConfig.reasoning === false
+      ) {
+        generationConfig.reasoning = undefined;
+      }
     }
   } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {

@@ -1790,7 +1790,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               skills: supportedCommands !== undefined ? skills : current.skills,
               models: sessionModels.length > 0 ? sessionModels : current.models,
               currentModel: sessionCurrentModel ?? current.currentModel,
-              reasoning,
+              reasoning: context !== undefined ? reasoning : current.reasoning,
               currentMode: currentMode ?? current.currentMode,
               displayName:
                 getSessionDisplayName(activeSession.state) ??

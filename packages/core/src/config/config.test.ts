@@ -4300,6 +4300,46 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('refreshAuth', () => {
+    it('preserves reasoning budget tokens across a thinking toggle', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          reasoning: { effort: 'medium', budget_tokens: 4096 },
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          authType: AuthType.USE_GEMINI,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'medium', budget_tokens: 4096 },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.USE_GEMINI);
+      const generationConfig = (
+        config as unknown as {
+          modelsConfig: {
+            getGenerationConfig(): ContentGeneratorConfig;
+          };
+        }
+      ).modelsConfig.getGenerationConfig();
+
+      config.setThinkingEnabled(false);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(generationConfig.reasoning).toBe(false);
+
+      config.setThinkingEnabled(true);
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'medium',
+        budget_tokens: 4096,
+      });
+      expect(generationConfig.reasoning).toEqual({
+        effort: 'medium',
+        budget_tokens: 4096,
+      });
+    });
+
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);
       const authType = AuthType.USE_GEMINI;

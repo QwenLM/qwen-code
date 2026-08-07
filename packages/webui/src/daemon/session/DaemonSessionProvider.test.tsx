@@ -9425,11 +9425,32 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('accepts live events after ring-evicted reload reconnects', async () => {
+    const releaseEviction = createDeferred<void>();
     const reattachDelivered = createDeferred<void>();
     const firstSession = createMockSession({
       sessionId: 'session-reattach',
       lastEventId: 10,
+      context: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-reattach',
+        workspaceCwd: '/mock-workspace',
+        state: {
+          configOptions: [
+            { id: 'thinking', currentValue: 'on' },
+            {
+              id: 'effort',
+              currentValue: 'xhigh',
+              options: [
+                { value: 'low' },
+                { value: 'medium' },
+                { value: 'xhigh' },
+              ],
+            },
+          ],
+        },
+      })),
       events: async function* ringEvictedThenReload() {
+        await releaseEviction.promise;
         yield {
           v: 1,
           type: 'state_resync_required',
@@ -9444,6 +9465,9 @@ describe('DaemonSessionProvider', () => {
     const secondSession = createMockSession({
       sessionId: 'session-reattach',
       lastEventId: 10,
+      context: vi.fn(async () => {
+        throw new Error('context unavailable during reattach');
+      }),
       events: async function* reattachedLive(
         opts: { signal?: AbortSignal } = {},
       ) {
@@ -9474,9 +9498,11 @@ describe('DaemonSessionProvider', () => {
 
     let blocks: readonly DaemonTranscriptBlock[] = [];
     let awaitingResync = false;
+    let connection: DaemonConnectionState | undefined;
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
       awaitingResync = useDaemonTranscriptState().awaitingResync;
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -9486,7 +9512,14 @@ describe('DaemonSessionProvider', () => {
       reconnectDelayMs: 1,
       maxReconnectDelayMs: 1,
     });
+    await vi.waitFor(() =>
+      expect(connection?.reasoning).toEqual({
+        thinking: { enabled: true },
+        effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+      }),
+    );
     await act(async () => {
+      releaseEviction.resolve();
       await reattachDelivered.promise;
       await flushPromises();
       await flushTranscriptDispatch();
@@ -9501,6 +9534,10 @@ describe('DaemonSessionProvider', () => {
     );
 
     expect(awaitingResync).toBe(false);
+    expect(connection?.reasoning).toEqual({
+      thinking: { enabled: true },
+      effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+    });
     expect(blocks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
