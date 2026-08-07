@@ -1403,6 +1403,80 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   );
 
   itWhenTuiInputReliable(
+    'opens the setup flow at the restored Kimi endpoint',
+    async () => {
+      const userSettings = {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'kimi-k3',
+              name: '[Kimi API] kimi-k3',
+              baseUrl: 'https://api.moonshot.ai/v1',
+              envKey: 'MOONSHOT_API_KEY',
+            },
+          ],
+        },
+      } as Settings;
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: userSettings,
+          originalSettings: userSettings,
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await moveDownAndWaitForSelection(
+        stdin,
+        lastFrame,
+        'Third-party Providers',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Third-party Providers · Provider',
+      );
+      await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+      for (const label of ['Grok (xAI) API Key', 'Idealab API Key', 'Kimi']) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        await wait();
+      }
+      // The setup flow must open at the endpoint step with the restored
+      // API Key (International) option highlighted, not the first option.
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Kimi · Step 1/3 · Access type',
+      );
+      await waitForSelectedOption(lastFrame, 'API Key (International)');
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
     'should show Alibaba ModelStudio access methods after selecting Alibaba ModelStudio',
     async () => {
       const settings: LoadedSettings = new LoadedSettings(

@@ -358,6 +358,59 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('first-model-a, shared-id');
   });
 
+  it('keeps persisted default trims across a round trip without field edits', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'persisted-trim-no-edit-provider',
+      label: 'Persisted Trim No Edit Provider',
+      description: 'Provider with a saved default trim',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-model-a' }, { id: 'first-model-b' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-model' }],
+        },
+      ],
+      envKey: () => 'SHARED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Persisted Trim',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        provider,
+        undefined,
+        undefined,
+        ['shared-id'],
+        firstUrl,
+        ['first-model-b'],
+      );
+    });
+    expect(result.current.state.modelIds).toBe('first-model-a, shared-id');
+
+    // No field edits: the seeded trim alone must keep the deleted default
+    // deleted across the round trip.
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    expect(result.current.state.modelIds).toBe('second-model, shared-id');
+    act(() => {
+      result.current.selectBaseUrl(firstUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('first-model-a, shared-id');
+  });
+
   it('preserves edited models and API key when reselecting the current endpoint', () => {
     const url = 'https://first.example/v1';
     const provider: ProviderConfig = {
@@ -719,6 +772,62 @@ describe('useProviderSetupFlow', () => {
     });
     // Provider B must see the stored env value, never provider A's draft.
     expect(result.current.state.apiKey).toBe('stored-shared');
+  });
+
+  it('does not leak protocol drafts into the next provider flow', () => {
+    const providerA: ProviderConfig = {
+      id: 'provider-a',
+      label: 'Provider A',
+      description: 'First multi-protocol provider',
+      protocol: AuthType.USE_OPENAI,
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+      envKey: (protocol) =>
+        protocol === AuthType.USE_ANTHROPIC
+          ? 'A_ANTHROPIC_API_KEY'
+          : 'A_OPENAI_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'A',
+    };
+    const providerB: ProviderConfig = {
+      id: 'provider-b',
+      label: 'Provider B',
+      description: 'Second multi-protocol provider',
+      protocol: AuthType.USE_OPENAI,
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+      envKey: (protocol) =>
+        protocol === AuthType.USE_ANTHROPIC
+          ? 'B_ANTHROPIC_API_KEY'
+          : 'B_OPENAI_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'B',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(providerA);
+    });
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    act(() => {
+      result.current.changeBaseUrl('https://a-anthropic.example/v1');
+      result.current.changeApiKey('sk-a-anthropic');
+    });
+    act(() => {
+      // Leaving the protocol stashes the endpoint and key under its draft.
+      result.current.selectProtocol(AuthType.USE_OPENAI);
+    });
+
+    act(() => {
+      result.current.start(providerB);
+    });
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+
+    // Provider A's protocol draft must not resurface under provider B.
+    expect(result.current.state.baseUrl).toBe('');
+    expect(result.current.state.apiKey).toBe('');
   });
 
   it('resets dirty model state when starting another provider flow', () => {

@@ -11,6 +11,7 @@ import {
   KIMI_API_ENV_KEY,
   KIMI_CODE_BASE_URL,
   KIMI_CODE_ENV_KEY,
+  PROVIDER_METADATA_NS,
   THIRD_PARTY_PROVIDERS,
   buildProviderTemplate,
   buildInstallPlan,
@@ -89,6 +90,18 @@ describe('kimiProvider', () => {
     expect(plan.modelProviders?.[0]?.models?.[0]?.envKey).toBe(
       KIMI_CODE_ENV_KEY,
     );
+    // The trailing slash must not reach any persisted output: a variant
+    // baseUrl would never match the canonical template's version hash.
+    expect(plan.modelProviders?.[0]?.models?.[0]?.baseUrl).toBe(
+      KIMI_CODE_BASE_URL,
+    );
+    expect(plan.modelSelection).toEqual({
+      modelId: 'k3-256k',
+      baseUrl: KIMI_CODE_BASE_URL,
+    });
+    expect(
+      plan.providerState?.[`${PROVIDER_METADATA_NS}.kimi--coding-plan`],
+    ).toMatchObject({ baseUrl: KIMI_CODE_BASE_URL });
 
     expect(typeof kimiProvider.documentationUrl).toBe('function');
     const documentationUrl = kimiProvider.documentationUrl as (

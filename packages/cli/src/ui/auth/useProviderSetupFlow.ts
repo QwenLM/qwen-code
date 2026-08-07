@@ -249,12 +249,6 @@ export function useProviderSetupFlow(
       setProtocol(selectedProtocol);
       if (selectedProtocol !== protocol) {
         protocolDraftsRef.current.set(protocol, { baseUrl, apiKey });
-        if (provider) {
-          apiKeyDraftsRef.current.set(
-            providerEnvKey(provider, protocol, baseUrl),
-            apiKey,
-          );
-        }
         const draft = protocolDraftsRef.current.get(selectedProtocol);
         if (draft) {
           setBaseUrl(draft.baseUrl);
@@ -273,7 +267,7 @@ export function useProviderSetupFlow(
       }
       goNext();
     },
-    [apiKey, baseUrl, goNext, protocol, provider],
+    [apiKey, baseUrl, goNext, protocol],
   );
 
   const selectBaseUrl = useCallback(
@@ -352,14 +346,10 @@ export function useProviderSetupFlow(
     if (!baseUrl.trim()) {
       setBaseUrl(effective);
     }
-    protocolDraftsRef.current.set(protocol, {
-      baseUrl: effective,
-      apiKey,
-    });
     setBaseUrlError(null);
     goNext();
     return true;
-  }, [apiKey, baseUrl, baseUrlPlaceholder, goNext, protocol]);
+  }, [baseUrl, baseUrlPlaceholder, goNext]);
 
   const changeBaseUrl = useCallback((value: string) => {
     setBaseUrl(value);

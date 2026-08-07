@@ -315,6 +315,48 @@ describe('provider endpoint state', () => {
     expect(drafts.size).toBe(0);
   });
 
+  it('restores a draft through a sibling endpoint in the same credential domain', () => {
+    const cnUrl = 'https://api.moonshot.cn/v1';
+    const globalUrl = 'https://api.moonshot.ai/v1';
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const regionalKimi: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'api-cn',
+          label: 'API China',
+          url: cnUrl,
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'api-global',
+          label: 'API Global',
+          url: globalUrl,
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        ...(Array.isArray(kimi.baseUrl) ? kimi.baseUrl.slice(0, 1) : []),
+      ],
+    };
+    const drafts = new Map<string, string>();
+
+    // Leave the shared domain via the Coding Plan endpoint; the typed key is
+    // stashed under the credential domain, not the China URL.
+    expect(
+      apiKeyAfterBaseUrlChange(
+        regionalKimi,
+        cnUrl,
+        codingUrl,
+        'typed-key',
+        drafts,
+      ),
+    ).toBe('');
+
+    // Restoring through the sibling URL in the same domain must find it.
+    expect(
+      apiKeyAfterBaseUrlChange(regionalKimi, codingUrl, globalUrl, '', drafts),
+    ).toBe('typed-key');
+  });
+
   it('restores API key drafts across a cross-domain endpoint round trip', () => {
     const drafts = new Map<string, string>();
     const codingUrl = 'https://api.kimi.com/coding/v1';

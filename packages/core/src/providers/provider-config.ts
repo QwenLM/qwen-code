@@ -272,12 +272,16 @@ export function buildInstallPlan(
   inputs: ProviderSetupInputs,
 ): ProviderInstallPlan {
   const protocol = inputs.protocol ?? config.protocol;
-  const envKey = resolveEnvKey(config, inputs);
-  const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  // Canonicalize the endpoint once so models, modelSelection, and
+  // providerState all persist the provider's own URL. A variant (trailing
+  // slash) would poison the version hash and identity matching downstream.
+  const baseUrl = resolveBaseUrl(config, inputs.baseUrl);
+  const resolvedInputs = { ...inputs, baseUrl };
+  const envKey = resolveEnvKey(config, resolvedInputs);
+  const models =
+    inputs.prebuiltModels ?? buildModelConfigs(config, resolvedInputs);
   const providerOwnsModel = resolveOwnsModel(config);
-  const selectedEndpoint = normalizeBaseUrlForMatching(
-    resolveBaseUrl(config, inputs.baseUrl),
-  );
+  const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const ownsModel = config.mergeModelsByIdentity
     ? Array.isArray(config.baseUrl) && providerOwnsModel
       ? (model: ProviderModelConfig) =>
@@ -315,7 +319,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState: resolveProviderState(config, baseUrl, models),
   };
 }
 

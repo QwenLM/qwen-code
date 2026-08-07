@@ -352,6 +352,25 @@ describe('AuthMessage draft isolation', () => {
 
     expect(textInput().value).toBe('beta-two-default');
   });
+
+  it('clears a typed key when abandoning a flow and starting another provider', async () => {
+    actions.getAuthProviders.mockResolvedValue(catalog);
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Alpha'));
+    click(findButtonContaining('Alpha Two'));
+    setInput(passwordInput(), 'secret-a');
+
+    // Abandon the flow from the apiKey step, then start provider Beta and
+    // advance to its apiKey step without switching endpoints.
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Provider Beta'));
+    click(findButtonContaining('next'));
+
+    expect(passwordInput().value).toBe('');
+  });
 });
 
 function textInput(): HTMLInputElement {
@@ -561,5 +580,20 @@ describe('AuthMessage model field preservation', () => {
 
     expect(document.body.textContent).toContain('C_TWO_KEY');
     expect(document.body.textContent).not.toContain('C_SHARED_KEY');
+  });
+
+  it('seeds the first endpoint defaults without an endpoint selection', async () => {
+    actions.getAuthProviders.mockResolvedValue(catalog);
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Beta'));
+    // Advance without clicking an endpoint option: the models field must
+    // carry the first endpoint's defaults, not the provider-wide list.
+    click(findButtonContaining('next'));
+    setInput(passwordInput(), 'sk-beta');
+    click(findButtonContaining('next'));
+
+    expect(textInput().value).toBe('beta-one-default');
   });
 });
