@@ -1253,10 +1253,10 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
   });
 
   it('raises the stream guards with lifetime strictly above idle', () => {
-    const idle = Number(env.QWEN_STREAM_IDLE_TIMEOUT_MS);
-    const lifetime = Number(env.QWEN_STREAM_MAX_LIFETIME_MS);
-    expect(idle).toBe(600000);
-    expect(lifetime).toBe(1800000);
-    expect(lifetime).toBeGreaterThan(idle);
+    expect(env.QWEN_STREAM_IDLE_TIMEOUT_MS).toBe('600000');
+    expect(env.QWEN_STREAM_MAX_LIFETIME_MS).toBe('1800000');
+    expect(Number(env.QWEN_STREAM_MAX_LIFETIME_MS)).toBeGreaterThan(
+      Number(env.QWEN_STREAM_IDLE_TIMEOUT_MS),
+    );
   });
 });
