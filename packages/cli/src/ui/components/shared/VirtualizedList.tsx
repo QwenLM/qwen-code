@@ -492,12 +492,27 @@ function VirtualizedList<T>(
     props.targetScrollIndex,
   ]);
 
+  // Clamp for marginTop: can't be negative or exceed total - container
+  const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+  const clampedScrollTop = Math.min(
+    Math.max(0, isStickingToBottom ? maxScroll : actualScrollTop),
+    maxScroll,
+  );
+
+  // The render window must cover what the viewport actually paints, so
+  // it is computed from clampedScrollTop, not the anchor-based
+  // actualScrollTop. While bottom-stuck the viewport pins to maxScroll,
+  // but the anchor can sit far above it (e.g. {0, 0} after a collapse
+  // cascade shrank the content and re-engaged sticking); windowing
+  // around the anchor then leaves the visible bottom rows unmounted and
+  // paints a fully blank frame that only a scroll heals.
+  //
   // Cached zero heights create runs of coincident offsets; findLastLE
   // lands on the run's LAST item, leaving the run's earlier items
   // unmounted and unable to re-measure their re-expanded content. Walk
   // back to the run's first item so a re-expand heals the whole run in
   // one pass instead of one item per scroll.
-  let startIndex = Math.max(0, findLastLE(offsets, actualScrollTop) - 1);
+  let startIndex = Math.max(0, findLastLE(offsets, clampedScrollTop) - 1);
   while (startIndex > 0 && offsets[startIndex - 1] === offsets[startIndex]) {
     startIndex--;
   }
@@ -505,7 +520,7 @@ function VirtualizedList<T>(
     scrollableContainerHeight > 0 ? scrollableContainerHeight : 50;
   const endIndexOffsetRaw = upperBound(
     offsets,
-    actualScrollTop + viewHeightForEndIndex,
+    clampedScrollTop + viewHeightForEndIndex,
   );
   const endIndex =
     endIndexOffsetRaw >= offsets.length
@@ -602,13 +617,6 @@ function VirtualizedList<T>(
   ]);
 
   const { getScrollTop, setPendingScrollTop } = useBatchedScroll(scrollTop);
-
-  // Clamp for marginTop: can't be negative or exceed total - container
-  const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
-  const clampedScrollTop = Math.min(
-    Math.max(0, isStickingToBottom ? maxScroll : actualScrollTop),
-    maxScroll,
-  );
 
   const getScrollbarGeometry = useCallback(() => {
     const shouldShowScrollbar = (props.showScrollbar ?? true) && maxScroll > 0;

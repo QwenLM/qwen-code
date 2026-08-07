@@ -1128,4 +1128,56 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
       true,
     );
   });
+
+  it('re-expands to a non-empty healed frame after collapsing while scrolled', async () => {
+    // Keyboard path from the #8570 real-TUI verification: expand, PageUp
+    // away from the bottom, collapse (Alt+T), re-expand (Alt+T). The
+    // collapse cascade walks the anchor to the top and re-engages
+    // sticking-to-bottom; the re-expanded window must still cover the
+    // bottom-stuck viewport instead of stranding it over unmounted
+    // cached-zero continuations (a persistent all-blank frame that only
+    // a scroll healed).
+    const data = thoughtHistory(30, 4, 4);
+    const ref: RefObject<VirtualizedListRef<HistoryItem> | null> = {
+      current: null,
+    };
+    const harness = render(
+      thoughtTree(new Set([HEAD_ID]), ref, data, SCROLL_TO_ITEM_END),
+    );
+    await tick();
+    await tick();
+
+    // PageUp (ScrollableList scrolls by one containerHeight); the group
+    // is taller than the viewport, so this stays inside it.
+    act(() => {
+      ref.current?.scrollBy(-40);
+    });
+    await tick();
+    await tick();
+    expect(ref.current!.getScrollState().scrollTop).toBeGreaterThan(0);
+
+    // Collapse while scrolled: continuations cache 0 as the cascade
+    // walks the window up, ending with the shrunken content fitting the
+    // container.
+    harness.rerender(thoughtTree(new Set(), ref, data, SCROLL_TO_ITEM_END));
+    for (let i = 0; i < 10; i++) {
+      await tick();
+    }
+    const collapsed = harness.lastFrame() ?? '';
+    expect(collapsed.includes('Thought for 1m 41s')).toBe(true);
+    expect(collapsed.includes('answer thought line 0')).toBe(true);
+
+    // Re-expand: the frame must not blank, and every cached zero must
+    // heal back to the full expanded total.
+    harness.rerender(
+      thoughtTree(new Set([HEAD_ID]), ref, data, SCROLL_TO_ITEM_END),
+    );
+    for (let i = 0; i < 15; i++) {
+      await tick();
+    }
+    const lines = (harness.lastFrame() ?? '').split('\n');
+    expect(lines.filter((l) => l.trim() !== '').length).toBeGreaterThan(0);
+    expect(/thought line|answer/.test(harness.lastFrame() ?? '')).toBe(true);
+    expect(ref.current!.getScrollState().scrollHeight).toBe(159);
+  });
 });
