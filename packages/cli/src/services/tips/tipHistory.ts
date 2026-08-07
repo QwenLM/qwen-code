@@ -20,6 +20,7 @@ interface TipHistoryEntry {
 interface TipHistoryData {
   sessionCount: number;
   tips: Record<string, TipHistoryEntry>;
+  lastSeenVersion?: string;
 }
 
 export class TipHistory {
@@ -105,6 +106,18 @@ export class TipHistory {
     this.persist();
   }
 
+  hasSeenVersion(version: string): boolean {
+    return this.data.lastSeenVersion === version;
+  }
+
+  markVersionSeen(version: string): boolean {
+    if (this.hasSeenVersion(version)) return false;
+
+    this.data.lastSeenVersion = version;
+    this.persist();
+    return true;
+  }
+
   /**
    * Persist history to disk.
    */
@@ -145,6 +158,10 @@ export class TipHistory {
                 ? Math.floor(parsed.sessionCount)
                 : 0,
             tips: parsed.tips ?? {},
+            lastSeenVersion:
+              typeof parsed.lastSeenVersion === 'string'
+                ? parsed.lastSeenVersion
+                : undefined,
           };
         }
       }
