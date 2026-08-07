@@ -62,6 +62,9 @@ Lift history (#4175 Mode B daemon roadmap):
   injection seam for daemon-host env / preflight cells (production
   impl in `cli/src/serve/daemon-status-provider.ts`) and the F1
   `BridgeFileSystem` injection seam for the ACP fs proxy.
+  `delegateReadTextFileToClient` defaults to `true`; same-host daemon callers
+  may set it to `false` so child text reads use the regular CLI filesystem
+  service while final ACP text writes remain delegated.
 - `spawnChannel` (F1) — `defaultSpawnChannelFactory` + `killChild` +
   `SCRUBBED_CHILD_ENV_KEYS` denylist + `scrubChildEnv` pure env-policy
   helper (exported for adapter reuse + unit-test access; isolates the
@@ -90,9 +93,10 @@ Lift history (#4175 Mode B daemon roadmap):
   ACP fs proxy. When wired through `BridgeOptions.fileSystem`,
   `BridgeClient.readTextFile` / `BridgeClient.writeTextFile`
   delegate to it instead of the inline `fs.realpath` /
-  `fs.writeFile` / `fs.readFile` proxy. Production `qwen serve`
-  follow-up wraps PR 18's `WorkspaceFileSystem` here so writes
-  get TOCTOU + symlink + trust-gate + audit guarantees.
+  `fs.writeFile` / `fs.readFile` proxy. Production `qwen serve` injects
+  `WorkspaceFileSystem` for final ACP `writeTextFile` content writes and for
+  defensive handling of unexpected or capability-violating delegated reads;
+  normal same-host text reads stay in the child.
 
 ## Imports — root vs subpaths
 
