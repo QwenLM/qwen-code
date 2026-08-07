@@ -198,6 +198,68 @@ describe('evaluateWebSearchGate', () => {
     if (!gate.ok) expect(gate.notice).toContain('no search model');
   });
 
+  it('pins the no-model notice: the example must pass the gate', () => {
+    const gate = evaluateWebSearchGate(
+      makeConfig({ settings: { enabled: true } }),
+    );
+    expect(gate.ok).toBe(false);
+    if (gate.ok) return;
+    // The notice is copy-pasteable guidance: round-trip its settings.json
+    // block through the gate so a typo or drift fails the suite.
+    const start = gate.notice.indexOf('{');
+    expect(start).toBeGreaterThan(-1);
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < gate.notice.length; i++) {
+      if (gate.notice[i] === '{') depth++;
+      else if (gate.notice[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    expect(end).toBeGreaterThan(start);
+    const example = JSON.parse(gate.notice.slice(start, end + 1)) as {
+      tools?: { webSearch?: { enabled?: boolean; model?: string } };
+      modelProviders?: {
+        openai?: Array<{ id?: string; baseUrl?: string; envKey?: string }>;
+      };
+    };
+    const settings = example.tools?.webSearch;
+    const entries = example.modelProviders?.openai;
+    expect(settings).toBeTruthy();
+    expect(entries).toBeTruthy();
+    if (!settings || !entries) return;
+    const savedKey = process.env['DASHSCOPE_API_KEY'];
+    process.env['DASHSCOPE_API_KEY'] = 'sk-test';
+    try {
+      const oracle = evaluateWebSearchGate(
+        makeConfig({
+          settings,
+          models: entries.map((entry) => ({
+            id: entry.id ?? '',
+            authType: 'openai',
+            envKey: entry.envKey,
+            baseUrl: entry.baseUrl,
+          })),
+        }),
+      );
+      expect(oracle.ok).toBe(true);
+    } finally {
+      if (savedKey === undefined) {
+        delete process.env['DASHSCOPE_API_KEY'];
+      } else {
+        process.env['DASHSCOPE_API_KEY'] = savedKey;
+      }
+    }
+    expect(gate.notice).toContain('ENABLE_WEB_SEARCH');
+    expect(gate.notice).toContain('WEB_SEARCH_MODEL');
+    expect(gate.notice).toContain('WEB_SEARCH_BASE_URL');
+    expect(gate.notice).toContain('WEB_SEARCH_API_KEY');
+  });
+
   it('rejects a selector that matches no configured model', () => {
     const gate = evaluateWebSearchGate(
       makeConfig({ settings: { enabled: true, model: 'qwen3.9-mega' } }),

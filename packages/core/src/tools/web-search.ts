@@ -180,7 +180,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
         '        "envKey": "DASHSCOPE_API_KEY" }]\n' +
         '    }\n' +
         '  }\n' +
-        'Or via env: WEB_SEARCH_MODEL=qwen3.6-plus (plus WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY).',
+        'Or via env: ENABLE_WEB_SEARCH=true WEB_SEARCH_MODEL=qwen3.6-plus (plus WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY).',
     };
   }
 
