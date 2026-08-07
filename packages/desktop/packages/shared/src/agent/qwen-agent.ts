@@ -4550,6 +4550,7 @@ export class QwenAgent extends BaseAgent {
     if (!existsSync(transcriptPath)) return [];
 
     const parentUuidByUuid = new Map<string, string>();
+    const userRecordUuids = new Set<string>();
     const invocations = new Map<string, SlashCommandInvocation>();
     const seenResults = new Set<string>();
     const messages: Message[] = [];
@@ -4570,6 +4571,7 @@ export class QwenAgent extends BaseAgent {
 
         const uuid = asString(record.uuid);
         if (uuid) {
+          if (record.type === 'user') userRecordUuids.add(uuid);
           const parentUuidValue = asString(record.parentUuid);
           if (parentUuidValue) parentUuidByUuid.set(uuid, parentUuidValue);
         }
@@ -4616,6 +4618,7 @@ export class QwenAgent extends BaseAgent {
         const resultCommandName = rawCommand.split(/\s+/, 1)[0];
         while (ancestorUuid && !visited.has(ancestorUuid)) {
           visited.add(ancestorUuid);
+          if (userRecordUuids.has(ancestorUuid)) break;
           const candidate = invocations.get(ancestorUuid);
           if (candidate) {
             if (
