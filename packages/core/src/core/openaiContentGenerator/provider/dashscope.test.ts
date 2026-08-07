@@ -785,6 +785,34 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it('warns that the dropped budget came from a request-level same-layer pair', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max-preview',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max-preview',
+          reasoning_effort: 'high',
+          thinking_budget: 1024,
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      );
+
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        'DashScope: dropped conflicting thinking knobs',
+        {
+          model: 'qwen3.8-max-preview',
+          reasoningEffort: 'high',
+          dropped: ['thinking_budget'],
+        },
+      );
+    });
+
     it('drops the preset enable_thinking when an effort tier ships on qwen3.8-max-preview', () => {
       // The Token Plan preset ships qwen3.8-max-preview with enableThinking,
       // which provider-config.ts turns into extra_body.enable_thinking; the
