@@ -962,15 +962,20 @@ jobs:
       # "running" line doesn't outlive the run. Neutral wording — the verdict
       # lives in the stage comments above; this only records that the run ended
       # and keeps the run link. PATCHes exactly the comment id the claim step
-      # exported; an empty id means this run never claimed a comment (a cancel
-      # landing before the claim posted), so nothing is flipped and a previous
-      # run's terminal wording stays untouched. Best-effort, on success,
-      # failure, AND cancellation: always() (not success() || failure())
-      # because cancellation — cancel-in-progress superseding this run on a
-      # newer push or comment, job timeout, or manual cancel — would skip this
-      # step and leave the comment claiming the run is still in progress — the
-      # verify lane has publish-verify to catch that case, this lane only has
-      # us.
+      # exported. An empty id means this run never ended up owning a comment:
+      # a cancel landing before the claim posted, or a transient failure of the
+      # claim's write (both the fresh-POST and PATCH arms export an empty id on
+      # failure). Either way nothing is flipped and a previous run's terminal
+      # wording stays untouched. A failed claim therefore leaves no lifecycle
+      # breadcrumb even when the comments API recovers during the minutes-long
+      # agent run — accepted: the verdict still lands in the stage comments,
+      # and a list-then-POST recovery here would reintroduce exactly the
+      # selection this coupling removes. Best-effort, on success, failure, AND
+      # cancellation: always() (not success() || failure()) because
+      # cancellation — cancel-in-progress superseding this run on a newer push
+      # or comment, job timeout, or manual cancel — would skip this step and
+      # leave the comment claiming the run is still in progress — the verify
+      # lane has publish-verify to catch that case, this lane only has us.
       - name: 'Finalize triage status comment'
         if: "always() && steps.resolve.outputs.number != ''"
         shell: 'bash'

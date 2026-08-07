@@ -555,6 +555,10 @@ describe('qwen-triage tmux workflow', () => {
     expect(statusStep).toContain(
       'echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"',
     );
+    // The executed claim harness's stub answers a POST with the already-
+    // extracted id, so nothing there exercises the POST arm's `--jq '.id'`
+    // (removing the flag keeps the suite green). Pin the flag statically.
+    expect(statusStep).toContain("--jq '.id'");
     expect(statusStep).toContain('[watch live progress]($RUN_URL)');
     expect(statusStep).toContain('[查看实时进度]($RUN_URL)');
 
@@ -590,9 +594,10 @@ describe('qwen-triage tmux workflow', () => {
       'repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID',
     );
     expect(finalizeStep).toContain('--method PATCH');
-    // An empty id means this run never claimed a comment (a cancel landing
-    // before the claim posted): no-op, never a fresh post or a lookup that
-    // could clobber a previous run's terminal wording.
+    // An empty id means this run never ended up owning a comment (a cancel
+    // landing before the claim posted, or a transiently failed claim write):
+    // no-op, never a fresh post or a lookup that could clobber a previous
+    // run's terminal wording.
     expect(finalizeStep).toContain('if [ -z "${STATUS_COMMENT_ID:-}" ]; then');
     expect(finalizeStep).toContain(
       'This run claimed no status comment; nothing to finalize.',
