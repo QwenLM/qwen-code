@@ -21,9 +21,7 @@ import {
   useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
-  useWorkspaceActions,
   type DaemonSessionActions,
-  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionArtifact,
@@ -181,7 +179,6 @@ export interface ChatPaneProps {
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Allow prompt admission to recover a disconnected SSE stream. */
@@ -231,7 +228,6 @@ export function ChatPane({
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
-  const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
@@ -302,16 +298,11 @@ export function ChatPane({
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
-    onPaneArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    onPaneArtifactsChange?.(sessionId, artifacts);
     return () => {
-      onPaneArtifactsChange?.(sessionId, [], workspaceActions);
+      onPaneArtifactsChange?.(sessionId, []);
     };
-  }, [
-    artifacts,
-    connection.sessionId,
-    onPaneArtifactsChange,
-    workspaceActions,
-  ]);
+  }, [artifacts, connection.sessionId, onPaneArtifactsChange]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
   const firstPromptAdmittedRef = useRef(false);
@@ -547,20 +538,12 @@ export function ChatPane({
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
-      if (request.kind === 'subagent') {
-        onRightPanelOpen({
-          ...request,
-          sourceSessionId: connection.sessionId,
-        });
-        return;
-      }
       onRightPanelOpen({
         ...request,
-        workspaceActions,
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen, workspaceActions],
+    [connection.sessionId, onRightPanelOpen],
   );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The

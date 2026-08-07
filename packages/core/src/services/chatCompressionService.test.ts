@@ -19,7 +19,10 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type {
+  BaseLlmClient,
+  GenerateTextOptions,
+} from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -2277,19 +2280,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(generateText).toHaveBeenCalledTimes(1);
-    const request = generateText.mock.calls[0]![0] as {
-      contents: Content[];
-      systemInstruction?: string;
-      config?: {
-        tools?: unknown;
-        thinkingConfig?: {
-          includeThoughts?: boolean;
-          thinkingBudget?: number;
-        };
-        maxOutputTokens?: number;
-      };
-    };
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
     expect(request.systemInstruction).toBe(mainSystemInstruction);
+    expect(request.promptCacheSharing).toBe(true);
     expect(request.config?.tools).toBe(tools);
     expect(request.config?.thinkingConfig?.includeThoughts).toBe(true);
     expect(request.config?.thinkingConfig?.thinkingBudget).toBe(
@@ -2376,6 +2369,34 @@ describe('ChatCompressionService.compress cache sharing', () => {
       });
 
       expect(generateText).toHaveBeenCalledTimes(1);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'https://api.openai.com/v1',
+    'https://api.deepseek.com/v1',
+    'https://proxy.example/v1',
+  ])(
+    'uses cache sharing for OpenAI-compatible endpoint %s',
+    async (baseUrl) => {
+      const { chat, config, generateText } = makeFixture({
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+      });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+      expect(request.promptCacheSharing).toBe(true);
       expect(coldSpy).not.toHaveBeenCalled();
     },
   );
@@ -2810,13 +2831,6 @@ describe('ChatCompressionService.compress cache sharing', () => {
     {
       name: 'a provider without explicit cache support',
       options: { authType: AuthType.USE_GEMINI },
-    },
-    {
-      name: 'a non-DashScope OpenAI-compatible provider',
-      options: {
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://api.openai.com/v1',
-      },
     },
     {
       name: 'disabled cache control',
