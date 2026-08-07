@@ -4246,6 +4246,28 @@ export class Config {
     ) {
       return undefined;
     }
+    if (selected.field === 'enable_thinking' && selected.value === true) {
+      // An on-switch never blocks the tier — the wire drops the switch and
+      // ships it — so only a request-level effort override can still shadow
+      // the current tier from under it.
+      if (selected.source !== 'extra_body') {
+        return undefined;
+      }
+      const below = selectDashScopeThinkingKnob(
+        cfg.model,
+        undefined,
+        cfg.samplingParams,
+        currentEffort,
+      );
+      if (
+        below?.source === 'samplingParams' &&
+        below.field === 'reasoning_effort' &&
+        below.value !== currentEffort
+      ) {
+        return { source: below.source, field: below.field };
+      }
+      return undefined;
+    }
     return { source: selected.source, field: selected.field };
   }
 

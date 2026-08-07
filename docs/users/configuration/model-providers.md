@@ -604,7 +604,7 @@ On a `api.deepseek.com` baseURL, the OpenAI pipeline emits the explicit `thinkin
 >
 > When `generationConfig.samplingParams` is set on an OpenAI-compatible provider, the pipeline ships those keys to the wire **verbatim** and skips the separate `reasoning` injection entirely. So a config like `{ samplingParams: { temperature: 0.5 }, reasoning: { effort: 'max' } }` will silently drop the reasoning field on OpenAI/DeepSeek requests.
 >
-> DashScope Qwen models are an exception: their provider reads `reasoning` directly and maps it to `reasoning_effort` or `enable_thinking`. Provider-specific `samplingParams` fields still take precedence when the wire parameters conflict.
+> DashScope Qwen models are an exception: their provider reads `reasoning` directly and maps it to `reasoning_effort` or `enable_thinking`. On the qwen3.8-max family, provider-specific `samplingParams` fields still take precedence when the wire parameters conflict; on older qwen hybrids, a configured effort tier collapses to `enable_thinking: true`, which overrides a `samplingParams.enable_thinking` value.
 >
 > If you set `samplingParams`, include the reasoning knob inside it directly — for DeepSeek that's `samplingParams.reasoning_effort`, for GPT-5/o-series it's `samplingParams.reasoning_effort` (their flat field) or `samplingParams.reasoning` (the nested object). For OpenRouter and other providers the field name varies; consult the provider docs.
 >

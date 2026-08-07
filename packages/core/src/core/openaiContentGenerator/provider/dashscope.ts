@@ -68,6 +68,13 @@ export function selectDashScopeThinkingKnob(
         value: layer['thinking_budget'],
       };
     }
+    // A solitary on-switch still represents its layer so a higher-priority
+    // `true` beats a lower-priority disable; it ranks below the value knobs
+    // in its own layer because, unlike the off-switch, it never rewrites
+    // the shipping tier.
+    if (layer?.['enable_thinking'] === true) {
+      return { source, field: 'enable_thinking', value: true };
+    }
     return undefined;
   };
 
@@ -485,17 +492,20 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * Resolve thinking knobs that conflict with a shipping `reasoning_effort`.
    * Preset extra_body injects `enable_thinking` for models declared with
    * enableThinking (provider-config.ts), and user extra_body merges last.
-   * Only the qwen3.8-max family reads `reasoning_effort` itself — there the
-   * selected cross-layer field ships alone: an `enable_thinking: true`
-   * alongside an effort tier is a second competing knob (the shape the
-   * nested-`reasoning` strip in buildRequest exists to prevent), and
-   * DashScope rejects `reasoning_effort` combined with `thinking_budget`.
-   * Explicit same-layer effort/budget pairs retain reasoning_effort, matching
-   * the provider's behavior before cross-layer resolution. An explicit
-   * `enable_thinking: false` is the documented extra_body escape hatch
-   * winning over the config tier, so it is honoured as the family's
-   * canonical disable (`reasoning_effort: 'none'`, preserved by the
-   * pipeline's disable strip) rather than silently deleted. Older qwen
+   * Only the qwen3.8-max family reads `reasoning_effort` itself — there an
+   * effort tier ships alone: an `enable_thinking: true` alongside an effort
+   * tier is a second competing knob (the shape the nested-`reasoning` strip
+   * in buildRequest exists to prevent), and DashScope rejects
+   * `reasoning_effort` combined with `thinking_budget`. The `'none'`
+   * disable and a winning `thinking_budget` intentionally keep a co-present
+   * `enable_thinking`. Explicit same-layer effort/budget pairs retain
+   * reasoning_effort, matching the provider's behavior before cross-layer
+   * resolution. An explicit `enable_thinking: false` is the documented
+   * extra_body escape hatch winning over the config tier, so it is honoured
+   * as the family's canonical disable (`reasoning_effort: 'none'`, preserved
+   * by the pipeline's disable strip) rather than silently deleted; a
+   * higher-priority `enable_thinking: true` conversely keeps the shipping
+   * tier. Older qwen
    * hybrids read `enable_thinking` / `thinking_budget`, not
    * `reasoning_effort`, so when an opaque reasoning_effort override
    * conflicts with a meaningful thinking_budget the inert field goes and
@@ -528,7 +538,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const dropped: string[] = [];
     if (isTieredEffortWireModel(wireModel)) {
       if (selectedThinkingKnob?.field === 'enable_thinking') {
-        merged['reasoning_effort'] = 'none';
+        // Only the off-switch rewrites the tier; a higher-priority
+        // `enable_thinking: true` keeps thinking on, so the shipping tier
+        // survives and only the redundant knobs go.
+        if (selectedThinkingKnob.value !== true) {
+          merged['reasoning_effort'] = 'none';
+        }
         dropped.push('enable_thinking');
         if (merged['thinking_budget'] !== undefined) {
           dropped.push('thinking_budget');

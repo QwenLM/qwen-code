@@ -4375,6 +4375,28 @@ describe('Server Config (config.ts)', () => {
         samplingParams: { reasoning_effort: 'max' },
         expected: undefined,
       },
+      {
+        name: 'extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch over a samplingParams disable',
+        extra_body: { enable_thinking: true },
+        samplingParams: { enable_thinking: false },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams enable_thinking on-switch',
+        samplingParams: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams effort under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
     ])('resolves $name', ({ extra_body, samplingParams, expected }) => {
       const config = new Config({
         ...baseParams,
