@@ -217,11 +217,16 @@ jobs:
               # dispatched yet (conflict dispatches happen later in the
               # walk), so a dispatch created since T0 is ours — provided it
               # is the ONLY one. The fork-review bridge also dispatches
-              # autonomously at arbitrary times; if one lands inside this
-              # window the newest-since-T0 heuristic cannot tell the two
-              # apart, so an ambiguous window records run=none rather than
-              # tracking a run we do not own — the same documented fallback
-              # as a never-appearing run: a duplicate scan, not starvation.
+              # autonomously at arbitrary times, and GitHub may expose a
+              # foreign dispatch before our own run appears in the list.
+              # So: ANY poll seeing two or more candidates records run=none
+              # (the window is ambiguous — never attribute a guess), and a
+              # single candidate is accepted only as the sole candidate
+              # across two consecutive polls — the FIRST singleton might be
+              # the foreign one, and our run arriving at the next poll flips
+              # the window to ambiguous instead of being attributed on top
+              # of it. Either fallback is the documented one: a duplicate
+              # scan, never starvation.
               if [[ "${DRY_RUN}" != "true" ]]; then
                 for _ in 1 2 3 4 5; do
                   sleep 2
@@ -229,15 +234,23 @@ jobs:
                     --event workflow_dispatch --limit 5 --json databaseId,createdAt 2> /dev/null \
                     | jq -c --arg t0 "${DISPATCH_T0}" '[ .[] | select(.createdAt >= $t0) ]' 2> /dev/null || true)"
                   COUNT="$(jq 'length' <<< "${CANDIDATES}" 2> /dev/null || echo 0)"
-                  if [[ "${COUNT}" == "1" ]]; then
-                    LIVENESS_RUN_OUT="$(jq -r '.[0].databaseId // "" | tostring' <<< "${CANDIDATES}")"
-                    break
-                  fi
                   if [[ "${COUNT}" =~ ^[0-9]+$ ]] && [[ "${COUNT}" -gt 1 ]]; then
                     echo "🫀 ${COUNT} dispatches since ${DISPATCH_T0} — attribution ambiguous (fork bridge?), recording run=none"
+                    ATTRIBUTED=''
                     break
                   fi
+                  SEEN_ID=''
+                  if [[ "${COUNT}" == "1" ]]; then
+                    SEEN_ID="$(jq -r '.[0].databaseId // "" | tostring' <<< "${CANDIDATES}")"
+                  fi
+                  if [[ -n "${SEEN_ID}" && "${SEEN_ID}" == "${PREV_SEEN:-}" ]]; then
+                    ATTRIBUTED="${SEEN_ID}"
+                  else
+                    ATTRIBUTED=''
+                  fi
+                  PREV_SEEN="${SEEN_ID}"
                 done
+                LIVENESS_RUN_OUT="${ATTRIBUTED:-}"
               fi
             fi
           fi

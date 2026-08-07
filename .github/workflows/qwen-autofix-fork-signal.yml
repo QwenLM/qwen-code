@@ -3,25 +3,28 @@ name: 'Qwen Autofix Fork Signal'
 # GitHub hands NO repository secrets to a workflow run tied to a pull request
 # whose head lives in a fork — the run header reads `Secret source: None` — so
 # `secrets.CI_DEV_BOT_PAT` arrives empty and the review lane in
-# `qwen-autofix.yml` cannot authenticate. Merging this bridge REQUIRES #8671
-# first: that PR adds route's `secretless` output so the direct
-# `pull_request_review` lane skips fork PRs instead of failing three API calls
-# and reddening the run. Until #8671 lands the premise below is not yet true
-# and a managed fork PR's review fires BOTH lanes, the direct one still
-# red-ing out on the empty PAT — hence the merge ordering in the PR body.
+# `qwen-autofix.yml` cannot authenticate from it. #8671 (merged, 63a99c2c11)
+# already changed the direct lane to match: route's decide script declines
+# fork `pull_request_review` events inline, and review-scan fails fast at the
+# top on an empty PAT — so fork reviews no longer redden the direct lane, but
+# they also get no real-time pickup there: only the scheduled scan, running
+# in repo context, ever engages a fork PR.
 #
 # This is the credential-free half of the standard `workflow_run` bridge that
-# closes the gap. It records nothing — its only job is to complete `success`
+# closes that gap. It records nothing — its only job is to complete `success`
 # EXACTLY for the reviews the direct lane cannot serve, so the base-context
-# half (`qwen-autofix-fork-bridge.yml`) can resolve the PR from this run's
-# head SHA and start the real scan where the secrets and `actions: write` do
-# exist.
+# half (`qwen-autofix-fork-bridge.yml`) can start the real scan where the
+# secrets and `actions: write` do exist. Which PR was reviewed, and by whom,
+# rides this run's `run-name` below — GitHub surfaces it on the
+# `workflow_run` event as `display_title` — and the bridge re-checks the
+# reviewed head against the PR's live head as a freshness gate.
 #
 # Fork-triggered runs execute the workflow file from the BASE branch, not the
 # PR head — verified on run 31152873061, whose PR branch predates a main-only
 # change to `qwen-autofix.yml` and which still executed the NEW file — so a
-# fork cannot edit this gate, and every conjunct is re-checked downstream
-# anyway: the bridge re-reads live PR state and review-scan re-derives
+# fork cannot edit this gate or forge the run-name binding, and every
+# conjunct is re-checked downstream anyway: the bridge re-reads live PR state
+# (including the reviewer's LIVE write permission) and review-scan re-derives
 # admission, so this gate decides WHEN, never whether.
 #
 # Deliberately powerless: `permissions: {}`, no checkout, and no repository
@@ -33,6 +36,12 @@ on:
   pull_request_review:
     types:
       - 'submitted'
+
+# The bridge's PR binding and the reviewer identity ride this run-name:
+# GitHub surfaces it on the `workflow_run` event as `display_title`, and this
+# FILE — which a fork cannot edit — supplies it. The format is load-bearing
+# and pinned by scripts/tests/qwen-autofix-fork-bridge-workflow.test.js.
+run-name: 'fork-signal: PR ${{ github.event.pull_request.number }} reviewed by ${{ github.event.review.user.login }}'
 
 permissions: {}
 
@@ -63,10 +72,15 @@ jobs:
     # or takeover-labeled — so an ordinary contributor's fork PR burns no
     # signal/bridge/dispatched runs per review, and a takeover PR whose
     # author turned maintainer edits off is never pushed into the credentialed
-    # lane. The association list mirrors TRUSTED_ASSOC, the review-bot login
-    # mirrors REVIEW_BOT, the takeover label mirrors TAKEOVER_LABEL, and the
-    # bot-author fallback mirrors AUTOFIX_BOT — all pinned by the fork-bridge
-    # workflow test.
+    # lane. SKIP wins here as it wins everywhere: a skip-labeled PR's reviews
+    # would otherwise burn a signal + bridge run and a PR read before being
+    # discarded, repeating known-useless work on every review. The
+    # association list mirrors TRUSTED_ASSOC, the review-bot login mirrors
+    # REVIEW_BOT, and the two labels mirror TAKEOVER_LABEL / SKIP_LABEL — all
+    # pinned by the fork-bridge workflow test. The association is a WHEN
+    # filter only: MEMBER/COLLABORATOR does not guarantee LIVE write
+    # permission, so the bridge re-checks the reviewer live before
+    # dispatching.
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code'
       && github.event.pull_request.head.repo.full_name != github.repository
@@ -75,6 +89,7 @@ jobs:
       && github.event.pull_request.maintainer_can_modify == true
       && (github.event.pull_request.user.login == (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot')
       || contains(toJSON(github.event.pull_request.labels.*.name), '"autofix/takeover"'))
+      && !contains(toJSON(github.event.pull_request.labels.*.name), '"autofix/skip"')
       && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
       || github.event.review.user.login == 'qwen-code-ci-bot') }}
     runs-on: 'ubuntu-latest'
@@ -85,4 +100,4 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           echo "🔔 signalling fork PR #${PR_NUMBER} for the autofix review lane"
-          echo "The bridge resolves the PR from this run's head SHA; nothing is uploaded."
+          echo "The bridge reads the PR number and reviewer from this run's title and re-checks the head SHA; nothing is uploaded."
