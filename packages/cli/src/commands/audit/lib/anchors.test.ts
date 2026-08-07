@@ -55,7 +55,10 @@ describe('parseReportFindings', () => {
       location: 'unique.ts',
       anchor: 'export const uniqueToken = 42;',
     });
-    expect(findings[1].location).toBe('dup.ts');
+    expect(findings[1]).toMatchObject({
+      severity: 'Suggestion',
+      location: 'dup.ts',
+    });
   });
 
   it('collects a multi-line anchor up to the next field', () => {
@@ -125,6 +128,128 @@ const y = x;
       'const x = 1;\n- const y = x;',
     );
   });
+
+  it('does not clobber the location on a field-shaped line inside the anchor', () => {
+    const quoted = [
+      '### [Critical] quoted yaml',
+      '- Location: unique.ts:1',
+      '- Anchor: offices:',
+      '  - Location: remote',
+      '- Issue: a',
+    ].join('\n');
+    const findings = parseReportFindings(quoted);
+    expect(findings[0].location).toBe('unique.ts');
+    expect(findings[0].anchor).toContain('- Location: remote');
+  });
+
+  it('does not truncate an anchor on an indented field-shaped snippet line', () => {
+    const embedded = [
+      '### [Critical] embedded field shape',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1;',
+      '   - Issue: quoted, not a field',
+      'const z = x;',
+      '- Issue: the real issue',
+    ].join('\n');
+    expect(parseReportFindings(embedded)[0].anchor).toBe(
+      'const x = 1;\n   - Issue: quoted, not a field\nconst z = x;',
+    );
+  });
+
+  it('ends anchor collection on a recognized field without an Issue field', () => {
+    const noIssue = [
+      '### [Critical] no issue field',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1;',
+      '- Failure scenario: trigger',
+    ].join('\n');
+    expect(parseReportFindings(noIssue)[0].anchor).toBe('const x = 1;');
+  });
+
+  it('does not split an anchor on a header-shaped snippet line', () => {
+    const rust = [
+      '### [Critical] rust attr in snippet',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1;',
+      '#[cfg(test)]',
+      '- Issue: a',
+    ].join('\n');
+    const findings = parseReportFindings(rust);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].anchor).toContain('#[cfg(test)]');
+  });
+
+  it('dedents multi-line anchors by the Anchor field indentation', () => {
+    const indented = [
+      '  ### [Critical] indented multi-line',
+      '  - Location: dup.ts:1',
+      '  - Anchor: const x = 1;',
+      '  const y = x;',
+      '  - Issue: a',
+    ].join('\n');
+    expect(parseReportFindings(indented)[0].anchor).toBe(
+      'const x = 1;\nconst y = x;',
+    );
+  });
+
+  it('strips a fence pair wrapped around a multi-line anchor', () => {
+    const fenced = [
+      '### [Critical] fenced anchor',
+      '- Location: dup.ts:1',
+      '- Anchor: ```ts',
+      'const x = 1;',
+      'const y = x;',
+      '```',
+      '- Issue: a',
+    ].join('\n');
+    expect(parseReportFindings(fenced)[0].anchor).toBe(
+      'const x = 1;\nconst y = x;',
+    );
+  });
+
+  it('accepts case-deviated field names', () => {
+    const deviated = [
+      '### [Critical] case-deviated fields',
+      '- location: unique.ts:1',
+      '- ANCHOR: export const uniqueToken = 42;',
+      '- Failure Scenario: x',
+    ].join('\n');
+    const findings = parseReportFindings(deviated);
+    expect(findings[0].location).toBe('unique.ts');
+    expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
+  });
+
+  it('strips line, column, and range suffixes from locations', () => {
+    const block = (location: string) =>
+      `### [Critical] suffixes\n- Location: ${location}\n- Anchor: x\n`;
+    expect(parseReportFindings(block('unique.ts:1'))[0].location).toBe(
+      'unique.ts',
+    );
+    expect(parseReportFindings(block('unique.ts:1:5'))[0].location).toBe(
+      'unique.ts',
+    );
+    expect(parseReportFindings(block('unique.ts:1-3'))[0].location).toBe(
+      'unique.ts',
+    );
+  });
+
+  it('fails closed on bracket-less and bold finding headers', () => {
+    const bracketless = parseReportFindings(
+      '### Critical: no brackets\n- Issue: x\n',
+    );
+    expect(bracketless).toHaveLength(1);
+    expect(bracketless[0]).toMatchObject({
+      title: '### Critical: no brackets',
+      severity: '',
+      location: '',
+      anchor: '',
+    });
+    const bold = parseReportFindings('**[Suggestion] bold header**\n');
+    expect(bold).toHaveLength(1);
+    expect(bold[0]).toMatchObject({ severity: '', anchor: '' });
+    // The report's own section headings are not findings.
+    expect(parseReportFindings('## Critical\n\n## Suggestion\n')).toEqual([]);
+  });
 });
 
 describe('resolveAnchors', () => {
@@ -159,6 +284,23 @@ describe('resolveAnchors', () => {
       'ambiguous',
     ]);
     expect(results[2].matchCount).toBe(2); // "= x;" in lines 2 and 3
+  });
+
+  it('resolves anchors inside the test corpus', () => {
+    writeFileSync(join(dir, 'unique.test.ts'), 'export const tested = 1;\n');
+    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [
+        {
+          title: 't',
+          severity: 'Suggestion',
+          location: 'unique.test.ts',
+          anchor: 'export const tested = 1;',
+        },
+      ],
+      plan,
+    );
+    expect(results[0].verdict).toBe('resolved');
   });
 
   it('refuses anchors citing files outside the audited set as out-of-scope', () => {

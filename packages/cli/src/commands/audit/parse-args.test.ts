@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseAuditArgs } from './parse-args.js';
@@ -14,11 +14,10 @@ describe('parseAuditArgs', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = join(
-      tmpdir(),
-      `audit args $(literal) ${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    mkdirSync(dir, { recursive: true });
+    // Realpath the fixture: resolveAuditRoot returns the realpath, and on
+    // macOS os.tmpdir() sits behind the /var -> /private/var symlink. The
+    // spaced prefix keeps the metacharacter canary the old name carried.
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'audit args ')));
   });
 
   afterEach(() => {

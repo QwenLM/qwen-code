@@ -88,7 +88,12 @@ export const parseArgsCommand: CommandModule = {
         describe: 'Also write the JSON verdict to this path',
       }),
   handler: (argv) => {
-    const { out } = argv as unknown as ParseArgsCliArgs;
+    const { stdin, out } = argv as unknown as ParseArgsCliArgs;
+    if (!stdin) {
+      throw new Error(
+        'audit parse-args: --stdin cannot be negated — the command is stdin-only.',
+      );
+    }
     const raw = readFileSync(0, 'utf8').replace(/\r?\n$/, '');
     const json = JSON.stringify(parseAuditArgs(raw), null, 2);
     if (out) {

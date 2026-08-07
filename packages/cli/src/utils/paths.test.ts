@@ -25,6 +25,12 @@ describe('safeTarget', () => {
     expect(safeTarget('a b:c')).toBe('a_b_c');
   });
 
+  it('strips leading dashes so slugs survive argv boundaries', () => {
+    expect(safeTarget('-foo')).toBe('foo');
+    expect(safeTarget('./--verbose')).toBe('verbose');
+    expect(safeTarget('---')).toBe('target');
+  });
+
   it('falls back to "target" when nothing safe remains', () => {
     expect(safeTarget('')).toBe('target');
     expect(safeTarget('.')).toBe('target');

@@ -42,9 +42,20 @@ export const checkAnchorsCommand: CommandModule = {
       callers?: string;
     };
     const planJson = JSON.parse(readFileSync(plan, 'utf8')) as FilesPlan;
-    const registeredCallers = callers
-      ? (JSON.parse(readFileSync(callers, 'utf8')) as string[])
-      : [];
+    let registeredCallers: string[] = [];
+    if (callers) {
+      // The callers file is agent-authored — validate the shape before use.
+      const parsed = JSON.parse(readFileSync(callers, 'utf8')) as unknown;
+      if (
+        !Array.isArray(parsed) ||
+        parsed.some((c) => typeof c !== 'string' || c === '')
+      ) {
+        throw new Error(
+          'audit check-anchors: --callers file must be a JSON array of absolute path strings.',
+        );
+      }
+      registeredCallers = parsed as string[];
+    }
     const findings = parseReportFindings(readFileSync(report, 'utf8'));
     const results = resolveAnchors(findings, planJson, registeredCallers);
     writeStdoutLine(JSON.stringify(results, null, 2));

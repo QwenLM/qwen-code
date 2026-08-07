@@ -27,12 +27,21 @@ describe('auditCommand', () => {
 
   it('demandCommand text names each subcommand', () => {
     const source = readFileSync('src/commands/audit.ts', 'utf8');
-    expect(source).toContain('plan-files');
-    expect(source).toContain('agent-prompt');
-    expect(source).toContain('snapshot');
-    expect(source).toContain('drift-check');
-    expect(source).toContain('guard-check');
-    expect(source).toContain('check-anchors');
+    // Assert against the demandCommand MESSAGE, not the whole file: the
+    // import lines also contain the subcommand module names.
+    const message = /\.demandCommand\(\s*1,\s*'([^']+)'/.exec(source)?.[1];
+    expect(message).toBeDefined();
+    for (const name of [
+      'parse-args',
+      'plan-files',
+      'agent-prompt',
+      'snapshot',
+      'drift-check',
+      'guard-check',
+      'check-anchors',
+    ]) {
+      expect(message).toContain(name);
+    }
   });
 
   it('is a CommandModule with an empty dispatch handler', () => {

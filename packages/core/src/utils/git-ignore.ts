@@ -13,8 +13,8 @@
 //
 // Deliberately NOT GitIgnoreParser (gitIgnoreParser.ts): that in-process
 // matcher reads the ignore files itself and misses sources a linked
-// worktree or a global excludesFile would supply, flipping to "ignored"
-// where git answers "not ignored" — the dangerous direction for a guard.
+// worktree or a global excludesFile would supply, so its verdict can
+// diverge from git's in either direction — a guard needs git's own answer.
 
 import { execFileSync } from 'node:child_process';
 

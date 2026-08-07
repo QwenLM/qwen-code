@@ -13,6 +13,7 @@
 
 import {
   AUDIT_SCRATCH_PREFIX,
+  LOW_ANGLE_FLOOR_LINES,
   type AuditRoleId,
   type FilesPlan,
 } from './files-plan.js';
@@ -23,7 +24,6 @@ import {
 export type AuditBriefRole = AuditRoleId | 'low-reader';
 
 export interface AuditBrief {
-  id: AuditBriefRole;
   title: string;
   brief: string;
 }
@@ -72,7 +72,6 @@ export const AUDIT_BRIEFS: Record<
   AuditBrief
 > = {
   '1a': {
-    id: '1a',
     title: 'Line-by-line correctness scan',
     brief: `You are the line-by-line correctness scan. Your dimension is defined by HOW you walk, not by a topic. Walk EVERY subject file, line by line, reading each function in full (paging if truncated). For every line ask: what input, state, timing, or platform makes this line wrong?
 
@@ -85,7 +84,6 @@ export const AUDIT_BRIEFS: Record<
 ${SEVERITY_HEURISTIC}`,
   },
   '1c': {
-    id: '1c',
     title: 'Cross-file tracer',
     brief: `You are the cross-file tracer. You own the cross-file walk, end to end. An edge has two ends — walk both.
 
@@ -103,7 +101,6 @@ For every config field, option, or optional parameter the module READS, grep its
 ${SEVERITY_HEURISTIC}`,
   },
   '2': {
-    id: '2',
     title: 'Security',
     brief: `You are the security auditor.
 
@@ -120,7 +117,6 @@ Then the checklist, driven by the threat model:
 ${SEVERITY_HEURISTIC}`,
   },
   '3a': {
-    id: '3a',
     title: 'Reuse & duplication',
     brief: `You are the reuse-and-duplication auditor. One question, walked to the end: does the codebase already have this?
 
@@ -133,7 +129,6 @@ For every non-trivial block of logic in the module — a helper, a parse, a norm
 Also report DEAD CODE: a function, branch, export, constant or import that nothing reaches. Trace it (grep for the symbol) rather than assuming — the caller may live in another package. Dead code that PRESENTS as a live safety mechanism (a trust gate, a validator nobody calls) is the most dangerous kind — say so.`,
   },
   '3b': {
-    id: '3b',
     title: 'Altitude & abstraction fit',
     brief: `You are the altitude-and-abstraction auditor. One question, walked to the end: is each piece of logic at the right depth?
 
@@ -146,7 +141,6 @@ Altitude failures read as correct at every individual line and are wrong as a wh
 Every finding needs the concrete cost, not an aesthetic judgement: what breaks next, what has to be repeated, who else is affected. "This should be more general" with no named next caller is not a finding.`,
   },
   '3c': {
-    id: '3c',
     title: 'Consistency & clarity',
     brief: `You are the consistency-and-clarity auditor. One question, walked to the end: does this code match what surrounds it?
 
@@ -157,7 +151,6 @@ Every finding needs the concrete cost, not an aesthetic judgement: what breaks n
 - **Documentation parity.** If the module exposes user-facing surfaces (settings keys, config fields, event names), check whether siblings are documented and where. Parity check only: name the sibling precedent and its file. Severity: Suggestion.`,
   },
   '4': {
-    id: '4',
     title: 'Performance & efficiency',
     brief: `You are the performance auditor. First trace the hot path: which entry points run per request/event/tool-call (not per session)? A per-call cost is paid constantly; name it.
 
@@ -172,7 +165,6 @@ Audit for:
 For every finding, name the hot path it sits on and the concrete cost shape (per-call? per-item? quadratic in what?). A performance finding with no named hot path and no cost shape is a suspicion, not a finding. Where you can, measure by reading: count the passes, name the loop bounds.`,
   },
   '5': {
-    id: '5',
     title: 'Test coverage',
     brief: `You are the test-coverage auditor. In this audit the TESTS are your subject (the test corpus listed in the plan). The question is sharper than "is coverage high": which wrong behavior could this module exhibit tomorrow with every test still green?
 
@@ -182,7 +174,6 @@ For every finding, name the hot path it sits on and the concrete cost shape (per
 - **Historical-bug parity.** git log the module for past fix commits, find the tests those fixes added, and check whether ADJACENT inputs of the same class are covered (if one spelling of a bug class got a test, did its siblings?). A fix with a test for exactly one path of a multi-path class is the finding.`,
   },
   '6a': {
-    id: '6a',
     title: 'Attacker persona (undirected)',
     brief: `You are the attacker. Forget the dimension checklist — the other auditors have it covered. Your job is the blind spot a fixed checklist cannot have: pick the module's most security-critical mechanism (an authz gate, a parser, a trust decision, a secret flow) and try to BREAK it with concrete inputs.
 
@@ -194,7 +185,6 @@ For every finding, name the hot path it sits on and the concrete cost shape (per
 Every claimed break needs the exact input and the wrong outcome, end to end.`,
   },
   '6b': {
-    id: '6b',
     title: 'Simplicity zealot persona (undirected)',
     brief: `You are the simplicity zealot, undirected. The quality auditors have their checklists; your job is to ask the questions nobody else asks: what in this module should not exist at all?
 
@@ -205,7 +195,6 @@ Every claimed break needs the exact input and the wrong outcome, end to end.`,
 Every finding names the concrete carrying cost: the reader tax, the drift surface, the dead path a future change will wrongly build on.`,
   },
   '6c': {
-    id: '6c',
     title: 'Newcomer persona (undirected)',
     brief: `You are the newcomer, undirected. Read the module as its next maintainer — someone with no context who must change it safely next month. Report what will make them ship a bug:
 
@@ -227,6 +216,13 @@ function subjectFileList(plan: FilesPlan): string {
   return plan.subjectFiles
     .map((f) => `${f.path} (${f.lines} lines)`)
     .join(', ');
+}
+
+/** The walked set's own line total: subjectLines is the gate arm and also
+ *  counts uncoverable files, so pairing it with the enumerated file count
+ *  overstates the walkable surface whenever an uncoverable subject exists. */
+function walkedSubjectLines(plan: FilesPlan): number {
+  return plan.subjectFiles.reduce((n, f) => n + f.lines, 0);
 }
 
 export function buildAuditPrompt(
@@ -256,7 +252,7 @@ export function buildAuditPrompt(
       : '(test files are evidence about intent, not subjects)';
   return `${UNTRUSTED_DATA_PREAMBLE}
 
-CONTEXT: You are auditing EXISTING, merged code — there is no diff and no PR. The subject is the directory ${plan.targetPathAbsolute} (${plan.subjectFiles.length} subject files, ${plan.subjectLines} subject lines). Every dimension agent reads the whole subject set — that is the validated topology.
+CONTEXT: You are auditing EXISTING, merged code — there is no diff and no PR. The subject is the directory ${plan.targetPathAbsolute} (${plan.subjectFiles.length} subject files, ${walkedSubjectLines(plan)} subject lines). Every dimension agent reads the whole subject set — that is the validated topology.
 
 Subject files to audit ${subjectNote}: ${subjectFileList(plan)}${corpus}${uncoverable}
 
@@ -285,22 +281,35 @@ export function buildLowReaderPrompt(plan: FilesPlan): string {
     E: '**E — reuse and dead code.** Code that re-implements a helper visible in the module, the same block pasted into two files of the module, and code nothing reaches: a function, branch, export or import with no live caller.',
     F: '**F — sibling consistency.** Where one member of a parallel family — sibling loaders, the arms of a switch, the handlers of a route table — carries a guard, validation, cleanup or shape-check, check that every sibling carries it too. The missing half is a latent asymmetric failure.',
   };
+  // A stale/hand-edited plan JSON can carry anything in its angles —
+  // validate at the read site instead of rendering a bare "- undefined".
+  for (const angle of low.angles) {
+    if (!Object.hasOwn(angleDefs, angle)) {
+      throw new Error(
+        `buildLowReaderPrompt: the plan carries an unknown angle '${angle}' — regenerate the plan.`,
+      );
+    }
+  }
   const angleList = low.angles.map((a) => `- ${angleDefs[a]}`).join('\n');
   const sweep = low.sweep
     ? `\n\n**Then one sweep.** Take a further pass, in this same context, as a fresh reviewer handed the candidate list so far, hunting ONLY what is not already on it: moved-or-extracted code that dropped a guard, second-tier footguns (a default evaluated once at definition time, a lock whose scope shrank, a predicate method with a side effect, iteration order relied on but not guaranteed), setup/teardown asymmetry, flipped config defaults. Up to 6 more candidates; if nothing new, return nothing from the sweep — do not pad it.`
     : '';
   const floorNote = low.angleFloorApplied
-    ? `\n\nThis module is below the 60-line angle floor, so only angles A and C run — the report header discloses the shrink.`
+    ? `\n\nThis module is below the ${LOW_ANGLE_FLOOR_LINES}-line angle floor, so only angles A and C run — the report header discloses the shrink.`
     : '';
   const corpus =
     plan.testCorpus.length > 0
       ? `\n\nThe module has a test corpus (${plan.testCorpus.length} files) — NOT examined at this tier; the report header says so.`
       : '';
+  const uncoverable =
+    plan.uncoverable.length > 0
+      ? `\n\nUncoverable (enumerated, never walked — do not open them): ${plan.uncoverable.map((u) => `${u.path} (${u.reason})`).join(', ')}`
+      : '';
   return `${UNTRUSTED_DATA_PREAMBLE}
 
-CONTEXT: You are the low-tier reader for an audit of EXISTING, merged code — the directory ${plan.targetPathAbsolute} (${plan.subjectFiles.length} subject files, ${plan.subjectLines} subject lines). This is triage, not an audit: your findings ship UNVERIFIED, capped at ${low.findingCap}, most severe first.
+CONTEXT: You are the low-tier reader for an audit of EXISTING, merged code — the directory ${plan.targetPathAbsolute} (${plan.subjectFiles.length} subject files, ${walkedSubjectLines(plan)} subject lines). This is triage, not an audit: your findings ship UNVERIFIED, capped at ${low.findingCap}, most severe first.
 
-Subject files (read every one): ${subjectFileList(plan)}${corpus}
+Subject files (read every one): ${subjectFileList(plan)}${corpus}${uncoverable}
 
 Walk the module once per angle below, in order, one at a time — do not merge them into a single "look for bugs" read (that pass converges on whichever file looks most suspicious and leaves the rest unexamined). Surface up to 6 candidates per angle.
 

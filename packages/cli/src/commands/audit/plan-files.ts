@@ -34,26 +34,58 @@ interface PlanFilesArgs {
   applyExcludeRemedy?: boolean;
 }
 
+/** The args-report is any file on disk — stale, partial, or hand-authored —
+ *  so validate the shape before the cast instead of trusting it. */
+function readArgsReport(path: string): ParsedAuditArgs {
+  const parsed = JSON.parse(
+    readFileSync(path, 'utf8'),
+  ) as Partial<ParsedAuditArgs>;
+  if (
+    typeof parsed.targetPath !== 'string' ||
+    typeof parsed.targetPathAbsolute !== 'string' ||
+    (parsed.effort !== 'low' &&
+      parsed.effort !== 'medium' &&
+      parsed.effort !== 'high')
+  ) {
+    throw new Error(
+      'plan-files: --args-report is not a parse-args verdict — regenerate it.',
+    );
+  }
+  return {
+    targetPath: parsed.targetPath,
+    targetPathAbsolute: parsed.targetPathAbsolute,
+    effort: parsed.effort,
+  };
+}
+
 function runPlanFiles(args: PlanFilesArgs): void {
   if ((args.path === undefined) === (args.argsReport === undefined)) {
     throw new Error(
       'plan-files: pass exactly one of <path> or --args-report <path>.',
     );
   }
-  const parsed = args.argsReport
-    ? (JSON.parse(readFileSync(args.argsReport, 'utf8')) as ParsedAuditArgs)
-    : undefined;
-  const targetPath = parsed?.targetPath ?? args.path!;
-  const rootAbs = parsed?.targetPathAbsolute ?? resolveAuditRoot(targetPath);
-  const effort = parsed?.effort ?? args.effort ?? 'medium';
+  const parsed = args.argsReport ? readArgsReport(args.argsReport) : undefined;
+  const targetPath = parsed ? parsed.targetPath : (args.path as string);
+  const rootAbs = parsed
+    ? parsed.targetPathAbsolute
+    : resolveAuditRoot(targetPath);
+  // An explicit --effort flag overrides the recorded verdict: the low-gate
+  // refusal's remedy re-runs this command with --effort medium.
+  const effort = args.effort ?? parsed?.effort ?? 'medium';
   const projectRoot = process.cwd();
 
   if (args.applyExcludeRemedy) {
-    const excludeFile = applyExcludeRemedy(projectRoot);
-    writeStderrLine(
-      `Added ignore rules for /.qwen/audits/ and /.qwen/tmp/ to ${excludeFile} ` +
-        `(applies to every worktree of this repository).`,
-    );
+    try {
+      const excludeFile = applyExcludeRemedy(projectRoot);
+      writeStderrLine(
+        `Added ignore rules for /.qwen/audits/ and /.qwen/tmp/ to ${excludeFile} ` +
+          `(applies to every worktree of this repository).`,
+      );
+    } catch (err) {
+      // The guard re-probe stays 'unprotected', so the fallback landing
+      // still engages — relay why the remedy did not apply.
+      writeStderrLine(err instanceof Error ? err.message : String(err));
+    }
   }
 
   const collection = collectAuditFiles(rootAbs);
@@ -108,9 +140,11 @@ function runPlanFiles(args: PlanFilesArgs): void {
         `(${guard.fallbackRoot}) or \`git rm --cached\` the tracked files.`,
     );
   }
+  const walkedSubjectLines = plan.subjectFiles.reduce((n, f) => n + f.lines, 0);
+  const walkedTestLines = plan.testCorpus.reduce((n, f) => n + f.lines, 0);
   writeStderrLine(
-    `Audit: ${plan.subjectLines} subject lines across ${plan.subjectFiles.length} files ` +
-      `(${plan.testCorpus.length} test files / ${plan.testLines} lines, ` +
+    `Audit: ${walkedSubjectLines} subject lines across ${plan.subjectFiles.length} files ` +
+      `(${plan.testCorpus.length} test files / ${walkedTestLines} lines, ` +
       `${plan.uncoverable.length} uncoverable, ${plan.excludedDirs.length} excluded dirs) — ` +
       (effort === 'low'
         ? `low tier: single reader sub-agent, cap ${plan.lowTier?.findingCap} findings`

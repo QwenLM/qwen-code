@@ -27,8 +27,8 @@ function isTeamFileGitIgnored(gitRoot: string, filePath: string): boolean {
   const rel = path.relative(gitRoot, filePath) || '.';
   // Errors are treated as not-ignored: at THIS call site a false signal must
   // never produce a user-facing warning (missed warnings are the accepted
-  // trade-off) — the opposite direction of the guard-oriented default the
-  // shared probe documents.
+  // trade-off) — the same error→not-ignored default the shared probe
+  // documents.
   return isGitIgnored(gitRoot, rel);
 }
 

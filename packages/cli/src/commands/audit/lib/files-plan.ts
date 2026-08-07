@@ -23,6 +23,7 @@ import {
   realpathSync,
   statSync,
   writeFileSync,
+  type Stats,
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { isGitIgnored, Storage } from '@qwen-code/qwen-code-core';
@@ -208,9 +209,11 @@ export function walkAuditTree(rootAbs: string): WalkResult {
   const files: string[] = [];
   const excludedDirs: string[] = [];
   const structuralUncoverable: WalkResult['structuralUncoverable'] = [];
-  // Includes the root's own name: auditing `vendor/` itself is auditing
-  // vendored code, so the vendor rules apply from the first level down.
-  const rootUnderVendor = toPosix(rootAbs).split('/').includes('vendor');
+  // Auditing `vendor/` itself is auditing vendored code, so the vendor
+  // rules apply from the first level down; a vendor-named ANCESTOR of the
+  // audited path is just a directory name — vendor directories below the
+  // root are picked up by the walk.
+  const rootUnderVendor = basename(rootAbs) === 'vendor';
   if (isExcludedDirName(basename(rootAbs), rootUnderVendor)) {
     return { files, excludedDirs: ['.'], structuralUncoverable };
   }
@@ -230,7 +233,16 @@ export function walkAuditTree(rootAbs: string): WalkResult {
     for (const entry of entries) {
       const entryAbs = join(dirAbs, entry);
       const childRel = rel === '' ? entry : `${rel}/${entry}`;
-      const stat = lstatSync(entryAbs);
+      let stat: Stats;
+      try {
+        stat = lstatSync(entryAbs);
+      } catch {
+        // An entry that vanishes between readdir and lstat — or a directory
+        // readable but not searchable — records as uncoverable, same as an
+        // unreadable directory: enumeration never aborts on one entry.
+        structuralUncoverable.push({ path: childRel, reason: 'unreadable' });
+        continue;
+      }
       if (stat.isSymbolicLink()) {
         structuralUncoverable.push({ path: childRel, reason: 'symlink' });
         continue;
@@ -258,8 +270,10 @@ export function walkAuditTree(rootAbs: string): WalkResult {
   return { files, excludedDirs, structuralUncoverable };
 }
 
+// A continuing identifier must start uppercase: past-tense and stem-prefix
+// calls (`fired(`, `emitted(`) are not event-API call sites.
 const EVENT_CALL_RE =
-  /\b(?:emit|dispatch|publish|subscribe|addEventListener|fire|trigger)[A-Z]?\w*\s*\(|\.on\s*\(/g;
+  /\b(?:emit|dispatch|publish|subscribe|addEventListener|fire|trigger)(?:[A-Z]\w*)?\s*\(|\.on\s*\(/g;
 
 function countLines(content: string): number {
   if (content === '') return 0;
@@ -291,7 +305,12 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
     const kind = classifyAuditPath(relPath);
     const entryAbs = join(rootAbs, relPath);
     if (basename(relPath).startsWith(AUDIT_SCRATCH_PREFIX)) {
-      residue.push({ path: relPath, mtimeMs: statSync(entryAbs).mtimeMs });
+      try {
+        residue.push({ path: relPath, mtimeMs: statSync(entryAbs).mtimeMs });
+      } catch {
+        // Vanished between the walk and the stat; the content read below
+        // records it like any other vanished file.
+      }
     }
     let content: string;
     try {
@@ -355,17 +374,28 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
 
 // --- Git-geometry refusals ----------------------------------------------------
 
-function git(root: string, args: string[]): string | null {
+/** The one git probe helper for the audit command group: argv-form
+ *  execFileSync under a caller-chosen deadline. Consolidated so a future
+ *  fix to process invocation lands in one place. */
+export function runGit(
+  root: string,
+  args: string[],
+  timeoutMs: number,
+): string | null {
   try {
     return execFileSync('git', ['-C', root, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: GIT_TIMEOUT_MS,
+      timeout: timeoutMs,
       maxBuffer: 64 * 1024 * 1024,
     });
   } catch {
     return null;
   }
+}
+
+function git(root: string, args: string[]): string | null {
+  return runGit(root, args, GIT_TIMEOUT_MS);
 }
 
 export interface GitGeometry {
@@ -398,13 +428,16 @@ export function submoduleRefusal(rootAbs: string): string | null {
     return 'the audited path resolves inside a submodule — no drift coverage inside submodules in v1';
   }
   const rel = toPosix(relative(toplevel, realRoot));
+  // -z is load-bearing: paths arrive verbatim (no C-quoting), and this parse
+  // has no unquoting logic.
   const listing = git(toplevel, ['ls-files', '-s', '-z']);
   if (listing === null) return null;
   const gitlinks = listing
     .split('\0')
     .filter((line) => line.startsWith('160000 '))
-    .map((line) => line.split('\t')[1])
-    .filter((p) => p !== undefined && p.length > 0);
+    // Split at the FIRST tab only: a gitlink path may itself contain tabs.
+    .map((line) => line.slice(line.indexOf('\t') + 1))
+    .filter((p) => p.length > 0);
   for (const link of gitlinks) {
     const atOrUnder = rel === '' || link === rel || link.startsWith(`${rel}/`);
     const isAncestor = rel.startsWith(`${link}/`);
@@ -473,10 +506,12 @@ function guardDir(
       break;
     }
   }
+  // :(literal): the prefix may start with ':' (a legal directory name),
+  // which git would otherwise parse as pathspec magic and answer empty.
   const trackedOut = git(gitRoot, [
     'ls-files',
     '--',
-    `${prefixDir}${toPosix(dir)}/`,
+    `:(literal)${prefixDir}${toPosix(dir)}/`,
   ]);
   const trackedFiles = (trackedOut ?? '')
     .split('\n')
@@ -487,13 +522,22 @@ function guardDir(
   return { dir, representative, ignored, trackedFiles, status };
 }
 
+function auditTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+  );
+}
+
 /** Probe both module-derived directories (.qwen/audits, .qwen/tmp) so the
  *  report, plan, and prompt records can never land in version control.
- *  Probes use the name shapes actually written — the dated report form and
- *  one representative per tmp artifact class — because check-ignore answers
- *  per path name and re-includes can be name-selective. Fresh answers by
- *  construction: the shared helper carries no memo, so a remedy re-check
- *  observes the flip. */
+ *  Probes use the name shapes actually written — the dated report form
+ *  (carrying the CURRENT date, so a date-keyed re-include cannot escape
+ *  the probe), the sidecar, and one representative per tmp artifact class —
+ *  because check-ignore answers per path name and re-includes can be
+ *  name-selective. Fresh answers by construction: the shared helper carries
+ *  no memo, so a remedy re-check observes the flip. */
 export function checkLocalOnlyGuard(
   projectRoot: string,
   reportFileName: string,
@@ -502,7 +546,8 @@ export function checkLocalOnlyGuard(
   return {
     dirs: [
       guardDir(projectRoot, geometry.root ?? null, AUDITS_DIR, [
-        `2026-01-01-000000-${reportFileName}`,
+        `${auditTimestamp(new Date())}-${reportFileName}`,
+        'audit-0.sidecar',
       ]),
       guardDir(projectRoot, geometry.root ?? null, AUDIT_TMP_DIR, [
         'audit-args-0.json',
@@ -542,6 +587,12 @@ export function applyExcludeRemedy(projectRoot: string): string {
   const prefix = top
     ? toPosix(relative(realpathSync(top.trim()), realpathSync(projectRoot)))
     : '';
+  if (/[*?[\]\\]/.test(prefix)) {
+    throw new Error(
+      'audit: the landing prefix contains gitignore pattern syntax — an ' +
+        'exclude rule can never match it. Use the fallback landing instead.',
+    );
+  }
   const anchor = prefix === '' ? '' : `/${prefix}`;
   const rules = [`${anchor}/.qwen/audits/`, `${anchor}/.qwen/tmp/`];
   const existingRules = new Set(
@@ -785,9 +836,12 @@ export function buildFilesPlan(
     );
   }
   if (effort === 'low' && subjectLines > LOW_SUBJECT_LINES_GATE) {
+    const atMedium = estimateTokens(subjectLines, testLines);
     refuse(
       'low-gate',
-      `audit: ${subjectLines} subject lines exceeds low's ${LOW_SUBJECT_LINES_GATE}-line gate — run --effort medium instead.`,
+      atMedium.topTokens > TOKEN_CAP
+        ? `audit: ${subjectLines} subject lines exceeds low's ${LOW_SUBJECT_LINES_GATE}-line gate, and at medium the priced estimate (${atMedium.floorTokens}–${atMedium.topTokens} tokens) exceeds the ${TOKEN_CAP} cap — narrow the path.`
+        : `audit: ${subjectLines} subject lines exceeds low's ${LOW_SUBJECT_LINES_GATE}-line gate — run --effort medium instead.`,
     );
   }
   if (effort !== 'low' && testLines > TEST_LINES_GATE) {

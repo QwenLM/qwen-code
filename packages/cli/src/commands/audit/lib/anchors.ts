@@ -40,14 +40,44 @@ export interface AnchorResult {
 // Header matching is lenient on the axes an agent plausibly deviates on —
 // leading indentation (stripped before matching), 2–4 hashes, severity case —
 // so a deviated header still parses. What still fails to parse is caught by
-// HEADER_SHAPED_RE and fails closed.
+// the header-shaped net and fails closed.
 const FINDING_RE = /^#{2,4}\s+\[(critical|suggestion)\]\s+(.+)$/i;
+// The fail-closed net. Bracket-less severity headers (`### Critical: foo`)
+// and bold headers (`**[Critical] foo**`) are the common rendering
+// deviations; without them a deviated draft parses to ZERO findings and the
+// gate exits 0. The report's own section headings ('## Critical',
+// '## Suggestion') carry no title after the severity word and stay
+// invisible.
 const HEADER_SHAPED_RE = /^#{1,6}\s*\[/;
-const FIELD_RE = /^-\s+(Location|Anchor):\s*(.*)$/;
-// Anchor collection ends only on a RECOGNIZED finding field: a column-0
-// `- ` line inside the quoted snippet (a YAML/markdown list item) must not
-// truncate the anchor.
-const FIELD_END_RE = /^-\s+(Issue|Failure scenario|Severity|Location|Anchor):/;
+const SEVERITY_HEADING_RE = /^#{2,6}\s*(?:critical|suggestion)\b\s*\S/i;
+const BOLD_FINDING_RE = /^\*\*\s*\[(?:critical|suggestion)\]/i;
+// Field names match case-insensitively: header matching is deliberately
+// case-lenient, and LLM casing deviation on the fields must not fail a
+// correctly-anchored finding.
+const FIELD_RE = /^-\s+(Location|Anchor):\s*(.*)$/i;
+// Anchor collection ends only on a RECOGNIZED finding field indented at or
+// shallower than the Anchor field line: a deeper-indented line inside the
+// quoted snippet (a YAML/markdown list item, an embedded `- Issue:`) must
+// not truncate the anchor.
+const FIELD_END_RE = /^-\s+(Issue|Failure scenario|Severity|Location|Anchor):/i;
+
+function leadingIndent(line: string): number {
+  let i = 0;
+  while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+  return i;
+}
+
+function dedent(line: string, indent: number): string {
+  let i = 0;
+  while (
+    i < indent &&
+    i < line.length &&
+    (line[i] === ' ' || line[i] === '\t')
+  ) {
+    i++;
+  }
+  return line.slice(i);
+}
 
 /** Parse the finding blocks of a report draft: `### [sev] title` opens a
  *  block; `- Location:` and `- Anchor:` fields inside it. An anchor value
@@ -61,9 +91,28 @@ export function parseReportFindings(report: string): ReportFinding[] {
   const lines = report.split('\n');
   let current: (ReportFinding & { anchorLines: string[] }) | null = null;
   let inAnchor = false;
+  // The Anchor field line's indentation: continuation lines are dedented by
+  // it (an indented finding block must still yield a matchable needle), and
+  // only fields indented at or shallower terminate collection.
+  let anchorIndent = 0;
   const push = (): void => {
     if (!current) return;
-    current.anchor = current.anchorLines.join('\n').trim();
+    const collected = current.anchorLines;
+    let lo = 0;
+    let hi = collected.length;
+    while (lo < hi && collected[lo].trim() === '') lo++;
+    while (hi > lo && collected[hi - 1].trim() === '') hi--;
+    // Agents habitually wrap quoted code in ``` fences: drop a surrounding
+    // fence pair so the needle is the snippet itself.
+    if (
+      hi - lo >= 2 &&
+      collected[lo].trim().startsWith('```') &&
+      collected[hi - 1].trim().startsWith('```')
+    ) {
+      lo++;
+      hi--;
+    }
+    current.anchor = collected.slice(lo, hi).join('\n').trim();
     findings.push({
       title: current.title,
       severity: current.severity,
@@ -74,6 +123,14 @@ export function parseReportFindings(report: string): ReportFinding[] {
   };
   for (const raw of lines) {
     const line = raw.trim();
+    if (current && inAnchor) {
+      if (FIELD_END_RE.test(line) && leadingIndent(raw) <= anchorIndent) {
+        inAnchor = false;
+        continue;
+      }
+      current.anchorLines.push(dedent(raw.replace(/\r$/, ''), anchorIndent));
+      continue;
+    }
     const header = FINDING_RE.exec(line);
     if (header) {
       push();
@@ -88,7 +145,11 @@ export function parseReportFindings(report: string): ReportFinding[] {
       inAnchor = false;
       continue;
     }
-    if (HEADER_SHAPED_RE.test(line)) {
+    if (
+      HEADER_SHAPED_RE.test(line) ||
+      SEVERITY_HEADING_RE.test(line) ||
+      BOLD_FINDING_RE.test(line)
+    ) {
       push();
       findings.push({ title: line, severity: '', location: '', anchor: '' });
       continue;
@@ -96,20 +157,14 @@ export function parseReportFindings(report: string): ReportFinding[] {
     if (!current) continue;
     const field = FIELD_RE.exec(line);
     if (field) {
-      inAnchor = field[1] === 'Anchor';
-      if (field[1] === 'Location') {
-        current.location = field[2].replace(/:\d+(:\d+)?$/, '').trim();
-      } else {
+      if (field[1].toLowerCase() === 'anchor') {
+        inAnchor = true;
+        anchorIndent = leadingIndent(raw);
         current.anchorLines.push(field[2]);
+      } else {
+        current.location = field[2].replace(/:\d+(:\d+|-\d+)?$/, '').trim();
       }
       continue;
-    }
-    if (inAnchor && FIELD_END_RE.test(line)) {
-      inAnchor = false;
-      continue;
-    }
-    if (inAnchor) {
-      current.anchorLines.push(raw.replace(/\r$/, ''));
     }
   }
   push();

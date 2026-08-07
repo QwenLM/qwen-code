@@ -50,7 +50,7 @@ describe('captureSidecar outside any worktree', () => {
     ]);
   });
 
-  it('drift-check reports content drift, deletion, and new files', () => {
+  it('drift-check reports content drift and deletion', () => {
     const p = plan();
     captureSidecar(p, sidecarDir);
     const clean = driftCheck(p, sidecarDir);
@@ -84,6 +84,33 @@ describe('captureSidecar outside any worktree', () => {
     rmSync(join(dir, 'src', 'a.ts'));
     mkdirSync(join(dir, 'src', 'a.ts'));
     expect(driftCheck(p, sidecarDir).driftedFiles).toEqual(['src/a.ts']);
+  });
+
+  it('reports a plan-enumerated file absent at capture as deleted', () => {
+    writeFileSync(join(dir, 'src', 'gone.ts'), 'const g = 1;\n');
+    const p = plan();
+    rmSync(join(dir, 'src', 'gone.ts'));
+    captureSidecar(p, sidecarDir); // no baseline for gone.ts
+    expect(driftCheck(p, sidecarDir).deletedFiles).toEqual(['src/gone.ts']);
+  });
+
+  it('reports a file absent at capture as new when it (re)appears', () => {
+    writeFileSync(join(dir, 'src', 'late.ts'), 'const l = 1;\n');
+    const p = plan();
+    rmSync(join(dir, 'src', 'late.ts'));
+    captureSidecar(p, sidecarDir); // no baseline for late.ts
+    writeFileSync(join(dir, 'src', 'late.ts'), 'const l = 2;\n');
+    expect(driftCheck(p, sidecarDir).newFiles).toEqual(['src/late.ts']);
+  });
+
+  it('baselines a file named __proto__ like any other walked file', () => {
+    writeFileSync(join(dir, '__proto__'), 'const p = 1;\n');
+    const p = plan();
+    captureSidecar(p, sidecarDir);
+    const drift = driftCheck(p, sidecarDir);
+    expect(drift.driftedFiles).toEqual([]);
+    expect(drift.deletedFiles).toEqual([]);
+    expect(drift.newFiles).toEqual([]);
   });
 
   it('never hashes uncoverable files', () => {
@@ -137,6 +164,23 @@ describe('caller registration', () => {
     expect(extended.callerNames).toEqual([caller]);
     expect(extended.callerHashes[caller]).toBeUndefined();
     expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([caller]);
+  });
+
+  it('never copies a traversal caller path outside the sidecar', () => {
+    writeFileSync(join(dir, 'caller.ts'), 'call();\n');
+    const p = plan();
+    const prevCwd = process.cwd();
+    process.chdir(join(dir, 'src'));
+    try {
+      // Reads fine (../caller.ts resolves), but the '..' must not normalize
+      // the copy out of sidecarDir/callers.
+      const extended = captureSidecar(p, sidecarDir, ['../caller.ts']);
+      expect(extended.callerHashes['../caller.ts']).toBeDefined();
+      expect(extended.callerNames).toEqual(['../caller.ts']);
+      expect(existsSync(join(sidecarDir, 'caller.ts'))).toBe(false);
+    } finally {
+      process.chdir(prevCwd);
+    }
   });
 
   it('name-records a caller already unreadable at first capture', () => {
@@ -197,6 +241,31 @@ describe('captureSidecar inside a worktree', () => {
     );
     expect(existsSync(join(sidecarDir, 'untracked', 'elsewhere.ts'))).toBe(
       false,
+    );
+  });
+
+  it('expands a collapsed nested-repository listing onto enumerated files', () => {
+    const repo = join(dir, 'repo4');
+    mkdirSync(join(repo, 'mod'), { recursive: true });
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    // A nested repo the outer repo does not register: ls-files --others
+    // collapses it to a single trailing-/ entry.
+    mkdirSync(join(repo, 'mod', 'nested'), { recursive: true });
+    git(['init', '-q'], join(repo, 'mod', 'nested'));
+    writeFileSync(join(repo, 'mod', 'nested', 's.ts'), 'const s = 1;\n');
+
+    const modPlan = buildFilesPlan(
+      join(repo, 'mod'),
+      join(repo, 'mod'),
+      'medium',
+      collectAuditFiles(join(repo, 'mod')),
+    );
+    captureSidecar(modPlan, sidecarDir);
+    expect(existsSync(join(sidecarDir, 'untracked', 'nested', 's.ts'))).toBe(
+      true,
     );
   });
 

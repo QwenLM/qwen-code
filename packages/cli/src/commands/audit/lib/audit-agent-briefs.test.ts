@@ -17,6 +17,7 @@ import {
 import {
   buildFilesPlan,
   collectAuditFiles,
+  LOW_ANGLE_FLOOR_LINES,
   rosterForEffort,
   type FilesPlan,
 } from './files-plan.js';
@@ -111,6 +112,10 @@ describe('buildAuditPrompt', () => {
     expect(buildAuditPrompt('5', noTests, true)).toContain(
       'No test files under the audited path',
     );
+    // The skip note is role-5's alone; the other ten agents never walk tests.
+    expect(buildAuditPrompt('1a', noTests, true)).not.toContain(
+      'No test files under the audited path',
+    );
   });
 
   it('conditions the probe discipline on the Step-2 consent', () => {
@@ -136,6 +141,24 @@ describe('buildAuditPrompt', () => {
     );
     expect(buildAuditPrompt('5', plan, true)).toContain(
       'the test corpus is the subject',
+    );
+    expect(buildAuditPrompt('1a', plan, true)).toContain(
+      'evidence about intent, not subjects',
+    );
+  });
+
+  it('pairs the subject count with the walked line total, not the gate arm', () => {
+    writeFileSync(join(dir, 'fixture.bin'), 'x\nx\nx\n');
+    const withBinary = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    // fixture.bin's lines ride in subjectLines (the gate arm) but not in the
+    // enumerated set the CONTEXT sentence names.
+    expect(buildAuditPrompt('1a', withBinary, true)).toContain(
+      '(2 subject files, 30 subject lines)',
     );
   });
 
@@ -179,12 +202,18 @@ describe('buildLowReaderPrompt', () => {
     expect(prompt).toContain('UNVERIFIED');
     expect(prompt).toContain('capped at 10');
     expect(prompt).toContain('RETURN CONTRACT');
+    // The finding-format block the write-time parser requires, and the
+    // subject enumeration the reader walks.
+    expect(prompt).toContain('### [Critical|Suggestion]');
+    expect(prompt).toContain('- Anchor:');
+    expect(prompt).toContain('src/a.ts (10 lines)');
+    expect(prompt).toContain(dir);
   });
 
-  it('walks all five surviving angles above the floor, A+C below it', () => {
+  it('walks A+C below the angle floor', () => {
     const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
     const prompt = buildLowReaderPrompt(lowPlan);
-    // 32 subject lines < 60 → the floor applies.
+    // 31 subject lines < 60 → the floor applies.
     expect(lowPlan.lowTier?.angleFloorApplied).toBe(true);
     expect(prompt).toContain('A — line-by-line');
     expect(prompt).toContain('C — language pitfalls');
@@ -193,11 +222,70 @@ describe('buildLowReaderPrompt', () => {
     expect(prompt).toContain('angle floor');
   });
 
+  it('unlocks all five surviving angles above the floor', () => {
+    const c = collectAuditFiles(dir);
+    c.subjects = [
+      {
+        path: 'src/big.ts',
+        kind: 'source',
+        lines: LOW_ANGLE_FLOOR_LINES,
+        chars: 0,
+      },
+    ];
+    const lowPlan = buildFilesPlan(dir, dir, 'low', c);
+    expect(lowPlan.lowTier?.angleFloorApplied).toBe(false);
+    const prompt = buildLowReaderPrompt(lowPlan);
+    expect(prompt).toContain('A — line-by-line');
+    expect(prompt).toContain('C — language pitfalls');
+    expect(prompt).toContain('D — wrapper');
+    expect(prompt).toContain('E — reuse');
+    expect(prompt).toContain('F — sibling');
+    expect(prompt).not.toContain('angle floor');
+  });
+
+  it('carries the sweep directive above the sweep floor only', () => {
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    expect(buildLowReaderPrompt(lowPlan)).toContain('Then one sweep');
+    const c = collectAuditFiles(dir);
+    c.subjects = [{ path: 'src/a.ts', kind: 'source', lines: 10, chars: 0 }];
+    const tiny = buildFilesPlan(dir, dir, 'low', c);
+    expect(tiny.lowTier?.sweep).toBe(false);
+    expect(buildLowReaderPrompt(tiny)).not.toContain('Then one sweep');
+  });
+
   it('names a found-but-unexamined test corpus', () => {
     const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
     expect(buildLowReaderPrompt(lowPlan)).toContain(
       'NOT examined at this tier',
     );
+  });
+
+  it('does not claim a corpus when the plan has none', () => {
+    const c = collectAuditFiles(dir);
+    c.testCorpus = [];
+    const lowPlan = buildFilesPlan(dir, dir, 'low', c);
+    expect(buildLowReaderPrompt(lowPlan)).not.toContain(
+      'NOT examined at this tier',
+    );
+  });
+
+  it('lists uncoverable files as never-walked at low too', () => {
+    writeFileSync(join(dir, 'logo.png'), 'not-a-png');
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    const prompt = buildLowReaderPrompt(lowPlan);
+    expect(prompt).toContain(
+      'Uncoverable (enumerated, never walked — do not open them)',
+    );
+    expect(prompt).toContain('logo.png (non-text)');
+  });
+
+  it('refuses a stale plan carrying an unknown low angle', () => {
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    const stale: FilesPlan = {
+      ...lowPlan,
+      lowTier: { ...lowPlan.lowTier!, angles: ['A', 'bogus'] },
+    };
+    expect(() => buildLowReaderPrompt(stale)).toThrow(/unknown angle/);
   });
 
   it('refuses a non-low plan', () => {

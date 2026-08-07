@@ -27,5 +27,7 @@ export function safeTarget(target: string): string {
   const flat = target
     .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
     .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
-  return flat.replace(/^[._]+/, '') || 'target';
+  // Leading dashes too: a dash-leading slug is parsed as short flags when a
+  // consumer passes it as a spaced CLI argument value.
+  return flat.replace(/^[._-]+/, '') || 'target';
 }

@@ -20,7 +20,17 @@ function readPlan(path: string): FilesPlan {
 
 function readCallers(path?: string): string[] {
   if (!path) return [];
-  return JSON.parse(readFileSync(path, 'utf8')) as string[];
+  // The callers file is agent-authored — validate the shape before use.
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((c) => typeof c !== 'string' || c === '')
+  ) {
+    throw new Error(
+      'audit snapshot: --callers file must be a JSON array of absolute path strings.',
+    );
+  }
+  return parsed as string[];
 }
 
 export const snapshotCommand: CommandModule = {
@@ -57,6 +67,7 @@ export const snapshotCommand: CommandModule = {
         {
           capturedAt: sidecar.meta.capturedAt,
           noVcs: sidecar.meta.noVcs,
+          captureDegraded: sidecar.meta.captureDegraded ?? [],
           headSha: sidecar.meta.headSha ?? null,
           subtreeHash: sidecar.meta.subtreeHash ?? null,
           hashedFiles: Object.keys(sidecar.hashes).length,

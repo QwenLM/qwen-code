@@ -10,7 +10,6 @@
 // drift arms re-check the audited path — not the repository — before
 // verification, before each high-tier round, and at write time.
 
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
@@ -20,22 +19,13 @@ import {
   realpathSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
-import type { FilesPlan } from './files-plan.js';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { runGit, type FilesPlan } from './files-plan.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 
 function git(root: string, args: string[]): string | null {
-  try {
-    return execFileSync('git', ['-C', root, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-  } catch {
-    return null;
-  }
+  return runGit(root, args, GIT_TIMEOUT_MS);
 }
 
 function sha256(content: Buffer): string {
@@ -62,6 +52,9 @@ export interface SidecarMeta {
    *  in the repository neither breaks alignment nor stops the run. Absent
    *  when the audited path has no HEAD entry (the vendored case). */
   subtreeHash?: string;
+  /** Set when a capture arm failed after the toplevel probe succeeded: the
+   *  sidecar is partial, and the report header says so. */
+  captureDegraded?: Array<'diff' | 'untracked'>;
 }
 
 export interface Sidecar {
@@ -87,11 +80,13 @@ export interface Sidecar {
 function recordCaller(sidecarDir: string, caller: string): string | undefined {
   try {
     const hash = sha256(readFileSync(caller));
-    const dest = join(
-      sidecarDir,
-      'callers',
-      caller.replace(/^([A-Za-z]:)?[\\/]/, ''),
-    );
+    const callersRoot = join(sidecarDir, 'callers');
+    const dest = join(callersRoot, caller.replace(/^([A-Za-z]:)?[\\/]/, ''));
+    // Caller paths are agent-authored: '..' segments must not normalize the
+    // copy outside the sidecar. The hash still rides in callerHashes, so a
+    // skipped copy never becomes a silent drop at drift-check time.
+    const rel = relative(callersRoot, dest);
+    if (rel.startsWith('..') || isAbsolute(rel)) return hash;
     mkdirSync(dirname(dest), { recursive: true });
     copyFileSync(caller, dest);
     return hash;
@@ -134,6 +129,7 @@ export function captureSidecar(
     capturedAt: new Date().toISOString(),
     noVcs: top === null,
   };
+  const captureDegraded: Array<'diff' | 'untracked'> = [];
   if (top !== null) {
     meta.headSha = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
     const subtree = subtreeHashAt(rootAbs, top.trim());
@@ -141,7 +137,9 @@ export function captureSidecar(
     // Tracked and staged changes, path-scoped so the sidecar never carries
     // unrelated dirty content from elsewhere in the repository.
     const diff = git(rootAbs, ['diff', 'HEAD', '--', rootAbs]);
-    if (diff !== null && diff.length > 0) {
+    if (diff === null) {
+      captureDegraded.push('diff');
+    } else if (diff.length > 0) {
       writeFileSync(join(sidecarDir, 'diff.patch'), diff, 'utf8');
     }
   }
@@ -156,7 +154,9 @@ export function captureSidecar(
   ]);
   if (top !== null) {
     const others = git(rootAbs, ['ls-files', '-z', '--others', '--', rootAbs]);
-    if (others !== null) {
+    if (others === null) {
+      captureDegraded.push('untracked');
+    } else {
       const listed = others.split('\0').filter((p) => p.length > 0);
       // A collapsed trailing-/ entry is a nested git repository: expand it
       // against the enumerated files under it.
@@ -185,23 +185,26 @@ export function captureSidecar(
     }
   }
 
-  const hashes: Record<string, string> = {};
+  // Object.create(null): walked names are filesystem-controlled — a file
+  // named `__proto__` must get a baseline like any other.
+  const hashes: Record<string, string> = Object.create(null);
   for (const file of [...plan.subjectFiles, ...plan.testCorpus]) {
     try {
       hashes[file.path] = sha256(readFileSync(join(rootAbs, file.path)));
     } catch {
-      // A file that vanishes between plan and capture is drift the first
-      // checkpoint reports; the missing key is the signal.
+      // A file that vanishes between plan and capture is reported deleted
+      // at the first checkpoint: the absence is the signal.
     }
   }
 
-  const callerHashes: Record<string, string> = {};
+  const callerHashes: Record<string, string> = Object.create(null);
   for (const caller of callerPaths) {
     // An unreadable caller is recorded by name only.
     const hash = recordCaller(sidecarDir, caller);
     if (hash !== undefined) callerHashes[caller] = hash;
   }
 
+  if (captureDegraded.length > 0) meta.captureDegraded = captureDegraded;
   const sidecar: Sidecar = {
     meta,
     hashes,
@@ -220,7 +223,8 @@ export function captureSidecar(
 export interface DriftReport {
   /** Walked files whose content hash moved since the capture. */
   driftedFiles: string[];
-  /** Walked files present at capture and now missing. */
+  /** Walked files the plan enumerates that are now missing — present at
+   *  capture or vanished before it. */
   deletedFiles: string[];
   /** New files under the audited path matching the enumerated sets. */
   newFiles: string[];
@@ -247,10 +251,14 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
   const newFiles: string[] = [];
 
   for (const file of [...plan.subjectFiles, ...plan.testCorpus]) {
-    const baseline = sidecar.hashes[file.path];
+    const baseline = Object.hasOwn(sidecar.hashes, file.path)
+      ? sidecar.hashes[file.path]
+      : undefined;
     const abs = join(rootAbs, file.path);
     if (!existsSync(abs)) {
-      if (baseline !== undefined) deletedFiles.push(file.path);
+      // A plan-enumerated file that is gone — whether or not it carried a
+      // capture baseline — is drift the orchestrator must see.
+      deletedFiles.push(file.path);
       continue;
     }
     let current: string;
@@ -271,7 +279,9 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
 
   const driftedCallers: string[] = [];
   for (const caller of sidecar.callerNames) {
-    const baseline = sidecar.callerHashes[caller];
+    const baseline = Object.hasOwn(sidecar.callerHashes, caller)
+      ? sidecar.callerHashes[caller]
+      : undefined;
     if (!existsSync(caller)) {
       driftedCallers.push(caller);
       continue;

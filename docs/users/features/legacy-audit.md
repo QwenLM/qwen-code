@@ -38,7 +38,7 @@ v1 audits one bounded module at a time. `plan-files` refuses at plan time — an
 - subject lines exceed **2,000** at low (points you at medium);
 - the priced token estimate's top exceeds the **60M** cap.
 
-A larger subsystem is audited as coherent sub-paths, one bounded run each. Lowering the effort is never the remedy for a cap refusal — the priced cost is a function of line counts alone.
+A larger subsystem is audited as coherent sub-paths, one bounded run each. For subject-gate and token-cap refusals, lowering the effort is never the remedy — the priced cost is a function of line counts alone. The test-line gate does not apply at `low` (the corpus goes unexamined there — triage, not an audit), and `low-gate`'s remedy is the tier change its message names.
 
 ## What you confirm before anything launches
 
