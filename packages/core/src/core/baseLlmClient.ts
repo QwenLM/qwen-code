@@ -19,6 +19,7 @@ import type { Config } from '../config/config.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  PromptCacheSharingParameters,
 } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
@@ -108,6 +109,12 @@ export interface GenerateTextOptions {
    * deltas are collected into the same `{ text, usage }` result.
    */
   stream?: boolean;
+  /**
+   * Let the OpenAI adapter mark the unchanged history prefix for cache reuse.
+   * This is only for requests ending in a non-reusable trailing directive;
+   * the adapter deliberately excludes the final message from cache marking.
+   */
+  promptCacheSharing?: boolean;
   /**
    * When true, throw instead of silently falling back to the main generator if
    * a distinct generator for `model` can't be created (model not registered, or
@@ -396,10 +403,11 @@ export class BaseLlmClient {
     ).slimmedHistory;
 
     try {
-      const request = {
+      const request: PromptCacheSharingParameters = {
         model: requestModel,
         config: requestConfig,
         contents: requestContents,
+        ...(options.promptCacheSharing && { promptCacheSharing: true }),
       };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single

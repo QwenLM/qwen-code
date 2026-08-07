@@ -99,6 +99,7 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
+  buildPermissionCheckContext,
   evaluateToolInvocationGuard,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -139,11 +140,17 @@ import {
   isShellProgressData,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
+  GLOBAL_DUPLICATE_THRESHOLD,
+  canonicalToolName,
+  getToolCallRepeatKey,
+  shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   LoopDetectedEvent,
   LoopType,
   acquireSleepInhibitor,
+  didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
+  refreshMemoryInstruction,
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
@@ -173,6 +180,7 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
+  isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
@@ -180,6 +188,22 @@ import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 import { normalizeChannelDeliveryText } from '../../runtime/channel-delivery.js';
+import {
+  CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+  CaptureScreenContextTool,
+} from '../../serve/live/capture-screen-context.js';
+import {
+  createLiveTaskTools,
+  type LiveTaskTool,
+} from '../../serve/live/live-task-tools.js';
+import {
+  SPEAK_TO_USER_TOOL_NAME,
+  SpeakToUserTool,
+} from '../../serve/live/live-speak-to-user.js';
+import {
+  LIVE_BACKEND_END_INSTRUCTIONS,
+  LIVE_BACKEND_START_INSTRUCTIONS,
+} from '../../serve/live/live-backend-instructions.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
@@ -261,6 +285,7 @@ import type {
   ToolCallStartParams,
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
+import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -296,7 +321,6 @@ const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
 const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
   ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
-
 // Content has no private metadata slot, so history cleanup recognizes only
 // these exact templates; byte-identical user text is intentionally ambiguous.
 function isTodoStopGuardPromptText(text: unknown): text is string {
@@ -433,9 +457,13 @@ type QueueToolResultRecord = (
   record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
 ) => void;
 
-type DaemonToolLoopState = {
+export type DaemonToolLoopState = {
   totalToolCalls: number;
   invalidToolParamErrors: Map<string, number>;
+  /** Per-turn counts of identical (tool, args) calls, by repeat key. */
+  toolCallKeyCounts: Map<string, number>;
+  /** Highest repeat count of any single (tool, args) pair this turn. */
+  maxToolCallKeyRepeat: number;
   loopDetected: boolean;
 };
 
@@ -455,6 +483,8 @@ function createDaemonToolLoopState(): DaemonToolLoopState {
   return {
     totalToolCalls: 0,
     invalidToolParamErrors: new Map(),
+    toolCallKeyCounts: new Map(),
+    maxToolCallKeyRepeat: 0,
     loopDetected: false,
   };
 }
@@ -485,24 +515,75 @@ function recordDaemonToolCalls(
   config: Config,
   promptId: string,
   loopState: DaemonToolLoopState | undefined,
-  count: number,
+  calls: readonly FunctionCall[],
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
-  loopState.totalToolCalls += count;
-  // Same per-turn cap as the core LoopDetectionService (getMaxToolCallsPerTurn
-  // resolves model.maxToolCallsPerTurn to an effective value, Infinity when
-  // disabled). Unlike core there is no in-session disable check — that flag is
-  // only set by the interactive loop-detection dialog, which has no ACP
-  // equivalent.
-  if (loopState.totalToolCalls <= config.getMaxToolCallsPerTurn()) return false;
-  return recordDaemonLoopDetected(
-    config,
-    promptId,
-    LoopType.TURN_TOOL_CALL_CAP,
-    `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
-    loopState,
-  );
+  loopState.totalToolCalls += calls.length;
+  for (const call of calls) {
+    const key = getToolCallRepeatKey(call.name ?? '', call.args ?? {});
+    const count = (loopState.toolCallKeyCounts.get(key) ?? 0) + 1;
+    loopState.toolCallKeyCounts.set(key, count);
+    if (count > loopState.maxToolCallKeyRepeat) {
+      loopState.maxToolCallKeyRepeat = count;
+    }
+  }
+  // Same per-turn cap semantics as the core LoopDetectionService — the
+  // shouldHaltOnTurnToolCallCap predicate is shared with core's
+  // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
+  // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
+  // past the soft cap a productive turn continues until the
+  // stuck-repetition signal or the hard backstop). Unlike core there is
+  // no in-session disable check — that flag is only set by the interactive
+  // loop-detection dialog, which has no ACP equivalent — and this runs
+  // once per batch, before execution: a batch that would cross the cap
+  // check is skipped whole, so a turn never executes past an explicit cap
+  // or the hard backstop (it can halt up to one batch short), while the
+  // adaptive soft cap is exceeded by design, up to the backstop. No retry
+  // rollback is needed for these counters: on RETRY / MODEL_FALLBACK the
+  // daemon stream loops discard the failed attempt's accumulated calls
+  // (functionCalls.length = 0) before re-streaming, so a failed attempt's
+  // calls never reach this function to be double-counted.
+  if (
+    shouldHaltOnTurnToolCallCap(
+      loopState.totalToolCalls,
+      loopState.maxToolCallKeyRepeat,
+      config.getMaxToolCallsPerTurn(),
+      config.isMaxToolCallsPerTurnExplicit(),
+    )
+  ) {
+    return recordDaemonLoopDetected(
+      config,
+      promptId,
+      LoopType.TURN_TOOL_CALL_CAP,
+      `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
+      loopState,
+    );
+  }
+  // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
+  // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
+  // it. Gated on skipLoopDetection exactly as in core — that detector class
+  // is the historically false-positive-prone one (long turns legitimately
+  // re-run the same build/test/read), so it ships off by default, and its
+  // false positives would land hardest on exactly the long turns this
+  // adaptive cap exists to enable. The cap's stuck signal above stays
+  // always-on regardless. "Off by default" depends on the CLI layer: core's
+  // Config defaults skipLoopDetection to false and loadCliConfig applies
+  // `?? true` (cli config.ts), so a Config constructed without that layer
+  // would ship this halt on.
+  if (
+    !config.getSkipLoopDetection() &&
+    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
+  ) {
+    return recordDaemonLoopDetected(
+      config,
+      promptId,
+      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
+      loopState,
+    );
+  }
+  return false;
 }
 
 function recordDaemonInvalidToolParams(
@@ -832,15 +913,19 @@ class TodoStopGuardClaimTimeoutError extends Error {
   }
 }
 
-interface BackgroundNotificationQueueItem {
+export interface BackgroundNotificationQueueItem {
   displayText: string;
   modelText: string;
   taskId: string;
   status: string;
   kind: 'agent' | 'monitor' | 'shell';
-  continuesTodoStopGuardWorkChain: boolean;
   toolUseId?: string;
   todoWorkChainId?: string;
+}
+
+interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
+  continuesTodoStopGuardWorkChain: boolean;
+  persisted?: true;
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
@@ -1059,7 +1144,7 @@ function readTelemetryPromptId(payload: unknown): string | undefined {
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user') {
+  if (record.type !== 'user' || record.subtype === 'realtime_message') {
     return false;
   }
   return (
@@ -1265,6 +1350,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
   /**
@@ -1316,10 +1402,15 @@ export class Session implements SessionContext {
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
-  private notificationQueue: BackgroundNotificationQueueItem[] = [];
+  private notificationQueue: QueuedBackgroundNotification[] = [];
   private notificationProcessing = false;
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
+  private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
+  private readonly backgroundNotificationAcceptances = new Map<
+    string,
+    Promise<boolean>
+  >();
 
   // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
   // against the race where #drainNotificationQueue's finally block kicks off
@@ -1332,12 +1423,21 @@ export class Session implements SessionContext {
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private readonly workflowApprovalAbortController = new AbortController();
+  private activeTodoPlanRevision?: {
+    planId: string;
+    sourceCallId: string;
+  };
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
+  private liveScreenContextTool?: CaptureScreenContextTool;
+  private liveTaskTools: readonly LiveTaskTool[] = [];
+  private liveSpeakToUserTool?: SpeakToUserTool;
+  private liveConversationActive: boolean | undefined;
+  private liveEndInstructionPending = false;
 
   // Message rewrite middleware (optional, installed after history replay)
   messageRewriter?: MessageRewriteMiddleware;
@@ -1644,6 +1744,10 @@ export class Session implements SessionContext {
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
+  clearActiveTodoPlanRevision(): void {
+    this.activeTodoPlanRevision = undefined;
+  }
+
   hardSuspendTodoStopGuard(): void {
     this.#clearTodoStopGuardQueuedPromptWait();
     this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
@@ -1743,7 +1847,7 @@ export class Session implements SessionContext {
   }
 
   #notificationContinuesTodoStopGuardWorkChain(
-    item: BackgroundNotificationQueueItem,
+    item: QueuedBackgroundNotification,
   ): boolean {
     return item.continuesTodoStopGuardWorkChain;
   }
@@ -1921,6 +2025,9 @@ export class Session implements SessionContext {
           'create_sub_session: bridge returned non-string sessionId',
         );
       }
+      if (req.completion === 'sent') {
+        this.relatedAgentIds.add(resp['sessionId']);
+      }
       return {
         sessionId: resp['sessionId'],
         ...(typeof resp['result'] === 'string'
@@ -1934,6 +2041,178 @@ export class Session implements SessionContext {
           : {}),
       };
     });
+  }
+
+  async enableLiveScreenContext(): Promise<void> {
+    const registry = this.config.getToolRegistry();
+    const existing = registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
+    if (existing && existing !== this.liveScreenContextTool) {
+      throw new Error(
+        'capture_screen_context is reserved for the trusted Live Appshot channel.',
+      );
+    }
+    if (!this.liveScreenContextTool) {
+      const tool = new CaptureScreenContextTool(async () => {
+        const response = await this.client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext,
+          { callerSessionId: this.sessionId },
+        );
+        const appName = response['appName'];
+        const windowTitle = response['windowTitle'];
+        const accessibilityText = response['accessibilityText'];
+        const screenshotPath = response['screenshotPath'];
+        if (
+          typeof appName !== 'string' ||
+          !appName ||
+          (windowTitle !== undefined && typeof windowTitle !== 'string') ||
+          typeof accessibilityText !== 'string' ||
+          typeof screenshotPath !== 'string' ||
+          !screenshotPath
+        ) {
+          throw new Error('capture_screen_context: invalid daemon response');
+        }
+        return {
+          appName,
+          ...(windowTitle ? { windowTitle } : {}),
+          accessibilityText,
+          screenshotPath,
+        };
+      });
+      registry.registerTool(tool);
+      if (registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME) !== tool) {
+        throw new Error(
+          'capture_screen_context is required for Live Voice but is disabled.',
+        );
+      }
+      this.liveScreenContextTool = tool;
+    }
+
+    if (this.liveTaskTools.length === 0) {
+      const tools = createLiveTaskTools(async (name, args) =>
+        this.client.extMethod(SERVE_CONTROL_EXT_METHODS.liveTaskTool, {
+          callerSessionId: this.sessionId,
+          name,
+          arguments: args,
+        }),
+      );
+      for (const tool of tools) {
+        if (registry.getTool(tool.name)) {
+          throw new Error(
+            `${tool.name} is reserved for the trusted Live task channel.`,
+          );
+        }
+      }
+      for (const tool of tools) registry.registerTool(tool);
+      for (const tool of tools) {
+        if (registry.getTool(tool.name) !== tool) {
+          throw new Error(
+            `${tool.name} is required for Live Voice but is disabled.`,
+          );
+        }
+      }
+      this.liveTaskTools = tools;
+    }
+
+    const existingSpeakToUser = registry.getTool(SPEAK_TO_USER_TOOL_NAME);
+    if (
+      existingSpeakToUser &&
+      existingSpeakToUser !== this.liveSpeakToUserTool
+    ) {
+      throw new Error(
+        'speak_to_user is reserved for the trusted Live speech channel.',
+      );
+    }
+    if (!this.liveSpeakToUserTool) {
+      const tool = new SpeakToUserTool(async (message) => {
+        await this.client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+          callerSessionId: this.sessionId,
+          message,
+        });
+      });
+      registry.registerTool(tool);
+      if (registry.getTool(SPEAK_TO_USER_TOOL_NAME) !== tool) {
+        throw new Error(
+          'speak_to_user is required for Live Voice but is disabled.',
+        );
+      }
+      this.liveSpeakToUserTool = tool;
+    }
+    await this.#syncLiveToolDeclarations();
+  }
+
+  async #syncLiveToolDeclarations(): Promise<void> {
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient) {
+      throw new Error('The Live backend model client is unavailable.');
+    }
+    await geminiClient.setTools();
+  }
+
+  async setLiveConversationActive(active: boolean): Promise<void> {
+    if (this.liveConversationActive === active) return;
+    if (active) {
+      this.liveConversationActive = true;
+      this.liveEndInstructionPending = false;
+      this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_START_INSTRUCTIONS);
+    } else {
+      if (this.liveConversationActive !== true) {
+        this.liveConversationActive = false;
+        return;
+      }
+      this.liveConversationActive = false;
+      this.liveEndInstructionPending = true;
+      this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_END_INSTRUCTIONS);
+    }
+    await this.config.getGeminiClient()?.refreshSystemInstruction();
+  }
+
+  async appendLiveConversationTranscript(
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void> {
+    if (this.liveConversationActive !== true) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Live conversation is not active for this session.',
+      );
+    }
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw RequestError.internalError(
+        undefined,
+        'Chat recording service unavailable',
+      );
+    }
+    await recording.recordRealtimeConversation(entries, model);
+    for (const entry of entries) {
+      try {
+        await this.sendUpdate({
+          sessionUpdate:
+            entry.role === 'user'
+              ? 'user_message_chunk'
+              : 'agent_message_chunk',
+          content: { type: 'text', text: entry.text },
+          _meta: {
+            source: 'realtime_voice',
+            qwenDiscreteMessage: true,
+          },
+        });
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit persisted realtime transcript: ${this.#formatError(error)}`,
+        );
+      }
+    }
+  }
+
+  async #consumeLiveEndInstruction(): Promise<void> {
+    if (this.liveConversationActive || !this.liveEndInstructionPending) return;
+    this.liveEndInstructionPending = false;
+    this.config.setLiveAppendSystemPrompt(undefined);
+    await this.config.getGeminiClient()?.refreshSystemInstruction();
   }
 
   getId(): string {
@@ -2191,6 +2470,17 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   primeTurnFromHistory(records: ChatRecord[]): void {
+    for (const record of records) {
+      if (record.subtype !== 'notification') continue;
+      const backgroundTask = (
+        record.systemPayload as
+          | { backgroundTask?: { taskId?: unknown } }
+          | undefined
+      )?.backgroundTask;
+      if (typeof backgroundTask?.taskId === 'string') {
+        this.persistedBackgroundNotificationTaskIds.add(backgroundTask.taskId);
+      }
+    }
     this.turn = Math.max(
       this.turn,
       computeInitialTurnFromHistory(records, this.config.getSessionId()),
@@ -2202,7 +2492,15 @@ export class Session implements SessionContext {
     gaps?: HistoryGap[],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
-    await this.historyReplayer.replay(records, gaps);
+    try {
+      await this.historyReplayer.replay(records, gaps);
+    } finally {
+      // Replayed plan updates re-stamp the revision via sendUpdate, but they
+      // belong to finished cycles; only live updates may bind the next
+      // exit_plan_mode approval, so a replayed session starts text-only —
+      // even when the replay fails part-way.
+      this.activeTodoPlanRevision = undefined;
+    }
   }
 
   rewindToTurn(
@@ -2242,6 +2540,7 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
+    this.activeTodoPlanRevision = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -2307,6 +2606,7 @@ export class Session implements SessionContext {
       .getGeminiClient()!
       .getChat()
       .setHistory(structuredClone(history));
+    this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -2419,11 +2719,31 @@ export class Session implements SessionContext {
     params: PromptRequest,
     invocationContext?: InvocationContextV1,
     admissionCancellation?: AbortSignal,
+    modelPrompt?: string,
   ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (modelPrompt !== undefined && invocationContext === undefined) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Model-only prompt requires trusted invocation context',
+      );
+    }
+    if (modelPrompt !== undefined && !isValidTrustedModelPrompt(modelPrompt)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted model-only prompt',
+      );
+    }
     await this.assertCanStartTurn();
+    if (
+      this.liveScreenContextTool ||
+      this.liveTaskTools.length > 0 ||
+      this.liveSpeakToUserTool
+    ) {
+      await this.#syncLiveToolDeclarations();
+    }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -2533,6 +2853,7 @@ export class Session implements SessionContext {
         pendingSend,
         channelDeliveryCapture,
         invocationContext,
+        modelPrompt,
       );
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
@@ -2583,6 +2904,7 @@ export class Session implements SessionContext {
       void this.#startCronSchedulerInRuntime();
       resolveCompletion();
       this.pendingPromptCompletion = null;
+      await this.#consumeLiveEndInstruction();
     }
   }
 
@@ -2749,6 +3071,7 @@ export class Session implements SessionContext {
     pendingSend: AbortController,
     channelDeliveryCapture?: ChannelDeliveryCapture,
     invocationContext?: InvocationContextV1,
+    modelPrompt?: string,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -2766,7 +3089,12 @@ export class Session implements SessionContext {
     // the first session created in this process.
     return runWithInvocationContext(invocationContext, () =>
       sessionIdContext.run(sessionId, () =>
-        this.#executePromptInner(params, pendingSend, channelDeliveryCapture),
+        this.#executePromptInner(
+          params,
+          pendingSend,
+          channelDeliveryCapture,
+          modelPrompt,
+        ),
       ),
     );
   }
@@ -2775,6 +3103,7 @@ export class Session implements SessionContext {
     params: PromptRequest,
     pendingSend: AbortController,
     channelDeliveryCapture?: ChannelDeliveryCapture,
+    modelPrompt?: string,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -2820,6 +3149,10 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const modelPromptBlocks: PromptRequest['prompt'] =
+              modelPrompt === undefined
+                ? params.prompt
+                : [{ type: 'text', text: modelPrompt }];
 
             // Log user prompt
             logUserPrompt(
@@ -2911,11 +3244,14 @@ export class Session implements SessionContext {
 
             // Check if the input contains a slash command
             // Extract text from the first text block if present
-            const firstTextBlock = params.prompt.find(
+            const firstTextBlock = modelPromptBlocks.find(
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
             const isSlashInput = !isContinue && isSlashCommand(inputText);
+            if (!isSlashInput && !isContinue && !isRetry) {
+              this.refreshContextFilesOnWrite = false;
+            }
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
@@ -2945,7 +3281,7 @@ export class Session implements SessionContext {
 
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,
-                params.prompt,
+                modelPromptBlocks,
                 pendingSend.signal,
                 onFullTurnModel,
               );
@@ -2960,7 +3296,7 @@ export class Session implements SessionContext {
               // user's instruction the final, prominent part when referenced
               // file/editor content is appended (issue: ACP + local qwen).
               parts = await this.#resolvePrompt(
-                params.prompt,
+                modelPromptBlocks,
                 pendingSend.signal,
                 { promptLast: true, onFullTurnModel },
               );
@@ -4444,10 +4780,39 @@ export class Session implements SessionContext {
   async sendUpdate(update: SessionUpdate): Promise<void> {
     const params: SessionNotification = {
       sessionId: this.sessionId,
-      update,
+      update: projectAcpToolResultUpdate(update),
     };
 
+    if (update.sessionUpdate === 'plan') {
+      // Clear before delivery: a plan update the client never receives
+      // must not stay bound to the next exit_plan_mode approval. The
+      // capture below re-stamps only after delivery succeeds.
+      this.activeTodoPlanRevision = undefined;
+    }
     await this.client.sessionUpdate(params);
+    if (update.sessionUpdate === 'plan') {
+      this.#captureTodoPlanRevision(update);
+    }
+  }
+
+  #captureTodoPlanRevision(
+    update: Extract<SessionUpdate, { sessionUpdate: 'plan' }>,
+  ): void {
+    const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+    const plan = isRecord(meta?.['qwenTodoPlan'])
+      ? meta['qwenTodoPlan']
+      : undefined;
+    const transcript = isRecord(meta?.['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+    const planId = plan?.['id'];
+    const sourceCallId = transcript?.['planToolCallId'];
+    this.activeTodoPlanRevision =
+      typeof planId === 'string' &&
+      typeof sourceCallId === 'string' &&
+      update.entries.length > 0
+        ? { planId, sourceCallId }
+        : undefined;
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -5877,7 +6242,7 @@ export class Session implements SessionContext {
     }
   }
 
-  #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
+  #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
     while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
       let evictedIndex = 0;
       if (
@@ -5910,6 +6275,64 @@ export class Session implements SessionContext {
     }
     this.notificationQueue.push(item);
     void this.#drainNotificationQueue();
+  }
+
+  async enqueueBackgroundNotification(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<{ accepted: boolean }> {
+    if (this.persistedBackgroundNotificationTaskIds.has(item.taskId)) {
+      return { accepted: true };
+    }
+    const existing = this.backgroundNotificationAcceptances.get(item.taskId);
+    if (existing) return { accepted: await existing };
+
+    const acceptance = this.#persistDaemonBackgroundNotification(item);
+    this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
+    try {
+      return { accepted: await acceptance };
+    } finally {
+      if (
+        this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
+      ) {
+        this.backgroundNotificationAcceptances.delete(item.taskId);
+      }
+    }
+  }
+
+  async #persistDaemonBackgroundNotification(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<boolean> {
+    if (this.disposed || this.closing) return false;
+    const recording = this.config.getChatRecordingService();
+    if (!recording) return false;
+    try {
+      await recording.recordNotificationStrict(
+        [{ text: item.modelText }],
+        item.displayText,
+        {
+          taskId: item.taskId,
+          status: item.status,
+          kind: item.kind,
+          toolUseId: item.toolUseId,
+        },
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `Daemon notification persistence rejected [session ${this.sessionId}, task ${item.taskId}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+
+    this.persistedBackgroundNotificationTaskIds.add(item.taskId);
+    if (!this.disposed && !this.closing) {
+      this.#enqueueBackgroundNotification({
+        ...item,
+        continuesTodoStopGuardWorkChain:
+          this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
+        persisted: true,
+      });
+    }
+    return true;
   }
 
   async #drainNotificationQueue(): Promise<void> {
@@ -6001,7 +6424,7 @@ export class Session implements SessionContext {
   }
 
   async #executeBackgroundNotificationPromptInner(
-    item: BackgroundNotificationQueueItem,
+    item: QueuedBackgroundNotification,
   ): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -6024,14 +6447,16 @@ export class Session implements SessionContext {
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];
-          this.config
-            .getChatRecordingService()
-            ?.recordNotification(notificationParts, item.displayText, {
-              taskId: item.taskId,
-              status: item.status,
-              kind: item.kind,
-              toolUseId: item.toolUseId,
-            });
+          if (!item.persisted) {
+            this.config
+              .getChatRecordingService()
+              ?.recordNotification(notificationParts, item.displayText, {
+                taskId: item.taskId,
+                status: item.status,
+                kind: item.kind,
+                toolUseId: item.toolUseId,
+              });
+          }
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();
@@ -6468,8 +6893,14 @@ export class Session implements SessionContext {
         `Unknown approval mode: ${params.modeId}`,
       );
     }
+    const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
     if (approvalMode === ApprovalMode.PLAN) {
+      if (previousApprovalMode !== ApprovalMode.PLAN) {
+        // A redundant plan re-select keeps the revision captured by the
+        // live cycle; only a fresh entry starts a new approval cycle.
+        this.activeTodoPlanRevision = undefined;
+      }
       this.clearTodoStopGuardTrust();
     }
 
@@ -6774,30 +7205,6 @@ export class Session implements SessionContext {
       return part;
     };
 
-    if (
-      recordDaemonToolCalls(
-        this.config,
-        promptId,
-        toolLoopState,
-        dedupedFunctionCalls.length,
-      )
-    ) {
-      return await finalizeRunToolResult({
-        parts: await Promise.all(
-          dedupedFunctionCalls.map((fc) =>
-            recordSkippedToolCall(
-              fc,
-              LOOP_DETECTED_SKIP_MESSAGE,
-              false,
-              ToolErrorType.UNKNOWN,
-            ),
-          ),
-        ),
-        stopAfterPermissionCancel: false,
-        loopDetected: true,
-      });
-    }
-
     type ExecutableBatch = {
       kind: 'execute';
       concurrent: boolean;
@@ -6932,7 +7339,10 @@ export class Session implements SessionContext {
         handledProviderToolCallIds.add(providerCallId);
       }
 
-      const isAgent = fc.name === ToolNames.AGENT;
+      // Canonical names match core's isToolCallConcurrencySafe predicate,
+      // where `task` is a live alias of the agent tool; concurrent batches
+      // are therefore agent-only.
+      const isAgent = canonicalToolName(fc.name ?? '') === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
@@ -6944,6 +7354,32 @@ export class Session implements SessionContext {
     const executableCalls = batches.flatMap((batch) =>
       batch.kind === 'execute' ? batch.calls : [],
     );
+    // Count only the calls that will actually execute: calls served from
+    // history as duplicates never run and must not accumulate repeat
+    // counts toward the stuck signal.
+    if (
+      recordDaemonToolCalls(
+        this.config,
+        promptId,
+        toolLoopState,
+        executableCalls,
+      )
+    ) {
+      return await finalizeRunToolResult({
+        parts: await Promise.all(
+          dedupedFunctionCalls.map((fc) =>
+            recordSkippedToolCall(
+              fc,
+              LOOP_DETECTED_SKIP_MESSAGE,
+              false,
+              ToolErrorType.UNKNOWN,
+            ),
+          ),
+        ),
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      });
+    }
     const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
       executableCalls.map((call) => call.name),
     );
@@ -6975,28 +7411,49 @@ export class Session implements SessionContext {
       await refreshMemoryAfterManagedWrite(this.config, memoryWriteCandidates, {
         logContext: `ACP session ${this.sessionId} memory tool batch`,
       });
+      if (!this.refreshContextFilesOnWrite) {
+        return;
+      }
+      const matchedContextFileWrite = didWriteProjectContextFile(
+        memoryWriteCandidates,
+        this.config.getProjectRoot(),
+      );
+      debugLogger.debug(
+        `ACP session ${this.sessionId} checked marked context-file memory tool batch; matched=${matchedContextFileWrite}`,
+      );
+      if (!matchedContextFileWrite) {
+        return;
+      }
+      debugLogger.debug(
+        `ACP session ${this.sessionId} refreshing memory after context-file memory write`,
+      );
+      await refreshMemoryInstruction(this.config, {
+        logContext: `ACP session ${this.sessionId} context-file memory tool batch`,
+      });
     };
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
     // in input order regardless of resolution order.
+    //
+    // Only agent-only batches reach here (the batcher above groups only
+    // agent calls into concurrent batches), so no invalid-params serial
+    // defence is needed: an invalid agent call fails in build() before any
+    // side effect. Batches wider than the cap run in windows; once a
+    // window's race observes a loop, the unstarted tail is skipped. A loop
+    // firing mid-batch never aborts in-flight calls regardless of batch
+    // width — they settle and their results are kept before the turn
+    // reports the stop, so no executed output is discarded either way.
     const runBounded = async (
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
       onStopAfterPermissionCancel?: () => void,
-      onStopAfterLoopDetected?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const configuredMaxConcurrency = parsePositiveIntegerEnv(
+      const maxConcurrency = parsePositiveIntegerEnv(
         process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
-      const maxConcurrency = toolLoopState
-        ? Math.min(
-            configuredMaxConcurrency,
-            DAEMON_INVALID_TOOL_PARAMS_THRESHOLD,
-          )
-        : configuredMaxConcurrency;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
       const fillLoopSkippedFrom = async (startIndex: number) => {
@@ -7016,52 +7473,8 @@ export class Session implements SessionContext {
           };
         }
       };
-      const fillPermissionSkippedFrom = async (startIndex: number) => {
-        for (let i = startIndex; i < calls.length; i++) {
-          if (results[i]) continue;
-          results[i] = {
-            parts: [await recordSkippedToolCall(calls[i])],
-            stopAfterPermissionCancel: false,
-          };
-        }
-      };
-      let startIndex = 0;
-      if (
-        toolLoopState &&
-        calls.length > DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
-      ) {
-        startIndex = DAEMON_INVALID_TOOL_PARAMS_THRESHOLD;
-        for (let i = 0; i < startIndex; i++) {
-          if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
-            results[i] = {
-              parts: [await recordSkippedToolCall(calls[i])],
-              stopAfterPermissionCancel: false,
-            };
-            continue;
-          }
-          const r = await this.runTool(
-            runAbortSignal,
-            promptId,
-            calls[i],
-            onStopAfterPermissionCancel,
-            toolLoopState,
-            recordSkippedToolCall,
-            queueToolResultRecord,
-            executionCallIds.get(calls[i]),
-            onFullTurnModel,
-          );
-          results[i] = r;
-          if (r.loopDetected) {
-            await fillLoopSkippedFrom(i + 1);
-            return results;
-          }
-          if (r.stopAfterPermissionCancel) {
-            await fillPermissionSkippedFrom(i + 1);
-            return results;
-          }
-        }
-      }
-      for (let i = startIndex; i < calls.length; i++) {
+      let warnedWaitingForInFlight = false;
+      for (let i = 0; i < calls.length; i++) {
         const idx = i;
         if (toolLoopState?.loopDetected) {
           await fillLoopSkippedFrom(idx);
@@ -7087,6 +7500,18 @@ export class Session implements SessionContext {
         )
           .then((r) => {
             results[idx] = r;
+            if (
+              r.loopDetected &&
+              executing.size > 1 &&
+              !warnedWaitingForInFlight
+            ) {
+              warnedWaitingForInFlight = true;
+              debugLogger.warn(
+                `Loop detection stopped this ACP turn; waiting for ${
+                  executing.size - 1
+                } in-flight tool call(s) to settle before returning.`,
+              );
+            }
           })
           .finally(() => {
             executing.delete(p);
@@ -7095,7 +7520,6 @@ export class Session implements SessionContext {
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
           if (results.some((result) => result?.loopDetected)) {
-            onStopAfterLoopDetected?.();
             await Promise.all(executing);
             await fillLoopSkippedFrom(idx + 1);
             return results;
@@ -7108,7 +7532,6 @@ export class Session implements SessionContext {
           if (invalidToolErrorNearThreshold && executing.size > 0) {
             await Promise.all(executing);
             if (results.some((result) => result?.loopDetected)) {
-              onStopAfterLoopDetected?.();
               await fillLoopSkippedFrom(idx + 1);
               return results;
             }
@@ -7166,7 +7589,6 @@ export class Session implements SessionContext {
               batch.calls,
               batchAbortController.signal,
               stopBatchAfterPermissionCancel,
-              () => batchAbortController.abort('loop_detected'),
               () => batchStopAfterPermissionCancel,
             );
           } finally {
@@ -7542,8 +7964,21 @@ export class Session implements SessionContext {
         if (entryCancellation) return entryCancellation;
 
         // ---- L1: Tool enablement check ----
+        const isTrustedLiveScreenContextTool =
+          tool === this.liveScreenContextTool;
+        const isTrustedLiveTaskTool = this.liveTaskTools.includes(
+          tool as LiveTaskTool,
+        );
+        const isTrustedLiveSpeakToUserTool = tool === this.liveSpeakToUserTool;
         const pm = this.config.getPermissionManager?.();
-        const toolEnabled = pm ? await pm.isToolEnabled(policyToolName) : true;
+        const isTrustedLiveTool =
+          isTrustedLiveScreenContextTool ||
+          isTrustedLiveTaskTool ||
+          isTrustedLiveSpeakToUserTool;
+        const toolEnabled =
+          pm && !isTrustedLiveTool
+            ? await pm.isToolEnabled(policyToolName)
+            : true;
         const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (enablementCancellation) return enablementCancellation;
         if (pm && !toolEnabled) {
@@ -7650,15 +8085,29 @@ export class Session implements SessionContext {
           // The VS Code extension is just a UI layer for requestPermission.
           const isAskUserQuestionTool =
             policyToolName === ToolNames.ASK_USER_QUESTION;
-
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
-          const flowResult = await evaluatePermissionFlow(
-            this.config,
-            invocation,
-            policyToolName,
-            toolParams,
-          );
+          const flowResult =
+            isTrustedLiveScreenContextTool || isTrustedLiveTaskTool
+              ? {
+                  defaultPermission: 'allow' as const,
+                  finalPermission: 'allow' as const,
+                  pmForcedAsk: false,
+                  pmCtx: buildPermissionCheckContext(
+                    policyToolName,
+                    toolParams,
+                    this.config.getTargetDir(),
+                    invocation.permissionAliases,
+                  ),
+                  requiresUserInteraction: false,
+                  denyMessage: undefined,
+                }
+              : await evaluatePermissionFlow(
+                  this.config,
+                  invocation,
+                  policyToolName,
+                  toolParams,
+                );
           const permissionFlowCancellation =
             cancelBeforeExecutionIfAborted(toolName);
           if (permissionFlowCancellation) return permissionFlowCancellation;
@@ -8213,6 +8662,11 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
+                    ...(isExitPlanModeTool && this.activeTodoPlanRevision
+                      ? {
+                          qwenTodoApproval: this.activeTodoPlanRevision,
+                        }
+                      : {}),
                   },
                 },
               };
@@ -8501,6 +8955,7 @@ export class Session implements SessionContext {
 
           const toolInvocationGuard = this.config.getToolInvocationGuard?.();
           if (toolInvocationGuard) {
+            const invocationContext = getInvocationContext();
             const guardDecision = await evaluateToolInvocationGuard(
               toolInvocationGuard,
               {
@@ -8508,6 +8963,7 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                ...(invocationContext ? { invocationContext } : {}),
               },
             );
             if (activeToolAbortSignal.aborted) {
@@ -8733,6 +9189,7 @@ export class Session implements SessionContext {
           ) {
             await this.sendCurrentModeUpdateNotification();
             if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+              this.activeTodoPlanRevision = undefined;
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }
@@ -9201,6 +9658,9 @@ export class Session implements SessionContext {
     onFullTurnModel: (model: string) => boolean,
   ): Promise<Part[] | null> {
     this.#emitGoalStatusItems(result);
+    this.refreshContextFilesOnWrite =
+      result.type === 'submit_prompt' &&
+      Boolean(result.refreshContextFilesOnWrite);
 
     switch (result.type) {
       case 'submit_prompt':

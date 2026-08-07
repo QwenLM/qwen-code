@@ -34,6 +34,8 @@ export interface DaemonWorkspaceCapability {
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+  /** Daemon-owned Live conversation runtime. */
+  kind?: 'live';
 }
 
 export interface DaemonWorkspaceUpdate {
@@ -627,8 +629,32 @@ export interface DaemonStatusReport {
      * none.
      */
     memory?: {
-      /** Always false: nothing in this section is applied to a process. */
+      /** False, and required: nothing in this section is applied to a process. */
       enforced: false;
+      /**
+       * The per-child heap partition the daemon models but does not apply.
+       * `null` when no policy was built; absent on daemons predating it.
+       */
+      childHeap?: {
+        mode: 'off' | 'observe';
+        /**
+         * `null` under `off`, which models nothing — distinct from `0`,
+         * a computed answer meaning the pool hosts no child.
+         */
+        maxConcurrentChildren: number | null;
+        /**
+         * Never 0 and never below `modeled.minChildHeapMb`; `null` instead,
+         * under `off` and wherever no partition fits within that floor.
+         */
+        perChildCeilingMb: number | null;
+        /**
+         * Admission pressure only. 0 does not mean the partition is safe to
+         * apply: children still run on the host-derived ceiling. A channel
+         * swap at full occupancy also books one, and on a host too small to
+         * model a partition this equals the total ACP spawn count.
+         */
+        refusals: number;
+      } | null;
       configuredBudgetMb: number;
       effectiveBudgetMb: number;
       budgetSource: 'flag' | 'derived';
@@ -701,17 +727,67 @@ export interface DaemonStatusReport {
        */
       activeAcpChildren: number;
       /**
-       * Which children the daemon's RSS sampling covers. Only the primary ACP
-       * child is sampled, and only while an SSE/WS watcher is active; when no
-       * client is observing, childRssBytes reads 0. After the last watcher
-       * detaches, the last sampled value persists until it ages out (~30s).
+       * Which children the daemon's RSS sampling covers, and only while an
+       * SSE/WS watcher is active; with no client observing, nothing is
+       * sampled. After the last watcher detaches, each reading persists until
+       * it ages out (~30s).
+       *
+       * A union, unlike the daemon's own type: `primary_only` is what daemons
+       * before the aggregate send, and this mirror describes every version.
        */
-      childRssCoverage: 'primary_only';
+      childRssCoverage: 'primary_only' | 'active_children';
+      /**
+       * Aggregate RSS across the children `childRssCoverage` names. Both an
+       * over-count (summed per-process RSS double-counts shared pages) and a
+       * floor (each child reports only its own process, so its MCP descendants
+       * and all channel workers are missing). Not the daemon tree's memory.
+       *
+       * Optional because it is additive within an existing block: a daemon
+       * that shipped `runtime.memory` before it exists sends the block without
+       * it, and a daemon reporting `primary_only` never sends it at all.
+       */
+      children?: {
+        /** A floor rather than a total whenever `sampled < activeAcpChildren`. */
+        rssBytes: number;
+        /** Contributors. The denominator is the sibling `activeAcpChildren`. */
+        sampled: number;
+        /**
+         * Age of the oldest reading in the sum. `null` when nothing was
+         * sampled, and also when every contributor predates the field — so
+         * `null` never means "fresh".
+         */
+        oldestReadingAgeMs: number | null;
+      };
       modeled: {
         /** `null` when no workspace is registered. */
         recommendedShareAtRegisteredMb: number | null;
         /** `null` when no ACP child is active. */
         recommendedShareAtActiveMb: number | null;
+      };
+      /**
+       * The daemon root's own memory pressure. Reported in both modes; only
+       * `observe` also raises a status issue from it, so `off` leaves the
+       * top-level `status` rollup unaffected. Root process only: these are
+       * this process's own figures, so children growing does not move them —
+       * compare against `children.rssBytes` for that.
+       *
+       * Optional because it is additive *within* an existing block: a daemon
+       * that shipped `runtime.memory` before this field exists and sends the
+       * block without it. Typing it as required would make this mirror lie
+       * about those daemons.
+       */
+      pressure?: {
+        mode: 'off' | 'observe';
+        level: 'normal' | 'soft' | 'hard' | 'critical';
+        /** `unknown` means neither denominator was usable, not that all is well. */
+        source: 'rss' | 'heap' | 'unknown';
+        ratio: number;
+        rssBytes: number;
+        rssRatio: number;
+        availableBytes: number;
+        heapUsedBytes: number;
+        heapRatio: number;
+        heapLimitBytes: number;
       };
     };
     /** Optional daemon-process performance counters. */
@@ -790,7 +866,10 @@ export interface DaemonBranchInfo {
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
+  /** Immutable runtime ownership root used for daemon routing. */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from `workspaceCwd`. */
+  currentCwd?: string;
   /** True when an existing session was reused under sessionScope:single. */
   attached: boolean;
   /**
@@ -2603,6 +2682,115 @@ export interface DaemonWorkspaceVoiceTranscriptionResult {
   transport: DaemonVoiceTransport;
 }
 
+export type DaemonLiveState =
+  | 'unavailable'
+  | 'idle'
+  | 'starting'
+  | 'listening'
+  | 'thinking'
+  | 'speaking'
+  | 'stopping'
+  | 'error';
+
+export type DaemonLiveBlocker =
+  | 'host_missing'
+  | 'host_disconnected'
+  | 'host_version'
+  | 'microphone_permission'
+  | 'accessibility_permission'
+  | 'screen_recording_permission'
+  | 'audio_input'
+  | 'audio_output'
+  | 'global_shortcut'
+  | 'appshot'
+  | 'provider_config'
+  | 'provider_unreachable';
+
+export type DaemonLiveRequirementState =
+  | 'ready'
+  | 'missing'
+  | 'denied'
+  | 'unavailable'
+  | 'checking';
+
+/** Process-global Live Voice state. It never contains provider credentials. */
+export interface DaemonLiveStatus {
+  v: 1;
+  available: boolean;
+  state: DaemonLiveState;
+  shortcut: string;
+  blocker?: DaemonLiveBlocker;
+  message?: string;
+  callId?: string;
+  inputMuted?: boolean;
+  outputMuted?: boolean;
+  transcript?: string;
+  caption?: string;
+  statusText?: string;
+  requirements?: Partial<
+    Record<
+      | 'host'
+      | 'microphone'
+      | 'accessibility'
+      | 'screenRecording'
+      | 'audioInput'
+      | 'audioOutput'
+      | 'globalShortcut'
+      | 'appshot'
+      | 'provider',
+      DaemonLiveRequirementState
+    >
+  >;
+  host?: {
+    version?: string;
+    protocolVersion?: number;
+  };
+}
+
+export type DaemonLiveHostInstallState =
+  | 'missing'
+  | 'checking'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'launching'
+  | 'installed'
+  | 'error';
+
+export interface DaemonLiveHostInstallStatus {
+  state: DaemonLiveHostInstallState;
+  version?: string;
+  progress?: number;
+  message?: string;
+  retryable?: boolean;
+}
+
+/** WebShell-only Live onboarding state. Provider credentials are never returned. */
+export interface DaemonLiveSetupStatus {
+  v: 1;
+  enabled: boolean;
+  keyConfigured: boolean;
+  model: string;
+  shortcut: string;
+  install: DaemonLiveHostInstallStatus;
+  live: DaemonLiveStatus;
+}
+
+export type DaemonLiveSetupApiKeyMutation =
+  | { operation: 'replace'; value: string }
+  | { operation: 'clear' };
+
+export interface DaemonLiveSetupUpdate {
+  enabled?: boolean;
+  shortcut?: string;
+  apiKey?: DaemonLiveSetupApiKeyMutation;
+}
+
+export interface DaemonLiveMuteUpdate {
+  inputMuted?: boolean;
+  outputMuted?: boolean;
+}
+
 export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
 
 export type DaemonWorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
@@ -2988,18 +3176,86 @@ export type DaemonChannelConfigFieldKind =
   | 'number'
   | 'enum'
   | 'string-list'
-  | 'record';
+  | 'record'
+  | 'object';
 
-export interface DaemonChannelConfigFieldDescriptor {
+interface DaemonChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  kind: DaemonChannelConfigFieldKind;
-  required?: boolean;
-  envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
   description?: string;
 }
+
+export interface DaemonChannelConfigValueFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'string' | 'secret';
+  required?: boolean;
+  envResolvable?: boolean;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigPlainValueFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'boolean' | 'string-list' | 'record';
+  required?: boolean;
+  envResolvable?: never;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigEnumFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'enum';
+  required?: boolean;
+  envResolvable?: never;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigNumberFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'number';
+  required?: boolean;
+  envResolvable?: never;
+  exclusiveMinimum?: number;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigObjectFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'object';
+  required?: false;
+  envResolvable?: never;
+  properties: readonly DaemonChannelConfigNestedFieldDescriptor[];
+}
+
+export type DaemonChannelConfigNestedFieldDescriptor =
+  | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: Exclude<
+        DaemonChannelConfigFieldKind,
+        'secret' | 'enum' | 'number' | 'object'
+      >;
+      envResolvable?: never;
+    })
+  | (Omit<DaemonChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'enum';
+      envResolvable?: never;
+    })
+  | (Omit<
+      DaemonChannelConfigNumberFieldDescriptor,
+      'kind' | 'envResolvable'
+    > & {
+      kind: 'number';
+      envResolvable?: never;
+    })
+  | DaemonChannelConfigObjectFieldDescriptor;
+
+export type DaemonChannelConfigFieldDescriptor =
+  | DaemonChannelConfigValueFieldDescriptor
+  | DaemonChannelConfigPlainValueFieldDescriptor
+  | DaemonChannelConfigEnumFieldDescriptor
+  | DaemonChannelConfigNumberFieldDescriptor
+  | DaemonChannelConfigObjectFieldDescriptor;
 
 export interface DaemonChannelTypeDescriptor {
   type: string;
@@ -3059,8 +3315,15 @@ export interface DaemonChannelMutationResult {
 export interface DaemonChannelPairingRequest {
   senderId: string;
   senderName: string;
+  subject?: DaemonChannelPairingSubject;
   code: string;
   createdAt: number;
+}
+
+export interface DaemonChannelPairingSubject {
+  type: 'user' | 'group';
+  id: string;
+  name: string;
 }
 
 export interface DaemonChannelPairingRequestsSnapshot {
@@ -3078,11 +3341,12 @@ export interface DaemonChannelPairingApprovalResult
 
 export interface DaemonChannelPairingApprovalsSnapshot {
   senderIds: string[];
+  groupIds?: string[];
 }
 
-export interface DaemonChannelPairingRevocationRequest {
-  senderId: string;
-}
+export type DaemonChannelPairingRevocationRequest =
+  | { senderId: string; groupId?: never }
+  | { senderId?: never; groupId: string };
 
 export interface DaemonChannelPairingRevocationResult
   extends DaemonChannelPairingApprovalsSnapshot {

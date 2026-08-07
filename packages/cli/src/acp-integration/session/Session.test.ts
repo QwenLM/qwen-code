@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Buffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -17,6 +19,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import type { DaemonToolLoopState } from './Session.js';
 import type {
   Content,
   FunctionCall,
@@ -43,18 +46,26 @@ import type {
   PromptRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
+import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../../serve/live/capture-screen-context.js';
+import { SPEAK_TO_USER_TOOL_NAME } from '../../serve/live/live-speak-to-user.js';
+import {
+  collectHistoryReplayUpdates,
+  createReplayCumulativeUsage,
+} from './history-replay-page.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const bridgeToolResultImagesSpy = vi.hoisted(() => vi.fn());
 const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
+const refreshMemoryInstructionSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 const startToolSpanSpy = vi.hoisted(() => vi.fn());
 const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
@@ -82,6 +93,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     runVisionBridge: runVisionBridgeSpy,
     bridgeToolResultImages: bridgeToolResultImagesSpy,
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
+    refreshMemoryInstruction: refreshMemoryInstructionSpy,
     startToolSpan: (...args: Parameters<typeof actual.startToolSpan>) => {
       startToolSpanSpy(...args);
       return actual.startToolSpan(...args);
@@ -208,6 +220,12 @@ describe('computeInitialTurnFromHistory', () => {
             timestamp: '2026-05-17T07:27:18.861Z',
             type: 'assistant',
             message: { parts: [{ text: 'answer 1' }] },
+          }),
+          chatRecord({
+            uuid: 'realtime-user',
+            timestamp: '2026-05-17T07:27:19.000Z',
+            subtype: 'realtime_message',
+            message: { parts: [{ text: 'voice question' }] },
           }),
           chatRecord({
             uuid: 'user-2',
@@ -371,6 +389,8 @@ describe('Session', () => {
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
+    recordNotificationStrict: ReturnType<typeof vi.fn>;
+    recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
@@ -384,6 +404,8 @@ describe('Session', () => {
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
     isInitialized: ReturnType<typeof vi.fn>;
+    refreshSystemInstruction: ReturnType<typeof vi.fn>;
+    setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
@@ -404,6 +426,9 @@ describe('Session', () => {
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
+    registerTool: ReturnType<typeof vi.fn>;
+    warmAll: ReturnType<typeof vi.fn>;
+    getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
   };
   let mockWorkflowRunRegistry: {
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
@@ -507,6 +532,8 @@ describe('Session', () => {
     );
     refreshMemoryAfterManagedWriteSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
+    refreshMemoryInstructionSpy.mockReset();
+    refreshMemoryInstructionSpy.mockResolvedValue(undefined);
     transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -533,10 +560,13 @@ describe('Session', () => {
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+      setTools: vi.fn(),
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
       isInitialized: vi.fn().mockReturnValue(true),
+      refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
+      setTools: vi.fn().mockResolvedValue(undefined),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -576,6 +606,8 @@ describe('Session', () => {
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
+      recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
+      recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
@@ -590,6 +622,11 @@ describe('Session', () => {
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
+      registerTool: vi.fn(),
+      warmAll: vi.fn().mockResolvedValue(undefined),
+      getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
+        names.map((name) => ({ name })),
+      ),
     };
     const fileService = {
       shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
@@ -609,6 +646,7 @@ describe('Session', () => {
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      setLiveAppendSystemPrompt: vi.fn(),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
@@ -651,6 +689,10 @@ describe('Session', () => {
       getMaxToolCallsPerTurn: vi
         .fn()
         .mockReturnValue(core.DEFAULT_MAX_TOOL_CALLS_PER_TURN),
+      isMaxToolCallsPerTurnExplicit: vi.fn().mockReturnValue(false),
+      // Mirrors the resolved settings default (cli/config.ts passes
+      // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
+      getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getBackgroundTaskRegistry: vi
         .fn()
@@ -716,6 +758,82 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it('bounds textual tool results at the live ACP delivery boundary', async () => {
+    const source = `head-${'x'.repeat(499_999)}-tail`;
+    await session.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'large-call',
+      status: 'completed',
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: source },
+        },
+      ],
+      rawOutput: source,
+      _meta: { toolName: 'read_file' },
+    });
+
+    const params = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.at(-1)?.[0] as SessionNotification | undefined;
+    expect(params).toBeDefined();
+    const delivered = params?.update as unknown as Record<string, unknown>;
+    expect(
+      Buffer.byteLength(JSON.stringify(delivered['content']), 'utf8'),
+    ).toBeLessThanOrEqual(65_536);
+    expect(
+      Buffer.byteLength(JSON.stringify(delivered['rawOutput']), 'utf8'),
+    ).toBeLessThanOrEqual(65_536);
+    expect(delivered).toHaveProperty('content');
+    expect(delivered).toHaveProperty('rawOutput');
+
+    await session.sendUpdate(params!.update);
+    const redelivered = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.at(-1)?.[0]?.update;
+    expect(redelivered).toBe(params?.update);
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session-id',
+      records: [
+        chatRecord({
+          uuid: 'large-tool-result',
+          parentUuid: 'large-assistant',
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'large-replay-call',
+                  name: 'read_file',
+                  response: { output: source },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'large-replay-call',
+            responseParts: [],
+            resultDisplay: source,
+          },
+        }),
+      ],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+    const replayUpdate = replay.updates.find(
+      (update) => update.sessionUpdate === 'tool_call_update',
+    );
+    expect(replayUpdate).toBeDefined();
+
+    await session.sendUpdate(replayUpdate!);
+    const replayDelivered = vi
+      .mocked(mockClient.sessionUpdate)
+      .mock.calls.at(-1)?.[0]?.update;
+    expect(replayDelivered).toBe(replayUpdate);
   });
 
   it('bridges workflow approvals through ACP permission requests', async () => {
@@ -1269,6 +1387,110 @@ describe('Session', () => {
     );
     session.dispose();
     expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('registers the dedicated Live screen tool and routes it over extMethod', async () => {
+    const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const screenshotPath = path.join(directory, `${randomUUID()}.png`);
+    await fs.writeFile(
+      screenshotPath,
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]),
+    );
+    const registered = new Map<string, core.AnyDeclarativeTool>();
+    mockToolRegistry.registerTool = vi.fn((tool) => {
+      registered.set(tool.name, tool);
+    });
+    mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
+    mockClient.extMethod = vi.fn().mockResolvedValue({
+      appName: 'Safari',
+      windowTitle: 'LIVE_APP_A',
+      accessibilityText: 'AXWindow LIVE_APP_A',
+      screenshotPath,
+    });
+
+    try {
+      await session.enableLiveScreenContext();
+      const screenTool = registered.get(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
+      expect(screenTool?.name).toBe('capture_screen_context');
+      const invocation = screenTool?.build({});
+      expect(invocation).toBeDefined();
+      await expect(invocation?.getDefaultPermission()).resolves.toBe('allow');
+      await expect(
+        invocation?.execute(new AbortController().signal),
+      ).resolves.toMatchObject({
+        returnDisplay: 'Captured Safari — LIVE_APP_A',
+      });
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'qwen/control/live/capture-screen-context',
+        { callerSessionId: 'test-session-id' },
+      );
+      const speakTool = registered.get(SPEAK_TO_USER_TOOL_NAME);
+      const speakInvocation = speakTool?.build({ message: '测试语音' });
+      await expect(speakInvocation?.getDefaultPermission()).resolves.toBe(
+        'allow',
+      );
+      await speakInvocation?.execute(new AbortController().signal);
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'qwen/control/live/speak-to-user',
+        { callerSessionId: 'test-session-id', message: '测试语音' },
+      );
+      expect(mockGeminiClient.setTools).toHaveBeenCalledOnce();
+    } finally {
+      await fs.unlink(screenshotPath).catch(() => undefined);
+    }
+  });
+
+  it('persists Realtime-owned dialogue without adding a backend model turn', async () => {
+    await session.setLiveConversationActive(true);
+    vi.spyOn(session, 'isIdle').mockReturnValue(false);
+    const entries = [
+      { role: 'user' as const, text: '你好' },
+      { role: 'assistant' as const, text: '你好！' },
+    ];
+
+    await session.appendLiveConversationTranscript(
+      entries,
+      'qwen3.5-omni-plus-realtime',
+    );
+
+    expect(
+      mockChatRecordingService.recordRealtimeConversation,
+    ).toHaveBeenCalledWith(entries, 'qwen3.5-omni-plus-realtime');
+    expect(mockChat.addHistory).not.toHaveBeenCalled();
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: '你好' },
+        _meta: {
+          source: 'realtime_voice',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '你好！' },
+        _meta: {
+          source: 'realtime_voice',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+  });
+
+  it('rejects a conflicting tool at the reserved Live Appshot name', async () => {
+    mockToolRegistry.getTool.mockReturnValue({
+      name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+    });
+
+    await expect(session.enableLiveScreenContext()).rejects.toThrow(
+      /reserved for the trusted Live Appshot channel/u,
+    );
+    expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
   });
 
   it('attributes a delayed title notification to the persisted record session', () => {
@@ -1919,6 +2141,83 @@ describe('Session', () => {
     });
   });
 
+  // Runs a full exit_plan_mode approval turn and returns the permission
+  // request the client received, so tests can assert the observable
+  // `_meta.qwenTodoApproval` binding instead of poking the private
+  // `activeTodoPlanRevision` field. Mirrors the it.each harness in the
+  // prompt describe block.
+  async function runExitPlanModeApprovalPrompt(): Promise<
+    Parameters<AgentSideConnection['requestPermission']>[0]
+  > {
+    let mode = ApprovalMode.PLAN;
+    const hookSpy = vi
+      .spyOn(core, 'firePermissionRequestHook')
+      .mockResolvedValue({
+        hasDecision: true,
+        shouldAllow: true,
+        updatedInput: { plan: 'Hook-replaced plan' },
+        denyMessage: undefined,
+      });
+    const invocation = {
+      params: { plan: 'Original plan' },
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      getConfirmationDetails: vi.fn().mockResolvedValue({
+        type: 'plan',
+        title: 'Approve plan',
+        plan: 'Original plan',
+        hideAlwaysAllow: true,
+        onConfirm: vi.fn().mockResolvedValue(undefined),
+      }),
+      getDescription: vi.fn().mockReturnValue('Plan:'),
+      toolLocations: vi.fn().mockReturnValue([]),
+      execute: vi.fn().mockImplementation(async () => {
+        mode = ApprovalMode.DEFAULT;
+        return { llmContent: 'approved', returnDisplay: 'approved' };
+      }),
+    };
+    const tool = {
+      name: core.ToolNames.EXIT_PLAN_MODE,
+      kind: core.Kind.Think,
+      build: vi.fn().mockReturnValue(invocation),
+    };
+
+    mockToolRegistry.getTool.mockReturnValue(tool);
+    mockConfig.getApprovalMode = vi.fn(() => mode);
+    mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+      createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'call-exit-plan',
+                name: core.ToolNames.EXIT_PLAN_MODE,
+                args: { plan: 'Original plan' },
+              },
+            ],
+          },
+        },
+      ]),
+    );
+
+    try {
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'approve the plan' }],
+      });
+    } finally {
+      hookSpy.mockRestore();
+    }
+
+    const calls = vi.mocked(mockClient.requestPermission).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls.at(-1)![0];
+  }
+
   describe('setMode', () => {
     it.each([
       ['plan', ApprovalMode.PLAN],
@@ -1963,6 +2262,56 @@ describe('Session', () => {
       expect(mockClient.extNotification).not.toHaveBeenCalledWith(
         'qwen/notify/session/mode-update',
         expect.anything(),
+      );
+    });
+
+    it('clears the active Todo plan revision when transitioning into plan mode', async () => {
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
+    });
+
+    it('preserves the active Todo plan revision when re-selecting plan mode', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
       );
     });
   });
@@ -2017,7 +2366,7 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
-    it('truncates model history before the requested user turn and records rewind', () => {
+    it('truncates model history before the requested user turn and records rewind', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -2026,12 +2375,27 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
 
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
@@ -2315,6 +2679,32 @@ describe('Session', () => {
       expect(snapshot).toEqual(history);
       expect(mockChat.setHistory).toHaveBeenCalledWith(history);
       expect(mockChat.getHistory).not.toHaveBeenCalled();
+    });
+
+    it('clears the active Todo plan revision when restoring history', async () => {
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'old-plan', sourceCallId: 'old-call' },
+        }),
+      );
+
+      session.restoreHistory([]);
+
+      const restored = await runExitPlanModeApprovalPrompt();
+      expect(restored.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
     });
 
     it('rejects history restore while a prompt is running', () => {
@@ -3485,6 +3875,52 @@ describe('Session', () => {
       expect(observed).toBeUndefined();
     });
 
+    it('uses a trusted model-only prompt while recording the public prompt', async () => {
+      const trustedContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'daemon-prompt-id',
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '原始语音文本' }],
+        },
+        trustedContext,
+        undefined,
+        '<realtime_delegation>trusted model input</realtime_delegation>',
+      );
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '原始语音文本',
+      );
+      expect(textParts(firstSentMessage())).toEqual([
+        '<realtime_delegation>trusted model input</realtime_delegation>',
+      ]);
+    });
+
+    it('rejects model-only prompts without trusted invocation context', async () => {
+      await expect(
+        session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'public prompt' }],
+          },
+          undefined,
+          undefined,
+          'forged model prompt',
+        ),
+      ).rejects.toThrow(
+        'Model-only prompt requires trusted invocation context',
+      );
+      expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('clears the root invocation context from automatic turns', async () => {
       const rootContext: core.InvocationContextV1 = {
         version: 1,
@@ -4050,6 +4486,102 @@ describe('Session', () => {
       expect(notificationSignal?.aborted).toBe(true);
     });
 
+    it('persists an accepted daemon completion before a user prompt can abort its turn', async () => {
+      const noopCompression = {
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: core.CompressionStatus.NOOP,
+      };
+      let notificationSignal: AbortSignal | undefined;
+      mockGeminiClient.tryCompressChat = vi
+        .fn()
+        .mockImplementationOnce(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) => {
+            notificationSignal = signal;
+            await new Promise<void>((resolve) => {
+              signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+            return noopCompression;
+          },
+        )
+        .mockResolvedValue(noopCompression);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-race',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(notificationSignal).toBeDefined());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'interrupt notification' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(notificationSignal?.aborted).toBe(true);
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('preserves Todo Stop Guard lineage for a sent sub-session completion', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'worker-related',
+      });
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      expect(spawn).toBeTypeOf('function');
+      await spawn?.({
+        prompt: 'finish the delegated work',
+        completion: 'sent',
+      });
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-related',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: true });
+
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{
+              taskId: string;
+              continuesTodoStopGuardWorkChain: boolean;
+            }>;
+          }
+        ).notificationQueue,
+      ).toContainEqual(
+        expect.objectContaining({
+          taskId: 'worker-related',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      );
+    });
+
     it('drops oldest background notifications when the queue reaches its cap', () => {
       (
         session as unknown as {
@@ -4083,6 +4615,182 @@ describe('Session', () => {
       expect(queued).toHaveLength(20);
       expect(queued[0]?.taskId).toBe('agent-5');
       expect(queued.at(-1)?.taskId).toBe('agent-24');
+    });
+
+    it('keeps an accepted daemon completion durable across overflow and deduplicates retries', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+      for (let index = 0; index < 20; index++) {
+        callback(
+          `done ${index}`,
+          `<task-notification>${index}</task-notification>`,
+          {
+            agentId: `agent-${index}`,
+            status: 'completed',
+          },
+        );
+      }
+
+      const completion = {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-overflow',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+
+      for (let index = 20; index < 45; index++) {
+        callback(
+          `done ${index}`,
+          `<task-notification>${index}</task-notification>`,
+          {
+            agentId: `agent-${index}`,
+            status: 'completed',
+          },
+        );
+      }
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledTimes(1);
+      const queued = (
+        session as unknown as {
+          notificationQueue: Array<{ taskId: string }>;
+        }
+      ).notificationQueue;
+      expect(
+        queued.filter((item) => item.taskId === completion.taskId),
+      ).toHaveLength(0);
+    });
+
+    it('coalesces concurrent retries while daemon completion persistence is in flight', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+      let finishPersistence!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPersistence = resolve;
+          }),
+      );
+      const completion = {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-concurrent',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+
+      const first = session.enqueueBackgroundNotification(completion);
+      const retry = session.enqueueBackgroundNotification(completion);
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce(),
+      );
+      finishPersistence();
+
+      await expect(Promise.all([first, retry])).resolves.toEqual([
+        { accepted: true },
+        { accepted: true },
+      ]);
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledOnce();
+      const queued = (
+        session as unknown as {
+          notificationQueue: Array<{ taskId: string }>;
+        }
+      ).notificationQueue;
+      expect(
+        queued.filter((item) => item.taskId === completion.taskId),
+      ).toHaveLength(1);
+    });
+
+    it('does not acknowledge a daemon completion when the recorder is inactive', async () => {
+      mockChatRecordingService.recordNotificationStrict.mockRejectedValueOnce(
+        new core.SessionWriterUnavailableError(),
+      );
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-inactive-recorder',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: false });
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{ taskId: string }>;
+          }
+        ).notificationQueue,
+      ).toHaveLength(0);
+    });
+
+    it('deduplicates a daemon completion already persisted before parent reaping', async () => {
+      session.primeTurnFromHistory([
+        {
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: new Date(0).toISOString(),
+          type: 'user',
+          subtype: 'notification',
+          cwd: '/tmp',
+          version: 'test',
+          message: { role: 'user', parts: [{ text: '<task-notification />' }] },
+          systemPayload: {
+            displayText: 'Worker completed.',
+            backgroundTask: {
+              taskId: 'worker-reaped',
+              status: 'completed',
+              kind: 'agent',
+            },
+          },
+        },
+      ]);
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-reaped',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{ taskId: string }>;
+          }
+        ).notificationQueue,
+      ).toHaveLength(0);
     });
 
     it('emits end_turn even when notification error display fails', async () => {
@@ -5749,6 +6457,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -5810,6 +6520,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -5874,6 +6586,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -5916,8 +6630,12 @@ describe('Session', () => {
       it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         // Pin the cap via the config mock — the daemon halts at whatever the
-        // resolved getter returns.
+        // resolved getter returns. An explicit value is a hard cap (core's
+        // released contract), so this turn stops on the call that exceeds it.
         mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(true);
         const functionCalls = Array.from({ length: 102 }, (_, index) => ({
           id: `read_${index}`,
           name: 'read_file',
@@ -5978,88 +6696,781 @@ describe('Session', () => {
         );
       });
 
-      it('does not start unstarted concurrent Agent calls after invalid parameter loop detection', async () => {
+      it('lets a productive turn continue past the default cap (adaptive)', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-        const build = vi.fn().mockImplementation(() => {
-          throw new Error('Invalid subagent_type: bad');
+        // Default cap (100) without an explicit setting: a turn of diverse
+        // calls — the /review orchestrator shape — must not be halted at the
+        // soft cap, mirroring core's adaptive checkTurnToolCallCap.
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 99,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        const calls = Array.from({ length: 5 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: `file_${index}.ts` },
+        }));
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
         });
         mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.AGENT
+          name === 'read_file'
             ? {
-                name: core.ToolNames.AGENT,
-                kind: core.Kind.Think,
-                displayName: 'Agent',
-                description: 'Agent',
-                build,
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
                 canUpdateOutput: false,
-                isOutputMarkdown: true,
+                isOutputMarkdown: false,
               }
             : undefined,
         );
-        const functionCalls: FunctionCall[] = Array.from(
-          { length: 5 },
-          (_, index) => ({
-            id: `agent_${index}`,
-            name: core.ToolNames.AGENT,
-            args: { subagent_type: `bad_${index}` },
-          }),
-        );
-        functionCalls.push({
-          id: 'read_after_loop',
-          name: 'read_file',
-          args: { file_path: 'after-loop.ts' },
-        });
-        const toolLoopState = {
-          totalToolCalls: 0,
-          invalidToolParamErrors: new Map<string, number>(),
-          loopDetected: false,
-        };
+
         const result = await (
           session as unknown as {
             runToolCalls: (
               abortSignal: AbortSignal,
               promptId: string,
-              calls: FunctionCall[],
+              calls: unknown[],
               loopState: typeof toolLoopState,
-            ) => Promise<{
-              parts: Part[];
-              stopAfterPermissionCancel: boolean;
-              loopDetected?: boolean;
-            }>;
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
           }
         ).runToolCalls(
           new AbortController().signal,
-          'prompt-agent-invalid-loop',
-          functionCalls,
+          'prompt-adaptive-cap',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected ?? false).toBe(false);
+        expect(execute).toHaveBeenCalledTimes(5);
+        expect(result.parts).toHaveLength(5);
+      });
+
+      it('does not halt on below-cap repeats while loop detection is skipped (default)', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // Six identical (tool, args) calls below the cap. Core's always-on
+        // consecutive-identical guard (TOOL_CALL_LOOP_THRESHOLD = 5) halts
+        // this exact shape regardless of skipLoopDetection; the daemon
+        // deliberately does not mirror that guard, so the daemon default
+        // must let it run too.
+        const calls = Array.from({ length: 6 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: 'same.ts' },
+        }));
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-below-cap-repeats-default',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected ?? false).toBe(false);
+        expect(execute).toHaveBeenCalledTimes(6);
+        expect(result.parts).toHaveLength(6);
+      });
+
+      it('stops a turn on repeated identical calls below the cap when loop detection is enabled', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        const calls = Array.from({ length: 6 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: 'same.ts' },
+        }));
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-below-cap-repeats-opted-in',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(execute).not.toHaveBeenCalled();
+        expect(
+          result.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 6 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after the same tool call repeated 6 times.',
+          ),
+        );
+      });
+
+      it('accumulates repeat counts across responses against the same loop state', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // The prompt loop calls runToolCalls once per model response against
+        // the same per-prompt loop state (never reset between responses), so
+        // repeats split across responses must accumulate toward the
+        // global-duplicate threshold: a stuck model re-emitting the same call
+        // in separate responses is the shape this mirror exists to catch.
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+        const sessionInternals = session as unknown as {
+          runToolCalls: (
+            abortSignal: AbortSignal,
+            promptId: string,
+            calls: unknown[],
+            loopState: typeof toolLoopState,
+          ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+        };
+        const makeCalls = (idPrefix: string) =>
+          Array.from({ length: 3 }, (_, index) => ({
+            id: `${idPrefix}_${index}`,
+            name: 'read_file',
+            args: { file_path: 'same.ts' },
+          }));
+
+        const first = await sessionInternals.runToolCalls(
+          new AbortController().signal,
+          'prompt-cross-response-repeats',
+          makeCalls('read_a'),
+          toolLoopState,
+        );
+        expect(first.loopDetected ?? false).toBe(false);
+        expect(first.parts).toHaveLength(3);
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(toolLoopState.maxToolCallKeyRepeat).toBe(3);
+
+        const second = await sessionInternals.runToolCalls(
+          new AbortController().signal,
+          'prompt-cross-response-repeats',
+          makeCalls('read_b'),
+          toolLoopState,
+        );
+        expect(second.loopDetected).toBe(true);
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(toolLoopState.maxToolCallKeyRepeat).toBe(6);
+        expect(
+          second.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 3 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after the same tool call repeated 6 times.',
+          ),
+        );
+      });
+
+      it('does not count provider-duplicate copies toward the repeat counters', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // Six identical (tool, args) calls in one batch — three execute, and
+        // three are provider re-sends collapsed into duplicate batches (the
+        // same path as history-served duplicates). Counting the duplicates
+        // would reach GLOBAL_DUPLICATE_THRESHOLD (6) and halt a productive
+        // turn as a false loop; the counters must only see the calls that
+        // actually execute.
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+        const usedIds = new Set<string>();
+        const makeCall = (rawId: string): FunctionCall => {
+          const [part] = core.normalizeModelToolCallIds(
+            [
+              {
+                functionCall: {
+                  id: rawId,
+                  name: 'read_file',
+                  args: { file_path: 'same.ts' },
+                },
+              },
+            ],
+            usedIds,
+            new Set<string>(),
+          );
+          return part.functionCall!;
+        };
+        const calls = [
+          'prov_live_1',
+          'prov_live_2',
+          'prov_live_3',
+          'prov_live_1',
+          'prov_live_2',
+          'prov_live_3',
+        ].map(makeCall);
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-duplicate-copies-excluded',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected ?? false).toBe(false);
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(toolLoopState.totalToolCalls).toBe(3);
+        expect(toolLoopState.maxToolCallKeyRepeat).toBe(3);
+        expect(result.parts).toHaveLength(6);
+        expect(
+          result.parts
+            .slice(3)
+            .map((part) => part.functionResponse?.response?.['error']),
+        ).toEqual(
+          Array.from({ length: 3 }, () =>
+            expect.stringContaining('Duplicate provider tool call id'),
+          ),
+        );
+      });
+
+      it('stops a stuck turn past the soft cap on the cap loop type (adaptive)', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 99,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // One diverse call plus six identical ones push the turn past the
+        // soft cap with the stuck-repetition signal: the adaptive cap halts
+        // on the cap loop type — core's tier order runs checkTurnToolCallCap
+        // before the gated global-duplicate check.
+        const calls = [
+          {
+            id: 'read_other',
+            name: 'read_file',
+            args: { file_path: 'other.ts' },
+          },
+          ...Array.from({ length: 6 }, (_, index) => ({
+            id: `read_${index}`,
+            name: 'read_file',
+            args: { file_path: 'same.ts' },
+          })),
+        ];
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-adaptive-cap-stuck',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(execute).not.toHaveBeenCalled();
+        expect(
+          result.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 7 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after 106 tool calls in one turn.',
+          ),
+        );
+      });
+
+      it('reports the cap loop type when a batch also trips the duplicate check', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        // Opt in so the gated global-duplicate check is live alongside the
+        // always-on cap: a batch that is simultaneously past the cap and at
+        // the duplicate threshold must still halt on the cap loop type,
+        // pinning the cap-first evaluation order (core's always-on tier
+        // evaluates the cap before the gated duplicate check).
+        mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 99,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        const calls = [
+          {
+            id: 'read_other',
+            name: 'read_file',
+            args: { file_path: 'other.ts' },
+          },
+          ...Array.from({ length: 6 }, (_, index) => ({
+            id: `read_${index}`,
+            name: 'read_file',
+            args: { file_path: 'same.ts' },
+          })),
+        ];
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute,
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-adaptive-cap-stuck-opted-in',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(execute).not.toHaveBeenCalled();
+        expect(
+          result.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
+        ).toEqual(
+          Array.from(
+            { length: 7 },
+            () =>
+              'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ),
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after 106 tool calls in one turn.',
+          ),
+        );
+      });
+
+      it('stops a diverse turn at the adaptive hard backstop', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // Adaptive (non-explicit) cap: diverse calls run through the soft
+        // cap, so the hard backstop (soft * 10) is the only signal that
+        // bounds an argument-varying runaway — pin the daemon branch.
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(3);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 29,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        // 29 prior calls + a batch of 2 diverse calls crosses the backstop
+        // of 30: the batch check runs before execution, so the whole batch
+        // is skipped rather than executed past the backstop.
+        const calls = [
+          { id: 'read_a', name: 'read_file', args: { file_path: 'a.ts' } },
+          { id: 'read_b', name: 'read_file', args: { file_path: 'b.ts' } },
+        ];
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: vi.fn().mockResolvedValue({
+                    llmContent: 'ok',
+                    returnDisplay: 'ok',
+                  }),
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-adaptive-hard-backstop',
+          calls,
           toolLoopState,
         );
 
         expect(result.loopDetected).toBe(true);
         expect(
-          result.parts
-            .slice(3)
-            .map((part) => part.functionResponse?.response?.['error']),
+          result.parts.map(
+            (part) => part.functionResponse?.response?.['error'],
+          ),
         ).toEqual([
           'Skipped because loop detection stopped the current turn before this tool call could run.',
           'Skipped because loop detection stopped the current turn before this tool call could run.',
-          'Skipped because loop detection stopped the current turn before this tool call could run.',
-        ]);
-        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
-          'agent_0',
-          'agent_1',
-          'agent_2',
-          'agent_3',
-          'agent_4',
-          'read_after_loop',
         ]);
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
-            'Stopping ACP turn after repeated tool parameter errors',
+            'Stopping ACP turn after 31 tool calls in one turn.',
           ),
         );
       });
 
-      it('stops concurrent Agent batches after Promise.race observes loop detection', async () => {
+      it('detects invalid parameter loops in concurrent Agent batches and skips the calls after the batch', async () => {
+        const previousMaxConcurrency =
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        try {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const build = vi.fn().mockImplementation(() => {
+            throw new Error('Invalid subagent_type: bad');
+          });
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            name === core.ToolNames.AGENT
+              ? {
+                  name: core.ToolNames.AGENT,
+                  kind: core.Kind.Think,
+                  displayName: 'Agent',
+                  description: 'Agent',
+                  build,
+                  canUpdateOutput: false,
+                  isOutputMarkdown: true,
+                }
+              : undefined,
+          );
+          const functionCalls: FunctionCall[] = Array.from(
+            { length: 5 },
+            (_, index) => ({
+              id: `agent_${index}`,
+              name: core.ToolNames.AGENT,
+              args: { subagent_type: `bad_${index}` },
+            }),
+          );
+          functionCalls.push({
+            id: 'read_after_loop',
+            name: 'read_file',
+            args: { file_path: 'after-loop.ts' },
+          });
+          const toolLoopState = {
+            totalToolCalls: 0,
+            invalidToolParamErrors: new Map<string, number>(),
+            toolCallKeyCounts: new Map<string, number>(),
+            maxToolCallKeyRepeat: 0,
+            loopDetected: false,
+          };
+          const result = await (
+            session as unknown as {
+              runToolCalls: (
+                abortSignal: AbortSignal,
+                promptId: string,
+                calls: FunctionCall[],
+                loopState: typeof toolLoopState,
+              ) => Promise<{
+                parts: Part[];
+                stopAfterPermissionCancel: boolean;
+                loopDetected?: boolean;
+              }>;
+            }
+          ).runToolCalls(
+            new AbortController().signal,
+            'prompt-agent-invalid-loop',
+            functionCalls,
+            toolLoopState,
+          );
+
+          expect(result.loopDetected).toBe(true);
+          // Agent-only batches run fully concurrent (no serial prefix), so
+          // every build() throws; the loop is detected on the third failure
+          // and only the calls AFTER the batch stay skipped.
+          expect(
+            result.parts
+              .slice(0, 5)
+              .map((part) => part.functionResponse?.response?.['error']),
+          ).toEqual(
+            Array.from({ length: 5 }, () => 'Invalid subagent_type: bad'),
+          );
+          expect(
+            result.parts
+              .slice(5)
+              .map((part) => part.functionResponse?.response?.['error']),
+          ).toEqual([
+            'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ]);
+          expect(result.parts.map((part) => part.functionResponse?.id)).toEqual(
+            [
+              'agent_0',
+              'agent_1',
+              'agent_2',
+              'agent_3',
+              'agent_4',
+              'read_after_loop',
+            ],
+          );
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Stopping ACP turn after repeated tool parameter errors',
+            ),
+          );
+        } finally {
+          if (previousMaxConcurrency === undefined) {
+            delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          } else {
+            process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+              previousMaxConcurrency;
+          }
+        }
+      });
+
+      it('detects invalid parameter loops in small concurrent Agent batches', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         const build = vi.fn().mockImplementation(() => {
           throw new Error('Invalid subagent_type: bad');
@@ -6084,6 +7495,8 @@ describe('Session', () => {
         const toolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
           loopDetected: false,
         };
 
@@ -6114,6 +7527,124 @@ describe('Session', () => {
           'agent_1',
           'agent_2',
         ]);
+      });
+
+      it('detects invalid parameter loops in Agent batches wider than the concurrency cap and skips the unstarted tail', async () => {
+        const previousMaxConcurrency =
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
+        try {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const tailExecute = vi.fn();
+          const build = vi
+            .fn()
+            .mockImplementation((args: Record<string, unknown>) => {
+              // The tail calls build fine; they must never reach execute()
+              // because the loop skips the unstarted tail.
+              if (String(args['subagent_type']).startsWith('tail_')) {
+                return {
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('agent'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: tailExecute,
+                };
+              }
+              throw new Error('Invalid subagent_type: bad');
+            });
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            name === core.ToolNames.AGENT
+              ? {
+                  name: core.ToolNames.AGENT,
+                  kind: core.Kind.Think,
+                  displayName: 'Agent',
+                  description: 'Agent',
+                  build,
+                  canUpdateOutput: false,
+                  isOutputMarkdown: true,
+                }
+              : undefined,
+          );
+          const functionCalls: FunctionCall[] = [
+            ...Array.from({ length: 4 }, (_, index) => ({
+              id: `agent_${index}`,
+              name: core.ToolNames.AGENT,
+              args: { subagent_type: `bad_${index}` },
+            })),
+            ...Array.from({ length: 2 }, (_, index) => ({
+              id: `agent_tail_${index}`,
+              name: core.ToolNames.AGENT,
+              args: { subagent_type: `tail_${index}` },
+            })),
+          ];
+          const toolLoopState = {
+            totalToolCalls: 0,
+            invalidToolParamErrors: new Map<string, number>(),
+            toolCallKeyCounts: new Map<string, number>(),
+            maxToolCallKeyRepeat: 0,
+            loopDetected: false,
+          };
+
+          const result = await (
+            session as unknown as {
+              runToolCalls: (
+                abortSignal: AbortSignal,
+                promptId: string,
+                calls: FunctionCall[],
+                loopState: typeof toolLoopState,
+              ) => Promise<{
+                parts: Part[];
+                stopAfterPermissionCancel: boolean;
+                loopDetected?: boolean;
+              }>;
+            }
+          ).runToolCalls(
+            new AbortController().signal,
+            'prompt-agent-wide-batch-loop',
+            functionCalls,
+            toolLoopState,
+          );
+
+          expect(result.loopDetected).toBe(true);
+          // The batch runs in windows of two; the third build() failure
+          // trips the invalid-params threshold in the second window, and
+          // the never-started tail is skipped instead of executing.
+          expect(tailExecute).not.toHaveBeenCalled();
+          expect(
+            result.parts
+              .slice(0, 4)
+              .map((part) => part.functionResponse?.response?.['error']),
+          ).toEqual(
+            Array.from({ length: 4 }, () => 'Invalid subagent_type: bad'),
+          );
+          expect(
+            result.parts
+              .slice(4)
+              .map((part) => part.functionResponse?.response?.['error']),
+          ).toEqual([
+            'Skipped because loop detection stopped the current turn before this tool call could run.',
+            'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ]);
+          expect(result.parts.map((part) => part.functionResponse?.id)).toEqual(
+            [
+              'agent_0',
+              'agent_1',
+              'agent_2',
+              'agent_3',
+              'agent_tail_0',
+              'agent_tail_1',
+            ],
+          );
+        } finally {
+          if (previousMaxConcurrency === undefined) {
+            delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          } else {
+            process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+              previousMaxConcurrency;
+          }
+        }
       });
 
       it('clears duplicate provider id tracking between ACP prompts', async () => {
@@ -6210,6 +7741,8 @@ describe('Session', () => {
               loopState: {
                 totalToolCalls: number;
                 invalidToolParamErrors: Map<string, number>;
+                toolCallKeyCounts: Map<string, number>;
+                maxToolCallKeyRepeat: number;
                 loopDetected: boolean;
               },
             ) => Promise<unknown>;
@@ -6221,6 +7754,8 @@ describe('Session', () => {
           {
             totalToolCalls: 0,
             invalidToolParamErrors: new Map(),
+            toolCallKeyCounts: new Map<string, number>(),
+            maxToolCallKeyRepeat: 0,
             loopDetected: false,
           },
         );
@@ -12627,6 +14162,135 @@ describe('Session', () => {
       );
     });
 
+    it('never requests ACP permission for the trusted Live Appshot tool', async () => {
+      const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      const screenshotPath = path.join(directory, `${randomUUID()}.png`);
+      await fs.writeFile(
+        screenshotPath,
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]),
+      );
+      const registered = new Map<string, core.AnyDeclarativeTool>();
+      mockToolRegistry.registerTool = vi.fn((tool) => {
+        registered.set(tool.name, tool);
+      });
+      mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
+      mockClient.extMethod = vi.fn().mockResolvedValue({
+        appName: 'Safari',
+        accessibilityText: 'AXWindow',
+        screenshotPath,
+      });
+      await session.enableLiveScreenContext();
+      const permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+        hasRelevantRules: vi.fn().mockReturnValue(true),
+        evaluate: vi.fn().mockResolvedValue('ask'),
+        hasMatchingAskRule: vi.fn().mockReturnValue(true),
+        findMatchingDenyRule: vi.fn(),
+      };
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue(permissionManager);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-live-appshot',
+                  name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+                  args: {},
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '看看当前页面' }],
+        });
+
+        expect(permissionManager.isToolEnabled).not.toHaveBeenCalled();
+        expect(permissionManager.evaluate).not.toHaveBeenCalled();
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          'qwen/control/live/capture-screen-context',
+          { callerSessionId: 'test-session-id' },
+        );
+      } finally {
+        await fs.unlink(screenshotPath).catch(() => undefined);
+      }
+    });
+
+    it('keeps ordinary Live tools on the normal ACP permission path', async () => {
+      const registered = new Map<string, core.AnyDeclarativeTool>();
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      });
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const ordinaryTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read a file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/private' },
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'info',
+            title: 'Read file',
+            prompt: 'Allow reading this file?',
+            onConfirm,
+          }),
+          getDescription: vi.fn().mockReturnValue('Read /tmp/private'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      } as unknown as core.AnyDeclarativeTool;
+      registered.set(ordinaryTool.name, ordinaryTool);
+      mockToolRegistry.registerTool = vi.fn((tool) => {
+        registered.set(tool.name, tool);
+      });
+      mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
+      await session.enableLiveScreenContext();
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-live-read-file',
+                  name: 'read_file',
+                  args: { path: '/tmp/private' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '读取文件' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(onConfirm).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
     it('emits terminalSequence returned by permission notification hooks over ACP', async () => {
       const notificationHookSpy = vi
         .spyOn(core, 'fireNotificationHook')
@@ -13614,45 +15278,230 @@ describe('Session', () => {
       );
     });
 
-    it('keeps exit_plan_mode in PLAN until ACP approval executes and then notifies once', async () => {
-      let mode = ApprovalMode.PLAN;
-      const hookSpy = vi
-        .spyOn(core, 'firePermissionRequestHook')
-        .mockResolvedValue({
-          hasDecision: true,
-          shouldAllow: true,
-          updatedInput: { plan: 'Hook-replaced plan' },
-          denyMessage: undefined,
+    it.each([
+      ['live update', 'live', true],
+      ['history replay', 'replay', false],
+      ['failed replacement', 'failed', false],
+      ['mode transition', 'cleared', false],
+      ['empty plan update', 'empty-entries', false],
+      ['plan update without identity', 'missing-meta', false],
+    ] as const)(
+      'keeps exit_plan_mode approval revision correct after %s',
+      async (_label, revisionSource, expectsRevision) => {
+        let mode = ApprovalMode.PLAN;
+        const hookSpy = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: true,
+            updatedInput: { plan: 'Hook-replaced plan' },
+            denyMessage: undefined,
+          });
+        const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+        const executeSpy = vi.fn().mockImplementation(async () => {
+          const updatesBeforeExecute = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.filter(
+              ([params]) =>
+                params.update.sessionUpdate === 'current_mode_update',
+            );
+          expect(mode).toBe(ApprovalMode.PLAN);
+          expect(updatesBeforeExecute).toHaveLength(0);
+          mode = ApprovalMode.DEFAULT;
+          return { llmContent: 'approved', returnDisplay: 'approved' };
         });
-      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
-      const executeSpy = vi.fn().mockImplementation(async () => {
-        const updatesBeforeExecute = vi
+        const invocation = {
+          params: { plan: 'Original plan' },
+          requiresUserInteraction: vi.fn().mockReturnValue(true),
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'plan',
+            title: 'Approve plan',
+            plan: 'Original plan',
+            hideAlwaysAllow: true,
+            onConfirm: onConfirmSpy,
+          }),
+          getDescription: vi.fn().mockReturnValue('Plan:'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        const tool = {
+          name: core.ToolNames.EXIT_PLAN_MODE,
+          kind: core.Kind.Think,
+          build: vi.fn().mockReturnValue(invocation),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn(() => mode);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-exit-plan',
+                    name: core.ToolNames.EXIT_PLAN_MODE,
+                    args: { plan: 'Original plan' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+        const planUpdate: SessionUpdate = {
+          sessionUpdate: 'plan',
+          entries: [
+            {
+              content: 'Ship',
+              priority: 'medium',
+              status: 'pending',
+            },
+          ],
+          _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'todo-call-1' },
+          },
+        };
+        if (revisionSource === 'replay') {
+          // A reloaded session replays the previous cycle's todo_write result;
+          // the replayed plan update must not bind the next approval.
+          await session.replayHistory([
+            chatRecord({
+              uuid: 'todo-exec-1',
+              type: 'tool_result',
+              message: {
+                parts: [
+                  {
+                    functionResponse: {
+                      name: core.ToolNames.TODO_WRITE,
+                      id: 'stale-call',
+                      response: {},
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'stale-call',
+                resultDisplay: {
+                  type: 'todo_list',
+                  planId: 'stale-plan',
+                  todos: [
+                    { id: '1', content: 'Done task', status: 'completed' },
+                  ],
+                },
+              },
+            }),
+          ]);
+        } else if (revisionSource === 'empty-entries') {
+          await session.sendUpdate({ ...planUpdate, entries: [] });
+        } else if (revisionSource === 'missing-meta') {
+          await session.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: planUpdate.entries,
+          });
+        } else {
+          await session.sendUpdate(planUpdate);
+        }
+        if (revisionSource === 'failed') {
+          vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
+            new Error('connection lost'),
+          );
+          await expect(
+            session.sendUpdate({
+              ...planUpdate,
+              _meta: {
+                qwenTodoPlan: { id: 'plan-2' },
+                qwenTranscript: { planToolCallId: 'todo-call-2' },
+              },
+            }),
+          ).rejects.toThrow('connection lost');
+        }
+        if (revisionSource === 'cleared') {
+          session.clearActiveTodoPlanRevision();
+        }
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'approve the plan' }],
+          });
+        } finally {
+          hookSpy.mockRestore();
+        }
+
+        expect(mockClient.requestPermission).toHaveBeenCalledWith(
+          expect.objectContaining({
+            options: [
+              expect.objectContaining({
+                kind: 'allow_once',
+                optionId: core.ToolConfirmationOutcome.RestorePrevious,
+              }),
+              expect.objectContaining({
+                kind: 'allow_always',
+                optionId: core.ToolConfirmationOutcome.ProceedAlways,
+              }),
+              expect.objectContaining({
+                kind: 'allow_once',
+                optionId: core.ToolConfirmationOutcome.ProceedOnce,
+              }),
+              expect.objectContaining({
+                kind: 'reject_once',
+                optionId: core.ToolConfirmationOutcome.Cancel,
+              }),
+            ],
+            toolCall: expect.objectContaining({
+              kind: 'switch_mode',
+              rawInput: { plan: 'Original plan' },
+              _meta: expectsRevision
+                ? expect.objectContaining({
+                    qwenTodoApproval: {
+                      planId: 'plan-1',
+                      sourceCallId: 'todo-call-1',
+                    },
+                  })
+                : expect.not.objectContaining({
+                    qwenTodoApproval: expect.anything(),
+                  }),
+            }),
+          }),
+        );
+        expect(onConfirmSpy).toHaveBeenCalledWith(
+          core.ToolConfirmationOutcome.ProceedOnce,
+          { answers: undefined },
+        );
+        expect(invocation.params).toEqual({ plan: 'Original plan' });
+        const modeUpdates = vi
           .mocked(mockClient.sessionUpdate)
           .mock.calls.filter(
             ([params]) => params.update.sessionUpdate === 'current_mode_update',
           );
-        expect(mode).toBe(ApprovalMode.PLAN);
-        expect(updatesBeforeExecute).toHaveLength(0);
-        mode = ApprovalMode.DEFAULT;
-        return { llmContent: 'approved', returnDisplay: 'approved' };
+        expect(modeUpdates).toHaveLength(1);
+        expect(modeUpdates[0]?.[0].update).toMatchObject({
+          currentModeId: ApprovalMode.DEFAULT,
+        });
+      },
+    );
+
+    it('clears the captured revision when enter_plan_mode execution enters plan mode', async () => {
+      let mode = ApprovalMode.DEFAULT;
+      const executeSpy = vi.fn().mockImplementation(async () => {
+        mode = ApprovalMode.PLAN;
+        return { llmContent: 'entered', returnDisplay: 'entered' };
       });
       const invocation = {
-        params: { plan: 'Original plan' },
-        requiresUserInteraction: vi.fn().mockReturnValue(true),
-        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
-        getConfirmationDetails: vi.fn().mockResolvedValue({
-          type: 'plan',
-          title: 'Approve plan',
-          plan: 'Original plan',
-          hideAlwaysAllow: true,
-          onConfirm: onConfirmSpy,
-        }),
-        getDescription: vi.fn().mockReturnValue('Plan:'),
+        params: {},
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn(),
+        getDescription: vi.fn().mockReturnValue('Enter plan mode'),
         toolLocations: vi.fn().mockReturnValue([]),
         execute: executeSpy,
       };
       const tool = {
-        name: core.ToolNames.EXIT_PLAN_MODE,
+        name: core.ToolNames.ENTER_PLAN_MODE,
         kind: core.Kind.Think,
         build: vi.fn().mockReturnValue(invocation),
       };
@@ -13660,7 +15509,7 @@ describe('Session', () => {
       mockToolRegistry.getTool.mockReturnValue(tool);
       mockConfig.getApprovalMode = vi.fn(() => mode);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         createStreamWithChunks([
@@ -13669,65 +15518,38 @@ describe('Session', () => {
             value: {
               functionCalls: [
                 {
-                  id: 'call-exit-plan',
-                  name: core.ToolNames.EXIT_PLAN_MODE,
-                  args: { plan: 'Original plan' },
+                  id: 'call-enter-plan',
+                  name: core.ToolNames.ENTER_PLAN_MODE,
+                  args: {},
                 },
               ],
             },
           },
         ]),
       );
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'Old cycle', priority: 'medium', status: 'pending' },
+        ],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
 
-      try {
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'approve the plan' }],
-        });
-      } finally {
-        hookSpy.mockRestore();
-      }
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'plan this' }],
+      });
 
-      expect(mockClient.requestPermission).toHaveBeenCalledWith(
-        expect.objectContaining({
-          options: [
-            expect.objectContaining({
-              kind: 'allow_once',
-              optionId: core.ToolConfirmationOutcome.RestorePrevious,
-            }),
-            expect.objectContaining({
-              kind: 'allow_always',
-              optionId: core.ToolConfirmationOutcome.ProceedAlways,
-            }),
-            expect.objectContaining({
-              kind: 'allow_once',
-              optionId: core.ToolConfirmationOutcome.ProceedOnce,
-            }),
-            expect.objectContaining({
-              kind: 'reject_once',
-              optionId: core.ToolConfirmationOutcome.Cancel,
-            }),
-          ],
-          toolCall: expect.objectContaining({
-            kind: 'switch_mode',
-            rawInput: { plan: 'Original plan' },
-          }),
+      expect(executeSpy).toHaveBeenCalled();
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
         }),
       );
-      expect(onConfirmSpy).toHaveBeenCalledWith(
-        core.ToolConfirmationOutcome.ProceedOnce,
-        { answers: undefined },
-      );
-      expect(invocation.params).toEqual({ plan: 'Original plan' });
-      const modeUpdates = vi
-        .mocked(mockClient.sessionUpdate)
-        .mock.calls.filter(
-          ([params]) => params.update.sessionUpdate === 'current_mode_update',
-        );
-      expect(modeUpdates).toHaveLength(1);
-      expect(modeUpdates[0]?.[0].update).toMatchObject({
-        currentModeId: ApprovalMode.DEFAULT,
-      });
     });
 
     it('routes ACP protected L4 allow writes through AUTO review', async () => {
@@ -15800,6 +17622,144 @@ describe('Session', () => {
         expect(ids).toEqual(['call-a', 'call-b']);
       });
 
+      it.each([core.ToolNames.AGENT, 'task'])(
+        'starts every %s call of a fan-out concurrently, past the loop-detection threshold',
+        async (callName) => {
+          const previousMaxConcurrency =
+            process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          try {
+            // Regression: the daemon once serialized the first three calls of a
+            // large batch before widening concurrency, which stretched /review
+            // fan-outs into several serial multi-minute agent runs. All five
+            // calls here must reach execute() before any result resolves; under
+            // the old serial prefix the fourth would not start until one of the
+            // first three finished, and the race below reports that regression
+            // with a named assertion instead of an opaque vitest timeout. The
+            // `task` variant pins the legacy-alias branch of the agent
+            // classifier: an aliased fan-out must still land in one concurrent
+            // batch, not drop back onto the serial path.
+            type Deferred<T> = {
+              promise: Promise<T>;
+              resolve: (v: T) => void;
+            };
+            const makeDeferred = <T>(): Deferred<T> => {
+              let resolve!: (v: T) => void;
+              const promise = new Promise<T>((r) => {
+                resolve = r;
+              });
+              return { promise, resolve };
+            };
+
+            const ids = ['call-a', 'call-b', 'call-c', 'call-d', 'call-e'];
+            const called: Record<string, Deferred<void>> = {};
+            const result: Record<string, Deferred<core.ToolResult>> = {};
+            for (const id of ids) {
+              called[id] = makeDeferred<void>();
+              result[id] = makeDeferred<core.ToolResult>();
+            }
+
+            const agentTool = {
+              name: core.ToolNames.AGENT,
+              kind: core.Kind.Think,
+              build: vi
+                .fn()
+                .mockImplementation((args: Record<string, unknown>) => {
+                  const id = args['_test_id'] as string;
+                  return {
+                    params: args,
+                    eventEmitter: undefined,
+                    getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                    getDescription: vi.fn().mockReturnValue(`agent ${id}`),
+                    toolLocations: vi.fn().mockReturnValue([]),
+                    execute: vi.fn().mockImplementation(() => {
+                      called[id].resolve();
+                      return result[id].promise;
+                    }),
+                  };
+                }),
+            };
+
+            mockToolRegistry.getTool.mockImplementation((name: string) =>
+              name === callName ? agentTool : undefined,
+            );
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.DEFAULT);
+            mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+
+            const sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      functionCalls: ids.map((id) => ({
+                        id,
+                        name: callName,
+                        args: { _test_id: id, subagent_type: 'explore' },
+                      })),
+                    },
+                  },
+                ]),
+              )
+              .mockResolvedValueOnce(createEmptyStream());
+            mockChat.sendMessageStream = sendMessageStream;
+
+            const promptPromise = session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'spawn five agents' }],
+            });
+
+            let fanOutTimer: ReturnType<typeof setTimeout> | undefined;
+            const fanOutDeadline = new Promise<never>((_, reject) => {
+              fanOutTimer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      'Agent fan-out did not start concurrently ' +
+                        '(serial-prefix regression).',
+                    ),
+                  ),
+                10_000,
+              );
+            });
+            await Promise.race([
+              Promise.all(ids.map((id) => called[id].promise)),
+              fanOutDeadline,
+            ]);
+            clearTimeout(fanOutTimer);
+
+            for (const id of ids) {
+              result[id].resolve({
+                llmContent: `${id}-done`,
+                returnDisplay: id,
+              });
+            }
+
+            await promptPromise;
+
+            expect(sendMessageStream).toHaveBeenCalledTimes(2);
+            const followUp = sendMessageStream.mock.calls[1][1] as {
+              message: Array<{ functionResponse?: { id?: string } }>;
+            };
+            expect(
+              followUp.message
+                .filter((p) => p.functionResponse)
+                .map((p) => p.functionResponse?.id),
+            ).toEqual(ids);
+          } finally {
+            if (previousMaxConcurrency === undefined) {
+              delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+            } else {
+              process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+                previousMaxConcurrency;
+            }
+          }
+        },
+      );
+
       it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
         const previousMaxConcurrency =
           process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
@@ -16435,11 +18395,7 @@ describe('Session', () => {
         abortSignal: AbortSignal,
         promptId: string,
         functionCalls: FunctionCall[],
-        toolLoopState?: {
-          totalToolCalls: number;
-          invalidToolParamErrors: Map<string, number>;
-          loopDetected: boolean;
-        },
+        toolLoopState?: DaemonToolLoopState,
         onFullTurnModel?: (model: string) => boolean,
       ) => Promise<{
         parts: Part[];
@@ -18253,6 +20209,149 @@ describe('Session', () => {
       );
     });
 
+    async function markAcpContextRefreshIntent() {
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [{ text: 'Remember this fact.' }],
+        refreshContextFilesOnWrite: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/remember fact' }],
+      });
+    }
+
+    function allowAcpWriteFile() {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote file',
+        returnDisplay: 'wrote file',
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.WRITE_FILE, execute),
+      );
+    }
+
+    async function runAcpWriteFile(
+      filePath: string,
+      promptId: string,
+      callId = 'write_context',
+    ) {
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        promptId,
+        [
+          {
+            id: callId,
+            name: core.ToolNames.WRITE_FILE,
+            args: { file_path: filePath },
+          },
+        ],
+      );
+    }
+
+    it('refreshes context-file instructions after ACP bare remember writes QWEN.md', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryAfterManagedWriteSpy.mockClear();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile('/repo/QWEN.md', 'prompt-context-write');
+
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryInstructionSpy).toHaveBeenCalledWith(mockConfig, {
+        logContext:
+          'ACP session test-session-id context-file memory tool batch',
+      });
+    });
+
+    it('keeps refreshing context-file instructions for later ACP writes in a marked turn', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/QWEN.md',
+        'prompt-context-write-1',
+        'write_context_1',
+      );
+      await runAcpWriteFile(
+        '/repo/QWEN.md',
+        'prompt-context-write-2',
+        'write_context_2',
+      );
+
+      expect(refreshMemoryInstructionSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not refresh context-file instructions for marked ACP writes to other files', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryAfterManagedWriteSpy.mockClear();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/notes.md',
+        'prompt-notes-write',
+        'write_notes',
+      );
+
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
+    });
+
+    it('clears unmatched context-file refresh intent on the next ordinary ACP turn', async () => {
+      await markAcpContextRefreshIntent();
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/notes.md',
+        'prompt-notes-write',
+        'write_notes',
+      );
+
+      refreshMemoryInstructionSpy.mockClear();
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ordinary turn' }],
+      });
+      await runAcpWriteFile('/repo/QWEN.md', 'prompt-ordinary-context-write');
+
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh context-file instructions for ordinary ACP QWEN.md writes', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote context',
+        returnDisplay: 'wrote context',
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.WRITE_FILE, execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-ordinary-context-write',
+        [
+          {
+            id: 'write_context',
+            name: core.ToolNames.WRITE_FILE,
+            args: { file_path: '/repo/QWEN.md' },
+          },
+        ],
+      );
+
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
+    });
+
     it('does not fire PostToolBatch hooks from the ACP session path', async () => {
       const messageBus = {
         request: vi.fn().mockImplementation(async (request) => ({
@@ -18584,6 +20683,8 @@ describe('Session', () => {
       const toolLoopState = {
         totalToolCalls: 0,
         invalidToolParamErrors: new Map<string, number>(),
+        toolCallKeyCounts: new Map<string, number>(),
+        maxToolCallKeyRepeat: 0,
         loopDetected: false,
       };
 
@@ -19267,89 +21368,224 @@ describe('Session', () => {
       expect(siblingSignal?.aborted).toBe(true);
     });
 
-    it('aborts sibling Agent calls in the same batch after loop detection', async () => {
-      let firstSiblingSignal: AbortSignal | undefined;
-      let secondSiblingSignal: AbortSignal | undefined;
-      const firstSiblingExecute = vi
-        .fn()
-        .mockImplementation(async (signal: AbortSignal) => {
-          firstSiblingSignal = signal;
-          await waitForAbortOrTick(signal);
-          return {
-            llmContent: 'first sibling stopped',
-            returnDisplay: 'first sibling stopped',
-          };
+    it('lets sibling Agent calls in a small batch finish when loop detection fires', async () => {
+      const previousMaxConcurrency =
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      try {
+        let firstSiblingSignal: AbortSignal | undefined;
+        let secondSiblingSignal: AbortSignal | undefined;
+        const firstSiblingExecute = vi
+          .fn()
+          .mockImplementation(async (signal: AbortSignal) => {
+            firstSiblingSignal = signal;
+            await waitForAbortOrTick(signal);
+            return {
+              llmContent: 'first sibling stopped',
+              returnDisplay: 'first sibling stopped',
+            };
+          });
+        const secondSiblingExecute = vi
+          .fn()
+          .mockImplementation(async (signal: AbortSignal) => {
+            secondSiblingSignal = signal;
+            await waitForAbortOrTick(signal);
+            return {
+              llmContent: 'second sibling stopped',
+              returnDisplay: 'second sibling stopped',
+            };
+          });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            if (args['_test_id'] === 'invalid') {
+              throw new Error('Invalid subagent_type: bad');
+            }
+            const isFirstSibling = args['_test_id'] === 'sibling_1';
+            return {
+              params: { subagent_type: 'explore', ...args },
+              eventEmitter: new EventEmitter(),
+              execute: isFirstSibling
+                ? firstSiblingExecute
+                : secondSiblingExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Agent'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            };
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
         });
-      const secondSiblingExecute = vi
-        .fn()
-        .mockImplementation(async (signal: AbortSignal) => {
-          secondSiblingSignal = signal;
-          await waitForAbortOrTick(signal);
-          return {
-            llmContent: 'second sibling stopped',
-            returnDisplay: 'second sibling stopped',
-          };
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-loop-abort',
+          [
+            {
+              id: 'agent_invalid',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'invalid', subagent_type: 'bad' },
+            },
+            {
+              id: 'agent_sibling_1',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'sibling_1', subagent_type: 'explore' },
+            },
+            {
+              id: 'agent_sibling_2',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'sibling_2', subagent_type: 'explore' },
+            },
+          ],
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(firstSiblingExecute).toHaveBeenCalledOnce();
+        expect(secondSiblingExecute).toHaveBeenCalledOnce();
+        // Agent-only batches run at full width (no serial prefix), so a batch
+        // this size never hits the capped race branch: the loop fired by the
+        // invalid call stops the turn without aborting mid-flight siblings —
+        // they finish and their results are kept instead of being killed.
+        expect(firstSiblingSignal?.aborted).toBe(false);
+        expect(secondSiblingSignal?.aborted).toBe(false);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_invalid',
+          'agent_sibling_1',
+          'agent_sibling_2',
+        ]);
+      } finally {
+        if (previousMaxConcurrency === undefined) {
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        } else {
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+            previousMaxConcurrency;
+        }
+      }
+    });
+
+    it('lets in-flight Agent calls of a wide batch finish when loop detection fires', async () => {
+      const previousMaxConcurrency =
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
+      try {
+        let inFlightSignal: AbortSignal | undefined;
+        const inFlightExecute = vi
+          .fn()
+          .mockImplementation(async (signal: AbortSignal) => {
+            inFlightSignal = signal;
+            await waitForAbortOrTick(signal);
+            return {
+              llmContent: 'in-flight sibling finished',
+              returnDisplay: 'in-flight sibling finished',
+            };
+          });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            if (args['_test_id'] === 'invalid') {
+              throw new Error('Invalid subagent_type: bad');
+            }
+            return {
+              params: { subagent_type: 'explore', ...args },
+              eventEmitter: new EventEmitter(),
+              execute: inFlightExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Agent'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            };
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
         });
-      mockToolRegistry.getTool.mockReturnValue({
-        name: core.ToolNames.AGENT,
-        kind: core.Kind.Think,
-        displayName: 'Agent',
-        description: 'Agent',
-        build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
-          if (args['_test_id'] === 'invalid') {
-            throw new Error('Invalid subagent_type: bad');
-          }
-          const isFirstSibling = args['_test_id'] === 'sibling_1';
-          return {
-            params: { subagent_type: 'explore', ...args },
-            eventEmitter: new EventEmitter(),
-            execute: isFirstSibling
-              ? firstSiblingExecute
-              : secondSiblingExecute,
-            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-            getDescription: vi.fn().mockReturnValue('Agent'),
-            toolLocations: vi.fn().mockReturnValue([]),
-          };
-        }),
-        canUpdateOutput: false,
-        isOutputMarkdown: true,
-      });
-      const toolLoopState = {
-        totalToolCalls: 0,
-        invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
-        loopDetected: false,
-      };
+        const toolLoopState = {
+          totalToolCalls: 0,
+          // Two prior invalid-param errors: the first failure in this batch
+          // trips the threshold of three while the sibling shares the
+          // concurrency window, forcing the capped race branch.
+          invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
 
-      const result = await (
-        session as unknown as ToolCallInternals
-      ).runToolCalls(
-        new AbortController().signal,
-        'prompt-agent-loop-abort',
-        [
-          {
-            id: 'agent_invalid',
-            name: core.ToolNames.AGENT,
-            args: { _test_id: 'invalid', subagent_type: 'bad' },
-          },
-          {
-            id: 'agent_sibling_1',
-            name: core.ToolNames.AGENT,
-            args: { _test_id: 'sibling_1', subagent_type: 'explore' },
-          },
-          {
-            id: 'agent_sibling_2',
-            name: core.ToolNames.AGENT,
-            args: { _test_id: 'sibling_2', subagent_type: 'explore' },
-          },
-        ],
-        toolLoopState,
-      );
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-wide-loop-keep-results',
+          [
+            {
+              id: 'agent_invalid',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'invalid', subagent_type: 'bad' },
+            },
+            {
+              id: 'agent_in_flight',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'in_flight', subagent_type: 'explore' },
+            },
+            {
+              id: 'agent_tail_1',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'tail_1', subagent_type: 'explore' },
+            },
+            {
+              id: 'agent_tail_2',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'tail_2', subagent_type: 'explore' },
+            },
+          ],
+          toolLoopState,
+        );
 
-      expect(result.loopDetected).toBe(true);
-      expect(firstSiblingExecute).toHaveBeenCalledOnce();
-      expect(secondSiblingExecute).toHaveBeenCalledOnce();
-      expect(firstSiblingSignal?.aborted).toBe(true);
-      expect(secondSiblingSignal?.aborted).toBe(true);
+        expect(result.loopDetected).toBe(true);
+        expect(inFlightExecute).toHaveBeenCalledOnce();
+        // The race branch for batches at/over the cap must behave like the
+        // narrow-batch path above: the in-flight sibling is not aborted —
+        // it settles and its result is kept — while the unstarted tail is
+        // skipped.
+        expect(inFlightSignal?.aborted).toBe(false);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_invalid',
+          'agent_in_flight',
+          'agent_tail_1',
+          'agent_tail_2',
+        ]);
+        expect(
+          result.parts[1].functionResponse?.response?.['error'],
+        ).toBeUndefined();
+        expect(
+          result.parts
+            .slice(2)
+            .map((part) => part.functionResponse?.response?.['error']),
+        ).toEqual([
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+        ]);
+      } finally {
+        if (previousMaxConcurrency === undefined) {
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        } else {
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+            previousMaxConcurrency;
+        }
+      }
     });
 
     it('does not treat parent abort during nested Agent permission as explicit rejection', async () => {

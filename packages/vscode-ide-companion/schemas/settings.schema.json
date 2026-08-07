@@ -681,12 +681,12 @@
           "default": false
         },
         "skipLoopDetection": {
-          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap, see model.maxToolCallsPerTurn) still runs regardless of this setting.",
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard.",
           "type": "boolean",
           "default": true
         },
         "maxToolCallsPerTurn": {
-          "description": "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to both the interactive TUI and non-interactive (-p / JSON / stream-JSON) core-client runs; the daemon/ACP path always treats the value as a hard cap. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "description": "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
           "type": "integer",
           "default": 100
         },
@@ -727,7 +727,7 @@
               "minimum": 1
             },
             "enableCacheControl": {
-              "description": "Enable cache control for DashScope providers.",
+              "description": "Enable provider prompt-cache controls.",
               "type": "boolean",
               "default": true
             },
@@ -857,7 +857,7 @@
               "description": "Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1."
             },
             "toolResultsTotalCharsThreshold": {
-              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
+              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. When exceeded, oldest results are cleared down to half this threshold (best effort) to preserve the provider prompt cache on later turns. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
               "type": "number",
               "default": 500000
             }
@@ -1427,6 +1427,14 @@
           "description": "When true, HTTP hooks may target private/link-local IP ranges (the SSRF IP-range checks are skipped). Cloud metadata hostnames (e.g. 169.254.169.254, metadata.google.internal) remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot self-grant this bypass. Enable only in trusted, managed environments, and pair with security.allowedHttpHookUrls.",
           "type": "boolean",
           "default": false
+        },
+        "allowedInsecureVoiceBaseUrls": {
+          "description": "Complete voice base URLs that may use HTTP or private-network addresses. Entries must include an explicit http:// or https:// scheme and the full provider path; only URL serialization and trailing slashes are normalized. Wildcards are not supported; metadata, link-local, local-use NAT64, 6to4, and Teredo addresses remain blocked even when listed, as do hostnames that resolve to loopback; IPv4-mapped, IPv4-compatible, and well-known NAT64 (64:ff9b::/96) literals are classified by their embedded IPv4 address. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. Enable only for trusted endpoints in managed private networks. Cleartext HTTP also exposes the provider API key transmitted in the Authorization header. An allowlisted hostname is only as trustworthy as its DNS; prefer IP-literal entries when the gateway address is stable.",
+          "type": "array",
+          "items": {
+            "description": "Complete voice provider base URL with explicit scheme and full path (no wildcards)",
+            "type": "string"
+          }
         }
       }
     },
@@ -3323,6 +3331,42 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "liveVoice": {
+          "description": "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable experimental realtime voice conversations on macOS WebShell.",
+              "type": "boolean",
+              "default": false
+            },
+            "apiKey": {
+              "description": "Dedicated DashScope API key for qwen3.5-omni-plus-realtime.",
+              "type": "string",
+              "default": ""
+            },
+            "model": {
+              "description": "Upstream Realtime model used for Live Voice.",
+              "type": "string",
+              "default": "qwen3.5-omni-plus-realtime"
+            },
+            "endpoint": {
+              "description": "Advanced override for the DashScope Realtime WebSocket endpoint.",
+              "type": "string",
+              "default": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+            },
+            "voice": {
+              "description": "Voice used for Realtime model audio output.",
+              "type": "string",
+              "default": "Tina"
+            },
+            "shortcut": {
+              "description": "Electron accelerator registered globally by Qwen Live Host.",
+              "type": "string",
+              "default": "Command+E"
+            }
+          }
+        },
         "sessionWorkflow": {
           "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.",
           "type": "boolean",

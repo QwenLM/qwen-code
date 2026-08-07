@@ -450,6 +450,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       return false;
     }
 
+    // An executor-boundary guard authorizes one concrete invocation attempt.
+    // A transport error is ambiguous: the MCP server may have applied the
+    // side effect before its response was lost. Reusing the original allow
+    // decision for an internal reconnect would turn one authorization into
+    // multiple execution attempts, so guarded invocations fail closed.
+    if (this.cliConfig?.getToolInvocationGuard?.()) {
+      return false;
+    }
+
     if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
       return true;
     }

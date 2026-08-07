@@ -6,7 +6,6 @@ export { GithubChannel };
 export const plugin: ChannelPlugin = {
   channelType: 'github',
   displayName: 'GitHub',
-  requiredConfigFields: ['token'],
   envResolvableConfigFields: ['baseUrl'],
   defaultSessionScope: 'chat_thread',
   management: {
@@ -15,9 +14,16 @@ export const plugin: ChannelPlugin = {
         key: 'token',
         label: 'Personal Access Token',
         kind: 'secret',
-        required: true,
         envResolvable: true,
-        description: 'Classic PAT with "notifications" scope',
+        description:
+          'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+      },
+      {
+        key: 'useLocalGh',
+        label: 'Use Local GitHub CLI Authentication',
+        kind: 'boolean',
+        description:
+          'Reuse the daemon host GitHub CLI login when no token is configured',
       },
       {
         key: 'baseUrl',
@@ -32,11 +38,13 @@ export const plugin: ChannelPlugin = {
         label: 'Group Policy',
         kind: 'enum',
         required: true,
-        description: 'Must be "Open" for notifications to flow',
+        description:
+          'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
         default: 'open',
         options: [
           { value: 'open', label: 'Open' },
           { value: 'allowlist', label: 'Allowlist' },
+          { value: 'pairing', label: 'Pairing' },
           { value: 'disabled', label: 'Disabled' },
         ],
       },
@@ -90,6 +98,14 @@ export const plugin: ChannelPlugin = {
         ],
       },
     ],
+    validateConfig: (config) => {
+      const token =
+        typeof config['token'] === 'string' ? config['token'].trim() : '';
+      if (!token && config['useLocalGh'] !== true) {
+        return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
+      }
+      return undefined;
+    },
   },
   createChannel: (name, config, bridge, options) =>
     new GithubChannel(name, config, bridge, options),

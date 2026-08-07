@@ -11,7 +11,11 @@ import {
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
-import type { DaemonTransport } from './DaemonTransport.js';
+import type {
+  DaemonSseConnectReason,
+  DaemonTransport,
+} from './DaemonTransport.js';
+export type { DaemonSseConnectReason } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
@@ -196,6 +200,10 @@ import type {
   DaemonWorkspaceVoiceTranscribeOptions,
   DaemonWorkspaceVoiceTranscriptionResult,
   DaemonWorkspaceVoiceUpdate,
+  DaemonLiveMuteUpdate,
+  DaemonLiveSetupStatus,
+  DaemonLiveSetupUpdate,
+  DaemonLiveStatus,
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
@@ -600,6 +608,17 @@ export interface SubscribeOptions {
    * frames don't trip the warn / eviction path on the first publish.
    */
   maxQueued?: number;
+  /** Client identity forwarded on REST/SSE subscriptions. */
+  clientId?: string;
+  /** Diagnostic-only reason for opening this REST/SSE connection. */
+  sseConnectReason?: DaemonSseConnectReason;
+  /** Diagnostic-only predecessor of this REST/SSE connection. */
+  previousSseStreamId?: string;
+  /**
+   * Called after a REST/SSE handshake is accepted. The id is undefined when
+   * an older daemon or intermediary omits a valid stream-id response header.
+   */
+  onSseStreamAccepted?: (streamId: string | undefined) => void;
 }
 
 export class DaemonClient {
@@ -3250,6 +3269,95 @@ export class DaemonClient {
     );
   }
 
+  async liveStatus(clientId?: string): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/status',
+      'GET /live/status',
+      {
+        clientId,
+      },
+    );
+  }
+
+  async liveSetupStatus(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup',
+      'GET /live/setup',
+      { clientId },
+    );
+  }
+
+  async updateLiveSetup(
+    update: DaemonLiveSetupUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup',
+      'POST /live/setup',
+      { method: 'POST', body: update, clientId },
+    );
+  }
+
+  async retryLiveHostInstall(
+    clientId?: string,
+  ): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup/install',
+      'POST /live/setup/install',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async launchLiveHost(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return await this.jsonRequest<DaemonLiveSetupStatus>(
+      '/live/setup/launch',
+      'POST /live/setup/launch',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async startLive(
+    mode: 'resume' | 'new' = 'resume',
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    const path = mode === 'new' ? '/live/new' : '/live/start';
+    return await this.jsonRequest<DaemonLiveStatus>(
+      path,
+      mode === 'new' ? 'POST /live/new' : 'POST /live/start',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async stopLive(clientId?: string): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/stop',
+      'POST /live/stop',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async setLiveMute(
+    update: DaemonLiveMuteUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/mute',
+      'POST /live/mute',
+      { method: 'POST', body: update, clientId },
+    );
+  }
+
+  async setLiveShortcut(
+    shortcut: string,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/shortcut',
+      'POST /live/shortcut',
+      { method: 'POST', body: { shortcut }, clientId },
+    );
+  }
+
   /** @internal */
   async workspaceVoiceTranscriptionRequest(
     workspaceSelector: string,
@@ -4170,6 +4278,10 @@ export class DaemonClient {
       epoch: opts.epoch,
       onEpoch: opts.onEpoch,
       maxQueued: opts.maxQueued,
+      clientId: opts.clientId,
+      sseConnectReason: opts.sseConnectReason,
+      previousSseStreamId: opts.previousSseStreamId,
+      onSseStreamAccepted: opts.onSseStreamAccepted,
       signal: opts.signal,
       connectTimeoutMs: this.fetchTimeoutMs || undefined,
     });
@@ -4939,6 +5051,54 @@ export class WorkspaceDaemonClient {
       audio,
       opts,
     );
+  }
+
+  liveStatus(clientId?: string): Promise<DaemonLiveStatus> {
+    return this.client.liveStatus(clientId);
+  }
+
+  liveSetupStatus(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return this.client.liveSetupStatus(clientId);
+  }
+
+  updateLiveSetup(
+    update: DaemonLiveSetupUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveSetupStatus> {
+    return this.client.updateLiveSetup(update, clientId);
+  }
+
+  retryLiveHostInstall(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return this.client.retryLiveHostInstall(clientId);
+  }
+
+  launchLiveHost(clientId?: string): Promise<DaemonLiveSetupStatus> {
+    return this.client.launchLiveHost(clientId);
+  }
+
+  startLive(
+    mode: 'resume' | 'new' = 'resume',
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return this.client.startLive(mode, clientId);
+  }
+
+  stopLive(clientId?: string): Promise<DaemonLiveStatus> {
+    return this.client.stopLive(clientId);
+  }
+
+  setLiveMute(
+    update: DaemonLiveMuteUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return this.client.setLiveMute(update, clientId);
+  }
+
+  setLiveShortcut(
+    shortcut: string,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return this.client.setLiveShortcut(shortcut, clientId);
   }
 
   workspaceGit(opts?: {

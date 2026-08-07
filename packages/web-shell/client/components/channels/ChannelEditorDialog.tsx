@@ -18,6 +18,7 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
@@ -74,6 +75,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
   github: {
     token: 'channels.editor.field.github.token',
+    useLocalGh: 'channels.editor.field.github.useLocalGh',
     baseUrl: 'channels.editor.field.github.baseUrl',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     senderPolicy: 'channels.editor.field.github.senderPolicy',
@@ -115,7 +117,7 @@ export interface ChannelEditorDialogProps {
   ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
   revokePairingApproval: (
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
 }
 
@@ -224,10 +226,18 @@ export function ChannelEditorDialog({
     code: ChannelEditorValidationCode,
   ) => {
     if (code === 'duplicate') return t('channels.editor.validation.duplicate');
+    if (code === 'credential')
+      return t('channels.editor.validation.credential');
     if (code === 'invalid') return t('channels.editor.validation.invalidName');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
+    if (code === 'outOfRange') {
+      return t('channels.editor.validation.outOfRange', {
+        min:
+          field && field.kind === 'number' ? (field.exclusiveMinimum ?? 0) : 0,
+      });
+    }
     if (code === 'policy') return t('channels.editor.validation.policy');
     return t('channels.editor.validation.required', {
       label: field ? fieldLabel(field) : t('channels.editor.instanceName'),
@@ -383,6 +393,7 @@ export function ChannelEditorDialog({
   };
 
   const renderField = (field: DaemonChannelConfigFieldDescriptor) => {
+    if (field.kind === 'object') return null;
     if (field.kind === 'secret') return renderSecret(field);
     const id = `${formId}-${field.key}`;
     const value = draft.values[field.key];
@@ -609,7 +620,15 @@ export function ChannelEditorDialog({
                 ? String(draft.values['senderPolicy'] ?? '')
                 : draft.senderPolicy;
               const showRadioGroup = !descriptorPolicy;
-              const showPairing = effectivePolicy === 'pairing';
+              const descriptorGroupPolicy = descriptor.fields.some(
+                (field) => field.key === 'groupPolicy',
+              );
+              const effectiveGroupPolicy = descriptorGroupPolicy
+                ? String(draft.values['groupPolicy'] ?? '')
+                : String(instance?.config.groupPolicy ?? '');
+              const showPairing =
+                effectivePolicy === 'pairing' ||
+                effectiveGroupPolicy === 'pairing';
               if (!showRadioGroup && !showPairing) return null;
               return (
                 <section className={styles.section}>
@@ -660,7 +679,8 @@ export function ChannelEditorDialog({
                     </>
                   ) : null}
                   {showPairing ? (
-                    instance?.config.senderPolicy === 'pairing' ? (
+                    instance?.config.senderPolicy === 'pairing' ||
+                    instance?.config.groupPolicy === 'pairing' ? (
                       <ChannelPairingRequests
                         channelName={instance.name}
                         listRequests={listPairingRequests}

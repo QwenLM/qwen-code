@@ -5,6 +5,7 @@
  */
 
 import { expect, test } from '@playwright/test';
+import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -60,6 +61,69 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`parallel agents group`, async ({ page }, testInfo) => {
+      // The group renders only when a turn carries two or more background
+      // Agent tool calls; seed both as completed so the rows are static and
+      // leave no final answer, which keeps the turn expanded around them.
+      const agentToolCallEvent = (
+        id: number,
+        toolCallId: string,
+        description: string,
+      ): DaemonEvent => ({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId,
+            toolName: 'Agent',
+            title: 'Agent',
+            kind: 'other',
+            status: 'completed',
+            rawInput: { description, run_in_background: true },
+          },
+        },
+      });
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Split the migration across parallel agents.', {
+            id: 1,
+          }),
+          agentToolCallEvent(
+            2,
+            'call-agent-schema-audit',
+            'Audit the schema drift between services',
+          ),
+          agentToolCallEvent(
+            3,
+            'call-agent-backfill-plan',
+            'Draft the backfill plan for the users table',
+          ),
+          turnCompleteEvent('prompt-parallel-agents', { id: 4 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      const summary = messageList.getByRole('button', {
+        name: /Parallel agents/,
+      });
+      await expect(summary).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-collapsed-${theme}`);
+
+      await summary.click();
+      await expect(
+        messageList.getByText('Audit the schema drift between services'),
+      ).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-expanded-${theme}`);
     });
 
     test(`extensions manager`, async ({ page }, testInfo) => {
@@ -352,6 +416,145 @@ for (const theme of THEMES) {
         .getByRole('heading', { name: 'Pairing approvals' })
         .scrollIntoViewIfNeeded();
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
+    });
+
+    test(`GitHub channel editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: { revision: '1', instances: {} },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channels', level: 1 }),
+      ).toBeVisible();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `github-channel-editor-${theme}`);
+      await page.getByLabel('Instance name').fill('github-bot');
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `github-channel-editor-credential-${theme}`,
+      );
+      await page
+        .getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        })
+        .click();
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toHaveCount(0);
+      await expect
+        .poll(() =>
+          daemon.requests.filter(
+            (request) =>
+              request.method === 'PUT' &&
+              request.path.endsWith('/channels/github-bot'),
+          ),
+        )
+        .toEqual([
+          expect.objectContaining({
+            body: expect.objectContaining({
+              config: expect.objectContaining({
+                type: 'github',
+                useLocalGh: true,
+              }),
+            }),
+          }),
+        ]);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {
