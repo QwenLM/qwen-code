@@ -640,6 +640,9 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
         return panelBox.y + panelBox.height - surfaceBox.y;
       })
       .toBeLessThanOrEqual(-7);
+    // The search input takes focus asynchronously after Ctrl+R; Escape only
+    // dismisses the panel when it lands on that input, so pin focus first.
+    await expect(historySearch).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(historySearch).toHaveCount(0);
 
