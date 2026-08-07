@@ -370,6 +370,30 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  if (process.argv.includes('--internal-agent-view-supervisor')) {
+    const { runAgentViewSupervisor } = await import(
+      './agent-view/supervisor-runner.js'
+    );
+    await runAgentViewSupervisor();
+    process.exit(0);
+  }
+
+  const ptyHostArgIndex = process.argv.indexOf(
+    '--internal-agent-view-pty-host',
+  );
+  if (ptyHostArgIndex !== -1) {
+    const launchPath = process.argv[ptyHostArgIndex + 1];
+    const socketPath = process.argv[ptyHostArgIndex + 2];
+    if (!launchPath || !socketPath) {
+      throw new Error('Agent View PTY host requires launch and socket paths.');
+    }
+    const { runAgentViewPtyHostProcess } = await import(
+      './agent-view/pty-host-process.js'
+    );
+    await runAgentViewPtyHostProcess({ launchPath, socketPath });
+    process.exit(0);
+  }
+
   // Run before yargs parses subcommands — handlers like `channel status`/`stop`
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
@@ -404,6 +428,18 @@ export async function main() {
     if (process.env['QWEN_CODE_NO_RELAUNCH'] || process.env['SANDBOX']) {
       delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
     }
+  }
+
+  if (argv.background) {
+    const prompt = argv.query;
+    if (!prompt) {
+      throw new Error('Cannot use --bg/--background without a prompt.');
+    }
+    const { handleAgentViewBackgroundPrompt } = await import(
+      './commands/agents.js'
+    );
+    await handleAgentViewBackgroundPrompt(prompt);
+    process.exit(0);
   }
 
   if (isBareMode(argv.bare)) {
@@ -472,6 +508,10 @@ export async function main() {
   const { themeManager, AUTO_THEME_NAME } = await import(
     './ui/themes/theme-manager.js'
   );
+  const { isAgentViewWorkerEnv } = await import(
+    './agent-view/worker-sideband.js'
+  );
+  const isAgentViewWorker = isAgentViewWorkerEnv();
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
@@ -801,6 +841,15 @@ export async function main() {
     // else: argv.resume is already a valid UUID, pass through to loadCliConfig
   }
 
+  if (argv.resume !== undefined) {
+    const { routeManagedAgentViewResume } = await import(
+      './startup/agent-view-resume.js'
+    );
+    if (await routeManagedAgentViewResume(argv.resume)) {
+      process.exit(process.exitCode ?? 0);
+    }
+  }
+
   // We are now past the logic handling potentially launching a child process
   // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
@@ -837,6 +886,36 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    {
+      const {
+        readAgentViewWorkerSidebandEnv,
+        reportAgentViewWorkerState,
+        sendAgentViewWorkerEvent,
+        startAgentViewWorkerHeartbeat,
+      } = await import('./agent-view/worker-sideband.js');
+      const sideband = readAgentViewWorkerSidebandEnv();
+      if (sideband) {
+        await sendAgentViewWorkerEvent({
+          type: 'ready',
+          cwd: process.cwd(),
+          capabilities: ['ready', 'heartbeat', 'state'],
+          summary: config.getQuestion(),
+        }).catch((error) => {
+          debugLogger.debug(
+            `Agent View worker ready sideband failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+        await reportAgentViewWorkerState({
+          sessionState: 'idle',
+          cwd: process.cwd(),
+          summary: config.getQuestion(),
+        });
+        startAgentViewWorkerHeartbeat();
+      }
+    }
 
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
@@ -989,7 +1068,10 @@ export async function main() {
       // the filter in startEarlyInputCapture absorbs the OSC 11 response
       // bytes so they cannot leak into the TUI input, even though our
       // probe attaches its own listener to parse the RGB value.
-      if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
+      if (
+        !isAgentViewWorker &&
+        (!configuredTheme || configuredTheme === AUTO_THEME_NAME)
+      ) {
         themeAutoDetectionComplete = themeManager
           .resolveAutoThemeAsync()
           .catch((err) => {

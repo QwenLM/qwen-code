@@ -28,6 +28,20 @@ import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
+const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
+  vi.fn(async () => ({
+    status: vi.fn(async () => ({ pid: 123 })),
+    list: vi.fn(async () => []),
+    dispatch: vi.fn(async () => ({ sessionId: 'session-1' })),
+    attach: vi.fn(async () => ({ attached: true })),
+    logs: vi.fn(async () => ({ output: '' })),
+    stop: vi.fn(async () => ({ stopped: true })),
+    kill: vi.fn(async () => ({ killed: true })),
+    respawn: vi.fn(async () => ({ respawned: true })),
+    remove: vi.fn(async () => ({ removed: true })),
+    shutdown: vi.fn(async () => ({ shuttingDown: true })),
+  })),
+);
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -52,6 +66,10 @@ vi.mock('../commands/update.js', () => ({
     describe: 'mock update command',
     handler: mockUpdateHandler,
   },
+}));
+
+vi.mock('../agent-view/supervisor-runner.js', () => ({
+  ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
 }));
 
 const createNativeLspServiceInstance = () => ({
@@ -333,6 +351,31 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it.each([
+    ['agents', ['agents']],
+    ['daemon stop --any', ['daemon', 'stop', '--any']],
+    ['attach <id>', ['attach', 'session-1']],
+    ['logs <id>', ['logs', 'session-1']],
+    ['stop <id>', ['stop', 'session-1']],
+    ['kill <id>', ['kill', 'session-1']],
+    ['respawn <id>', ['respawn', 'session-1']],
+    ['respawn --all', ['respawn', '--all']],
+    ['rm <id>', ['rm', 'session-1']],
+  ])(
+    'exits after `%s` instead of continuing to main CLI flow',
+    async (_label, args) => {
+      process.argv = ['node', 'script.js', ...args];
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockExit).toHaveBeenCalledWith(0);
+      mockExit.mockRestore();
+    },
+  );
+
   it('propagates non-zero exitCode from the update handler', async () => {
     process.argv = ['node', 'script.js', 'update'];
     mockUpdateHandler.mockImplementation(() => {
@@ -382,6 +425,61 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.insecure).toBe(true);
   });
+
+  it.each([
+    [
+      ['--bg', 'background task', '--prompt', 'hello'],
+      'Cannot use --bg/--background with --prompt (-p)',
+    ],
+    [
+      ['--background'],
+      'Cannot use --bg/--background without a positional prompt',
+    ],
+    [
+      ['--bg', 'background task', '--prompt-interactive', 'hello'],
+      'Cannot use --bg/--background with --prompt-interactive (-i)',
+    ],
+    [
+      ['--bg', 'background task', '--acp'],
+      'Cannot use --bg/--background with ACP mode',
+    ],
+    [
+      ['--bg', 'background task', '--input-format', 'stream-json'],
+      'Cannot use --bg/--background with --input-format stream-json',
+    ],
+    [
+      ['--bg', 'background task', '--output-format', 'json'],
+      'Cannot use --bg/--background with JSON output',
+    ],
+  ])('rejects %s', async (args, message) => {
+    process.argv = ['node', 'script.js', ...args];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(message),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it.each(['--bg', '--background'])(
+    'parses %s with a background prompt',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag, 'background task'];
+
+      const argv = await parseArguments();
+
+      expect(argv.background).toBe(true);
+      expect(argv.query).toBe('background task');
+      expect(argv.prompt).toBeUndefined();
+      expect(argv.promptInteractive).toBeUndefined();
+    },
+  );
 
   it('rejects --json-schema combined with --acp', async () => {
     // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
