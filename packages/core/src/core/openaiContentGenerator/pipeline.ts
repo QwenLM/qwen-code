@@ -9,9 +9,16 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  PromptCacheSharingParameters,
+} from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
+import {
+  applyOfficialOpenAIPromptCaching,
+  isOfficialOpenAIEndpoint,
+} from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -45,6 +52,8 @@ import {
   reportOpenAiResponse,
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
+import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
+import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -446,7 +455,7 @@ export class ContentGenerationPipeline {
   }
 
   async execute(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     return this.executeWithErrorHandling(
@@ -486,7 +495,7 @@ export class ContentGenerationPipeline {
   }
 
   async executeStream(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     return this.executeWithErrorHandling(
@@ -938,7 +947,7 @@ export class ContentGenerationPipeline {
   }
 
   private async buildRequest(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     context: RequestContext,
     isStreaming: boolean,
@@ -992,10 +1001,21 @@ export class ContentGenerationPipeline {
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
-    const providerRequest = this.config.provider.buildRequest(
+    let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
     );
+    if (
+      this.contentGeneratorConfig.enableCacheControl !== false &&
+      isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
+    ) {
+      providerRequest = applyOfficialOpenAIPromptCaching(
+        providerRequest,
+        this.config.cliConfig.getSessionId?.(),
+        request.promptCacheSharing === true,
+        isInForkExecution() ? undefined : (getCurrentAgentId() ?? undefined),
+      );
+    }
 
     // Reasoning is disabled when either:
     //   - the per-request opt-out is set (forked queries for suggestions),
@@ -1292,7 +1312,7 @@ export class ContentGenerationPipeline {
    * Common error handling wrapper for execute methods
    */
   private async executeWithErrorHandling<T>(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     isStreaming: boolean,
     executor: (
