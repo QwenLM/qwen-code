@@ -317,7 +317,10 @@ export async function replayTranscriptRecordPage({
       const text = (update as { content?: { text?: unknown } }).content?.text;
       if (typeof text !== 'string' || text.length === 0) return;
       for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
-        if (branchPoints[recordId] !== undefined) {
+        // Own-property check: transcript record uuids are untrusted input,
+        // and names like 'toString' would otherwise pass via the prototype
+        // chain.
+        if (Object.hasOwn(branchPoints, recordId)) {
           lastChunkIndexByRecordId.set(recordId, index);
         }
       }

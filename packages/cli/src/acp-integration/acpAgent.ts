@@ -10582,27 +10582,42 @@ class QwenAgent implements Agent {
           );
         }
 
-        return await this.runExclusiveHistoryMutation(sessionId, async () => {
-          let turnIndex: number | undefined = params['targetTurnIndex'] as
-            | number
-            | undefined;
-          const promptId = params['promptId'] as string | undefined;
+        // Validate request FORMAT synchronously at RPC entry so a malformed
+        // rewind fails with a deterministic invalid_rewind_target instead of
+        // queueing behind an active mutation and surfacing as a bridge
+        // timeout (which for a destructive op means "may have executed").
+        // Only the snapshot-index resolution needs the gate.
+        const promptId = params['promptId'] as string | undefined;
+        let turnIndex: number | undefined = params['targetTurnIndex'] as
+          | number
+          | undefined;
+        const resolveFromPromptId = Boolean(
+          promptId && (turnIndex === undefined || turnIndex === null),
+        );
+        if (resolveFromPromptId) {
+          const prefix = sessionId + '########';
+          if (!(promptId as string).startsWith(prefix)) {
+            throw new RequestError(-32602, 'Invalid promptId format', {
+              errorKind: 'invalid_rewind_target',
+            });
+          }
+          const suffix = (promptId as string).slice(prefix.length);
+          if (!/^\d+$/.test(suffix)) {
+            throw new RequestError(
+              -32602,
+              'Invalid promptId: non-numeric turn suffix',
+              { errorKind: 'invalid_rewind_target' },
+            );
+          }
+        } else if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing targetTurnIndex',
+          );
+        }
 
-          if (promptId && (turnIndex === undefined || turnIndex === null)) {
-            const prefix = sessionId + '########';
-            if (!promptId.startsWith(prefix)) {
-              throw new RequestError(-32602, 'Invalid promptId format', {
-                errorKind: 'invalid_rewind_target',
-              });
-            }
-            const suffix = promptId.slice(prefix.length);
-            if (!/^\d+$/.test(suffix)) {
-              throw new RequestError(
-                -32602,
-                'Invalid promptId: non-numeric turn suffix',
-                { errorKind: 'invalid_rewind_target' },
-              );
-            }
+        return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          if (resolveFromPromptId) {
             // Derive turnIndex from the snapshot's position in the array,
             // NOT from the promptId suffix. Session.turn is monotonic and
             // does not reset on rewind, so after a rewind cycle the suffix
@@ -10620,13 +10635,6 @@ class QwenAgent implements Agent {
               );
             }
             turnIndex = snapshotIdx;
-          }
-
-          if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Invalid or missing targetTurnIndex',
-            );
           }
 
           const rewindFiles = params['rewindFiles'] !== false;

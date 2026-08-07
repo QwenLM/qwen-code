@@ -2301,10 +2301,9 @@ export class Session implements SessionContext {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
     if (this.#hasActiveTurn()) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Session is busy processing a turn',
-      );
+      throw new RequestError(-32602, 'Session is busy processing a turn', {
+        errorKind: 'session_busy',
+      });
     }
     this.historyMutationActive = true;
     let released = false;

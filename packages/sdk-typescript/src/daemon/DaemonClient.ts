@@ -2514,6 +2514,10 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonBranchedSession;
       },
+      // 0 disables the per-call timeout: branch creation restores the forked
+      // session server-side and can exceed fetchTimeoutMs on large sessions.
+      // The bridge/agent side bounds and reports failures; a client-side
+      // abort here could leave a committed branch unobserved.
       0,
     );
   }

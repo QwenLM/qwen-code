@@ -313,7 +313,6 @@ interface BranchCreationManifestV1 {
   ownerToken: string;
   transcriptStagingName: string;
   backupStagingName: string;
-  backupNames: string[];
 }
 
 interface BranchOwnerMarkerV1 {
@@ -350,14 +349,7 @@ function parseBranchCreationManifest(
       parsed.transcriptStagingName !==
         branchTranscriptStagingName(expectedSessionId, parsed.ownerToken) ||
       parsed.backupStagingName !==
-        branchBackupStagingName(expectedSessionId, parsed.ownerToken) ||
-      !Array.isArray(parsed.backupNames) ||
-      !parsed.backupNames.every(
-        (name) =>
-          typeof name === 'string' &&
-          name.length > 0 &&
-          path.basename(name) === name,
-      )
+        branchBackupStagingName(expectedSessionId, parsed.ownerToken)
     ) {
       return undefined;
     }
@@ -2340,7 +2332,6 @@ export class SessionService {
       ownerToken,
       transcriptStagingName,
       backupStagingName,
-      backupNames: [...backupNames].sort(),
     };
 
     await Promise.all([

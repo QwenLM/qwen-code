@@ -1487,7 +1487,9 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    const pageBranchPoints: Record<string, string> = {};
+    // Null prototype: record uuids are untrusted, and '__proto__' would
+    // silently drop the entry on a plain object.
+    const pageBranchPoints: Record<string, string> = Object.create(null);
     for (const record of records) {
       const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
       if (checkpointUuid !== undefined) {

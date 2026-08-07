@@ -12544,6 +12544,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rewindSession rejects malformed requests without waiting on a held gate', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    let releaseFork!: () => void;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          forkSession: vi.fn(() => forkGate),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Hold the gate with a hanging branch: a malformed rewind must fail
+    // FORMAT synchronously with invalid_rewind_target, not queue behind the
+    // mutation and surface as a timeout (which means "may have executed").
+    const branch = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+      sessionId,
+      name: 'Gate holder',
+      cwd: '/tmp',
+    });
+    await vi.waitFor(() =>
+      expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalled(),
+    );
+
+    await expect(
+      agent.extMethod('rewindSession', {
+        sessionId,
+        promptId: 'not-a-valid-prompt-id',
+        cwd: '/tmp',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'invalid_rewind_target' },
+    });
+    expect(lastSessionMock?.rewindToTurn).not.toHaveBeenCalled();
+
+    releaseFork();
+    await branch;
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rewindSession rejects invalid session ids', async () => {
     await setupSessionMocks('11111111-1111-1111-1111-111111111111');
 
@@ -13755,6 +13815,47 @@ describe('QwenAgent extMethod renameSession routing', () => {
     ).rejects.toThrow('Session is closing');
     expect(liveAssertCanStartTurn).toHaveBeenCalledOnce();
     expect(sessionService.forkSession).not.toHaveBeenCalled();
+    // Ordering invariant: beginHistoryMutation must run only AFTER a passing
+    // assertCanStartTurn, so a failing assert never leaves the busy latch set
+    // with no wired release.
+    expect(liveBeginHistoryMutation).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('surfaces session_busy errorKind when a branch hits a busy session', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    // Mirrors Session.beginHistoryMutation()'s busy throw: the branch
+    // handler must let errorKind reach the caller (the rewind endpoint
+    // already maps the same condition to session_busy).
+    liveBeginHistoryMutation.mockImplementation(() => {
+      throw new RequestError(-32602, 'Session is busy processing a turn', {
+        errorKind: 'session_busy',
+      });
+    });
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14094,7 +14195,15 @@ describe('QwenAgent extMethod renameSession routing', () => {
     const close = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
       sessionId: liveSessionId,
     });
-    await Promise.resolve();
+    // Advance the close to the mutation queue before asserting: without the
+    // gate it would reach recorder.finalize() on its own, which is what
+    // makes the not-called assertion discriminate.
+    await vi.waitFor(() =>
+      expect(liveWaitForActiveTurnsToSettle).toHaveBeenCalled(),
+    );
+    for (let tick = 0; tick < 20; tick++) {
+      await Promise.resolve();
+    }
 
     expect(recording.finalize).not.toHaveBeenCalled();
     releaseFork();

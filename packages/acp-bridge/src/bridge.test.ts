@@ -7490,6 +7490,77 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects rewind as soon as a prompt is admitted', async () => {
+      const promptGate = deferred<PromptResponse>();
+      const handle = makeChannel({
+        promptImpl: () => promptGate.promise,
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            throw new Error('rewind must not run after prompt admission');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'admitted' }],
+      });
+      // Admission must reject in the pendingPromptCount window, before the
+      // queue lambda sets promptActive — otherwise the rewind chains behind
+      // the prompt and truncates history after the caller was told it failed.
+      await expect(
+        bridge.rewindSession(session.sessionId, { promptId: 'prompt-1' }),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+
+      promptGate.resolve({ stopReason: 'end_turn' });
+      await prompt;
+      await new Promise((r) => setImmediate(r));
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('waits for a dispatched rewind instead of timing out and committing later', async () => {
+      const rewindStarted = deferred<void>();
+      const rewindGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionRewind) return {};
+          rewindStarted.resolve();
+          await rewindGate.promise;
+          return { targetTurnIndex: 1, filesChanged: [], filesFailed: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      let settled = false;
+      const rewind = bridge
+        .rewindSession(session.sessionId, { promptId: 'prompt-1' })
+        .finally(() => {
+          settled = true;
+        });
+      await rewindStarted.promise;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(settled).toBe(false);
+
+      rewindGate.resolve();
+      await expect(rewind).resolves.toMatchObject({
+        rewound: true,
+        targetTurnIndex: 1,
+      });
+      await bridge.shutdown();
+    });
+
     it('rejects rewind at admission while a prompt is active', async () => {
       const promptStarted = deferred<void>();
       const promptGate = deferred<void>();
@@ -7599,6 +7670,15 @@ describe('createAcpSessionBridge', () => {
         expect.objectContaining({
           method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
         }),
+      );
+      // Second half of the invariant: the NEW session's restore lands on
+      // the fresh channel B, not on the dying source channel A (whose
+      // pending kill would reap the just-created branch on exit).
+      expect(handles[1]?.agent.loadSessionCalls).toContainEqual(
+        expect.objectContaining({ sessionId: 'branch-overlap' }),
+      );
+      expect(handles[0]?.agent.loadSessionCalls).not.toContainEqual(
+        expect.objectContaining({ sessionId: 'branch-overlap' }),
       );
 
       // Cleanup: the kill and the dying channel never settle — same

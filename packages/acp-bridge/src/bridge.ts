@@ -6453,8 +6453,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
           // ACP cannot cancel a branch after dispatch. Keep the queue and
           // reservation until its real outcome is known so a caller never sees
-          // a timeout followed by an unobserved committed session.
-          const result = (await mutation) as {
+          // a timeout followed by an unobserved committed session. The
+          // transport-closed race rejects only when the channel exits — a
+          // branch whose channel died cannot be observed or delivered anyway —
+          // so a slow-but-alive fork still waits for its real outcome.
+          const result = (await Promise.race([
+            mutation,
+            getTransportClosedReject(entry),
+          ])) as {
             newSessionId: string;
             title?: string;
             displayName?: string;
@@ -8318,18 +8324,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         let response: Record<string, unknown>;
         try {
+          // ACP cannot cancel a rewind after dispatch. Keep the queue until
+          // its real outcome is known so a caller never sees a timeout
+          // followed by an unobserved history truncation + file restores —
+          // same hazard the branch path documents.
           response = (await Promise.race([
-            withTimeout(
-              entry.connection.extMethod(
-                SERVE_CONTROL_EXT_METHODS.sessionRewind,
-                {
-                  sessionId,
-                  promptId: req.promptId,
-                  rewindFiles: req.rewindFiles !== false,
-                },
-              ),
-              initTimeoutMs,
+            entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
+              {
+                sessionId,
+                promptId: req.promptId,
+                rewindFiles: req.rewindFiles !== false,
+              },
             ),
             getTransportClosedReject(entry),
           ])) as Record<string, unknown>;

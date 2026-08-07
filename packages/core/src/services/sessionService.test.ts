@@ -3217,7 +3217,6 @@ describe('SessionService', () => {
           ownerToken,
           transcriptStagingName,
           backupStagingName,
-          backupNames: ['backup-a'],
         }),
       );
       fs.writeFileSync(stagedTranscriptPath, 'staged transcript');
@@ -4804,6 +4803,69 @@ describe('SessionService', () => {
       },
     );
 
+    it.each(['ENOTSUP', 'EPERM', 'EXDEV'] as const)(
+      'rolls back a published backup when transcript publication fails with %s',
+      async (causeCode) => {
+        const oldId = '55555555-5555-5555-5555-555555555562';
+        const newId = '66666666-6666-6666-6666-666666666680';
+        const { file, lines } = seedSession(oldId);
+        appendFileHistorySnapshot(oldId, file, lines, ['backup-rollback']);
+        const sourceBackupDir = realPath.join(
+          realTmpDir,
+          'file-history',
+          oldId,
+        );
+        fs.mkdirSync(sourceBackupDir, { recursive: true });
+        fs.writeFileSync(
+          realPath.join(sourceBackupDir, 'backup-rollback'),
+          'rollback content',
+        );
+        const chatsDir = realPath.join(
+          service['storage'].getProjectDir(),
+          'chats',
+        );
+        const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
+        const realLink = fs.promises.link;
+        const linkSpy = vi
+          .spyOn(fs.promises, 'link')
+          .mockImplementation(async (source, target) => {
+            if (target === targetPath) {
+              const error = new Error(
+                'hard links are unsupported',
+              ) as NodeJS.ErrnoException;
+              error.code = causeCode;
+              throw error;
+            }
+            return realLink(source, target);
+          });
+
+        try {
+          await expect(service.forkSession(oldId, newId)).rejects.toMatchObject(
+            {
+              name: 'BranchPublicationUnsupportedError',
+              errorKind: 'branch_publication_unsupported',
+              causeCode,
+            },
+          );
+        } finally {
+          linkSpy.mockRestore();
+        }
+
+        expect(fs.existsSync(targetPath)).toBe(false);
+        // The backup directory was published before the transcript link
+        // failed; cleanup must roll it back or GC never sees the orphan.
+        expect(
+          fs.existsSync(realPath.join(realTmpDir, 'file-history', newId)),
+        ).toBe(false);
+        expect(
+          fs.readdirSync(realPath.join(chatsDir, '.branch-claims')),
+        ).toEqual([]);
+        expect(
+          fs.readdirSync(realPath.join(chatsDir, '.branch-staging')),
+        ).toEqual([]);
+      },
+    );
+
     it('uses asynchronous filesystem APIs for fork publication and backup staging', async () => {
       const oldId = '55555555-5555-5555-5555-555555555560';
       const newId = '66666666-6666-6666-6666-666666666674';
@@ -4847,23 +4909,40 @@ describe('SessionService', () => {
       const oldId = '55555555-5555-5555-5555-555555555556';
       const newId = '66666666-6666-6666-6666-666666666667';
       seedSession(oldId);
-      const targetPath = realPath.join(
+      const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
         'chats',
-        `${newId}.jsonl`,
       );
+      const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
+      const stagingDir = realPath.join(chatsDir, '.branch-staging');
+      // Fail AFTER a partial write lands on disk so the cleanup path is the
+      // thing under test (an open-time failure would leave nothing to clean).
       const realOpen = fs.promises.open;
-      vi.spyOn(fs.promises, 'open').mockImplementation(async (...args) => {
-        if (String(args[0]).includes(`${realPath.sep}.branch-staging`)) {
-          throw new Error('disk full');
-        }
-        return realOpen(...args);
-      });
+      const openSpy = vi
+        .spyOn(fs.promises, 'open')
+        .mockImplementation(async (...args) => {
+          const handle = await realOpen(...args);
+          if (!String(args[0]).includes(`${realPath.sep}.branch-staging`)) {
+            return handle;
+          }
+          Object.defineProperty(handle, 'writeFile', {
+            value: async () => {
+              await handle.write('partial', null, 'utf8');
+              throw new Error('disk full');
+            },
+          });
+          return handle;
+        });
 
-      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
-        'disk full',
-      );
+      try {
+        await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+          'disk full',
+        );
+      } finally {
+        openSpy.mockRestore();
+      }
       expect(fs.existsSync(targetPath)).toBe(false);
+      expect(fs.readdirSync(stagingDir)).toEqual([]);
     });
 
     it.skipIf(process.platform === 'win32')(
@@ -4997,6 +5076,8 @@ describe('SessionService', () => {
         vi.spyOn(fs, 'existsSync'),
         vi.spyOn(fs, 'unlinkSync'),
         vi.spyOn(fs, 'rmSync'),
+        vi.spyOn(fs, 'accessSync'),
+        vi.spyOn(fs, 'opendirSync'),
       ];
 
       try {
@@ -5039,13 +5120,34 @@ describe('SessionService', () => {
       fs.writeFileSync(paths.claimPath, 'x'.repeat(256 * 1024 + 1));
       const staleTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
       fs.utimesSync(paths.claimPath, staleTime, staleTime);
-      const readFileSpy = vi.spyOn(fs.promises, 'readFile');
+      // The manifest reader uses open + handle.stat + handle.read; spy the
+      // handle read it actually performs (a readFile spy would pin nothing).
+      const claimReads: string[] = [];
+      const realOpen = fs.promises.open;
+      const openSpy = vi
+        .spyOn(fs.promises, 'open')
+        .mockImplementation(async (...args) => {
+          const handle = await realOpen(...args);
+          const openedPath = String(args[0]);
+          const realRead = handle.read.bind(handle);
+          Object.defineProperty(handle, 'read', {
+            value: (
+              ...readArgs: Parameters<typeof realRead>
+            ): ReturnType<typeof realRead> => {
+              if (openedPath === paths.claimPath) {
+                claimReads.push(openedPath);
+              }
+              return realRead(...readArgs);
+            },
+          });
+          return handle;
+        });
 
       try {
         await service['cleanupStaleBranchCreations']();
-        expect(readFileSpy).not.toHaveBeenCalled();
+        expect(claimReads).toEqual([]);
       } finally {
-        readFileSpy.mockRestore();
+        openSpy.mockRestore();
       }
       expect(fs.existsSync(paths.claimPath)).toBe(true);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
@@ -5588,6 +5690,11 @@ describe('SessionService', () => {
         vi.spyOn(fs, 'openSync'),
         vi.spyOn(fs, 'readSync'),
         vi.spyOn(fs, 'closeSync'),
+        vi.spyOn(fs, 'existsSync'),
+        vi.spyOn(fs, 'accessSync'),
+        vi.spyOn(fs, 'readFileSync'),
+        vi.spyOn(fs, 'lstatSync'),
+        vi.spyOn(fs, 'realpathSync'),
       ];
 
       try {

@@ -797,6 +797,11 @@ describe('sessionStorageUtils', () => {
         vi.spyOn(fs, 'openSync'),
         vi.spyOn(fs, 'readSync'),
         vi.spyOn(fs, 'closeSync'),
+        vi.spyOn(fs, 'existsSync'),
+        vi.spyOn(fs, 'accessSync'),
+        vi.spyOn(fs, 'readFileSync'),
+        vi.spyOn(fs, 'lstatSync'),
+        vi.spyOn(fs, 'realpathSync'),
       ];
 
       try {
