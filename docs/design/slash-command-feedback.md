@@ -10,8 +10,8 @@ is dismissed without a selection.
 ## Design
 
 - Do not add the built-in `/auth`, `/settings`, `/status`, `/help`, `/theme`,
-  `/editor`, or `/diff` invocations to visible TUI history. Bare `/effort`,
-  `/model`, `/statusline`, and `/stats` pickers are hidden too. Their existing
+  `/editor`, `/diff`, or `/stats` invocations to visible TUI history. Bare
+  `/effort`, `/model`, and `/statusline` pickers are hidden too. Their existing
   UI remains unchanged, as do chat recording and slash-command telemetry. User
   and project commands that override those names keep their invocation
   history.
