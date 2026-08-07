@@ -12,10 +12,18 @@ import {
   SERVICE_NAME,
 } from './constants.js';
 
+// Deferred telemetry initialization and Config.initialize() can both observe
+// the same session in the interactive TUI. Keep session.start idempotent so
+// those two legitimate paths cannot duplicate the lifecycle record.
+let startedSessionId: string | undefined;
+
 export function emitSessionStart(
   sessionId: string,
   previousSessionId?: string,
 ): void {
+  if (startedSessionId === sessionId) return;
+  startedSessionId = sessionId;
+
   const attributes: LogAttributes = {
     'event.name': EVENT_SESSION_START,
     'session.id': sessionId,
@@ -29,6 +37,10 @@ export function emitSessionStart(
 }
 
 export function emitSessionEnd(sessionId: string): void {
+  if (startedSessionId === sessionId) {
+    startedSessionId = undefined;
+  }
+
   logs.getLogger(SERVICE_NAME).emit({
     body: 'Session ended.',
     attributes: {
