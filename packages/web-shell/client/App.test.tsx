@@ -2316,6 +2316,9 @@ beforeEach(() => {
   mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
+  mockConnection.models = [{ id: 'qwen', label: 'Qwen' }];
+  delete (mockConnection as { reasoning?: unknown }).reasoning;
+  delete (mockConnection as { tokenUsage?: unknown }).tokenUsage;
   mockConnection.capabilities = {
     qwenCodeVersion: '1.2.3',
     features: [],

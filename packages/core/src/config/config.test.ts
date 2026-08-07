@@ -4570,6 +4570,43 @@ describe('Server Config (config.ts)', () => {
       expect(config.isThinkingEnabled()).toBe(false);
     });
 
+    it('keeps thinking-off across repeated registry-resolved auth refreshes', async () => {
+      // Regression: the repair must mirror `reasoning: false` into
+      // modelsConfig, the rebuildable source refreshAuth reads
+      // `priorReasoning` from. For a model resolvable against
+      // modelProviders, syncAfterAuthRefresh runs applyResolvedModelDefaults,
+      // which wipes `reasoning` on every refresh — so without the mirror the
+      // second refresh would read the preset back and silently re-enable
+      // thinking at the registry default tier.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'qwen3.8-max',
+          reasoning: false,
+          apiKey: 'test-key',
+          baseUrl: 'https://custom.example/v1',
+        },
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.8-max',
+              name: 'qwen3.8-max',
+              baseUrl: 'https://custom.example/v1',
+            },
+          ],
+        },
+      });
+      const authType = AuthType.USE_OPENAI;
+
+      await config.refreshAuth(authType);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.isThinkingEnabled()).toBe(false);
+
+      await config.refreshAuth(authType);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.isThinkingEnabled()).toBe(false);
+    });
+
     it('does not carry thinking-off when an auth refresh changes models', async () => {
       const config = new Config({
         ...baseParams,

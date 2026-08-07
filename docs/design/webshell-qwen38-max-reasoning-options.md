@@ -6,8 +6,9 @@ Expose model-specific Thinking and reasoning-effort controls without teaching
 clients about individual model ids. A built-in Core registry declares which
 controls each exact bare model id supports and their defaults.
 
-The model supports `low`, `medium`, and `xhigh`; its default is `xhigh`.
-`qwen3.8-max-preview`, snapshots, and aliases are deliberately excluded.
+`qwen3.8-max` supports `low`, `medium`, and `xhigh`; its default is
+`xhigh`. `qwen3.8-max-preview`, runtime snapshots, and aliases are
+deliberately excluded.
 
 ## Design
 
@@ -46,10 +47,13 @@ session mutation so the current session and future sessions stay in sync.
 
 ## UI behavior
 
-The existing model chip remains the only entry point. The popover renders each
-registered section independently above the searchable model list, supporting
-Thinking-only, Effort-only, and combined models. Effort rows remain visible but
-disabled while Thinking is off when both controls exist.
+The existing model chip remains the only entry point. For a model with
+reasoning controls, the popover's first level renders each registered section
+independently (Thinking, then Effort) and moves the searchable model list
+behind a second-level "Model" submenu; models without reasoning controls keep
+the flat searchable list. This supports Thinking-only, Effort-only, and
+combined models. Effort rows remain visible but disabled while Thinking is off
+when both controls exist.
 Changing an option keeps the popover open. During an active response the
 controls remain available; the new value applies to the next request.
 

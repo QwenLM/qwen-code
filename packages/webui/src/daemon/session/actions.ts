@@ -291,6 +291,15 @@ export function createDaemonSessionActions({
         missingSession: false,
         loadingTranscript: true,
         catchingUp: undefined,
+        // Drop the previous session's session-scoped snapshots (mirror the
+        // clear path): otherwise session A's reasoning/context state renders
+        // on session B until B's context() resolves — permanently if it
+        // rejects.
+        tokenUsage: undefined,
+        tokenCount: undefined,
+        supportedCommands: undefined,
+        context: undefined,
+        reasoning: undefined,
       }));
     }
     setPromptStatus('idle');

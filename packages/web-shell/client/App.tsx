@@ -8367,11 +8367,10 @@ export function App({
               'model.reasoningPreferences',
               updatedPreferences,
             ).then(() =>
+              // The write already persisted; a failed reload would otherwise
+              // leave the switch rendering a stale position with no error.
               reloadWorkspaceSettings().catch((error: unknown) => {
-                console.warn(
-                  '[web-shell] failed to reload settings after reasoning update',
-                  error,
-                );
+                reportError(error, t('reasoning.updateFailed'));
               }),
             );
           })();

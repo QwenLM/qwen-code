@@ -14990,6 +14990,35 @@ describe('createServeApp', () => {
       expect(bridge.setApprovalModeCalls).toHaveLength(0);
     });
 
+    it('200 returns the session configOptions for model and mode (ACP parity)', async () => {
+      const modelOption = { id: 'model', currentValue: 'some-model' };
+      const thinkingOption = { id: 'thinking', currentValue: 'on' };
+      const bridge = fakeBridge({
+        sessionContextImpl: async (sessionId) => ({
+          v: 1 as const,
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          state: { configOptions: [modelOption, thinkingOption] },
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const modelRes = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'model', value: 'some-model' });
+      expect(modelRes.status).toBe(200);
+      expect(modelRes.body.configOptions).toEqual([
+        modelOption,
+        thinkingOption,
+      ]);
+
+      const modeRes = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'mode', value: 'yolo' });
+      expect(modeRes.status).toBe(200);
+      expect(modeRes.body.configOptions).toEqual([modelOption, thinkingOption]);
+    });
+
     it('200 and routes a valid mode to setSessionApprovalMode (persist defaults to false)', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -15002,6 +15031,7 @@ describe('createServeApp', () => {
         mode: 'yolo',
         previous: 'default',
         persisted: false,
+        configOptions: [],
       });
       expect(bridge.setApprovalModeCalls).toHaveLength(1);
       expect(bridge.setApprovalModeCalls[0]).toMatchObject({

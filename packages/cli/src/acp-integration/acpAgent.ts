@@ -11191,8 +11191,13 @@ class QwenAgent implements Agent {
               try {
                 await config.switchModel(authType, newModelName);
                 // Mirror Session.setModel: apply the reloaded per-model
-                // reasoning preferences for the new model.
+                // reasoning preferences for the new model, then notify
+                // attached clients (config.switchModel publishes no
+                // model-update extNotification of its own).
                 session.syncReasoningSettingsForCurrentModel(newMerged);
+                await session.sendConfigOptionsUpdate(
+                  this.buildConfigOptions(session.getConfig()),
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,
@@ -11997,7 +12002,12 @@ class QwenAgent implements Agent {
     };
 
     const configOptions = [modeConfigOption, modelConfigOption];
-    const reasoningControls = getModelReasoningControls(rawCurrentModelId);
+    // Runtime snapshots are deliberately excluded from reasoning controls
+    // (mirrors buildAvailableModels): a snapshot can carry a bare id that
+    // collides with a registered model while pointing at a custom endpoint.
+    const reasoningControls = activeRuntimeSnapshot
+      ? undefined
+      : getModelReasoningControls(rawCurrentModelId);
     if (reasoningControls?.thinking) {
       configOptions.push({
         id: 'thinking',

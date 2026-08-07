@@ -442,6 +442,7 @@ export function resolveCliGenerationConfig(
       ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
   let invalidStoredReasoningEffortWarning: string | undefined;
+  let invalidPresetReasoningEffortWarning: string | undefined;
   if (reasoningRegistration) {
     const reasoningPreference = getModelReasoningPreference(
       settings,
@@ -455,15 +456,34 @@ export function resolveCliGenerationConfig(
         : undefined;
     const thinkingPreference = preferenceRecord?.['thinkingEnabled'];
     const storedEffort = preferenceRecord?.['effort'];
+    // List the tiers the registered model actually supports — the global
+    // ladder includes tiers this code path would silently clamp.
+    const supportedTiers = (
+      reasoningRegistration.effort?.supported ?? REASONING_EFFORT_TIERS
+    ).join(', ');
     // A configured-but-unrecognized stored tier (e.g. a "hihg" typo in
     // settings.json) normalizes to the registry default. Surface it the same
-    // way the global model.reasoningEffort path does.
+    // way the global model.reasoningEffort path does — for any invalid value,
+    // not only strings.
     invalidStoredReasoningEffortWarning =
-      typeof storedEffort === 'string' &&
-      !normalizeReasoningEffort(storedEffort)
-        ? `Ignoring invalid model.reasoningPreferences effort "${storedEffort}" for model "${resolved.config.model}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
+      storedEffort !== undefined &&
+      (typeof storedEffort !== 'string' ||
+        !normalizeReasoningEffort(storedEffort))
+        ? `Ignoring invalid model.reasoningPreferences effort "${String(storedEffort)}" for model "${resolved.config.model}"; expected one of: ${supportedTiers}.`
         : undefined;
     const presetReasoning = resolved.config.reasoning;
+    // The same typo in a generationConfig preset (settings
+    // model.generationConfig.reasoning or a modelProviders entry) is silently
+    // substituted with the registry default by the seed below; surface it too.
+    const presetEffort: unknown = presetReasoning
+      ? presetReasoning.effort
+      : undefined;
+    invalidPresetReasoningEffortWarning =
+      presetEffort !== undefined &&
+      (typeof presetEffort !== 'string' ||
+        !normalizeReasoningEffort(presetEffort))
+        ? `Ignoring invalid generationConfig reasoning effort "${String(presetEffort)}" for model "${resolved.config.model}"; expected one of: ${supportedTiers}.`
+        : undefined;
     const resolvedReasoning = resolveModelReasoningControls(
       resolved.config.model,
       {
@@ -516,6 +536,9 @@ export function resolveCliGenerationConfig(
       ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
       ...(invalidStoredReasoningEffortWarning
         ? [invalidStoredReasoningEffortWarning]
+        : []),
+      ...(invalidPresetReasoningEffortWarning
+        ? [invalidPresetReasoningEffortWarning]
         : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning

@@ -63,7 +63,12 @@ const MODEL_REASONING_CONTROLS = defineModelReasoningControls({
 export function getModelReasoningControls(
   baseModelId: string | undefined,
 ): ModelReasoningControlRegistration | undefined {
-  if (!baseModelId) return undefined;
+  // Own-property check: model ids are opaque user-configured strings, and a
+  // bare bracket lookup would return inherited Object.prototype members
+  // ('constructor', 'toString', ...) for unregistered ids colliding with them.
+  if (!baseModelId || !Object.hasOwn(MODEL_REASONING_CONTROLS, baseModelId)) {
+    return undefined;
+  }
   return MODEL_REASONING_CONTROLS[baseModelId];
 }
 

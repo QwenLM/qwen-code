@@ -2823,6 +2823,81 @@ describe('Session', () => {
       );
     });
 
+    it('retains the live preset effort when turning thinking off', async () => {
+      currentModel = 'qwen3.8-max';
+      // Live effort comes from a provider preset (no stored preference) and
+      // differs from the registry default, so genuine retention and
+      // default-substitution are distinguishable.
+      vi.mocked(mockConfig.getReasoningEffortPreference).mockReturnValue('low');
+
+      await session.setThinking('off');
+
+      expect(mockConfig.setThinkingEnabled).toHaveBeenCalledWith(false, 'low');
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningPreferences',
+        {
+          'qwen3.8-max': { thinkingEnabled: false, effort: 'low' },
+        },
+      );
+    });
+
+    it('prefers the stored effort over the live effort when turning thinking off', async () => {
+      currentModel = 'qwen3.8-max';
+      vi.mocked(mockConfig.getReasoningEffortPreference).mockReturnValue('low');
+      const storedSettings = {
+        ...mockSettings,
+        merged: {
+          model: {
+            reasoningPreferences: {
+              'qwen3.8-max': { effort: 'medium' },
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+      const storedSession = new Session(
+        'stored-effort-session',
+        mockConfig,
+        mockClient,
+        storedSettings,
+      );
+      vi.mocked(mockConfig.setThinkingEnabled).mockClear();
+      vi.mocked(mockSettings.setValue).mockClear();
+
+      await storedSession.setThinking('off');
+
+      expect(mockConfig.setThinkingEnabled).toHaveBeenCalledWith(
+        false,
+        'medium',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningPreferences',
+        {
+          'qwen3.8-max': { effort: 'medium', thinkingEnabled: false },
+        },
+      );
+    });
+
+    it('rejects thinking and effort changes while a runtime snapshot is active', async () => {
+      currentModel = 'qwen3.8-max';
+      (
+        mockConfig as unknown as {
+          getActiveRuntimeModelSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).getActiveRuntimeModelSnapshot = vi
+        .fn()
+        .mockReturnValue({ id: 'snap', modelId: 'qwen3.8-max' });
+
+      await expect(session.setThinking('off')).rejects.toThrow(
+        'Thinking controls are not available for qwen3.8-max',
+      );
+      await expect(session.setEffort('medium')).rejects.toThrow(
+        'Effort controls are not available for qwen3.8-max',
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
     it('accepts only the three stable effort tiers', async () => {
       currentModel = 'qwen3.8-max';
 

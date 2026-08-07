@@ -6866,7 +6866,13 @@ export class Session implements SessionContext {
 
   async setThinking(value: string): Promise<void> {
     const model = this.config.getModel();
-    const registration = getModelReasoningControls(model);
+    // Runtime snapshots are excluded from reasoning controls: a snapshot may
+    // carry a bare id colliding with a registered model while pointing at a
+    // custom endpoint, and persisting under that id would mutate the
+    // first-party registry model's preferences.
+    const registration = this.config.getActiveRuntimeModelSnapshot?.()
+      ? undefined
+      : getModelReasoningControls(model);
     if (!registration?.thinking) {
       throw RequestError.invalidParams(
         undefined,
@@ -6879,10 +6885,22 @@ export class Session implements SessionContext {
         `Unknown thinking value: ${value}`,
       );
     }
-    const resolved = resolveModelReasoningControls(
+    // Seed the live effort the UI is currently advertising so turning
+    // thinking off never substitutes the registry default for it ("Turning
+    // thinking off does not erase the tier"). Stored preferences still win.
+    const liveEffort = this.config.getReasoningEffortPreference();
+    const storedPreference = getModelReasoningPreference(
+      this.settings.merged,
       model,
-      getModelReasoningPreference(this.settings.merged, model),
     );
+    const resolved = resolveModelReasoningControls(model, {
+      ...(liveEffort ? { effort: liveEffort } : {}),
+      ...(storedPreference &&
+      typeof storedPreference === 'object' &&
+      !Array.isArray(storedPreference)
+        ? storedPreference
+        : {}),
+    });
     this.config.setThinkingEnabled(value === 'on', resolved?.effort);
     const scope = getPersistScopeForModelSelection(this.settings);
     this.settings.setValue(
@@ -6939,7 +6957,10 @@ export class Session implements SessionContext {
 
   async setEffort(value: string): Promise<void> {
     const model = this.config.getModel();
-    const registration = getModelReasoningControls(model);
+    // See setThinking: runtime snapshots are excluded from reasoning controls.
+    const registration = this.config.getActiveRuntimeModelSnapshot?.()
+      ? undefined
+      : getModelReasoningControls(model);
     if (!registration?.effort) {
       throw RequestError.invalidParams(
         undefined,

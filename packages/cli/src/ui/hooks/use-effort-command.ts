@@ -12,7 +12,10 @@ import {
   type ReasoningEffort,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { mergeModelReasoningPreference } from '../../config/model-reasoning-preferences.js';
@@ -48,7 +51,12 @@ export const useEffortCommand = (
           ? normalizeModelReasoningEffort(registration, effort)!
           : effort;
         config.setReasoningEffort(effectiveEffort);
-        const scope = getPersistScopeForModelSelection(loadedSettings);
+        // Mirror the slash-command path: `model.reasoningPreferences` is
+        // scoped independently from `modelProviders`, so persist to the scope
+        // owning the `model` key to avoid shadowed writes.
+        const scope =
+          getOwnKeyScope(loadedSettings, 'model') ??
+          getPersistScopeForModelSelection(loadedSettings);
         if (registration?.effort) {
           loadedSettings.setValue(
             scope,

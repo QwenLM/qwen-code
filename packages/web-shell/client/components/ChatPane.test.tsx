@@ -47,6 +47,7 @@ const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
+const setConfigOption = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
 const daemonActions = {
@@ -55,6 +56,7 @@ const daemonActions = {
   cancel,
   setApprovalMode,
   setModel,
+  setConfigOption,
   loadArtifacts,
   getTasks,
 };
@@ -294,6 +296,8 @@ beforeEach(() => {
   queuedPromptsMock = [];
   queuedTextsMock = [];
   sendPrompt.mockReset();
+  setConfigOption.mockReset();
+  setConfigOption.mockResolvedValue({} as any);
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
@@ -507,6 +511,37 @@ describe('ChatPane', () => {
     expect(
       Array.from(nullComposer?.parentElement?.children ?? []),
     ).toHaveLength(children.length);
+  });
+
+  it('wires reasoning controls into the composer when the capability is advertised', async () => {
+    connectionState.capabilities = {
+      features: ['session_reasoning_control'],
+    };
+    connectionState.reasoning = {
+      thinking: { enabled: true },
+      effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+    };
+
+    render();
+
+    expect(latestChatEditorProps.reasoningControlsSupported).toBe(true);
+    expect(latestChatEditorProps.reasoningState).toEqual(
+      connectionState.reasoning,
+    );
+    expect(latestChatEditorProps.reasoningBusy).toEqual({});
+    expect(typeof latestChatEditorProps.onSelectReasoningOption).toBe(
+      'function',
+    );
+
+    await act(async () => {
+      latestChatEditorProps.onSelectReasoningOption('effort', 'medium');
+    });
+    expect(setConfigOption).toHaveBeenCalledWith('effort', 'medium');
+  });
+
+  it('does not advertise reasoning controls without the capability', () => {
+    render();
+    expect(latestChatEditorProps.reasoningControlsSupported).toBe(false);
   });
 
   it('renders the session transcript and header label', () => {

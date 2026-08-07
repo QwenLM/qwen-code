@@ -836,6 +836,16 @@ function ToolbarPopover({
         collisionBoundary={collisionBoundary ?? undefined}
         data-web-shell-toolbar-popover
         onClick={(event) => event.stopPropagation()}
+        onOpenAutoFocus={(event) => {
+          if (!submenu) return;
+          // Radix's default mount focus lands on the first tabbable element,
+          // which with the reasoning header is the Thinking switch — typing
+          // to filter would do nothing and Enter/Space would toggle thinking.
+          // Focus the model submenu trigger instead; flat mode keeps the
+          // default (the search input is already first).
+          event.preventDefault();
+          submenuTriggerRef.current?.focus();
+        }}
         onPointerDownOutside={(event) => {
           const target = event.target;
           if (
@@ -892,7 +902,9 @@ function ToolbarPopover({
                       setSubmenuOpen(true);
                     }}
                   >
-                    <span>{submenu.triggerLabel}</span>
+                    <span title={submenu.triggerLabel}>
+                      {submenu.triggerLabel}
+                    </span>
                     <ChevronRightIcon aria-hidden="true" />
                   </button>
                 </PopoverTrigger>

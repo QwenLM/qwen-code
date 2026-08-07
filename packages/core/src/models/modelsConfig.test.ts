@@ -2099,6 +2099,43 @@ describe('ModelsConfig', () => {
       );
     });
 
+    it('clears model-scoped generation fields a runtime snapshot does not define', async () => {
+      // Regression: switching from a thinking-off registered model to a
+      // runtime snapshot whose generationConfig omits `reasoning` must not
+      // run the snapshot model with the previous model's opt-out.
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'qwen3.8-max',
+          reasoning: false,
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          reasoning: { kind: 'settings', detail: 'test' },
+        },
+      });
+      expect(currentGenerationConfig(modelsConfig).reasoning).toBe(false);
+
+      modelsConfig['runtimeModelSnapshots'].set('$runtime|openai|bare-model', {
+        id: '$runtime|openai|bare-model',
+        authType: AuthType.USE_OPENAI,
+        modelId: 'bare-model',
+        apiKey: 'sk-bare',
+        baseUrl: 'https://bare.example/v1',
+        generationConfig: {},
+        sources: {},
+        createdAt: Date.now(),
+      });
+
+      await modelsConfig.switchToRuntimeModel('$runtime|openai|bare-model');
+
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.model).toBe('bare-model');
+      expect(gc.apiKey).toBe('sk-bare');
+      expect(gc.baseUrl).toBe('https://bare.example/v1');
+      expect(gc.reasoning).toBeUndefined();
+    });
+
     it('should return runtime option first in getAllConfiguredModels', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
         openai: [

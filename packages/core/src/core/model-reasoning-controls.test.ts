@@ -22,6 +22,16 @@ describe('model reasoning controls', () => {
     expect(getModelReasoningControls('qwen3.8-max-2026-01-15')).toBeUndefined();
   });
 
+  it('does not match Object.prototype member names', () => {
+    expect(getModelReasoningControls('constructor')).toBeUndefined();
+    expect(getModelReasoningControls('toString')).toBeUndefined();
+    expect(getModelReasoningControls('hasOwnProperty')).toBeUndefined();
+    expect(getModelReasoningControls('__proto__')).toBeUndefined();
+    expect(
+      resolveModelReasoningControls('constructor', undefined),
+    ).toBeUndefined();
+  });
+
   it('uses registered defaults without inheriting another preference', () => {
     expect(resolveModelReasoningControls('qwen3.8-max', undefined)).toEqual({
       thinkingEnabled: true,

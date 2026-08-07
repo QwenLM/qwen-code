@@ -1967,10 +1967,49 @@ describe('modelConfigUtils', () => {
         });
 
         expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        const warning = result.warnings.find((w) =>
+          /Ignoring invalid model\.reasoningPreferences effort "hihg"/.test(w),
+        );
+        expect(warning).toBeDefined();
+        // Lists the registered model's tiers, not the global ladder
+        // ('high' and 'max' would appear as standalone tiers there).
+        expect(warning).toContain('low, medium, xhigh');
+        expect(warning).not.toContain('high, ');
+      });
+
+      it('warns when a stored reasoning effort is not a string', () => {
+        const result = resolveForModel('qwen3.8-max', {
+          name: 'qwen3.8-max',
+          reasoningPreferences: {
+            'qwen3.8-max': {
+              effort: 3,
+            } as unknown as ModelReasoningPreference,
+          },
+        });
+
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
         expect(result.warnings).toEqual(
           expect.arrayContaining([
             expect.stringMatching(
-              /Ignoring invalid model\.reasoningPreferences effort "hihg"/,
+              /Ignoring invalid model\.reasoningPreferences effort "3"/,
+            ),
+          ]),
+        );
+      });
+
+      it('warns when a generationConfig preset effort is unrecognized', () => {
+        const result = resolveForModel(
+          'qwen3.8-max',
+          { name: 'qwen3.8-max' },
+          { effort: 'hihg' as unknown as 'high' },
+        );
+
+        // The seed substitutes the registry default for the typo.
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        expect(result.warnings).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(
+              /Ignoring invalid generationConfig reasoning effort "hihg"/,
             ),
           ]),
         );

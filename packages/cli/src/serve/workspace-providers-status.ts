@@ -22,7 +22,10 @@ import type {
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import type { Settings } from '../config/settings.js';
-import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../config/modelProvidersScope.js';
 import {
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
@@ -219,8 +222,12 @@ function buildWorkspaceProvidersStatus(
       acpChannelLive,
       ...(current ? { current } : {}),
       approvalMode,
+      // The web-shell reads/writes `model.reasoningPreferences` under this
+      // scope; that key is scoped independently from `modelProviders`, so
+      // derive it from ownership of the `model` key itself.
       modelConfigScope:
-        getPersistScopeForModelSelection(loaded) === SettingScope.Workspace
+        (getOwnKeyScope(loaded, 'model') ??
+          getPersistScopeForModelSelection(loaded)) === SettingScope.Workspace
           ? 'workspace'
           : 'user',
       providers: [...providers.values()],

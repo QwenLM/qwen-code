@@ -120,6 +120,18 @@ describe('model-reasoning-preferences', () => {
       }
     });
 
+    it('does not spread array indices into the merged preferences root', () => {
+      const settings = makeSettings({
+        reasoningPreferences: [{ effort: 'low' }],
+      });
+
+      expect(
+        mergeModelReasoningPreference(settings, 'qwen3.8-max', {
+          effort: 'medium',
+        }),
+      ).toEqual({ 'qwen3.8-max': { effort: 'medium' } });
+    });
+
     it('replaces a non-object existing entry with the patch', () => {
       const settings = makeSettings({
         reasoningPreferences: { 'qwen3.8-max': 'garbage' },
