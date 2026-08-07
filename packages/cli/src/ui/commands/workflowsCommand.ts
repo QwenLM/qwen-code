@@ -196,7 +196,25 @@ export const workflowsCommand: SlashCommand = {
         };
       }
       const runId = tokens[1];
-      const target = registry.get(runId);
+      let target = registry.get(runId);
+      // Snapshots are always terminal, so a snapshot-only hit skips the
+      // isBackgrounded gate below and lands on the terminal wording —
+      // the same answer a still-retained terminal run gets.
+      let fromSnapshot = false;
+      if (!target) {
+        // Fall back to a persisted snapshot — the same source the listing
+        // and detail view merge in. A terminal run evicted from the
+        // in-memory registry (10-entry cap) or left behind by an earlier
+        // CLI process is still known to this command; answering "Unknown
+        // live workflow runId" for it contradicts the listing.
+        const snapshot = (await listWorkflowSnapshots(config)).find(
+          (s) => s.runId === runId,
+        );
+        if (snapshot) {
+          target = snapshotToTask(snapshot);
+          fromSnapshot = true;
+        }
+      }
       if (!target) {
         return {
           type: 'message' as const,
@@ -204,7 +222,7 @@ export const workflowsCommand: SlashCommand = {
           content: `Unknown live workflow runId: ${runId}`,
         };
       }
-      if (!target.isBackgrounded) {
+      if (!fromSnapshot && !target.isBackgrounded) {
         return {
           type: 'message' as const,
           messageType: 'error' as const,

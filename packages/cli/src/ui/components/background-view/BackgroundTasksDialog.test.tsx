@@ -859,6 +859,9 @@ describe('BackgroundTasksDialog', () => {
 
     expect(h.workflowPause).not.toHaveBeenCalled();
     expect(h.workflowResume).not.toHaveBeenCalled();
+    // R10-4: a not-applicable keypress (null verdict) must not light the
+    // rejection flash — only a real registry refusal (false) does.
+    expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
   });
 
   it('flashes a footer note when the registry rejects a pause/resume', () => {
@@ -886,6 +889,79 @@ describe('BackgroundTasksDialog', () => {
     }
   });
 
+  it('clears the rejection flash once a retry is accepted', () => {
+    // R10-2: the note tells the user to try again; once the retry
+    // succeeds the stale failure text must not keep hiding the hints.
+    vi.useFakeTimers();
+    try {
+      const h = setup([workflowEntry({ status: 'running' })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.workflowPause.mockReturnValue(false);
+      h.pressKey({ sequence: 'p' });
+      expect(h.lastFrame()).toContain('Pause/resume was rejected');
+
+      // The run settles to paused; the user follows the note's advice.
+      h.setEntries([workflowEntry({ status: 'paused' })]);
+      h.workflowResume.mockReturnValue(true);
+      h.pressKey({ sequence: 'p' });
+
+      expect(h.workflowResume).toHaveBeenCalledWith('wf_test1234');
+      expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-arms the rejection window on a second rejection', () => {
+    // R10-8: each rejection gets a full window — a same-value boolean
+    // state would measure the window from the FIRST rejection only.
+    vi.useFakeTimers();
+    try {
+      const h = setup([workflowEntry({ status: 'running' })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.workflowPause.mockReturnValue(false);
+
+      h.pressKey({ sequence: 'p' }); // first rejection at t=0
+      expect(h.lastFrame()).toContain('Pause/resume was rejected');
+
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      h.pressKey({ sequence: 'p' }); // second rejection at t=2s
+
+      act(() => {
+        vi.advanceTimersByTime(1100); // t=3.1s
+      });
+      // The first window (t=0 + 3s) has expired; the note must still be
+      // visible because the second rejection re-armed it to t=5s.
+      expect(h.lastFrame()).toContain('Pause/resume was rejected');
+
+      act(() => {
+        vi.advanceTimersByTime(2000); // t=5.1s
+      });
+      expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the rejection flash only on the entry that produced it', () => {
+    // R10-13: the flash must not bleed onto an unrelated entry's footer
+    // once the selection moves.
+    const running = workflowEntry({ status: 'running' });
+    const agentRow = entry({ agentId: 'a', id: 'a' });
+    const h = setup([running, agentRow]);
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.workflowPause.mockReturnValue(false);
+    h.pressKey({ sequence: 'p' });
+    expect(h.lastFrame()).toContain('Pause/resume was rejected');
+
+    h.call(() => h.probe.current!.actions.moveSelectionDown());
+    expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
+    // The unrelated entry's own hints are visible again.
+    expect(h.lastFrame()).toContain('x stop');
+  });
+
   it('does not offer or trigger pause for a foreground workflow', () => {
     const h = setup([
       workflowEntry({ status: 'running', isBackgrounded: false }),
@@ -897,6 +973,19 @@ describe('BackgroundTasksDialog', () => {
 
     expect(h.workflowPause).not.toHaveBeenCalled();
     expect(h.workflowResume).not.toHaveBeenCalled();
+    expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
+  });
+
+  it('does not flash a rejection when p does not apply to the selection', () => {
+    // R10-4: a non-workflow row — the toggle's null verdict must be
+    // distinguishable from a registry refusal (false), which flashes.
+    const h = setup([entry({ agentId: 'a', status: 'running' })]);
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.pressKey({ sequence: 'p' });
+
+    expect(h.workflowPause).not.toHaveBeenCalled();
+    expect(h.workflowResume).not.toHaveBeenCalled();
+    expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
   });
 
   it.each([

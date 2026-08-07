@@ -1433,16 +1433,27 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // A rejected cooperative pause/resume (the registry returns false when the
   // run's state raced away mid-request) flashes a short footer note instead
   // of being swallowed, matching the explicit error /workflows p reports.
-  const [pauseRejected, setPauseRejected] = useState(false);
+  // The flash is keyed to the entry that produced it (moving the selection
+  // away hides it); each rejection sets a fresh object, so the effect's
+  // timer re-arms on a repeat rejection, and an accepted retry clears it.
+  const [pauseRejected, setPauseRejected] = useState<{
+    entryKey: string;
+  } | null>(null);
   useEffect(() => {
     if (!pauseRejected) return;
-    const timer = setTimeout(() => setPauseRejected(false), 3000);
+    const timer = setTimeout(() => setPauseRejected(null), 3000);
     return () => clearTimeout(timer);
   }, [pauseRejected]);
 
   const toggleWorkflowPauseWithFeedback = useCallback(() => {
-    if (toggleSelectedWorkflowPause() === false) setPauseRejected(true);
-  }, [toggleSelectedWorkflowPause]);
+    const target = entries[selectedIndex];
+    const verdict = toggleSelectedWorkflowPause();
+    if (verdict === false && target) {
+      setPauseRejected({ entryKey: entryId(target) });
+    } else if (verdict === true) {
+      setPauseRejected(null);
+    }
+  }, [entries, selectedIndex, toggleSelectedWorkflowPause]);
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
@@ -1960,7 +1971,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         />
       ) : (
         <Box marginTop={1} paddingX={1}>
-          {pauseRejected ? (
+          {pauseRejected && pauseRejected.entryKey === selectedEntryKey ? (
             <Text color={theme.status.warning}>
               {t(
                 'Pause/resume was rejected; the workflow state changed. Try again.',

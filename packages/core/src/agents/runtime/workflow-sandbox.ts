@@ -775,6 +775,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   // handler to anywhere in the chain is never mirrored — the script had a
   // chance to surface it itself. Keys are opaque ids; the bridge contract
   // only allows primitives across, so the vm side passes ids and strings.
+  //
+  // All four are reset at the top of `run()`: the bookkeeping is per-run,
+  // and latching it for the sandbox's lifetime would let a second `run()`
+  // on the same sandbox bypass the deferred-verdict design entirely (every
+  // rejection would take the post-settlement immediate-mirror path).
   const unconsumedRoots = new Map<number, { rejectionHandled: boolean }>();
   interface UnconsumedRejectionEntry {
     rootId: number;
@@ -866,6 +871,15 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     wfClearUnconsumed: (id: number): void => {
       unconsumedRejections.delete(id);
     },
+    // R10-1: teardown discrimination cannot key on the error name alone.
+    // The dominant in-flight cancellation path (controller.abort() →
+    // subagent returns terminateMode=CANCELLED → runSingleDispatch throws
+    // a PLAIN Error) never produces an 'AbortError', so the mirror would
+    // log a spurious dispatch failure for a correctly-cancelled run. Once
+    // the run's abort signal has fired, the run is already settling as
+    // cancelled / timed-out — every rejection still crossing the boundary
+    // is teardown noise regardless of its shape.
+    isRunAborted: (): boolean => opts.abortOnTimeout?.signal.aborted === true,
     // The truthy flags distinguish "injected" from "default stub" inside the
     // init script without leaking the host function itself when not used.
     hasParallel: !!opts.parallel,
@@ -951,8 +965,12 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // Dispatch promises are ObservedPromise instances (a vm-realm
       // Promise subclass). Its then override marks the result consumed
       // and re-attaches the teardown observer to the derived promise, so
-      // script-derived chains (agent(...).then(...), await, Promise.all
-      // — everything funnels through then) stay observed at every depth.
+      // script-derived chains (agent(...).then(...), await, and the
+      // ELEMENTS of static-combinator aggregates — everything that
+      // funnels through then) stay observed at every depth. The
+      // AGGREGATES of Promise.all/race/any are built by the native
+      // statics and never pass through the observed then, so those
+      // statics are wrapped explicitly below (observeAggregate).
       // Without this, a correctly-cancelled run holding a pending derived
       // chain fired a process-level unhandledRejection even though the
       // bare dispatch promise was observed.
@@ -964,33 +982,71 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // no other surface, so without the mirror the failure leaves no
       // log, alarm, or telemetry.
       function mapDispatchError(hostErr) {
-        const msg = (hostErr && hostErr.message != null)
-          ? String(hostErr.message)
-          : String(hostErr);
+        var msg;
+        try {
+          msg = (hostErr && hostErr.message != null)
+            ? String(hostErr.message)
+            : String(hostErr);
+        } catch (e) {
+          msg = '[unserializable rejection value]';
+        }
         const vmErr = new Error(msg);
-        // Precise teardown discrimination: the scheduler's abortError() is
-        // a DOMException named 'AbortError'. Matching the name here at the
-        // host boundary — before the error is flattened into a vm-realm
-        // Error — suppresses teardown noise without swallowing genuine
+        // Teardown discrimination at the host boundary — before the error
+        // is flattened into a vm-realm Error. Two shapes count as
+        // teardown: an error NAMED 'AbortError' (the scheduler's
+        // abortError() DOMException), and ANY rejection that crosses
+        // after the run's abort signal has fired — the dominant
+        // cancellation path rejects with a plain Error ('did not complete
+        // (terminate mode: CANCELLED).'), which a name-only match would
+        // mirror as a spurious dispatch failure on a correctly-cancelled
+        // run. Matching the name here (rather than the message text)
+        // still suppresses teardown noise without swallowing genuine
         // failures whose message merely contains 'aborted' (e.g. a
         // network-layer 'connection aborted by peer').
-        if (hostErr && hostErr.name === 'AbortError') vmErr.__wfAbort = true;
+        var isAbort = false;
+        try {
+          isAbort = !!(hostErr && hostErr.name === 'AbortError');
+        } catch (e) {
+          isAbort = false;
+        }
+        if (isAbort || __b.isRunAborted()) vmErr.__wfAbort = true;
         vmErr.__wfDispatchFailed = true;
         return vmErr;
       }
       function observeDispatch(promise) {
         // Direct native-then call: routing through ObservedPromise.then
-        // would mark the promise consumed and recurse the observer.
+        // would mark the promise consumed and recurse the observer. The
+        // observer body must be exception-safe on ANY rejection value:
+        // a script handler can throw an exotic value (a message getter
+        // that throws, a Proxy with throwing traps), and an observer
+        // killed mid-body would turn the very rejection it watches into
+        // a process-level unhandledRejection — the exact failure class
+        // the observer exists to remove.
         Promise.prototype.then.call(promise, undefined, function (err) {
           if (promise.__wfConsumed) return;
-          if (err && err.__wfAbort) return;
-          const msg = String(
-            err && err.message != null ? err.message : err,
-          );
+          var isAbort = false;
+          try {
+            isAbort = !!(err && err.__wfAbort);
+          } catch (e) {
+            isAbort = false;
+          }
+          if (isAbort) return;
+          var dispatchFailed = false;
+          try {
+            dispatchFailed = !!(err && err.__wfDispatchFailed);
+          } catch (e) {
+            dispatchFailed = false;
+          }
+          var msg;
+          try {
+            msg = String(err && err.message != null ? err.message : err);
+          } catch (e) {
+            msg = '[unserializable rejection value]';
+          }
           promise.__wfUnconsumedId = __b.wfReportUnconsumed(
             promise.__wfRootId,
             promise.__wfIsRoot === true,
-            !!(err && err.__wfDispatchFailed),
+            dispatchFailed,
             msg,
           );
         });
@@ -999,8 +1055,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         then(onFulfilled, onRejected) {
           this.__wfConsumed = true;
           // An attached rejection handler means the script can surface the
-          // root rejection itself; the mirror stays silent for it.
-          if (typeof onRejected === 'function') {
+          // root rejection itself; the mirror stays silent for it. The
+          // finally override below routes through this then with marked
+          // rethrow combinators — those re-raise the rejection instead of
+          // handling it, so they must NOT set the flag (marking them
+          // handled would silently drop a fire-and-forget
+          // agent(...).finally(...) failure).
+          if (typeof onRejected === 'function' && !onRejected.__wfRethrows) {
             __b.wfMarkRejectionHandled(this.__wfRootId);
           }
           // A delayed consumption clears a verdict recorded at
@@ -1015,7 +1076,66 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           observeDispatch(derived);
           return derived;
         }
+        finally(onFinally) {
+          // Native Promise.prototype.finally calls the observed then with
+          // two function combinators, indistinguishable there from a real
+          // then(f, g) — which would mark the root rejection handled even
+          // though finally rethrows it. Implement finally through the
+          // observed then with an explicitly-marked rethrow combinator so
+          // the mirror stays armed for finally-only chains.
+          if (typeof onFinally !== 'function') {
+            return this.then(undefined, undefined);
+          }
+          const onRethrow = function (err) {
+            return Promise.resolve(onFinally()).then(function () {
+              throw err;
+            });
+          };
+          onRethrow.__wfRethrows = true;
+          return this.then(
+            function (value) {
+              return Promise.resolve(onFinally()).then(function () {
+                return value;
+              });
+            },
+            onRethrow,
+          );
+        }
       }
+      // --- Static combinators: observe the aggregate promise ---
+      // Promise.all/race/any build their aggregate via the native static;
+      // it never passes through the observed then, so a fire-and-forget
+      // aggregate holding a failed dispatch would escape the mirror and
+      // surface as a process-level unhandledRejection (the interactive
+      // CLI's CRITICAL banner, or Node's default
+      // --unhandled-rejections=throw termination in headless hosts).
+      // Wrap the statics so each aggregate inherits the observer:
+      // consumption tracking then works through the aggregate's own
+      // observed then (await / .catch / .then marks it handled), and the
+      // elements still funnel through the then override via the native
+      // static's internal attach, so they stay marked consumed.
+      function observeAggregate(nativeAggregate) {
+        const rootId = __b.wfRegisterRoot();
+        const observed = new ObservedPromise(function (resolve, reject) {
+          Promise.prototype.then.call(nativeAggregate, resolve, reject);
+        });
+        observed.__wfRootId = rootId;
+        observed.__wfIsRoot = true;
+        observeDispatch(observed);
+        return observed;
+      }
+      const nativePromiseAll = Promise.all;
+      const nativePromiseRace = Promise.race;
+      const nativePromiseAny = Promise.any;
+      Promise.all = function (items) {
+        return observeAggregate(nativePromiseAll.call(this, items));
+      };
+      Promise.race = function (items) {
+        return observeAggregate(nativePromiseRace.call(this, items));
+      };
+      Promise.any = function (items) {
+        return observeAggregate(nativePromiseAny.call(this, items));
+      };
       function vmAsync(hostFn) {
         return function (...vmArgs) {
           const rootId = __b.wfRegisterRoot();
@@ -1354,12 +1474,25 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       }
       safeLog(unconsumedRejectionLine(rec));
     }
+    // Clear after flushing so a subsequent flush (a reused sandbox's next
+    // run) does not re-log entries this run already reported.
     unconsumedRejections.clear();
   };
 
   let extractedMeta: WorkflowMeta | null = null;
   return {
     async run(scriptSource: string): Promise<unknown> {
+      // R10-7: the unconsumed-rejection bookkeeping is per-run. Reset it
+      // here (not just in flush) so a second run() on the same sandbox
+      // starts from the same clean slate as a fresh sandbox — otherwise
+      // the first run's flush latches unconsumedSettled for the sandbox's
+      // lifetime and every later rejection takes the immediate-mirror
+      // path, bypassing the deferred verdict.
+      unconsumedSettled = false;
+      unconsumedRoots.clear();
+      unconsumedRejections.clear();
+      nextUnconsumedId = 1;
+
       // P4: extract `export const meta = {...}` once before the body runs.
       // The stripped source is what the vm executes; the meta object is
       // surfaced via `getMeta()` after the run (or after a malformed-meta

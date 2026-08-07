@@ -848,6 +848,27 @@ describe('WorkflowRunRegistry', () => {
     expect(entry.status).toBe('running');
   });
 
+  it('fires statusChange once per accepted dispatch-state transition', () => {
+    // useBackgroundTaskView re-pulls entries exclusively via this
+    // callback — a pause/resume cycle must re-render the dialog row on
+    // every accepted transition (and stay quiet on a rejected one).
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_emit', { isBackgrounded: true }));
+    const cb = vi.fn();
+    r.setStatusChangeCallback(cb);
+
+    r.onDispatchStateChange(entry.runId, 'pausing');
+    r.onDispatchStateChange(entry.runId, 'paused');
+    r.onDispatchStateChange(entry.runId, 'running');
+    expect(cb).toHaveBeenCalledTimes(3);
+
+    cb.mockClear();
+    // running -> paused skips pausing — rejected, no emit.
+    r.onDispatchStateChange(entry.runId, 'paused');
+    expect(cb).not.toHaveBeenCalled();
+    expect(entry.status).toBe('running');
+  });
+
   it('caps agentsCompleted at agentsDispatched on double completion', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_overcount', { isBackgrounded: true }));
@@ -1290,18 +1311,41 @@ describe('WorkflowRunRegistry', () => {
     expect(e.perPhaseTokens.get(null)).toBe(100);
   });
 
-  it('P5: onBudgetUpdated is a no-op on missing / terminal entries', () => {
+  it('P5: onBudgetUpdated is a no-op on missing entries', () => {
     const r = new WorkflowRunRegistry();
     // Missing entry — no throw.
     r.onBudgetUpdated('wf_unknown', 100, 1000);
-
-    r.register(reg('wf_1'));
-    r.complete('wf_1', null, 1_000);
-    r.onBudgetUpdated('wf_1', 999, 1000); // terminal → ignored
-    const e = r.get('wf_1')!;
-    expect(e.tokensSpent).toBe(0);
-    expect(e.tokenBudgetTotal).toBeNull();
   });
+
+  it.each(['completed', 'failed'] as const)(
+    'mirrors post-%s dispatch drains like post-cancel drains',
+    (terminal) => {
+      // The runner's `finally` aborts the controller after EVERY
+      // settlement, so dispatches in flight at settlement drain after
+      // completed / failed exactly like cancelled — the entry counters
+      // must follow, or a run that fire-and-forget'd dispatches shows a
+      // permanently frozen 1/2-agent counter in the dialog.
+      const r = new WorkflowRunRegistry();
+      const entry = r.register(reg('wf_drain', { isBackgrounded: true }));
+
+      r.onAgentDispatched(entry.runId);
+      r.onAgentDispatched(entry.runId);
+      r.onAgentCompleted(entry.runId);
+      r.onBudgetUpdated(entry.runId, 100, 1000);
+
+      if (terminal === 'completed') r.complete(entry.runId, 'ok', 2_000);
+      else r.fail(entry.runId, 'boom', 2_000);
+
+      r.onAgentCompleted(entry.runId);
+      r.onBudgetUpdated(entry.runId, 350, 1000);
+      expect(entry.agentsCompleted).toBe(2);
+      expect(entry.tokensSpent).toBe(350);
+
+      // The cap still holds after settlement.
+      r.onAgentCompleted(entry.runId);
+      expect(entry.agentsCompleted).toBe(2);
+    },
+  );
 
   it('P5: onBudgetUpdated is a no-op on backwards / zero deltas (R1 #8: monotonic spent)', () => {
     // R1 #8 contract: the orchestrator fires `budgetUpdated` after every

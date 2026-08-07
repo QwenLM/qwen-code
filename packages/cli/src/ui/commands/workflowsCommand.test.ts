@@ -260,7 +260,7 @@ describe('workflowsCommand', () => {
     },
   );
 
-  it('rejects p for unknown or malformed targets without reading snapshots', async () => {
+  it('rejects p for targets unknown to both registry and snapshots', async () => {
     const unknown = await workflowsCommand.action!(context, 'p wf_missing');
     const malformed = await workflowsCommand.action!(context, 'p');
 
@@ -593,6 +593,35 @@ describe('workflowsCommand', () => {
         type: 'message',
         messageType: 'error',
         content: 'Unknown workflow runId: wf_ghost',
+      });
+    });
+
+    it('p falls back to a persisted snapshot and reports the terminal status', async () => {
+      // The listing merges snapshots into Recent and the detail view
+      // resolves them, so /workflows p for a snapshot-only runId must
+      // give the same terminal wording a still-retained run gets —
+      // not contradict the listing with "Unknown live workflow runId".
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        { runId: 'wf_old', status: 'completed' },
+      ]);
+      const result = await workflowsCommand.action!(ctx, 'p wf_old');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Workflow wf_old is completed and cannot be paused or resumed.',
+      });
+    });
+
+    it('p still reports unknown for a runId absent from registry and snapshots', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([{ runId: 'wf_other' }]);
+      const result = await workflowsCommand.action!(ctx, 'p wf_ghost');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: 'Unknown live workflow runId: wf_ghost',
       });
     });
   });

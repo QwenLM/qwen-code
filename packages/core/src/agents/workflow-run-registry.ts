@@ -710,12 +710,14 @@ export class WorkflowRunRegistry {
   /** Cumulative completion counter — incremented after each `agent()` call settles. */
   onAgentCompleted(runId: string): void {
     const entry = this.entries.get(runId);
-    if (
-      !entry ||
-      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled') ||
-      entry.agentsCompleted >= entry.agentsDispatched
-    )
-      return;
+    // No status gate: the runner's `finally` aborts the controller after
+    // EVERY settlement (completed / failed / cancelled alike), so
+    // dispatches in flight at settlement always drain after the terminal
+    // status is set — regardless of which terminal it is. Gating the
+    // drain to `cancelled` alone froze completed / failed counters
+    // mid-drain (e.g. a run that fire-and-forget'd 2 of 5 dispatches
+    // permanently showing 3/5 agents). The cap is the only guard needed.
+    if (!entry || entry.agentsCompleted >= entry.agentsDispatched) return;
     entry.agentsCompleted++;
     this.emitStatusChange(entry);
   }
@@ -732,19 +734,17 @@ export class WorkflowRunRegistry {
    */
   onBudgetUpdated(runId: string, spent: number, total: number | null): void {
     const entry = this.entries.get(runId);
-    // Symmetric with `onAgentCompleted` / `setRecentLogs`: dispatches in
-    // flight at cancel time still settle afterwards (the production
-    // dispatch reports tokens in a `finally`), and their burn keeps
-    // mirroring into `tokensSpent` so the live entry's completed-agent
-    // count and token total stay consistent. The persisted snapshot and
-    // telemetry event are a best-effort projection frozen at settlement
-    // — the runner writes both before in-flight dispatches drain — so
-    // for cancelled runs they may read lower than this entry.
-    if (
-      !entry ||
-      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
-    )
-      return;
+    // Symmetric with `onAgentCompleted`: dispatches in flight at
+    // settlement still drain afterwards for EVERY terminal status (the
+    // runner's `finally` aborts the controller after every settlement,
+    // and the production dispatch reports tokens in a `finally`), and
+    // their burn keeps mirroring into `tokensSpent` so the live entry's
+    // completed-agent count and token total stay consistent. The
+    // persisted snapshot and telemetry event are a best-effort
+    // projection frozen at settlement — the runner writes both before
+    // in-flight dispatches drain — so they may read lower than this
+    // entry.
+    if (!entry) return;
     const delta = spent - entry.tokensSpent;
     const totalChanged = entry.tokenBudgetTotal !== total;
     // P5 R1 (#8): skip the statusChange emit when nothing observable
