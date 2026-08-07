@@ -19,8 +19,7 @@ import {
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import type {
-  BranchPublicationUnsupportedError} from './sessionService.js';
+import type { BranchPublicationUnsupportedError } from './sessionService.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
@@ -4477,6 +4476,62 @@ describe('SessionService', () => {
       ).toBe('cross device content');
     });
 
+    it('preserves a backup target that appears immediately before publication', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313137';
+      const newId = '41414141-4141-4141-4141-414141414147';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, ['backup-collision']);
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      const targetTranscript = realPath.join(chatsDir, `${newId}.jsonl`);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'backup-collision'),
+        'source content',
+      );
+      const realRename = fs.promises.rename;
+      const renameSpy = vi
+        .spyOn(fs.promises, 'rename')
+        .mockImplementation(async (source, target) => {
+          if (String(target) === targetBackupDir) {
+            fs.mkdirSync(targetBackupDir, { recursive: true });
+            fs.writeFileSync(
+              realPath.join(targetBackupDir, 'foreign-sentinel'),
+              'foreign content',
+            );
+            const error = new Error(
+              'backup target appeared',
+            ) as NodeJS.ErrnoException;
+            error.code = 'EEXIST';
+            throw error;
+          }
+          return realRename(source, target);
+        });
+
+      try {
+        await expect(service.forkSession(oldId, newId)).rejects.toMatchObject({
+          code: 'EEXIST',
+        });
+      } finally {
+        renameSpy.mockRestore();
+      }
+
+      expect(fs.existsSync(targetTranscript)).toBe(false);
+      expect(
+        fs.readFileSync(
+          realPath.join(targetBackupDir, 'foreign-sentinel'),
+          'utf8',
+        ),
+      ).toBe('foreign content');
+      expect(
+        fs.existsSync(realPath.join(targetBackupDir, '.branch-owner')),
+      ).toBe(false);
+    });
+
     it('removes copied file-history backups when deleting a fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313132';
       const newId = '41414141-4141-4141-4141-414141414142';
@@ -4877,6 +4932,49 @@ describe('SessionService', () => {
       expect(fs.existsSync(paths.claimPath)).toBe(false);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
       expect(fs.existsSync(paths.stagedBackupPath)).toBe(false);
+    });
+
+    it('bounds the number of stale branch claims processed in one run', async () => {
+      for (let index = 0; index < 129; index++) {
+        const suffix = index.toString(16).padStart(12, '0');
+        seedStaleBranchCreation(
+          `66666666-6666-6666-6666-${suffix}`,
+          `77777777-7777-7777-7777-${suffix}`,
+        );
+      }
+      const claimsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        '.branch-claims',
+      );
+
+      await service['cleanupStaleBranchCreations']();
+      expect(fs.readdirSync(claimsDir)).toHaveLength(1);
+
+      await service['cleanupStaleBranchCreations']();
+      expect(fs.readdirSync(claimsDir)).toEqual([]);
+    });
+
+    it('preserves an oversized branch claim without reading it unbounded', async () => {
+      const newId = '66666666-6666-6666-6666-666666666679';
+      const ownerToken = '77777777-7777-7777-7777-777777777789';
+      const paths = seedStaleBranchCreation(newId, ownerToken);
+      fs.writeFileSync(paths.claimPath, 'x'.repeat(256 * 1024 + 1));
+      const staleTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      fs.utimesSync(paths.claimPath, staleTime, staleTime);
+      const readFileSpy = vi.spyOn(fs.promises, 'readFile');
+
+      try {
+        await service['cleanupStaleBranchCreations']();
+        expect(readFileSpy).not.toHaveBeenCalledWith(
+          paths.claimPath,
+          expect.anything(),
+        );
+      } finally {
+        readFileSpy.mockRestore();
+      }
+      expect(fs.existsSync(paths.claimPath)).toBe(true);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
     });
 
     it('isolates branch GC failures from list operations', async () => {
@@ -5402,6 +5500,29 @@ describe('SessionService', () => {
 
       const titles = await service.findSessionTitlesByPrefix('anything');
       expect(titles).toEqual([]);
+    });
+
+    it('uses only asynchronous filesystem APIs for the collision scan', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'async branch (Branch)',
+      );
+      const syncSpies = [
+        vi.spyOn(fs, 'readdirSync'),
+        vi.spyOn(fs, 'statSync'),
+        vi.spyOn(fs, 'openSync'),
+        vi.spyOn(fs, 'readSync'),
+        vi.spyOn(fs, 'closeSync'),
+      ];
+
+      try {
+        await expect(
+          service.findSessionTitlesByPrefix('async branch (Branch'),
+        ).resolves.toEqual(['async branch (Branch)']);
+        for (const spy of syncSpies) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of syncSpies) spy.mockRestore();
+      }
     });
   });
 

@@ -34,6 +34,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
+  readLastJsonStringFieldsAsync,
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
@@ -302,6 +303,9 @@ const MAX_PROMPT_SCAN_LINES = 10;
 const TAIL_READ_SIZE = 64 * 1024;
 const BRANCH_STAGING_STALE_MS = 24 * 60 * 60 * 1000;
 const BRANCH_CREATION_MANIFEST_VERSION = 1;
+const BRANCH_GC_MAX_CLAIMS_PER_RUN = 128;
+const BRANCH_GC_MAX_MANIFEST_BYTES = 256 * 1024;
+const BRANCH_TITLE_SCAN_CONCURRENCY = 16;
 
 interface BranchCreationManifestV1 {
   v: typeof BRANCH_CREATION_MANIFEST_VERSION;
@@ -360,6 +364,35 @@ function parseBranchCreationManifest(
     return parsed as BranchCreationManifestV1;
   } catch {
     return undefined;
+  }
+}
+
+async function readBranchCreationManifestBounded(
+  claimPath: string,
+  expectedSessionId: string,
+  buffer: Buffer,
+): Promise<BranchCreationManifestV1 | undefined> {
+  let handle: fs.promises.FileHandle | undefined;
+  try {
+    handle = await fs.promises.open(claimPath, 'r');
+    const before = await handle.stat();
+    if (before.size > BRANCH_GC_MAX_MANIFEST_BYTES) return undefined;
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      BRANCH_GC_MAX_MANIFEST_BYTES + 1,
+      0,
+    );
+    const after = await handle.stat();
+    if (bytesRead > BRANCH_GC_MAX_MANIFEST_BYTES || after.size !== bytesRead) {
+      return undefined;
+    }
+    return parseBranchCreationManifest(
+      buffer.toString('utf8', 0, bytesRead),
+      expectedSessionId,
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
@@ -565,16 +598,21 @@ export class SessionService {
   private async cleanupStaleBranchCreations(): Promise<void> {
     const chatsDir = this.getChatsDir();
     const claimsDir = path.join(chatsDir, '.branch-claims');
-    let claims: string[];
+    let claims: fs.Dir;
     try {
-      claims = await fs.promises.readdir(claimsDir);
+      claims = await fs.promises.opendir(claimsDir);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
       this.warn(`branch staging GC failed to list claims: ${error}`);
       return;
     }
-    for (const claimName of claims) {
+    const manifestBuffer = Buffer.alloc(BRANCH_GC_MAX_MANIFEST_BYTES + 1);
+    let claimsProcessed = 0;
+    for await (const claim of claims) {
+      const claimName = claim.name;
       if (!claimName.endsWith('.claim')) continue;
+      if (claimsProcessed >= BRANCH_GC_MAX_CLAIMS_PER_RUN) break;
+      claimsProcessed++;
       const sessionId = claimName.slice(0, -'.claim'.length);
       if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) continue;
       const claimPath = path.join(claimsDir, claimName);
@@ -585,9 +623,10 @@ export class SessionService {
         ) {
           continue;
         }
-        const manifest = parseBranchCreationManifest(
-          await fs.promises.readFile(claimPath, 'utf8'),
+        const manifest = await readBranchCreationManifestBounded(
+          claimPath,
           sessionId,
+          manifestBuffer,
         );
         if (!manifest) {
           this.warn(
@@ -654,9 +693,10 @@ export class SessionService {
         } else if (targetBackupExists) {
           await fs.promises.rm(targetBackup, { recursive: true, force: true });
         }
-        const currentManifest = parseBranchCreationManifest(
-          await fs.promises.readFile(claimPath, 'utf8'),
+        const currentManifest = await readBranchCreationManifestBounded(
+          claimPath,
           sessionId,
+          manifestBuffer,
         );
         if (currentManifest?.ownerToken === manifest.ownerToken) {
           await removeFileIfExistsAsync(claimPath);
@@ -995,6 +1035,25 @@ export class SessionService {
     source?: TitleSource;
   } {
     const hit = readLastJsonStringFieldsSync(
+      filePath,
+      'customTitle',
+      ['titleSource'],
+      '"subtype":"custom_title"',
+      tailBuffer,
+    );
+    const title = hit['customTitle'];
+    if (!title) return {};
+    const rawSource = hit['titleSource'];
+    const source =
+      rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
+    return { title, source };
+  }
+
+  private async readSessionTitleInfoFromFileAsync(
+    filePath: string,
+    tailBuffer: Buffer,
+  ): Promise<{ title?: string; source?: TitleSource }> {
+    const hit = await readLastJsonStringFieldsAsync(
       filePath,
       'customTitle',
       ['titleSource'],
@@ -2616,7 +2675,7 @@ export class SessionService {
 
     let fileNames: string[];
     try {
-      fileNames = fs.readdirSync(chatsDir);
+      fileNames = await fs.promises.readdir(chatsDir);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return titles;
@@ -2624,41 +2683,57 @@ export class SessionService {
       throw error;
     }
 
-    let filesProcessed = 0;
-    for (const name of fileNames) {
-      if (!SESSION_FILE_PATTERN.test(name)) continue;
-      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
-      filesProcessed++;
+    const candidates = fileNames
+      .filter((name) => SESSION_FILE_PATTERN.test(name))
+      .slice(0, MAX_FILES_TO_PROCESS);
+    const tailBuffers = Array.from(
+      { length: Math.min(BRANCH_TITLE_SCAN_CONCURRENCY, candidates.length) },
+      () => Buffer.alloc(LITE_READ_BUF_SIZE),
+    );
 
-      const filePath = path.join(chatsDir, name);
+    for (
+      let offset = 0;
+      offset < candidates.length;
+      offset += BRANCH_TITLE_SCAN_CONCURRENCY
+    ) {
+      const batch = candidates.slice(
+        offset,
+        offset + BRANCH_TITLE_SCAN_CONCURRENCY,
+      );
+      const matches = await Promise.all(
+        batch.map(async (name, index): Promise<string | undefined> => {
+          const filePath = path.join(chatsDir, name);
+          const titleInfo = await this.readSessionTitleInfoFromFileAsync(
+            filePath,
+            tailBuffers[index]!,
+          );
+          if (!titleInfo.title) return undefined;
+          if (
+            !titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)
+          ) {
+            return undefined;
+          }
 
-      // Cheap tail-read to extract the title before doing any project-
-      // filter work. Saves a per-file jsonl.readLines on the common
-      // case where most sessions don't share this prefix.
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath);
-      if (!titleInfo.title) continue;
-      const normalizedTitle = titleInfo.title.toLowerCase().trim();
-      if (!normalizedTitle.startsWith(normalizedPrefix)) continue;
-
-      // Project filter — same semantics as findSessionsByTitle: scope
-      // collisions to the current project so a fork in another project
-      // can't make this one bump unnecessarily.
-      try {
-        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
-        if (records.length === 0) continue;
-        if (
-          !(await this.sessionBelongsToCurrentProject(
-            records[0].sessionId,
-            records[0].cwd,
-          ))
-        ) {
-          continue;
-        }
-      } catch {
-        continue;
+          try {
+            const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+            if (records.length === 0) return undefined;
+            if (
+              !(await this.sessionBelongsToCurrentProject(
+                records[0].sessionId,
+                records[0].cwd,
+              ))
+            ) {
+              return undefined;
+            }
+          } catch {
+            return undefined;
+          }
+          return titleInfo.title;
+        }),
+      );
+      for (const title of matches) {
+        if (title !== undefined) titles.push(title);
       }
-
-      titles.push(titleInfo.title);
     }
 
     return titles;

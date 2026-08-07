@@ -6384,12 +6384,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
 
       const concurrentSideTask = isSideTask && entry.promptActive;
-      // Admission-time check: a prompt's `finally` clears `promptActive`
-      // BEFORE a queued branch callback runs, so a check inside the
-      // callback would observe post-prompt state and silently wait
-      // instead of rejecting. Reject synchronously per the design doc's
-      // "branch rejects while a prompt is active" semantics.
-      if (!isSideTask && entry.promptActive) {
+      // Admission-time check: pendingPromptCount changes synchronously when a
+      // prompt is accepted, before its queue callback sets promptActive. A
+      // check inside the branch callback would observe post-prompt state and
+      // silently wait instead of rejecting.
+      if (!isSideTask && (entry.pendingPromptCount > 0 || entry.promptActive)) {
         throw new BranchWhilePromptActiveError(sessionId);
       }
       const branchResult = (
@@ -6426,23 +6425,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // lives on A; routing through B reports session-not-found or
           // operates on the wrong runtime state. The NEW session's
           // restore below stays on the intended channel.
-          const result = (await withTimeout(
-            entry.connection.extMethod(
-              isSideTask
-                ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
-                : SERVE_CONTROL_EXT_METHODS.sessionBranch,
-              {
-                sessionId,
-                cwd: boundWorkspace,
-                name: req.name,
-                ...(req.atRecordId !== undefined
-                  ? { atRecordId: req.atRecordId }
-                  : {}),
-              },
-            ),
-            initTimeoutMs,
-            isSideTask ? 'createSideTaskSession' : 'branchSession',
-          )) as { newSessionId: string; title?: string; displayName?: string };
+          const mutation = entry.connection.extMethod(
+            isSideTask
+              ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
+              : SERVE_CONTROL_EXT_METHODS.sessionBranch,
+            {
+              sessionId,
+              cwd: boundWorkspace,
+              name: req.name,
+              ...(req.atRecordId !== undefined
+                ? { atRecordId: req.atRecordId }
+                : {}),
+            },
+          );
+          // ACP cannot cancel a branch after dispatch. Keep the queue and
+          // reservation until its real outcome is known so a caller never sees
+          // a timeout followed by an unobserved committed session.
+          const result = (await (isSideTask
+            ? withTimeout(mutation, initTimeoutMs, 'createSideTaskSession')
+            : mutation)) as {
+            newSessionId: string;
+            title?: string;
+            displayName?: string;
+          };
 
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(

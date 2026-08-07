@@ -1314,13 +1314,10 @@ export function createDaemonSessionActions({
         'branch_session',
       );
       try {
-        const result = await withActionTimeout(
-          session.client.branchSession(
-            session.sessionId,
-            { name, atRecordId },
-            session.clientId,
-          ),
-          'Branch session timed out',
+        const result = await session.client.branchSession(
+          session.sessionId,
+          { name, atRecordId },
+          session.clientId,
         );
         persistStableClientId(result.clientId, result.sessionId);
         void startSessionSwitch(result.sessionId, 'load').catch(

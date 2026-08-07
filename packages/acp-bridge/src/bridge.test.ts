@@ -7424,6 +7424,72 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects a normal branch as soon as a prompt is admitted', async () => {
+      const promptGate = deferred<PromptResponse>();
+      const handle = makeChannel({
+        promptImpl: () => promptGate.promise,
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            throw new Error('branch must not run after prompt admission');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'admitted' }],
+      });
+      await expect(
+        bridge.branchSession(session.sessionId, {}),
+      ).rejects.toBeInstanceOf(BranchWhilePromptActiveError);
+
+      promptGate.resolve({ stopReason: 'end_turn' });
+      await prompt;
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('waits for a dispatched branch instead of timing out and committing later', async () => {
+      const branchStarted = deferred<void>();
+      const branchGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          branchStarted.resolve();
+          await branchGate.promise;
+          return { newSessionId: 'slow-branch', title: 'Slow branch' };
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      let settled = false;
+      const branch = bridge.branchSession(session.sessionId, {}).finally(() => {
+        settled = true;
+      });
+      await branchStarted.promise;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(settled).toBe(false);
+
+      branchGate.resolve();
+      await expect(branch).resolves.toMatchObject({
+        sessionId: 'slow-branch',
+        displayName: 'Slow branch',
+      });
+      await bridge.shutdown();
+    });
+
     it('rejects rewind at admission while a prompt is active', async () => {
       const promptStarted = deferred<void>();
       const promptGate = deferred<void>();
@@ -7730,6 +7796,54 @@ describe('createAcpSessionBridge', () => {
           },
         }),
       );
+      await bridge.shutdown();
+    });
+
+    it('retains a completed-turn branch point in ring replay and compaction', async () => {
+      const branchPoint = {
+        assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+        checkpointUuid: '22222222-2222-4222-8222-222222222222',
+      };
+      const handle = makeChannel({
+        promptImpl: () =>
+          ({
+            stopReason: 'end_turn',
+            _meta: { 'qwen.branchPoint': branchPoint },
+          }) as PromptResponse,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'branchable' }],
+      });
+
+      const iterator = bridge
+        .subscribeEvents(session.sessionId, { lastEventId: 0 })
+        [Symbol.asyncIterator]();
+      let replayedComplete: BridgeEvent | undefined;
+      for (let index = 0; index < 10; index++) {
+        const next = await iterator.next();
+        if (next.done) break;
+        if (next.value.type === 'turn_complete') {
+          replayedComplete = next.value;
+          break;
+        }
+      }
+      await iterator.return?.();
+      expect(replayedComplete).toMatchObject({
+        type: 'turn_complete',
+        data: { branchPoint },
+      });
+
+      const compactedComplete = bridge
+        .getSessionReplaySnapshot(session.sessionId)
+        ?.compactedTurns.find((event) => event.type === 'turn_complete');
+      expect(compactedComplete).toMatchObject({
+        type: 'turn_complete',
+        data: { branchPoint },
+      });
       await bridge.shutdown();
     });
 

@@ -803,6 +803,58 @@ describe('createDaemonSessionActions', () => {
       }),
     );
   });
+
+  it('keeps waiting for a dispatched branch beyond the generic action timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const branchResult = createDeferred<{
+        sessionId: string;
+        clientId: string;
+        workspaceCwd: string;
+        attached: boolean;
+        state: Record<string, never>;
+        displayName: string;
+      }>();
+      session.client.branchSession.mockReturnValueOnce(branchResult.promise);
+      const addNotice = vi.fn((notice) => notice);
+      const { actions, pendingSessionLoadRef } = createActionsHarness({
+        addNotice,
+        session,
+      });
+
+      let settled = false;
+      const branch = actions
+        .branchSession(undefined, 'checkpoint-1')
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(settled).toBe(false);
+      expect(addNotice).not.toHaveBeenCalled();
+
+      branchResult.resolve({
+        sessionId: 'session-b',
+        clientId: 'client-session-b',
+        workspaceCwd: '/workspace',
+        attached: false,
+        state: {},
+        displayName: 'Historical branch',
+      });
+      await expect(branch).resolves.toEqual({
+        sessionId: 'session-b',
+        displayName: 'Historical branch',
+      });
+      if (pendingSessionLoadRef.current) {
+        clearTimeout(pendingSessionLoadRef.current.timeout);
+        pendingSessionLoadRef.current.resolve();
+        pendingSessionLoadRef.current = undefined;
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
 });
 
 function createActionsHarness(

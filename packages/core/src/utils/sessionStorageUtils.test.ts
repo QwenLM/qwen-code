@@ -14,6 +14,7 @@ import {
   extractLastJsonStringFields,
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
+  readLastJsonStringFieldsAsync,
   readLastJsonStringFieldsSync,
   unescapeJsonString,
 } from './sessionStorageUtils.js';
@@ -771,6 +772,67 @@ describe('sessionStorageUtils', () => {
           'custom_title',
         ),
       ).toEqual({ customTitle: 'new', titleSource: 'auto' });
+    });
+  });
+
+  describe('readLastJsonStringFieldsAsync', () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sst-readfields-async-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('reads the atomic title pair without synchronous filesystem calls', async () => {
+      const filePath = path.join(tmpDir, 'tail.jsonl');
+      fs.writeFileSync(
+        filePath,
+        '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n',
+      );
+      const syncSpies = [
+        vi.spyOn(fs, 'statSync'),
+        vi.spyOn(fs, 'openSync'),
+        vi.spyOn(fs, 'readSync'),
+        vi.spyOn(fs, 'closeSync'),
+      ];
+
+      try {
+        await expect(
+          readLastJsonStringFieldsAsync(
+            filePath,
+            'customTitle',
+            ['titleSource'],
+            'custom_title',
+            Buffer.alloc(LITE_READ_BUF_SIZE),
+          ),
+        ).resolves.toEqual({ customTitle: 'A', titleSource: 'auto' });
+        for (const spy of syncSpies) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of syncSpies) spy.mockRestore();
+      }
+    });
+
+    it('falls back to the bounded head window', async () => {
+      const filePath = path.join(tmpDir, 'head.jsonl');
+      fs.writeFileSync(
+        filePath,
+        '{"subtype":"custom_title","customTitle":"Head","titleSource":"manual"}\n' +
+          '{"type":"user","message":"' +
+          'x'.repeat(LITE_READ_BUF_SIZE) +
+          '"}\n',
+      );
+
+      await expect(
+        readLastJsonStringFieldsAsync(
+          filePath,
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).resolves.toEqual({ customTitle: 'Head', titleSource: 'manual' });
     });
   });
 });

@@ -443,6 +443,60 @@ describe('ChatRecordingService', () => {
       expect(records.at(-1)?.parentUuid).toBe(point?.checkpointUuid);
     });
 
+    it('releases buffered appends with a continuous chain when no candidate exists', async () => {
+      let validationStarted!: () => void;
+      let releaseValidation!: () => void;
+      const started = new Promise<void>((resolve) => {
+        validationStarted = resolve;
+      });
+      const validationGate = new Promise<void>((resolve) => {
+        releaseValidation = resolve;
+      });
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession: vi.fn(async () => {
+          validationStarted();
+          await validationGate;
+          return {
+            conversation: {
+              messages: vi
+                .mocked(mockLease.appendJsonLine)
+                .mock.calls.map((call) => call[0] as ChatRecord),
+            },
+          };
+        }),
+      } as unknown as ReturnType<Config['getSessionService']>);
+
+      chatRecordingService.recordUserMessage([{ text: 'no assistant yet' }]);
+      const checkpoint = chatRecordingService.recordBranchCheckpointTransaction(
+        {
+          startExclusiveRecordUuid: null,
+          stopReason: 'end_turn',
+        },
+      );
+      await started;
+      const title = chatRecordingService.recordCustomTitle('Title', 'manual');
+      chatRecordingService.recordUserMessage([{ text: 'next turn' }]);
+
+      releaseValidation();
+      await expect(checkpoint).resolves.toBeUndefined();
+      await expect(title).resolves.toBe(true);
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.map((call) => call[0] as ChatRecord);
+      expect(records.map((record) => record.subtype)).toEqual([
+        undefined,
+        'custom_title',
+        undefined,
+      ]);
+      expect(records[1]?.parentUuid).toBe(records[0]?.uuid);
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+      expect(chatRecordingService.getTranscriptCursor().recordId).toBe(
+        records[2]?.uuid,
+      );
+    });
+
     it.each(['cancelled', 'max_tokens'])(
       'does not record a checkpoint for a %s turn',
       async (stopReason) => {

@@ -486,3 +486,90 @@ export function readLastJsonStringFieldsSync(
     }
   }
 }
+
+/**
+ * Promise-based counterpart to {@link readLastJsonStringFieldsSync} for
+ * latency-sensitive daemon paths. It preserves the same bounded tail-first,
+ * latest-tail retry, and head fallback semantics without blocking the event
+ * loop on filesystem calls.
+ */
+export async function readLastJsonStringFieldsAsync(
+  filePath: string,
+  primaryKey: string,
+  otherKeys: string[],
+  lineContains?: string,
+  scratchBuffer?: Buffer,
+): Promise<Record<string, string | undefined>> {
+  const emptyResult: Record<string, string | undefined> = {};
+  emptyResult[primaryKey] = undefined;
+  for (const key of otherKeys) emptyResult[key] = undefined;
+
+  let handle: fs.promises.FileHandle | undefined;
+  try {
+    handle = await fs.promises.open(filePath, getReadOpenFlags());
+    const fileSize = (await handle.stat()).size;
+    if (fileSize === 0) return emptyResult;
+
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+    const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const tailOffset = fileSize - tailLength;
+    const tailRead = await handle.read(buffer, 0, tailLength, tailOffset);
+    if (tailRead.bytesRead > 0) {
+      const hit = extractLastJsonStringFields(
+        buffer.toString('utf8', 0, tailRead.bytesRead),
+        primaryKey,
+        otherKeys,
+        lineContains,
+      );
+      if (hit[primaryKey] !== undefined) return hit;
+    }
+
+    const latestSize = (await handle.stat()).size;
+    if (latestSize > fileSize) {
+      const latestTailLength = Math.min(latestSize, LITE_READ_BUF_SIZE);
+      const latestTailRead = await handle.read(
+        buffer,
+        0,
+        latestTailLength,
+        latestSize - latestTailLength,
+      );
+      if (latestTailRead.bytesRead > 0) {
+        const hit = extractLastJsonStringFields(
+          buffer.toString('utf8', 0, latestTailRead.bytesRead),
+          primaryKey,
+          otherKeys,
+          lineContains,
+        );
+        if (hit[primaryKey] !== undefined) return hit;
+      }
+    }
+
+    if (tailOffset === 0) return emptyResult;
+
+    const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const headRead = await handle.read(buffer, 0, headLength, 0);
+    if (headRead.bytesRead > 0) {
+      const rawHead = buffer.toString('utf8', 0, headRead.bytesRead);
+      const headText =
+        headRead.bytesRead < fileSize
+          ? rawHead.slice(0, rawHead.lastIndexOf('\n') + 1)
+          : rawHead;
+      const hit = extractLastJsonStringFields(
+        headText,
+        primaryKey,
+        otherKeys,
+        lineContains,
+      );
+      if (hit[primaryKey] !== undefined) return hit;
+    }
+
+    return emptyResult;
+  } catch {
+    return emptyResult;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}

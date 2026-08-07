@@ -2736,6 +2736,47 @@ describe('DaemonClient', () => {
         atRecordId: 'checkpoint-1',
       });
     });
+
+    it('does not detach a dispatched branch when the generic fetch timeout elapses', async () => {
+      const reply = {
+        sessionId: 'slow-branch',
+        workspaceCwd: '/work/a',
+        attached: false,
+        clientId: 'branch-client',
+        state: {},
+        displayName: 'Slow branch',
+        forkedFrom: {
+          sessionId: 'source-1',
+          displayName: 'Source session',
+        },
+      };
+      let releaseFetch: (() => void) | undefined;
+      let requestSignal: AbortSignal | null | undefined;
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve) => {
+            requestSignal = init?.signal;
+            releaseFetch = () => resolve(jsonResponse(201, reply));
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      let settled = false;
+      const branch = client.branchSession('source-1').finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(releaseFetch).toBeDefined());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(settled).toBe(false);
+      expect(requestSignal?.aborted ?? false).toBe(false);
+
+      releaseFetch!();
+      await expect(branch).resolves.toEqual(reply);
+    });
   });
 
   describe('createSideTaskSession', () => {

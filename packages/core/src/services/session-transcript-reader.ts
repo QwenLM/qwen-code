@@ -1245,12 +1245,13 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    const pageRecordUuids = new Set(records.map((record) => record.uuid));
-    const pageBranchPoints = Object.fromEntries(
-      [...index.branchPointsByAssistantUuid].filter(([assistantUuid]) =>
-        pageRecordUuids.has(assistantUuid),
-      ),
-    );
+    const pageBranchPoints: Record<string, string> = {};
+    for (const record of records) {
+      const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
+      if (checkpointUuid !== undefined) {
+        pageBranchPoints[record.uuid] = checkpointUuid;
+      }
+    }
     const backwardGoalState =
       direction === 'backward'
         ? await readGoalStateBeforePosition(index, nextPosition)
