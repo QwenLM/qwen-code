@@ -288,6 +288,15 @@ export function ParallelAgentsGroup({
             setAutomaticCollapseAnimating(true);
             autoCollapseAnimationTimerRef.current = setTimeout(() => {
               autoCollapseAnimationTimerRef.current = undefined;
+              // Same commit-vs-flush race as above: the deferral effect's
+              // rescue only fires while the animation is still pending, so
+              // finalizing on stale state would make it unrecoverable.
+              if (
+                deferAutomaticCollapseRef.current ||
+                !autoManageExpansionRef.current
+              ) {
+                return;
+              }
               if (
                 !wasActiveRef.current &&
                 expansionOwnerRef.current === 'automatic'
