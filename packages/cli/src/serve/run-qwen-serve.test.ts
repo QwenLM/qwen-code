@@ -3537,11 +3537,16 @@ describe('runQwenServe runtime startup failures', () => {
     try {
       await handle.runtimeReady;
       const bridgeOptions = createBridge.mock.calls[0]?.[0] as
-        | { childEnvOverrides?: Record<string, string | undefined> }
+        | {
+            childEnvOverrides?: Record<string, string | undefined>;
+            externalToolGuard?: unknown;
+          }
         | undefined;
       expect(bridgeOptions?.childEnvOverrides).toMatchObject({
         QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
+        QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD: 'required-v1',
       });
+      expect(bridgeOptions?.externalToolGuard).toEqual(expect.any(Function));
     } finally {
       if (originalClientMcpOverWs === undefined) {
         delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];

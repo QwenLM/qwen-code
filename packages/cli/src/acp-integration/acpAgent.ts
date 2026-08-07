@@ -2807,19 +2807,6 @@ export function createManagedExternalToolGuard(
     if (context.signal.aborted) {
       throw new DOMException('Tool invocation aborted', 'AbortError');
     }
-    if (
-      context.toolName === ToolNames.AGENT ||
-      context.toolName === ToolNames.WORKFLOW ||
-      context.toolName === ToolNames.CREATE_SUB_SESSION ||
-      context.toolName === ToolNames.SEND_MESSAGE
-    ) {
-      return {
-        allowed: false,
-        reason:
-          'Managed external tool guard v1 does not support nested or delegated agent execution.',
-      };
-    }
-
     let rejectOnAbort: ((error: Error) => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
       rejectOnAbort = reject;

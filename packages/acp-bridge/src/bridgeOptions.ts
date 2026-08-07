@@ -77,6 +77,10 @@ export interface ExternalToolGuardPrepareRequest {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly arguments: Readonly<Record<string, unknown>>;
+  /** Daemon-owned workspace identity. Never accepted from the ACP child. */
+  readonly workspaceCwd?: string;
+  /** Daemon-owned current session working directory. */
+  readonly effectiveCwd?: string;
 }
 
 export type ExternalToolGuardPrepareResult =

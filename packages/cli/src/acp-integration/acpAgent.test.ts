@@ -18286,39 +18286,27 @@ describe('createManagedExternalToolGuard', () => {
     expect(extMethod).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ToolNames.AGENT,
-    ToolNames.WORKFLOW,
-    ToolNames.CREATE_SUB_SESSION,
-    ToolNames.SEND_MESSAGE,
-  ])(
-    'rejects unsupported nested executor %s without contacting the provider',
-    async (toolName) => {
-      const extMethod = vi.fn();
-      const guard = createManagedExternalToolGuard({
-        extMethod,
-      } as unknown as AgentSideConnection);
+  it('forwards nested executors to the daemon host guard', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
 
-      await expect(
-        guard({
-          callId: 'call-1',
-          toolName,
-          args: {},
-          signal: new AbortController().signal,
-          invocationContext: {
-            version: 1,
-            sessionId: 'session-1',
-            promptId: 'prompt-1',
-          },
-        }),
-      ).resolves.toEqual({
-        allowed: false,
-        reason:
-          'Managed external tool guard v1 does not support nested or delegated agent execution.',
-      });
-      expect(extMethod).not.toHaveBeenCalled();
-    },
-  );
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: ToolNames.AGENT,
+        args: {},
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).toHaveBeenCalledOnce();
+  });
 
   it('stops waiting when the tool invocation is cancelled', async () => {
     const extMethod = vi.fn(

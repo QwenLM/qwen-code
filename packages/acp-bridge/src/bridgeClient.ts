@@ -533,6 +533,8 @@ function sliceLineRange(
  */
 export interface BridgeClientSessionEntry {
   sessionId: string;
+  workspaceCwd: string;
+  effectiveCwd: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
   recordingDegraded: boolean;
@@ -1245,6 +1247,8 @@ export class BridgeClient implements Client {
       toolCallId,
       toolName,
       arguments: args,
+      workspaceCwd: entry.workspaceCwd,
+      effectiveCwd: entry.effectiveCwd,
     });
     const currentEntry = this.resolveEntry(sessionId);
     if (

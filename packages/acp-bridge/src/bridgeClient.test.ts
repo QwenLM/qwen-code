@@ -247,10 +247,14 @@ describe('BridgeClient — managed external tool guard', () => {
     });
     const entry: {
       sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
       promptActive: boolean;
       activePromptId?: string;
     } = {
       sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
       promptActive: true,
       activePromptId: 'prompt-1',
     };
@@ -275,6 +279,8 @@ describe('BridgeClient — managed external tool guard', () => {
       toolCallId: 'call-1',
       toolName: 'write_file',
       arguments: { path: 'README.md' },
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
     });
   });
 

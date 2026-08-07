@@ -133,6 +133,7 @@ import type {
   ChannelDeliveryHostResult,
   ExternalToolGuardHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import { createDaemonToolGuard } from './daemon-git-worktree-guard.js';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
@@ -2797,6 +2798,9 @@ async function runQwenServeImpl(
       'qwen serve: required external tool guard handshake succeeded.',
     );
   }
+  const daemonToolGuardHandler = createDaemonToolGuard(
+    externalToolGuardHandler,
+  );
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
@@ -2804,9 +2808,7 @@ async function runQwenServeImpl(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: externalToolGuardHandler
-      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
-      : undefined,
+    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   };
 
   const cliVersionPromise = getCliVersion();
@@ -3923,9 +3925,7 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4322,9 +4322,7 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4871,9 +4869,7 @@ async function runQwenServeImpl(
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,
-          ...(externalToolGuardHandler
-            ? { externalToolGuard: externalToolGuardHandler }
-            : {}),
+          externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
