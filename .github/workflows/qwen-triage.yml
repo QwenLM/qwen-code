@@ -540,14 +540,13 @@ jobs:
       # The agent runs as one long step, but its output streams live to the
       # Actions log. Post a status comment up front carrying that run link so a
       # maintainer can watch progress instead of waiting silently until the
-      # first stage comment lands; "Finalize triage status comment" flips it to
-      # a terminal state at the end. Selection reuses a marker this run owns
-      # (a re-run rewrites its attempt-1 comment), else reclaims the OLDEST
-      # still-"running" marker — finalize's foreign arm adds a fresh comment
-      # instead of upserting, and once two markers exist a newest-wins pick
-      # would never touch an older stranded claim again — else the newest
-      # marker. Best-effort: never fail the job over a status post.
+      # first stage comment lands. Upsert by marker so a re-run reuses the one
+      # comment (no clutter), and export the comment id: "Finalize triage
+      # status comment" PATCHes exactly that id to flip it to a terminal state,
+      # so the two steps cannot disagree about which comment this run owns.
+      # Best-effort: never fail the job over a status post.
       - name: 'Post triage status comment'
+        id: 'status'
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
@@ -568,25 +567,27 @@ jobs:
             EXISTING_ID="$(
               gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
                 --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" --arg runurl "$RUN_URL" \
-                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))]
-                   | (map(select(.body | contains($runurl + ")"))) | last) as $own
-                   | (map(select(.body | contains("Qwen Triage is running"))) | first) as $running
-                   | if $own != null then $own.id
-                     elif $running != null then $running.id
-                     else (last | .id) // empty end'
+                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
             )" || EXISTING_ID=''
-            echo "Claim marker selection: '${EXISTING_ID:-new post}'" >&2
+            COMMENT_ID=''
             if [ -n "$EXISTING_ID" ]; then
-              gh api --method PATCH \
+              if gh api --method PATCH \
                 "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
+                -f body="$BODY" >/dev/null; then
+                COMMENT_ID="$EXISTING_ID"
+              else
                 echo "::warning::Failed to update triage status comment; continuing." >&2
+              fi
             else
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
+              COMMENT_ID="$(
+                gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                  -f body="$BODY" --jq '.id'
+              )" || COMMENT_ID=''
+              [ -n "$COMMENT_ID" ] ||
                 echo "::warning::Failed to post triage status comment; continuing." >&2
             fi
+            echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 'Inject model name into triage signature'
@@ -960,29 +961,29 @@ jobs:
       # Flip the early status comment to a terminal state so a lingering
       # "running" line doesn't outlive the run. Neutral wording — the verdict
       # lives in the stage comments above; this only records that the run ended
-      # and keeps the run link. Same marker → edits the one comment this run
-      # owns; a marker owned by another run gets a fresh terminal post.
-      # Best-effort, on success, failure, AND cancellation: always() (not
-      # success() || failure()) because cancellation — most often
-      # cancel-in-progress superseding this run on a newer push or comment,
-      # also job timeout or manual cancel — would skip this step and leave the
-      # comment claiming the run is still in progress — the verify lane has
-      # publish-verify to catch that case, this lane only has us.
+      # and keeps the run link. PATCHes exactly the comment id the claim step
+      # exported; an empty id means this run never claimed a comment (a cancel
+      # landing before the claim posted), so nothing is flipped and a previous
+      # run's terminal wording stays untouched. Best-effort, on success,
+      # failure, AND cancellation: always() (not success() || failure())
+      # because cancellation — cancel-in-progress superseding this run on a
+      # newer push or comment, job timeout, or manual cancel — would skip this
+      # step and leave the comment claiming the run is still in progress — the
+      # verify lane has publish-verify to catch that case, this lane only has
+      # us.
       - name: 'Finalize triage status comment'
         if: "always() && steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ steps.resolve.outputs.number }}'
+          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
           JOB_STATUS: '${{ job.status }}'
         run: |-
           set -uo pipefail
-          MARKER='<!-- qwen-triage lifecycle -->'
-          LEGACY_MARKER='<!-- qwen-triage stage=status -->'
-          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
-            echo "::warning::Cannot resolve bot identity; skipping final status comment upsert."
+          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
+            echo "This run claimed no status comment; nothing to finalize." >&2
           else
             # A step success is not a green job: 'Check triage response' exits
             # 1 on an empty summary while steps.triage.outcome stays 'success',
@@ -992,59 +993,17 @@ jobs:
               EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
               ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
             elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
-              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing, usually superseded by a newer push or comment. Check for a newer run before re-running."
-              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消，通常是更新的 push 或评论取代了本次运行。重跑前请先确认是否有更新的运行。"
+              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing. Check for a newer run before re-running."
+              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消。重跑前请先确认是否有更新的运行。"
             else
               EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
               ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
             fi
-            printf -v BODY '%s\n\n%s\n\n%s' "$MARKER" "$EN" "$ZH"
-            EXISTING_ID="$(
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" --arg runurl "$RUN_URL" \
-                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))]
-                   | (map(select(.body | contains($runurl + ")"))) | last) as $own
-                   | if $own != null then $own.id
-                     elif length == 0 then empty
-                     else "foreign" end'
-            )" || EXISTING_ID='unreadable'
-            # PATCH only a comment this run owns — its claim embeds $RUN_URL,
-            # and the LAST own marker wins, so a newer foreign comment cannot
-            # mask this run's claim. The match is bounded by the link's closing
-            # ')' so a run ID that is a decimal prefix of another run's ID
-            # cannot collide; a cancel landing before the claim posts must not
-            # clobber a previous run's terminal wording, which shares this
-            # marker. Anything not owned — a claim post that failed, a legacy
-            # marker body, or another lane's racing write (e.g.
-            # qwen-triage-finalize.yml's update_status) — gets a fresh terminal
-            # comment, so this run's ending is recorded and no comment this run
-            # owns keeps claiming it is still running. A still-running claim
-            # owned by ANOTHER run stays untouched here: that run's finalize
-            # owns it, and if that never lands, the claim step reclaims the
-            # oldest still-running marker on the next run.
-            case "$EXISTING_ID" in
-              unreadable)
-                echo "::warning::Cannot read the comment list; skipping final status comment to avoid a duplicate post." >&2
-                ;;
-              '')
-                gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                  -f body="$BODY" >/dev/null ||
-                  echo "::warning::Failed to post final triage status comment; continuing." >&2
-                ;;
-              foreign)
-                echo "::warning::Marker comment belongs to another run; posting a fresh final status comment instead of upserting." >&2
-                gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                  -f body="$BODY" >/dev/null ||
-                  echo "::warning::Failed to post final triage status comment; continuing." >&2
-                ;;
-              *)
-                gh api --method PATCH \
-                  "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                  -f body="$BODY" >/dev/null ||
-                  echo "::warning::Failed to finalize triage status comment; continuing." >&2
-                ;;
-            esac
+            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to finalize triage status comment; continuing." >&2
           fi
 
   # On-demand real-user testing: a write-permission user comments
@@ -1235,7 +1194,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
-          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
           restore-keys: 'npm-ci-'
 
       - name: 'Report npm cache hit'
@@ -2701,7 +2660,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
-          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
           restore-keys: 'npm-ci-'
 
       - name: 'Report npm cache hit'

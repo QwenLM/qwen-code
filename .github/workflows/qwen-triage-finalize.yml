@@ -324,15 +324,8 @@ jobs:
                 ;;
               *) return 0 ;;
             esac
-            # Prefer the newest marker that is NOT a live running claim:
-            # PATCHing an in-flight run's claim erases the run URL that run's
-            # finalize keys on, so that run posts a second comment while the
-            # overwritten one — never the newest again — strands forever.
-            # With only running markers, keep the base newest-wins overwrite.
             sid="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$STATUS_MARKER" --arg legacy "$LEGACY_STATUS_MARKER" \
-              '[.[] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))]
-               | (map(select(.body | contains("Qwen Triage is running") | not))) as $calm
-               | (if ($calm | length) > 0 then $calm else . end) | last | .id // empty' \
+              '[.[] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty' \
               "/tmp/comments-$pr.json")"
             [ -n "$sid" ] || return 0
             printf '%s\n\n%s\n\n%s' "$STATUS_MARKER" "$en" "$zh" > /tmp/status-body.md
