@@ -982,6 +982,8 @@ const EN: Messages = {
     `${v?.count ?? 0} unsupported image file(s) were skipped.`,
   'editor.imagesReadFailed': (v) =>
     `${v?.count ?? 0} image file(s) could not be read.`,
+  'editor.imagesTooLarge': (v) =>
+    `${v?.count ?? 0} image file(s) exceeded the attachment size limit.`,
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -1357,6 +1359,8 @@ const EN: Messages = {
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
+  'queue.mayCorrespond':
+    'The uncertain local copy and server queue entry may be the same prompt.',
   'queue.restoreUnknown': 'Restore local copy',
   'queue.discardUnknown': 'Discard local copy',
   'queue.continueEditing': 'Continue editing',
@@ -3747,6 +3751,8 @@ const ZH: Messages = {
   'editor.send': '发送消息',
   'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的图片文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个图片文件读取失败。`,
+  'editor.imagesTooLarge': (v) =>
+    `${v?.count ?? 0} 个图片文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -4103,6 +4109,8 @@ const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
+  'queue.mayCorrespond':
+    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
   'queue.restoreUnknown': '恢复本地副本',
   'queue.discardUnknown': '丢弃本地副本',
   'queue.continueEditing': '继续编辑',

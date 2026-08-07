@@ -102,6 +102,7 @@ import { useWebShellPortalRoot } from '../portalRoot';
 import {
   extractImageTransfer,
   hasFileTransferPayload,
+  MAX_IMAGE_ATTACHMENT_DATA_BYTES,
   readImageTransfer,
 } from '../utils/imageIngestion';
 
@@ -914,6 +915,9 @@ export interface EditorHandle extends WebShellComposerApi {
   hasInput(): boolean;
   retryLast(): void;
   restoreImages(images: readonly PromptImage[]): void;
+  restoreInputAnnotations?(
+    inputAnnotations: readonly DaemonInputAnnotation[],
+  ): void;
 }
 
 // ---- Compartments (shared) ----
@@ -939,6 +943,55 @@ function getFollowupRemainder(
   if (!completion || text.length === 0) return null;
   const remainder = completion.slice(text.length);
   return remainder.length > 0 ? remainder : null;
+}
+
+function mapRestoredInputAnnotationsAfterTextChange(
+  annotations: readonly DaemonInputAnnotation[],
+  previousText: string,
+  nextText: string,
+): DaemonInputAnnotation[] {
+  if (previousText === nextText) return [...annotations];
+  if (previousText && nextText.endsWith(`\n${previousText}`)) {
+    const offset = nextText.length - previousText.length;
+    return annotations.map((annotation) => ({
+      ...annotation,
+      start: annotation.start + offset,
+      end: annotation.end + offset,
+    }));
+  }
+
+  let from = 0;
+  while (
+    from < previousText.length &&
+    from < nextText.length &&
+    previousText[from] === nextText[from]
+  ) {
+    from += 1;
+  }
+  let previousTo = previousText.length;
+  let nextTo = nextText.length;
+  while (
+    previousTo > from &&
+    nextTo > from &&
+    previousText[previousTo - 1] === nextText[nextTo - 1]
+  ) {
+    previousTo -= 1;
+    nextTo -= 1;
+  }
+  const delta = nextTo - previousTo;
+
+  return annotations.flatMap((annotation) => {
+    let start = annotation.start;
+    let end = annotation.end;
+    if (previousTo <= start) {
+      start += delta;
+      end += delta;
+    } else if (from < end) {
+      return [];
+    }
+    if (nextText.slice(start, end) !== annotation.text) return [];
+    return [{ ...annotation, start, end }];
+  });
 }
 
 class FollowupGhostWidget extends WidgetType {
@@ -1354,6 +1407,8 @@ export function useComposerCore(
   );
   const mobileTextRef = useRef(mobileText);
   const mobileTextVersionRef = useRef(0);
+  const restoredInputAnnotationsRef = useRef<DaemonInputAnnotation[]>([]);
+  const skipNextRestoredAnnotationMappingRef = useRef(false);
   const draftIdentityRef = useRef({
     sessionId,
     workspaceCwd: atWorkspaceCwd,
@@ -1383,6 +1438,12 @@ export function useComposerCore(
   // typing or programmatic (setText, clear, history restore, post-submit
   // clear) — notifies onInputTextChange, so parent trackers never go stale.
   const setMobileText = useCallback((text: string) => {
+    restoredInputAnnotationsRef.current =
+      mapRestoredInputAnnotationsAfterTextChange(
+        restoredInputAnnotationsRef.current,
+        mobileTextRef.current,
+        text,
+      );
     mobileTextVersionRef.current += 1;
     mobileTextRef.current = text;
     setMobileTextState(text);
@@ -1643,6 +1704,14 @@ export function useComposerCore(
           const result = await readImageTransfer(transfer, {
             onReaderCreated: (reader) => lane.activeReaders.add(reader),
             onReaderSettled: (reader) => lane.activeReaders.delete(reader),
+            maxEncodedBytes: Math.max(
+              0,
+              MAX_IMAGE_ATTACHMENT_DATA_BYTES -
+                pastedImagesRef.current.reduce(
+                  (total, image) => total + image.data.length,
+                  0,
+                ),
+            ),
           });
           if (imageIngestionLaneRef.current !== lane) return;
           if (result.accepted.length > 0) {
@@ -1651,7 +1720,10 @@ export function useComposerCore(
             setPastedImages(next);
           }
           const skipped = result.rejected.filter(
-            ({ reason }) => reason !== 'read-failed',
+            ({ reason }) => reason !== 'read-failed' && reason !== 'too-large',
+          ).length;
+          const tooLarge = result.rejected.filter(
+            ({ reason }) => reason === 'too-large',
           ).length;
           const failed = result.rejected.filter(
             ({ reason }) => reason === 'read-failed',
@@ -1666,6 +1738,12 @@ export function useComposerCore(
             emitImageIngestionNotice(
               'error',
               tRef.current('editor.imagesReadFailed', { count: failed }),
+            );
+          }
+          if (tooLarge > 0) {
+            emitImageIngestionNotice(
+              'warning',
+              tRef.current('editor.imagesTooLarge', { count: tooLarge }),
             );
           }
         })
@@ -2353,16 +2431,39 @@ export function useComposerCore(
     const prompt = buildComposerPrompt(text, tags);
     const isShellMode = shellModeRef.current;
     const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
-    const inputAnnotations = createInputAnnotationsFromComposerTags(
+    const generatedInputAnnotations = createInputAnnotationsFromComposerTags(
       promptText,
       [...tags, ...normalizedInlineTags.map((placement) => placement.tag)],
     );
+    const inputAnnotations = [...generatedInputAnnotations];
+    const annotationKeys = new Set(
+      generatedInputAnnotations.map(
+        (annotation) =>
+          `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`,
+      ),
+    );
+    for (const annotation of restoredInputAnnotationsRef.current) {
+      if (
+        annotation.start < 0 ||
+        annotation.end > promptText.length ||
+        promptText.slice(annotation.start, annotation.end) !== annotation.text
+      ) {
+        continue;
+      }
+      const key = `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`;
+      if (annotationKeys.has(key)) continue;
+      annotationKeys.add(key);
+      inputAnnotations.push(annotation);
+    }
+    inputAnnotations.sort((left, right) => left.start - right.start);
     const submissionIdentity = { ...composerIdentityRef.current };
     const draftTextAtSubmit = editorText;
     const editorDocAtSubmit = view?.state.doc;
     const mobileTextVersionAtSubmit = mobileTextVersionRef.current;
     const composerTagsAtSubmit = composerTagsRef.current;
     const pastedImagesAtSubmit = pastedImagesRef.current;
+    const restoredInputAnnotationsAtSubmit =
+      restoredInputAnnotationsRef.current;
     const shellModeAtSubmit = shellModeRef.current;
     let committed = false;
     const commitAccepted = () => {
@@ -2409,6 +2510,8 @@ export function useComposerCore(
           : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
         composerTagsRef.current === composerTagsAtSubmit &&
         pastedImagesRef.current === pastedImagesAtSubmit &&
+        restoredInputAnnotationsRef.current ===
+          restoredInputAnnotationsAtSubmit &&
         shellModeRef.current === shellModeAtSubmit;
       historyBrowseActiveRef.current = false;
       if (!composerUnchanged) return;
@@ -2422,6 +2525,7 @@ export function useComposerCore(
       clearPromptHistoryDraftTags();
       setComposerTags([]);
       pastedImagesRef.current = [];
+      restoredInputAnnotationsRef.current = [];
       setPastedImages([]);
       if (view) {
         view.dispatch({
@@ -2994,6 +3098,17 @@ export function useComposerCore(
           }
           if (update.docChanged) {
             const text = getDocText(update.state);
+            if (skipNextRestoredAnnotationMappingRef.current) {
+              skipNextRestoredAnnotationMappingRef.current = false;
+            } else if (restoredInputAnnotationsRef.current.length > 0) {
+              restoredInputAnnotationsRef.current =
+                restoredInputAnnotationsRef.current.flatMap((annotation) => {
+                  const start = update.changes.mapPos(annotation.start, 1);
+                  const end = update.changes.mapPos(annotation.end, -1);
+                  if (text.slice(start, end) !== annotation.text) return [];
+                  return [{ ...annotation, start, end }];
+                });
+            }
             if (draftIdentityRef.current.storageKey === undefined) {
               unscopedDraftEditedRef.current = true;
             }
@@ -3114,6 +3229,7 @@ export function useComposerCore(
     if (!sessionChanged && !workspaceChanged) return;
 
     resetImageIngestion();
+    restoredInputAnnotationsRef.current = [];
     historyActionsRef.current.reset();
     shellHistoryActionsRef.current.reset();
     historyBrowseActiveRef.current = false;
@@ -3528,6 +3644,18 @@ export function useComposerCore(
       }
       const view = viewRef.current;
       if (!view) return;
+      if (restoredInputAnnotationsRef.current.length > 0) {
+        const currentText = view.state.doc.toString();
+        if (currentText !== text) {
+          restoredInputAnnotationsRef.current =
+            mapRestoredInputAnnotationsAfterTextChange(
+              restoredInputAnnotationsRef.current,
+              currentText,
+              text,
+            );
+          skipNextRestoredAnnotationMappingRef.current = true;
+        }
+      }
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
         effects: clearInlineTagsEffect.of(),
@@ -3577,6 +3705,7 @@ export function useComposerCore(
         setMobileText('');
       }
       if (clearTextOpt) {
+        restoredInputAnnotationsRef.current = [];
         resetImageIngestion();
       }
       if (clearTags) {
@@ -3724,6 +3853,7 @@ export function useComposerCore(
     const accepted = onSubmitRef.current(last);
     if (accepted === false) return;
     pastedImagesRef.current = [];
+    restoredInputAnnotationsRef.current = [];
     setPastedImages([]);
   }, []);
 
@@ -3912,6 +4042,7 @@ export function useComposerCore(
       shellHistoryActionsRef.current.push(text);
       shellHistoryActionsRef.current.reset();
       pastedImagesRef.current = [];
+      restoredInputAnnotationsRef.current = [];
       setPastedImages([]);
       replaceEditorText('');
     },
@@ -4000,6 +4131,26 @@ export function useComposerCore(
     pastedImagesRef.current = next;
     setPastedImages(next);
   }, []);
+  const restoreInputAnnotations = useCallback(
+    (inputAnnotations: readonly DaemonInputAnnotation[]) => {
+      const restored = new Map(
+        restoredInputAnnotationsRef.current.map((annotation) => [
+          `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`,
+          annotation,
+        ]),
+      );
+      for (const annotation of inputAnnotations) {
+        restored.set(
+          `${annotation.start}:${annotation.end}:${annotation.text}:${annotation.reference.id}`,
+          annotation,
+        );
+      }
+      restoredInputAnnotationsRef.current = [...restored.values()].sort(
+        (left, right) => left.start - right.start,
+      );
+    },
+    [],
+  );
   const handle = useMemo<EditorHandle>(() => {
     return {
       clearText,
@@ -4014,6 +4165,7 @@ export function useComposerCore(
       insertText,
       retryLast,
       restoreImages,
+      restoreInputAnnotations,
       submit,
     };
   }, [
@@ -4027,6 +4179,7 @@ export function useComposerCore(
     insertText,
     removeTopTag,
     restoreImages,
+    restoreInputAnnotations,
     retryLast,
     setText,
     submit,

@@ -3,6 +3,7 @@ import type { PromptImage } from '../adapters/promptTypes';
 export type ImageIngestionRejectionReason =
   | 'unsupported'
   | 'unavailable'
+  | 'too-large'
   | 'read-failed';
 
 export interface ImageIngestionRejection {
@@ -29,7 +30,11 @@ export interface ImageIngestionBatchResult {
 interface ReaderLifecycle {
   onReaderCreated?: (reader: FileReader) => void;
   onReaderSettled?: (reader: FileReader) => void;
+  maxEncodedBytes?: number;
 }
+
+export const MAX_IMAGE_ATTACHMENT_DATA_BYTES = 8 * 1024 * 1024;
+const MAX_CONCURRENT_IMAGE_READERS = 4;
 
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   bmp: 'image/bmp',
@@ -171,17 +176,51 @@ export async function readImageTransfer(
   transfer: ExtractedImageTransfer,
   lifecycle: ReaderLifecycle = {},
 ): Promise<ImageIngestionBatchResult> {
-  const settled = await Promise.allSettled(
-    transfer.candidates.map((candidate) => readImage(candidate, lifecycle)),
+  const candidates: ImageFileCandidate[] = [];
+  const rejected = [...transfer.rejected];
+  let estimatedEncodedBytes = 0;
+  const maxEncodedBytes =
+    lifecycle.maxEncodedBytes ?? MAX_IMAGE_ATTACHMENT_DATA_BYTES;
+  for (const candidate of transfer.candidates) {
+    const candidateBytes = Math.ceil(candidate.file.size / 3) * 4;
+    if (estimatedEncodedBytes + candidateBytes > maxEncodedBytes) {
+      rejected.push({ name: candidate.file.name, reason: 'too-large' });
+      continue;
+    }
+    estimatedEncodedBytes += candidateBytes;
+    candidates.push(candidate);
+  }
+
+  const settled: Array<PromiseSettledResult<PromptImage>> = new Array(
+    candidates.length,
+  );
+  let nextIndex = 0;
+  const readNext = async () => {
+    while (nextIndex < candidates.length) {
+      const index = nextIndex++;
+      try {
+        settled[index] = {
+          status: 'fulfilled',
+          value: await readImage(candidates[index]!, lifecycle),
+        };
+      } catch (reason) {
+        settled[index] = { status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAX_CONCURRENT_IMAGE_READERS, candidates.length) },
+      readNext,
+    ),
   );
   const accepted: PromptImage[] = [];
-  const rejected = [...transfer.rejected];
   settled.forEach((result, index) => {
     if (result.status === 'fulfilled') {
       accepted.push(result.value);
     } else {
       rejected.push({
-        name: transfer.candidates[index]?.file.name,
+        name: candidates[index]?.file.name,
         reason: 'read-failed',
       });
     }

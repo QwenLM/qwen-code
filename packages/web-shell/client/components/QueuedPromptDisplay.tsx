@@ -124,6 +124,7 @@ export interface QueuedPrompt {
   images?: PromptImage[];
   inputAnnotations?: DaemonInputAnnotation[];
   onComplete?: () => void;
+  onAdmitted?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
   midTurnState?: 'submitting' | 'queued';
@@ -171,9 +172,21 @@ export function QueuedPromptDisplay({
     !latestPrompt.isRemoving &&
     latestPrompt.payloadCompleteness !== 'summary-only' &&
     latestPrompt.admissionOutcome !== 'unknown';
+  const mayContainDuplicateAdmission =
+    prompts.some((prompt) => prompt.admissionOutcome === 'unknown') &&
+    prompts.some(
+      (prompt) =>
+        prompt.payloadCompleteness === 'summary-only' &&
+        prompt.serverPromptId !== undefined,
+    );
 
   return (
     <div className={styles.queuedPrompts}>
+      {mayContainDuplicateAdmission ? (
+        <div className={styles.queuedPromptAmbiguity} role="status">
+          {t('queue.mayCorrespond')}
+        </div>
+      ) : null}
       {prompts.map((prompt) => {
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),

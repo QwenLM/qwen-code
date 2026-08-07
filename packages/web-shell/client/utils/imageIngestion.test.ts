@@ -109,4 +109,47 @@ describe('image ingestion', () => {
     expect(created).toHaveLength(2);
     expect(new Set(settled)).toEqual(new Set(created));
   });
+
+  it('limits concurrent file readers', async () => {
+    const files = Array.from(
+      { length: 10 },
+      (_, index) =>
+        new File([`image-${index}`], `${index}.png`, { type: 'image/png' }),
+    );
+    const extracted = extractImageTransfer(
+      transfer({ files, types: ['Files'] }),
+      'drop',
+    );
+    let activeReaders = 0;
+    let maxActiveReaders = 0;
+
+    const result = await readImageTransfer(extracted, {
+      onReaderCreated: () => {
+        activeReaders += 1;
+        maxActiveReaders = Math.max(maxActiveReaders, activeReaders);
+      },
+      onReaderSettled: () => {
+        activeReaders -= 1;
+      },
+    });
+
+    expect(result.accepted).toHaveLength(10);
+    expect(maxActiveReaders).toBe(4);
+  });
+
+  it('rejects files that exceed the remaining encoded-data budget', async () => {
+    const files = [
+      new File(['one'], 'one.png', { type: 'image/png' }),
+      new File(['two'], 'two.png', { type: 'image/png' }),
+    ];
+    const extracted = extractImageTransfer(
+      transfer({ files, types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readImageTransfer(extracted, { maxEncodedBytes: 4 });
+
+    expect(result.accepted).toHaveLength(1);
+    expect(result.rejected).toEqual([{ name: 'two.png', reason: 'too-large' }]);
+  });
 });

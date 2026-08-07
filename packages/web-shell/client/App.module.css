@@ -989,6 +989,12 @@
   color: var(--foreground);
 }
 
+.queuedPromptAmbiguity {
+  color: var(--secondary-foreground);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .queuedPrompt + .queuedPrompt {
   border-top: 0;
 }

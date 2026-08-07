@@ -27,6 +27,7 @@ const sdk = vi.hoisted(() => ({
       promptId?: string;
       text?: string;
       state?: string;
+      stopReason?: string;
     };
   }>,
   batches: [] as Array<{
@@ -80,6 +81,7 @@ function mount(
     setText: vi.fn(),
     focus: vi.fn(),
     restoreImages: vi.fn(),
+    restoreInputAnnotations: vi.fn(),
   };
   const store = {
     appendLocalUserMessage: vi.fn(),
@@ -124,7 +126,10 @@ function mount(
 }
 
 function createActions() {
-  const pendingSubmit = deferred<{ promptId: string }>();
+  const pendingSubmit = deferred<{
+    promptId: string;
+    removedAfterAbort?: true;
+  }>();
   return {
     actions: {
       enqueueMidTurnMessage: vi.fn(),
@@ -247,6 +252,160 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
         serverState: 'queued',
       },
     ]);
+  });
+
+  it('keeps another prompt started buffer when one admission is unknown', async () => {
+    const firstSubmit = deferred<{ promptId: string }>();
+    const secondSubmit = deferred<{ promptId: string }>();
+    const { actions } = createActions();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstSubmit.promise)
+      .mockReturnValueOnce(secondSubmit.promise);
+    const { render, store } = mount('responding', actions);
+    const firstImages = [{ data: 'Zmlyc3Q=', media_type: 'image/png' }];
+    const secondImages = [{ data: 'c2Vjb25k', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('', firstImages));
+    act(() => latest.enqueuePrompt('', secondImages));
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_started',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-second',
+          text: '[image]',
+        },
+      },
+    ];
+    render('responding');
+
+    await act(async () => {
+      firstSubmit.reject(new TypeError('response lost'));
+      await Promise.resolve();
+      secondSubmit.resolve({ promptId: 'server-second' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '',
+      [{ data: 'c2Vjb25k', mimeType: 'image/png' }],
+      undefined,
+    );
+  });
+
+  it('binds an image prompt when its terminal event precedes admission response', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+    const images = [{ data: 'dGVybWluYWw=', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_started',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-terminal',
+          text: '[image]',
+        },
+      },
+      {
+        type: 'turn_complete',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-terminal',
+        },
+      },
+    ];
+    render('responding');
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-terminal' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '',
+      [{ data: 'dGVybWluYWw=', mimeType: 'image/png' }],
+      undefined,
+    );
+  });
+
+  it('does not append text twice when its terminal precedes admission response', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('idle', actions);
+
+    act(() => latest.enqueuePrompt('run once'));
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_started',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-text-terminal',
+          text: 'run once',
+        },
+      },
+      {
+        type: 'turn_complete',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-text-terminal',
+        },
+      },
+    ];
+    render('idle');
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-text-terminal' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+  });
+
+  it('does not append a prompt removed before its admission response', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+
+    act(() =>
+      latest.enqueuePrompt('', [
+        { data: 'cmVtb3ZlZA==', media_type: 'image/png' },
+      ]),
+    );
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_completed',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-removed',
+          state: 'removed',
+        },
+      },
+      {
+        type: 'turn_complete',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-removed',
+          stopReason: 'cancelled',
+        },
+      },
+    ];
+    render('idle');
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-removed' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
   it('does not create a duplicate summary while an image response is pending', async () => {
@@ -458,6 +617,40 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.restoreUnknownQueuedPrompt(1)).toBe(false);
     expect(editor.restoreImages).toHaveBeenCalledOnce();
     expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores queued input annotations with the local payload', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor } = mount('responding', actions);
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 8,
+        text: '@file.ts',
+        reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+      },
+    ];
+
+    act(() =>
+      latest.enqueuePrompt(
+        '@file.ts\n\nfix it',
+        undefined,
+        undefined,
+        inputAnnotations,
+      ),
+    );
+    await act(async () => {
+      pendingSubmit.reject(new TypeError('response lost'));
+      await Promise.resolve();
+    });
+    act(() => {
+      expect(latest.restoreUnknownQueuedPrompt(1)).toBe(true);
+    });
+
+    expect(editor.restoreInputAnnotations).toHaveBeenCalledWith(
+      inputAnnotations,
+    );
   });
 
   it('discards an uncertain local payload without sending it again', async () => {
@@ -884,6 +1077,31 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       { text: '中途消息', midTurnState: 'queued', midTurnMessageId: 'mid-1' },
     ]);
     expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
+  });
+
+  it('clears a submitting row after the server confirms abort cleanup', async () => {
+    const { actions, pendingSubmit } = createActions();
+    mount('responding', actions);
+
+    act(() =>
+      latest.enqueuePrompt('clear me', [
+        { data: 'eA==', media_type: 'image/png' },
+      ]),
+    );
+    act(() => latest.clearQueuedPrompts());
+    expect(latest.queuedPrompts[0]).toMatchObject({
+      admissionOutcome: 'unknown',
+    });
+
+    await act(async () => {
+      pendingSubmit.resolve({
+        promptId: 'server-cleared',
+        removedAfterAbort: true,
+      });
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('edits the last mid-turn row via editLastQueuedPrompt', async () => {

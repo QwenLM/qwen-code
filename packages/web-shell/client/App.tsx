@@ -437,6 +437,7 @@ interface SendPromptOptionsWithRetry {
   images?: PromptImage[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
+  onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
   onAdmitted?: () => void;
@@ -3574,11 +3575,6 @@ export function App({
     useState(false);
   const streamingState = useStreamingState();
   useEffect(() => {
-    if (streamingState !== 'idle' && unknownPromptAdmissionRef.current) {
-      updateUnknownPromptAdmission(null);
-    }
-  }, [streamingState, updateUnknownPromptAdmission]);
-  useEffect(() => {
     if (
       failedPromptRetry &&
       (failedPromptRetry.sessionId !== connection.sessionId ||
@@ -3625,6 +3621,9 @@ export function App({
   }, [displayMessages, streamingState]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
+  const lastSubmittedInputAnnotationsRef = useRef<
+    DaemonInputAnnotation[] | undefined
+  >(undefined);
   const lastSubmittedSourceVersionRef = useRef(
     composerSourceVersionRef.current,
   );
@@ -4438,6 +4437,8 @@ export function App({
       const isUserPrompt = !text.trimStart().startsWith('/');
       const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
       const previousLastSubmittedImages = lastSubmittedImagesRef.current;
+      const previousLastSubmittedInputAnnotations =
+        lastSubmittedInputAnnotationsRef.current;
       const previousLastSubmittedSourceVersion =
         lastSubmittedSourceVersionRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
@@ -4446,6 +4447,8 @@ export function App({
         setIsPreparingPrompt(false);
         lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
         lastSubmittedImagesRef.current = previousLastSubmittedImages;
+        lastSubmittedInputAnnotationsRef.current =
+          previousLastSubmittedInputAnnotations;
         lastSubmittedSourceVersionRef.current =
           previousLastSubmittedSourceVersion;
         retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
@@ -4454,6 +4457,7 @@ export function App({
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
+        lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
         lastSubmittedSourceVersionRef.current =
           composerSourceVersionRef.current;
         retriedTurnErrorIdRef.current = null;
@@ -4511,6 +4515,14 @@ export function App({
         inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
+        ...(opts?.onAdmissionStarted
+          ? {
+              onAdmissionStarted: () =>
+                opts.onAdmissionStarted?.(
+                  connectionRef.current.sessionId ?? allocatedSessionId,
+                ),
+            }
+          : {}),
         ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
       };
       if (opts?.commitComposerAccepted) {
@@ -4532,7 +4544,6 @@ export function App({
       const previousUserMessageId = opts?.onOptimisticUserMessage
         ? getLatestUserBlockId(store.getSnapshot().blocks)
         : undefined;
-      opts?.onAdmissionStarted?.(sessionIdAfterEnsure);
       const resultPromise = (
         sessionActions.sendPrompt as (
           promptText: string,
@@ -8148,6 +8159,9 @@ export function App({
       : draft;
     if (restoredText !== draft) editor.setText(restoredText);
     if (current.images?.length) editor.restoreImages(current.images);
+    if (current.inputAnnotations?.length) {
+      editor.restoreInputAnnotations?.(current.inputAnnotations);
+    }
     editor.focus();
     updateUnknownPromptAdmission({
       sessionId: current.sessionId,
@@ -8175,6 +8189,9 @@ export function App({
       const retryErrorId = retryableTurnErrorIdRef.current;
       const retrySessionId = connectionRef.current.sessionId;
       const retrySourceVersion = composerSourceVersionRef.current;
+      const retryText = lastSubmittedPromptRef.current;
+      const retryImages = lastSubmittedImagesRef.current;
+      const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
       const retryOwnerIsCurrent = () =>
         composerSourceVersionRef.current === retrySourceVersion &&
         connectionRef.current.sessionId === retrySessionId;
@@ -8187,25 +8204,45 @@ export function App({
         admitted: false,
         settled: false,
       });
-      sendPrompt(
-        lastSubmittedPromptRef.current,
-        lastSubmittedImagesRef.current,
-        {
-          optimisticUserMessage: false,
-          retry: true,
-          onAdmitted: () => {
-            if (!retryOwnerIsCurrent()) return;
-            setFailedPromptRetry((current) =>
-              current?.sessionId === retrySessionId &&
-              current.messageId === retryErrorId
-                ? { ...current, admitted: true }
-                : current,
-            );
-          },
+      let admissionStarted = false;
+      let admitted = false;
+      sendPrompt(retryText, retryImages, {
+        optimisticUserMessage: false,
+        retry: true,
+        inputAnnotations: retryInputAnnotations,
+        onAdmissionStarted: () => {
+          admissionStarted = true;
         },
-      )
+        onAdmitted: () => {
+          admitted = true;
+          if (!retryOwnerIsCurrent()) return;
+          setFailedPromptRetry((current) =>
+            current?.sessionId === retrySessionId &&
+            current.messageId === retryErrorId
+              ? { ...current, admitted: true }
+              : current,
+          );
+        },
+      })
         .catch((error: unknown) => {
           if (!retryOwnerIsCurrent()) return;
+          const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
+          if (admissionStarted && !admitted && !definitelyRejected) {
+            updateUnknownPromptAdmission({
+              sessionId: retrySessionId,
+              messageId: retryErrorId,
+              text: retryText,
+              images: retryImages ? [...retryImages] : undefined,
+              inputAnnotations: retryInputAnnotations,
+              payloadAvailable: true,
+            });
+            pushToast('warning', t('queue.admissionUnknown'));
+            console.warn(
+              '[WebShell] post-turn retry admission outcome is unknown',
+              error,
+            );
+            return;
+          }
           reportError(error, 'Failed to retry prompt');
         })
         .finally(() => {
@@ -8220,7 +8257,15 @@ export function App({
     } else {
       store.dispatch([{ type: 'status', text: t('retry.none') }]);
     }
-  }, [connected, sendPrompt, reportError, store, t]);
+  }, [
+    connected,
+    pushToast,
+    reportError,
+    sendPrompt,
+    store,
+    t,
+    updateUnknownPromptAdmission,
+  ]);
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {

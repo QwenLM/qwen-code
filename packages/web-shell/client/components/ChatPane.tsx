@@ -325,9 +325,6 @@ export function ChatPane({
     firstPromptAdmittedRef.current = false;
     setUnknownPromptAdmission(null);
   }, [connection.sessionId]);
-  useEffect(() => {
-    if (streamingState !== 'idle') setUnknownPromptAdmission(null);
-  }, [streamingState]);
   const admissionPayloadLocked =
     unknownPromptAdmission?.payloadAvailable === true;
   const discardUnknownPromptPayload = useCallback(() => {
@@ -530,22 +527,31 @@ export function ChatPane({
         return false;
       }
       const inputAnnotations = metadata?.inputAnnotations;
+      const notifyFirstPromptAdmitted = () => {
+        if (
+          trimmed &&
+          !firstPromptAdmittedRef.current &&
+          onFirstPromptAdmitted
+        ) {
+          firstPromptAdmittedRef.current = true;
+          onFirstPromptAdmitted(trimmed);
+        }
+      };
       if (streamingStateRef.current === 'idle') {
         const admissionOwner = admissionOwnerRef.current;
+        let admissionStarted = false;
+        let admitted = false;
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
             ...(inputAnnotations ? { inputAnnotations } : {}),
+            onAdmissionStarted: () => {
+              admissionStarted = true;
+            },
             onAdmitted: () => {
               if (admissionOwnerRef.current !== admissionOwner) return;
-              if (
-                trimmed &&
-                !firstPromptAdmittedRef.current &&
-                onFirstPromptAdmitted
-              ) {
-                firstPromptAdmittedRef.current = true;
-                onFirstPromptAdmitted(trimmed);
-              }
+              admitted = true;
+              notifyFirstPromptAdmitted();
               clearFollowup();
               commitAccepted?.();
             },
@@ -554,7 +560,7 @@ export function ChatPane({
             if (admissionOwnerRef.current !== admissionOwner) return;
             const definitelyRejected =
               isDefinitelyRejectedPromptAdmission(error);
-            if (definitelyRejected) {
+            if (admitted || !admissionStarted || definitelyRejected) {
               reportError(error, 'Failed to send prompt');
               return;
             }
@@ -571,9 +577,16 @@ export function ChatPane({
           });
         return false;
       }
-      return inputAnnotations
-        ? enqueuePrompt(trimmed, images, undefined, inputAnnotations)
-        : enqueuePrompt(trimmed, images);
+      if (!trimmed && !inputAnnotations) {
+        return enqueuePrompt(trimmed, images);
+      }
+      return enqueuePrompt(
+        trimmed,
+        images,
+        undefined,
+        inputAnnotations,
+        notifyFirstPromptAdmitted,
+      );
     },
     [
       actions,

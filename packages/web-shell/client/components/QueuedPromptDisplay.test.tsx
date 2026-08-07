@@ -211,6 +211,29 @@ describe('QueuedPromptDisplay', () => {
     confirm.mockRestore();
   });
 
+  it('warns when an unknown local copy may match a server summary', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: 'uncertain',
+          admissionOutcome: 'unknown',
+          payloadCompleteness: 'complete',
+          payloadAvailable: true,
+        },
+        {
+          id: 2,
+          text: '[image]',
+          serverPromptId: 'server-1',
+          serverState: 'queued',
+          payloadCompleteness: 'summary-only',
+        },
+      ],
+    });
+
+    expect(container.textContent).toContain(t('queue.mayCorrespond'));
+  });
+
   it('renders queued reference annotations as tags', () => {
     const serialized = '<context id="orders">orders</context>';
     const text = `inspect ${serialized} now`;

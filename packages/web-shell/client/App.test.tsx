@@ -148,6 +148,7 @@ const {
   editorCommit,
   editorFocus,
   editorInsertText,
+  editorRestoreInputAnnotations,
   settingsReload,
   settingsSetValue,
   qualifiedWorkspaceSettings,
@@ -355,6 +356,7 @@ const {
     editorCommit: vi.fn(),
     editorFocus: vi.fn(),
     editorInsertText: vi.fn(),
+    editorRestoreInputAnnotations: vi.fn(),
     settingsReload: vi.fn().mockResolvedValue(undefined),
     settingsSetValue,
     qualifiedWorkspaceSettings,
@@ -476,6 +478,14 @@ vi.mock('./components/ChatEditor', async () => {
           hasAttachments: () => boolean;
           hasInput: () => boolean;
           insertText: (text: string) => void;
+          getText: () => string;
+          setText: (text: string) => void;
+          restoreImages: (
+            images: readonly { data: string; media_type: string }[],
+          ) => void;
+          restoreInputAnnotations: (
+            inputAnnotations: readonly DaemonInputAnnotation[],
+          ) => void;
           submit: (input?: { text?: string }) => void;
           focus: () => void;
         }>,
@@ -505,6 +515,12 @@ vi.mock('./components/ChatEditor', async () => {
             ),
           hasInput: () => testState.prompt.trim().length > 0,
           insertText: editorInsertText,
+          getText: () => testState.prompt,
+          setText: (text) => {
+            testState.prompt = text;
+          },
+          restoreImages: () => undefined,
+          restoreInputAnnotations: editorRestoreInputAnnotations,
           submit: (input) => {
             const accepted = props.onSubmit(
               input?.text ?? testState.prompt,
@@ -2378,6 +2394,7 @@ beforeEach(() => {
   editorClear.mockClear();
   editorCommit.mockClear();
   editorFocus.mockClear();
+  editorRestoreInputAnnotations.mockClear();
   editorInsertText.mockClear();
   settingsReload.mockClear();
   settingsReload.mockResolvedValue(undefined);
@@ -8796,6 +8813,73 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('locks an image retry when its admission response is lost', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const retrySend = deferred<void>();
+    const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      },
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello', images, editorCommit, {
+        inputAnnotations,
+      });
+    });
+    await flush();
+    mockSessionActions.sendPrompt.mockClear();
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-retry',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender();
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+    mockSessionActions.sendPrompt.mockReturnValueOnce(retrySend.promise);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+    const retryOptions = mockSessionActions.sendPrompt.mock.calls[0]?.[1];
+    expect(retryOptions).toMatchObject({
+      images,
+      inputAnnotations,
+      optimisticUserMessage: false,
+      retry: true,
+    });
+    act(() => retryOptions?.onAdmissionStarted?.());
+    await act(async () => {
+      retrySend.reject(new Error('response lost'));
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="prompt-admission-unknown"]'),
+    ).not.toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    warn.mockRestore();
+  });
+
   it('gates queued submissions and only enqueues after approval', async () => {
     let approve: (() => void) | undefined;
     const onSubmitBefore = vi.fn(
@@ -12075,6 +12159,8 @@ describe('App prompt send failure retry', () => {
     await vi.waitFor(() => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
     });
+    const firstSendOptions = mockSessionActions.sendPrompt.mock.calls[0]?.[1];
+    act(() => firstSendOptions?.onAdmissionStarted?.());
     act(() => {
       mockConnection.sessionId = 'session-created';
       rerender();
@@ -12093,10 +12179,11 @@ describe('App prompt send failure retry', () => {
   it('locks duplicate submission when prompt admission is unknown', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const firstSend = deferred<void>();
-    mockSessionActions.sendPrompt.mockImplementationOnce(
-      () => firstSend.promise,
-    );
-    renderApp();
+    mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      options?.onAdmissionStarted?.();
+      return firstSend.promise;
+    });
+    const { rerender } = renderApp();
     await flush();
 
     act(() => {
@@ -12117,6 +12204,15 @@ describe('App prompt send failure retry', () => {
     expect(testState.latestChatEditorProps?.disabled).toBe(true);
 
     act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+    expect(
+      document.querySelector('[data-testid="prompt-admission-unknown"]'),
+    ).not.toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+
+    act(() => {
       notice?.querySelectorAll('button').item(1).click();
     });
 
@@ -12125,6 +12221,56 @@ describe('App prompt send failure retry', () => {
     expect(
       document.querySelector('[data-testid="prompt-admission-unknown"]'),
     ).not.toBeNull();
+  });
+
+  it('restores direct prompt annotations after uncertain admission', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      options?.onAdmissionStarted?.();
+      return firstSend.promise;
+    });
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 8,
+        text: '@file.ts',
+        reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+      },
+    ];
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        '@file.ts fix',
+        undefined,
+        editorCommit,
+        { inputAnnotations },
+      );
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+    await act(async () => {
+      firstSend.reject(new Error('response lost'));
+      await Promise.resolve();
+    });
+    act(() => {
+      document
+        .querySelector('[data-testid="prompt-admission-unknown"]')
+        ?.querySelectorAll('button')
+        .item(0)
+        .click();
+    });
+
+    expect(editorRestoreInputAnnotations).toHaveBeenCalledWith(
+      inputAnnotations,
+    );
+    confirm.mockRestore();
+    warn.mockRestore();
   });
 
   it('marks the failed message and retries its original payload without a duplicate', async () => {

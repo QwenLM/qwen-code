@@ -362,6 +362,7 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        options?.onAdmissionStarted?.();
         const accepted = await session.submitPrompt(
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
@@ -452,24 +453,27 @@ export function createDaemonSessionActions({
         promptRequest as Parameters<typeof session.submitPrompt>[0],
       );
       if (options?.signal?.aborted) {
-        await session
-          .removePendingPrompt(accepted.promptId)
-          .catch((err: unknown) => {
-            console.warn(
-              '[submitPrompt] removePendingPrompt failed after abort',
-              err,
-            );
-            addNotice({
-              severity: 'error',
-              category: 'user_action',
-              operation: 'send_prompt',
-              code: 'daemon.send_prompt.pending_cleanup_failed',
-              message:
-                'Prompt was accepted after cancellation but could not be removed from the queue.',
-              debugMessage: err instanceof Error ? err.message : String(err),
-              recoverable: true,
-            });
+        try {
+          const removal = await session.removePendingPrompt(accepted.promptId);
+          if (removal.removed) {
+            return { promptId: accepted.promptId, removedAfterAbort: true };
+          }
+        } catch (err) {
+          console.warn(
+            '[submitPrompt] removePendingPrompt failed after abort',
+            err,
+          );
+          addNotice({
+            severity: 'error',
+            category: 'user_action',
+            operation: 'send_prompt',
+            code: 'daemon.send_prompt.pending_cleanup_failed',
+            message:
+              'Prompt was accepted after cancellation but could not be removed from the queue.',
+            debugMessage: err instanceof Error ? err.message : String(err),
+            recoverable: true,
           });
+        }
         throw (
           options.signal.reason ?? new DOMException('Aborted', 'AbortError')
         );

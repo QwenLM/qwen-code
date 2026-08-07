@@ -763,6 +763,7 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
     expect(clearFollowup).not.toHaveBeenCalled();
@@ -798,6 +799,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -832,6 +834,7 @@ describe('ChatPane', () => {
       'onSlashCommand callback failed',
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -846,6 +849,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -872,6 +876,7 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
       images,
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -886,6 +891,7 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('', {
       images,
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
     act(() => sendPromptAdmit!());
@@ -917,6 +923,7 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
       inputAnnotations,
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -930,8 +937,32 @@ describe('ChatPane', () => {
       returned = latestOnSubmit!('queued next', undefined, commit);
     });
     expect(returned).toBe(true);
-    expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queued next',
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('names a side task when its first text prompt is admitted from the queue', () => {
+    streamingStateValue = 'responding';
+    const onFirstPromptAdmitted = vi.fn();
+    render({ onFirstPromptAdmitted });
+
+    act(() => {
+      latestOnSubmit!('name this queued task');
+    });
+
+    const onAdmitted = enqueuePrompt.mock.calls[0]?.[4] as
+      | (() => void)
+      | undefined;
+    expect(onAdmitted).toEqual(expect.any(Function));
+    act(() => onAdmitted?.());
+    expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this queued task');
   });
 
   it('forwards composer annotations with a queued prompt', () => {
@@ -956,6 +987,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       inputAnnotations,
+      expect.any(Function),
     );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
@@ -967,7 +999,13 @@ describe('ChatPane', () => {
     act(() => {
       latestOnSubmit!('queued image', images);
     });
-    expect(enqueuePrompt).toHaveBeenCalledWith('queued image', images);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queued image',
+      images,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it('queues an image-only prompt while the pane is already running', () => {
@@ -1026,7 +1064,10 @@ describe('ChatPane', () => {
     const onImageIngestionNotice = vi.fn();
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
     render({ onError, onImageIngestionNotice });
     const commit = vi.fn();
     await act(async () => {
@@ -1064,9 +1105,65 @@ describe('ChatPane', () => {
     warn.mockRestore();
   });
 
+  it('keeps an unknown admission locked across an unrelated stream', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('response lost');
+    });
+    render();
+
+    await act(async () => {
+      latestOnSubmit!('hi');
+      await Promise.resolve();
+    });
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+
+    streamingStateValue = 'responding';
+    rerender();
+
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('does not mark a turn error unknown after admission', async () => {
+    const onError = vi.fn();
+    let rejectTurn!: (error: unknown) => void;
+    sendPrompt.mockImplementationOnce((_text, options) => {
+      options?.onAdmissionStarted?.();
+      sendPromptAdmit = options?.onAdmitted;
+      return new Promise((_resolve, reject) => {
+        rejectTurn = reject;
+      });
+    });
+    render({ onError });
+    const commit = vi.fn();
+
+    act(() => {
+      latestOnSubmit!('hi', undefined, commit);
+      sendPromptAdmit?.();
+    });
+    await act(async () => {
+      rejectTurn(new Error('turn failed'));
+      await Promise.resolve();
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(testid('pane-prompt-admission-unknown')).toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(false);
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'turn failed' }),
+      'Failed to send prompt',
+    );
+  });
+
   it('discards an unknown local payload without hiding its marker', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
     render();
     const commit = vi.fn();
     await act(async () => {

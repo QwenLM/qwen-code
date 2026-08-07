@@ -965,6 +965,136 @@ describe('useComposerCore paste', () => {
 });
 
 describe('useComposerCore tags', () => {
+  it('resubmits restored input annotations with the draft', async () => {
+    const { onSubmit } = await mount();
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 8,
+        text: '@file.ts',
+        reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+      },
+    ];
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.(inputAnnotations);
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@file.ts\n\nfix it',
+      undefined,
+      expect.any(Function),
+      { inputAnnotations },
+    );
+  });
+
+  it('keeps earlier annotations when another restored prompt is prepended', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@a old');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 2,
+          text: '@a',
+          reference: { id: 'file:a' },
+        },
+      ]);
+      latest!.handle.setText('@b new\n@a old');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 2,
+          text: '@b',
+          reference: { id: 'file:b' },
+        },
+      ]);
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@b new\n@a old',
+      undefined,
+      expect.any(Function),
+      {
+        inputAnnotations: [
+          expect.objectContaining({ start: 0, end: 2, text: '@b' }),
+          expect.objectContaining({ start: 7, end: 9, text: '@a' }),
+        ],
+      },
+    );
+  });
+
+  it('maps restored annotations through edits before their range', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 8,
+          text: '@file.ts',
+          reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+        },
+      ]);
+      latest!.viewRef.current!.dispatch({
+        changes: { from: 0, insert: 'please ' },
+      });
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      'please @file.ts\n\nfix it',
+      undefined,
+      expect.any(Function),
+      {
+        inputAnnotations: [
+          expect.objectContaining({
+            start: 7,
+            end: 15,
+            text: '@file.ts',
+          }),
+        ],
+      },
+    );
+  });
+
+  it('drops a restored annotation when its range is edited', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 8,
+          text: '@file.ts',
+          reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+        },
+      ]);
+      latest!.viewRef.current!.dispatch({
+        changes: { from: 1, to: 2, insert: 'X' },
+      });
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@Xile.ts\n\nfix it',
+      undefined,
+      expect.any(Function),
+      undefined,
+    );
+  });
+
   it('keeps the composer API stable across tag updates', async () => {
     await mount();
     const api = latest!.handle;
