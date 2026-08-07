@@ -244,13 +244,14 @@ describe('FeishuQuestionCardController callbacks', () => {
     expect(claimed).toMatchObject({
       kind: 'handled',
       response: {
-        toast: expect.any(Object),
+        toast: { type: 'success', content: '答案已提交，正在处理。' },
         card: {
           type: 'raw',
           data: expect.objectContaining({ schema: '2.0' }),
         },
       },
     });
+    expect(JSON.stringify(claimed)).toContain('正在处理...');
     expect(respond).not.toHaveBeenCalled();
     expect(controller.claim(validCancel('request-submit'))).toEqual({
       kind: 'handled',
@@ -293,7 +294,7 @@ describe('FeishuQuestionCardController callbacks', () => {
     expect(claimed).toMatchObject({
       kind: 'handled',
       response: {
-        toast: expect.any(Object),
+        toast: { type: 'info', content: '已取消。' },
         card: {
           type: 'raw',
           data: expect.objectContaining({ schema: '2.0' }),
@@ -598,9 +599,11 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
     expect(events).toEqual(['patch', 'respond']);
     expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已过期');
     expect(respond).toHaveBeenCalledWith({ outcome: { outcome: 'cancelled' } });
-    expect(controller.claim(validCancel('request-timeout'))).toMatchObject({
+    expect(controller.claim(validCancel('request-timeout'))).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
     expect(
       (controller as unknown as { byRequest: Map<string, unknown> }).byRequest
@@ -666,9 +669,11 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
         }),
       ),
     ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
-    expect(controller.claim(validCancel('request-run-one'))).toMatchObject({
+    expect(controller.claim(validCancel('request-run-one'))).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
     expect(
       controller.claim(
@@ -677,9 +682,11 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
           chatId: 'oc_2',
         }),
       ),
-    ).toMatchObject({
+    ).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
   });
 
@@ -694,9 +701,11 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
 
     expect(patchCard).toHaveBeenCalledTimes(1);
     expect(respond).not.toHaveBeenCalled();
-    expect(controller.claim(validCancel('request-dispose'))).toMatchObject({
+    expect(controller.claim(validCancel('request-dispose'))).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
   });
 
@@ -718,9 +727,11 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
     expect(respond).not.toHaveBeenCalled();
     expect(
       controller.claim(validCancel('request-late', { messageId: 'om_late' })),
-    ).toMatchObject({
+    ).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
   });
 
@@ -758,6 +769,41 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
 
     expect(respond).not.toHaveBeenCalled();
     expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已取消');
+  });
+
+  it('absorbs the settlement echo of an in-flight accepted response', async () => {
+    const response = deferred<boolean>();
+    const respond = vi.fn().mockReturnValue(response.promise);
+    const { controller, patchCard } = createHarness();
+    const { context, settle } = createContext('request-echo', { respond });
+    await controller.present(context);
+    const claimed = controller.claim(
+      submit('request-echo', { '0': 'Beijing' }),
+    );
+    if (claimed.kind !== 'handled' || !claimed.execute) {
+      throw new Error('Expected claimed callback execution');
+    }
+
+    const executing = claimed.execute();
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledOnce());
+
+    // ChannelBase settles the request in the same turn that accepts the
+    // controller's own response; the echo must not terminalize the record.
+    settle('resolved_outside_presenter');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(patchCard).not.toHaveBeenCalled();
+    expect(
+      (controller as unknown as { byRequest: Map<string, unknown> }).byRequest
+        .size,
+    ).toBe(1);
+
+    response.resolve(true);
+    await executing;
+
+    expect(patchCard).toHaveBeenCalledOnce();
+    expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已提交');
   });
 
   it('lets an accepted in-flight submission override run cancellation', async () => {

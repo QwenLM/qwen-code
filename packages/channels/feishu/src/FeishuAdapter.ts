@@ -1273,7 +1273,7 @@ export class FeishuChannel extends ChannelBase {
             // Mirror onResponseComplete: retry without tables (Feishu card
             // table-count limit) before giving up on the card.
             const noTableText = this.stripTables(
-              displayText,
+              this.truncateCardText(displayText),
               '(表格内容请查看原文)',
             );
             updated = await this.updateCard(

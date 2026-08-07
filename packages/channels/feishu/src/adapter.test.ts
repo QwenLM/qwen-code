@@ -895,6 +895,10 @@ describe('FeishuChannel', () => {
           ).get('session_1'),
         ).toBe('inbound_1');
         expect(createStreamingCard).not.toHaveBeenCalled();
+        // A prompt-start creation regression may only schedule the card;
+        // flush timers so the scheduled shape is caught as well.
+        await vi.runAllTimersAsync();
+        expect(createStreamingCard).not.toHaveBeenCalled();
 
         getPrivateMethod<
           (chatId: string, chunk: string, sessionId: string) => void
@@ -1022,8 +1026,8 @@ describe('FeishuChannel', () => {
         await vi.runAllTimersAsync();
 
         expect(createStreamingCard).toHaveBeenCalledOnce();
-        expect(createStreamingCard.mock.calls[0]?.[1]).toContain(
-          'after answer',
+        expect(createStreamingCard.mock.calls[0]?.[1]).toBe(
+          '@sender\n\nafter answer',
         );
       } finally {
         vi.useRealTimers();
@@ -1156,6 +1160,61 @@ describe('FeishuChannel', () => {
 
       expect(updateCard).toHaveBeenCalledTimes(2);
       expect(updateCard.mock.calls[1]?.[1]).toContain('(表格内容请查看原文)');
+      expect(updateCard.mock.calls[1]?.[2]).toBe(true);
+      expect(updateCard.mock.calls[1]?.[4]).toBe('已完成');
+      expect(deleteCard).not.toHaveBeenCalled();
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('caps the input-request table-stripped retry at the card size limit', async () => {
+      const channel = createChannel();
+      const updateCard = vi
+        .fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const deleteCard = vi.fn().mockResolvedValue(true);
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard,
+        deleteCard,
+        sendMessage,
+      });
+      getPrivateMethod<Map<string, Record<string, unknown>>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', {
+        messageId: 'om_first_output',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'x'.repeat(24_000),
+        lastUpdateAt: Date.now(),
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_1',
+        'inbound_1',
+      );
+
+      await getPrivateMethod<
+        (
+          chatId: string,
+          sessionId: string,
+          segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => void | Promise<void>
+      >(channel, 'onOutputSegmentEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        {} as ChannelOutputSegmentContext,
+        'input_requested',
+      );
+
+      expect(updateCard).toHaveBeenCalledTimes(2);
+      const retryText = updateCard.mock.calls[1]?.[1] as string;
+      expect(retryText.length).toBeLessThanOrEqual(20_000);
+      expect(retryText).toContain('内容过长，已截断早期内容');
+      expect(updateCard.mock.calls[1]?.[2]).toBe(true);
       expect(deleteCard).not.toHaveBeenCalled();
       expect(sendMessage).not.toHaveBeenCalled();
     });
@@ -2411,6 +2470,8 @@ describe('FeishuChannel', () => {
         sessionId: 'session_1',
         runId: 'run-1',
         type: 'failed',
+        error: 'boom',
+        phase: 'agent',
         identity: { id: 'channel:feishu', displayName: 'feishu' },
         memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
       });
@@ -3027,7 +3088,7 @@ describe('FeishuChannel', () => {
       expect(updateCard.mock.calls[0]![1]).not.toContain('已停止生成');
     });
 
-    it('finalizes creating cards as completed after empty successful responses', async () => {
+    it('finalizes creating cards as completed after non-empty successful responses', async () => {
       const channel = createChannel();
       let resolveCreateCard:
         | ((value: { success: boolean; messageId: string }) => void)
@@ -3421,6 +3482,9 @@ describe('FeishuChannel', () => {
           accumulatedText: '',
         });
         expect(present).toHaveBeenCalledWith(context);
+        expect(updateCard.mock.invocationCallOrder[0]).toBeLessThan(
+          present.mock.invocationCallOrder[0]!,
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -3507,6 +3571,7 @@ describe('FeishuChannel', () => {
         runId: 'run-1',
         type: 'failed',
         error: 'model error',
+        phase: 'agent',
         identity: { id: 'channel:feishu', displayName: 'feishu' },
         memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
       });
@@ -3850,7 +3915,11 @@ describe('FeishuChannel', () => {
         const createStreamingCard = vi.fn();
         Object.assign(channel as unknown as Record<string, unknown>, {
           createStreamingCard,
-          sendMessage: vi.fn().mockResolvedValue(undefined),
+          // The 0ms creation timer fires while the finalization else branch
+          // awaits sendMessage, before releaseOutputCard runs.
+          sendMessage: vi.fn().mockImplementation(async () => {
+            await vi.advanceTimersByTimeAsync(0);
+          }),
           addReaction: vi.fn().mockResolvedValue(undefined),
           removeReaction: vi.fn().mockResolvedValue(undefined),
         });

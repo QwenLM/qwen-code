@@ -14,7 +14,10 @@ interface CardElement {
   tag: string;
   name?: string;
   value?: Record<string, unknown>;
-  options?: Array<{ value: string; text?: { content?: string } }>;
+  options?: Array<{
+    value: string;
+    text?: { tag?: string; content?: string };
+  }>;
   elements?: CardElement[];
   content?: string;
   form_action_type?: string;
@@ -87,16 +90,19 @@ describe('Feishu question cards', () => {
         tag: 'select_static',
         name: 'region',
         options: [
-          { value: 'Beijing', text: { content: 'Beijing' } },
-          { value: 'Shanghai', text: { content: 'Shanghai' } },
+          { value: 'Beijing', text: { tag: 'plain_text', content: 'Beijing' } },
+          {
+            value: 'Shanghai',
+            text: { tag: 'plain_text', content: 'Shanghai' },
+          },
         ],
       },
       {
         tag: 'multi_select_static',
         name: 'sources',
         options: [
-          { value: 'Logs', text: { content: 'Logs' } },
-          { value: 'Metrics', text: { content: 'Metrics' } },
+          { value: 'Logs', text: { tag: 'plain_text', content: 'Logs' } },
+          { value: 'Metrics', text: { tag: 'plain_text', content: 'Metrics' } },
         ],
       },
     ]);
@@ -162,6 +168,32 @@ describe('Feishu question cards', () => {
     expect((card as unknown as QuestionCard).schema).toBe('2.0');
     expect(elements.some((element) => element.tag === 'form')).toBe(false);
     expect(elements.some((element) => element.tag === 'button')).toBe(false);
+    const content = elements.map((element) => element.content ?? '').join('\n');
+    expect(content).toContain('已提交');
+    expect(content).toContain('**Region**\nBeijing');
+    expect(content).toContain('**Sources**\nLogs, Metrics');
+  });
+
+  it('renders the processing projection between claim and finalization', () => {
+    const card = buildQuestionTerminalCard(questions, 'processing', {
+      region: 'Beijing',
+      sources: 'Logs',
+    });
+    const elements = (card as unknown as QuestionCard).body.elements;
+    const content = elements.map((element) => element.content ?? '').join('\n');
+
+    expect(content).toContain('正在处理...');
+    expect(content).toContain('**Region**\nBeijing');
+  });
+
+  it('falls back to the question text when a terminal card has no answers', () => {
+    const card = buildQuestionTerminalCard(questions, 'cancelled');
+    const elements = (card as unknown as QuestionCard).body.elements;
+    const content = elements.map((element) => element.content ?? '').join('\n');
+
+    expect(content).toContain('已取消');
+    expect(content).toContain('Which region should I use?');
+    expect(content).toContain('Which sources should I inspect?');
   });
 
   it('parses a submitted form with top-level message context', () => {
