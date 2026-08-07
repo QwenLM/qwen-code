@@ -1415,6 +1415,13 @@ describe('docs-only medium gate', () => {
     const context = doc.jobs['review-pr'].steps.find((s) => s.id === 'context');
     // One assignment site, guarded on both the event and the action.
     expect(context.run.match(/AUTO_REVIEW=true/g)).toHaveLength(1);
+    // The false DEFAULT is load-bearing too: without it, dispatch,
+    // issue-comment and review-comment triggers inherit whatever the
+    // environment carries and can enter the automatic downgrade path.
+    expect(context.run.match(/AUTO_REVIEW=false/g)).toHaveLength(1);
+    expect(context.run.indexOf('AUTO_REVIEW=false')).toBeLessThan(
+      context.run.indexOf('AUTO_REVIEW=true'),
+    );
     // Both halves of the guard: the event must be pull_request_target AND the
     // action must not be review_requested. Pinning only the action half let a
     // deleted event condition survive — the branch is shared with
@@ -1435,15 +1442,20 @@ describe('docs-only medium gate', () => {
     expect(m).not.toBeNull();
     // Filter side: every autofix exclusion of that marker must carry the
     // author scope ($rb) — a human quoting the marker stays actionable —
-    // and all six sites (definition + five inline copies) must be present.
+    // and all six inline copies in qwen-autofix.yml must be present.
     const autofix = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
     const scoped =
       autofix.match(
-        /\(\.user\.login \/\/ ""\) == \$rb\)\) and \(\(\.body \/\/ ""\) \| test\("<!-- qwen-review docs-only-medium "\)/g,
+        /\(\.user\.login \/\/ ""\) == \$rb\)\) and \(\(\.body \/\/ ""\) \| test\("<!-- qwen-review docs-only-medium "\)\)\) \| not\)/g,
       ) ?? [];
     expect(scoped.length).toBeGreaterThanOrEqual(6);
-    // No body-only exclusion of the marker may survive anywhere.
-    expect(autofix).not.toMatch(/\|qwen-review docs-only-medium\)/);
+    // No body-only exclusion of the marker may survive anywhere: every
+    // marker test must carry the author scope, and a filter missing
+    // `| not` inverts to keep ONLY the badge — it then drops out of the
+    // scoped count above, so either mutant fails this pin.
+    const markerTests =
+      autofix.match(/test\("<!-- qwen-review docs-only-medium "\)/g) ?? [];
+    expect(markerTests.length).toBe(scoped.length);
   });
 
   it('routes classification through the shared classify-pr-profile wrapper', () => {
@@ -1573,6 +1585,16 @@ describe('docs-only gate and relay, executed', () => {
         [
           '#!/bin/bash',
           'echo "$*" >> "$CALLS"',
+          // The head-binding guard runs BEFORE the upsert attempts: pr view
+          // succeeds even in all-fail so that scenario still exercises the
+          // retry loop, while moved-head/closed-pr exercise the guard.
+          'case "$*" in',
+          '  "pr view"*)',
+          '    if [ "$SCENARIO" = "moved-head" ]; then printf "OPEN\\tdeadbeef\\n";',
+          '    elif [ "$SCENARIO" = "closed-pr" ]; then printf "MERGED\\tabc123\\n";',
+          '    else printf "OPEN\\tabc123\\n"; fi',
+          '    exit 0 ;;',
+          'esac',
           'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
           'case "$*" in',
           '  "api user"*) echo \'{"login":"relay-bot"}\' | jq -r .login; exit 0 ;;',
@@ -1590,6 +1612,7 @@ describe('docs-only gate and relay, executed', () => {
         'GITHUB_REPOSITORY=o/r',
         'PR_NUMBER=42',
         `RUNNER_TEMP="${dir}"`,
+        'EXPECTED_HEAD_SHA=abc123',
         'COMPLETION_LINE="Review complete: pr-42 — Comment, not posted (0 Critical, 1 Suggestion)"',
         'RUN_URL=https://x',
         relayRun,
@@ -1618,6 +1641,9 @@ describe('docs-only gate and relay, executed', () => {
     // upsert lookup and the supersede step match on; a body without it makes
     // every push stack a new badge and supersede match nothing.
     expect(r.calls).toContain('<!-- qwen-review docs-only-medium -->');
+    // The badge is bound to the reviewed head: a later push must never be
+    // described by an earlier revision's outcome.
+    expect(r.calls).toContain('Reviewed head: `abc123`');
   });
 
   it('PATCHes the existing bot-authored relay comment', () => {
@@ -1632,6 +1658,56 @@ describe('docs-only gate and relay, executed', () => {
     const r = runRelay({ scenario: 'all-fail' });
     expect(r.stdout).toContain('::warning::');
     expect(r.stdout).toContain('the review itself succeeded');
+  });
+
+  it('skips the relay when the head moved before the write', () => {
+    const r = runRelay({ scenario: 'moved-head' });
+    expect(r.stdout).toContain('moved from abc123 to deadbeef');
+    expect(r.calls).not.toContain('api repos/o/r/issues/42/comments');
+  });
+
+  it('skips the relay when the PR closed before the write', () => {
+    const r = runRelay({ scenario: 'closed-pr' });
+    expect(r.stdout).toContain('is MERGED');
+    expect(r.calls).not.toContain('api repos/o/r/issues/42/comments');
+  });
+
+  function normalizedIf(step) {
+    return step.if.replace(/\s+/g, ' ').trim();
+  }
+
+  it('pins the relay if: as the exact reviewed conjunction', () => {
+    // Full-string pin, not substrings: deleting or weakening any conjunct —
+    // or re-grouping them — edits this string, so every truth-table mutant
+    // reduces to a red test here without an Actions-expression evaluator.
+    const doc2 = parse(workflow);
+    const relay = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    expect(normalizedIf(relay)).toBe(
+      "steps.context.outputs.should_run == 'true' && " +
+        "steps.review.outcome == 'success' && " +
+        "steps.review.outputs.review_completed == 'true' && " +
+        "steps.review.outputs.docs_only_medium == 'true' && " +
+        "steps.context.outputs.pr_number != ''",
+    );
+  });
+
+  it('pins the supersede if: including the OR grouping of its three paths', () => {
+    const doc2 = parse(workflow);
+    const supersede = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Supersede stale docs-only badge',
+    );
+    expect(normalizedIf(supersede)).toBe(
+      '!cancelled() && ' +
+        "steps.context.outputs.should_run == 'true' && " +
+        "steps.context.outputs.pr_number != '' && " +
+        "( steps.review.outputs.docs_only_medium == 'false' || " +
+        "( steps.context.outputs.auto_review == 'false' && " +
+        "steps.context.outputs.review_mode == 'comment' && " +
+        "steps.review.outputs.review_completed == 'true' ) || " +
+        "( failure() && steps.review.outputs.docs_only_medium == 'true' ) )",
+    );
   });
 
   it('pins the review_completed wiring end to end', () => {
@@ -1719,7 +1795,12 @@ describe('supersede step and ci.yml rc-handling, executed', () => {
     (s) => s.name === 'Supersede stale docs-only badge',
   ).run;
 
-  function runSupersede({ scenario }) {
+  function runSupersede({
+    scenario,
+    docsOnlyMedium = 'false',
+    reviewCompleted = 'true',
+    expectedHeadSha = 'abc123',
+  }) {
     const dir = mkdtempSync(join(tmpdir(), 'docs-supersede-'));
     try {
       const bin = join(dir, 'bin');
@@ -1736,6 +1817,16 @@ describe('supersede step and ci.yml rc-handling, executed', () => {
         [
           '#!/bin/bash',
           'echo "$*" >> "$CALLS"',
+          // The head-binding guard runs BEFORE the upsert attempts: pr view
+          // succeeds even in all-fail so that scenario still exercises the
+          // retry loop.
+          'case "$*" in',
+          '  "pr view"*)',
+          '    if [ "$SCENARIO" = "moved-head" ]; then printf "OPEN\\tdeadbeef\\n";',
+          '    elif [ "$SCENARIO" = "closed-pr" ]; then printf "MERGED\\tabc123\\n";',
+          '    else printf "OPEN\\tabc123\\n"; fi',
+          '    exit 0 ;;',
+          'esac',
           'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
           'case "$*" in',
           '  "api user"*) echo bot ;;',
@@ -1751,6 +1842,10 @@ describe('supersede step and ci.yml rc-handling, executed', () => {
         'GITHUB_REPOSITORY=o/r',
         'PR_NUMBER=42',
         `RUNNER_TEMP="${dir}"`,
+        `EXPECTED_HEAD_SHA=${expectedHeadSha}`,
+        `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
+        `REVIEW_COMPLETED=${reviewCompleted}`,
+        'RUN_URL=https://x',
         supersedeRun,
         'echo "STEP_EXIT_OK"',
       ].join('\n');
@@ -1776,6 +1871,50 @@ describe('supersede step and ci.yml rc-handling, executed', () => {
       'api --method PATCH repos/o/r/issues/comments/31',
     );
     expect(r.stdout).toContain('STEP_EXIT_OK');
+    // Cause-neutral retired wording: it must hold even when an explicit full
+    // review completes on the SAME head the badge describes, so it may not
+    // claim the badge described an earlier revision.
+    expect(r.calls).toContain('(superseded)');
+    expect(r.calls).toContain(
+      'no longer reflects the current review state of this PR',
+    );
+    expect(r.calls).not.toContain('earlier docs-only revision');
+  });
+
+  it('updates the badge to a failure notice when a docs-only review failed', () => {
+    // The relay only runs on success; without this path the badge would keep
+    // quoting the previous revision's outcome for a head whose own run died.
+    const r = runSupersede({
+      scenario: 'existing',
+      docsOnlyMedium: 'true',
+      reviewCompleted: '',
+    });
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/31',
+    );
+    expect(r.calls).toContain('did not complete');
+    expect(r.calls).toContain('abc123');
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+  });
+
+  it('skips the badge update when the head moved before the write', () => {
+    const r = runSupersede({ scenario: 'moved-head' });
+    expect(r.stdout).toContain('moved from abc123 to deadbeef');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('skips the badge update when the PR closed before the write', () => {
+    const r = runSupersede({ scenario: 'closed-pr' });
+    expect(r.stdout).toContain('is MERGED');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('skips the badge update when the reviewed head SHA is unknown', () => {
+    // A run that failed before "Run review" emitted the SHA has nothing to
+    // bind to — a badge is never updated on ignorance.
+    const r = runSupersede({ scenario: 'existing', expectedHeadSha: '' });
+    expect(r.stdout).toContain('reviewed head SHA is unknown');
+    expect(r.calls).not.toContain('--method PATCH');
   });
 
   it('warns and exits 0 when every supersede attempt fails', () => {

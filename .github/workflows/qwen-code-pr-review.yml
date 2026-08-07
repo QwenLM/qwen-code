@@ -966,12 +966,14 @@ jobs:
           # Docs-only automatic reviews run at medium effort. The classifier is
           # the same one the Test workflow's CI-profile gate already trusts
           # (.github/scripts/ci/classify-profile.mjs) and it is conservative by
-          # construction: only docs/**.md(x) and root-level prose files classify
-          # docs_only — markdown under any src/ tree stays `full`, matching the
-          # review skill's own "markdown inside a source tree counts as source"
-          # rule — and any fetch or classifier failure falls back to the full
-          # review. On a diff with zero source lines, the passes medium drops
-          # (adversarial personas, reverse audit) have no failure mode to hunt;
+          # construction: only docs/**.md and root-level prose files classify
+          # docs_only — MDX is executable (imported components, expressions)
+          # and stays `full`, as does markdown under any src/ tree, matching
+          # the review skill's own "markdown inside a source tree counts as
+          # source" rule — and any fetch or classifier failure falls back to
+          # the full review. On a diff with zero source lines, the passes
+          # medium drops (adversarial personas, reverse audit) have no
+          # failure mode to hunt;
           # medium keeps the verified finder fan-out. `--comment` is dropped
           # with the downgrade — an effective --comment forces high
           # (parse-args), and medium never posts — so the "Report docs-only
@@ -1262,10 +1264,29 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          EXPECTED_HEAD_SHA: '${{ steps.review.outputs.expected_head_sha }}'
           COMPLETION_LINE: "${{ steps.review.outputs.completion_line || '(no relayable \"Review complete:\" line in the run output — see the run log)' }}"
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          # The write is bound to the reviewed head: re-read the live PR
+          # state immediately before the mutation. The stale-head guard in
+          # "Run review" checked at step start; a push that landed since
+          # must not receive this head's outcome (the fallback-comment step
+          # uses the same guard shape).
+          if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
+            echo "::warning::Could not verify PR #${PR_NUMBER} before relaying the docs-only outcome; skipping the relay."
+            exit 0
+          fi
+          IFS=$'\t' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "Skipping docs-only relay: PR #${PR_NUMBER} is ${PR_STATE}."
+            exit 0
+          fi
+          if [ "$CURRENT_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "Skipping docs-only relay: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${CURRENT_HEAD_SHA}."
+            exit 0
+          fi
           # Medium never posts inline comments and --comment would force high
           # effort back on (parse-args), so a docs-only automatic review
           # reports through this single relay instead. The quoted line arrives
@@ -1281,11 +1302,11 @@ jobs:
             '' \
             "> ${COMPLETION_LINE}" \
             '' \
-            "Full report in the [workflow run](${RUN_URL}). For a full high-effort review with inline comments, comment \`@qwen-code /review\`." \
+            "Reviewed head: \`${EXPECTED_HEAD_SHA}\`. Full report in the [workflow run](${RUN_URL}). For a full high-effort review with inline comments, comment \`@qwen-code /review\`." \
             '' \
             '<details><summary>中文说明</summary>' \
             '' \
-            "📄 **纯文档变更** —— 自动评审以 \`--effort medium\` 运行（发现已验证、无反向审计；medium 不发布行内评论），结果见上方引用行。完整报告见 [workflow 运行](${RUN_URL})；如需带行内评论的完整高强度（high-effort）评审，请评论 \`@qwen-code /review\`。" \
+            "📄 **纯文档变更** —— 自动评审以 \`--effort medium\` 运行（发现已验证、无反向审计；medium 不发布行内评论），结果见上方引用行。评审的 head：\`${EXPECTED_HEAD_SHA}\`。完整报告见 [workflow 运行](${RUN_URL})；如需带行内评论的完整高强度（high-effort）评审，请评论 \`@qwen-code /review\`。" \
             '' \
             '</details>')"
           # The shared upsert protocol (.github/scripts/upsert-bot-comment.sh)
@@ -1308,7 +1329,7 @@ jobs:
           fi
 
       - name: 'Supersede stale docs-only badge'
-        # Two paths owe the badge correction, and only these two:
+        # Three paths owe the badge correction, and only these three:
         # (1) an automatic run whose classification POSITIVELY determined the
         #     PR is not (or no longer) docs-only — docs_only_medium == 'false'
         #     is three-valued and empty when the classifier failed or never
@@ -1318,8 +1339,13 @@ jobs:
         # (2) an explicit comment-mode review that actually completed — the
         #     badge's own CTA path, whose posted full review makes the badge
         #     redundant; a dispatch dry-run that posts nothing retires
-        #     nothing. The body is cause-neutral: it asserts only what is
-        #     true on every covered path.
+        #     nothing;
+        # (3) a FAILED automatic docs-only review — the relay only runs on
+        #     success, so without this path the badge would keep quoting the
+        #     previous revision's outcome for a head whose own run died.
+        # The retired body is cause-neutral: it asserts only what is true on
+        # every covered path (an explicit review can complete on the very
+        # same SHA the badge describes).
         if: |-
           !cancelled() &&
           steps.context.outputs.should_run == 'true' &&
@@ -1330,29 +1356,74 @@ jobs:
               steps.context.outputs.auto_review == 'false' &&
               steps.context.outputs.review_mode == 'comment' &&
               steps.review.outputs.review_completed == 'true'
+            ) ||
+            (
+              failure() &&
+              steps.review.outputs.docs_only_medium == 'true'
             )
           )
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          EXPECTED_HEAD_SHA: "${{ steps.review.outputs.expected_head_sha || '' }}"
+          DOCS_ONLY_MEDIUM: '${{ steps.review.outputs.docs_only_medium }}'
+          REVIEW_COMPLETED: '${{ steps.review.outputs.review_completed }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          # The write is bound to the reviewed head: re-read the live PR
+          # state immediately before the mutation (the same guard shape as
+          # the fallback-comment step). A run that failed before "Run
+          # review" emitted the reviewed SHA has nothing to bind to — a
+          # badge is never updated on ignorance.
+          if [ -z "$EXPECTED_HEAD_SHA" ]; then
+            echo "Skipping badge update: the reviewed head SHA is unknown."
+            exit 0
+          fi
+          if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
+            echo "::warning::Could not verify PR #${PR_NUMBER} before updating the docs-only badge."
+            exit 0
+          fi
+          IFS=$'\t' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "Skipping badge update: PR #${PR_NUMBER} is ${PR_STATE}."
+            exit 0
+          fi
+          if [ "$CURRENT_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "Skipping badge update: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${CURRENT_HEAD_SHA}."
+            exit 0
+          fi
           # --update-only makes this a strict no-op on PRs that never
           # carried the badge; a failed lookup exits 1 (never the no-op), so
           # the warning below fires instead of silently keeping a stale
           # badge. The marker is defined once and used for both the body and
           # the lookup — they must be byte-identical.
           MARKER='<!-- qwen-review docs-only-medium -->'
-          BODY="$(printf '%s\n' \
-            "$MARKER" \
-            '' \
-            '📄 ~~Docs-only change~~ **(superseded)** — this badge described an earlier docs-only revision of this PR and no longer reflects the current head. See the latest review activity on this PR.' \
-            '' \
-            '<details><summary>中文说明</summary>' \
-            '' \
-            '📄 ~~纯文档变更~~ **（已失效）** —— 该徽章描述的是本 PR 更早的纯文档修订，已不再反映当前 head。请以本 PR 上最新的评审动态为准。' \
-            '' \
-            '</details>')"
+          if [ "$DOCS_ONLY_MEDIUM" = "true" ] && [ "$REVIEW_COMPLETED" != "true" ]; then
+            # A failed docs-only run: the singleton badge must not keep
+            # quoting the previous revision's success for this head.
+            BODY="$(printf '%s\n' \
+              "$MARKER" \
+              '' \
+              "📄 **Docs-only change** — the automatic \`--effort medium\` review of head \`${EXPECTED_HEAD_SHA}\` **did not complete**, so no outcome currently applies. See the failure comment on this PR and the [workflow run](${RUN_URL})." \
+              '' \
+              '<details><summary>中文说明</summary>' \
+              '' \
+              "📄 **纯文档变更** —— head \`${EXPECTED_HEAD_SHA}\` 的自动 \`--effort medium\` 评审**未能完成**，当前没有有效的评审结果。详见本 PR 上的失败评论与 [workflow 运行](${RUN_URL})。" \
+              '' \
+              '</details>')"
+          else
+            BODY="$(printf '%s\n' \
+              "$MARKER" \
+              '' \
+              '📄 ~~Docs-only change~~ **(superseded)** — this badge no longer reflects the current review state of this PR. See the latest review activity on this PR.' \
+              '' \
+              '<details><summary>中文说明</summary>' \
+              '' \
+              '📄 ~~纯文档变更~~ **（已失效）** —— 该徽章已不再反映本 PR 当前的评审状态。请以本 PR 上最新的评审动态为准。' \
+              '' \
+              '</details>')"
+          fi
           printf '%s' "$BODY" > "${RUNNER_TEMP}/docs-only-supersede-body.md"
           .github/scripts/upsert-bot-comment.sh \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
