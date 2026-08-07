@@ -35,6 +35,9 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
+import { ProcessRegistry } from './process-registry.js';
+import { createChildHeapPolicy } from './child-heap-policy.js';
+import { resolveDaemonMemoryBudget } from './daemon-memory-budget.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockSpawn = vi.hoisted(() => vi.fn());
@@ -242,6 +245,76 @@ describe('createSpawnChannelFactory env policy', () => {
       exitCode: 1,
       signalCode: null,
     });
+  });
+});
+
+describe('createSpawnChannelFactory child-heap observation', () => {
+  const originalArgv1 = process.argv[1];
+  const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+
+  beforeEach(() => {
+    mockSpawn.mockReset();
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+    process.argv[1] = '/tmp/qwen.js';
+    process.env['QWEN_CLI_ENTRY'] = '/tmp/qwen.js';
+  });
+  afterEach(() => {
+    process.argv[1] = originalArgv1;
+    delete process.env['QWEN_CLI_ENTRY'];
+  });
+
+  it('leaves argv byte-identical while counting what it would have refused', async () => {
+    const policy = createChildHeapPolicy({ budget, mode: 'observe' });
+    const registry = new ProcessRegistry();
+    const factory = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: policy,
+    });
+    // Non-null because the mode is `observe`; `off` publishes no limit.
+    const limit = policy.snapshot().maxConcurrentChildren!;
+
+    for (let i = 0; i < limit + 2; i++) await factory(`/tmp/w${i}`);
+    const observed = mockSpawn.mock.calls.at(-1)?.[1] as string[];
+
+    mockSpawn.mockClear();
+    await createSpawnChannelFactory({ processRegistry: new ProcessRegistry() })(
+      '/tmp/w0',
+    );
+    const bare = mockSpawn.mock.calls[0]?.[1] as string[];
+
+    // Nothing applied: passing a derived --max-old-space-size would change the
+    // child's GC and OOM behaviour, which an observing mode may not do.
+    expect(observed).toEqual(bare);
+    // Every spawn still went through — and the two past the modeled limit are
+    // counted, which is the whole product of this mode.
+    expect(registry.committedProcessCount).toBe(limit + 2);
+    expect(policy.snapshot().refusals).toBe(2);
+  });
+
+  it('releases the reservation when a supplied policy throws', async () => {
+    // `childHeapPolicy` is a public factory option, so `decide()` is caller
+    // code and may throw. The reservation is taken before it runs; if the
+    // throw escapes without cancelling, the token is held for the process
+    // lifetime and every later spawn sees an inflated committed count.
+    const registry = new ProcessRegistry();
+    const factory = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: {
+        decide: () => {
+          throw new Error('policy exploded');
+        },
+        snapshot: () => {
+          throw new Error('unused');
+        },
+      },
+    });
+
+    await expect(factory('/tmp/w0')).rejects.toThrow('policy exploded');
+
+    // Nothing was spawned, so nothing may remain committed. A leak shows up
+    // here as 1 — the reservation that outlived its own spawn.
+    expect(registry.committedProcessCount).toBe(0);
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 
