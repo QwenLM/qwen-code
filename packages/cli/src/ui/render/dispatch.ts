@@ -16,7 +16,10 @@ export type RendererId = 'ink' | 'opentui';
 
 export const RENDERER_ENV_VAR = 'QWEN_TUI_RENDERER';
 
-export const DEFAULT_RENDERER: RendererId = 'ink';
+// OpenTUI is now the default renderer (PR-1). Ink remains only as an explicit
+// fallback (`QWEN_TUI_RENDERER=ink`) during the transition; it is removed in the
+// final release commit after parity + regression.
+export const DEFAULT_RENDERER: RendererId = 'opentui';
 
 export const EXPERIMENTAL_RENDERER: RendererId = 'opentui';
 
@@ -24,9 +27,7 @@ export function pickRenderer(
   env: NodeJS.ProcessEnv = process.env,
 ): RendererId {
   const requested = env[RENDERER_ENV_VAR]?.trim();
-  return requested === EXPERIMENTAL_RENDERER
-    ? EXPERIMENTAL_RENDERER
-    : DEFAULT_RENDERER;
+  return requested === 'ink' ? 'ink' : DEFAULT_RENDERER;
 }
 
 export function isExperimentalRenderer(id: RendererId): boolean {

@@ -34,6 +34,7 @@ const cases: readonly Case[] = [
   ['empty value', { QWEN_TUI_RENDERER: '' }, DEFAULT_RENDERER],
   ['garbage value', { QWEN_TUI_RENDERER: 'garbage' }, DEFAULT_RENDERER],
   ['opentui value', { QWEN_TUI_RENDERER: 'opentui' }, EXPERIMENTAL_RENDERER],
+  ['ink fallback', { QWEN_TUI_RENDERER: 'ink' }, 'ink'],
 ];
 
 function runAssertions(): void {
@@ -50,7 +51,7 @@ function runAssertions(): void {
 
 if (typeof describe === 'function' && typeof it === 'function') {
   describe('renderer dispatch', () => {
-    it('picks ink by default and opentui only on request', () => {
+    it('picks opentui by default and ink only on explicit request', () => {
       runAssertions();
     });
   });
