@@ -656,6 +656,12 @@ const MAVEN_VALUE_FLAGS = new Set([
   '--log-file',
   '-T',
   '--threads',
+  '-b',
+  '--builder',
+  '-t',
+  '--toolchains',
+  '-gt',
+  '--global-toolchains',
 ]);
 
 /**
@@ -732,8 +738,13 @@ function mavenPlModules(command: string): string[] | null {
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     let raw: string | undefined;
-    if (token === '-pl' || token === '--projects') raw = tokens[i + 1];
-    else if (token.startsWith('-pl=')) raw = token.slice('-pl='.length);
+    // Advance BEFORE reading, like the sibling token walkers: reading
+    // tokens[i + 1] here made the rejoin loop below push that same token
+    // again, duplicating the first word of every space-bearing selector.
+    if (token === '-pl' || token === '--projects') {
+      i += 1;
+      raw = tokens[i];
+    } else if (token.startsWith('-pl=')) raw = token.slice('-pl='.length);
     else if (token.startsWith('--projects='))
       raw = token.slice('--projects='.length);
     if (raw === undefined) continue;
@@ -870,8 +881,11 @@ function ruleCommand(
     !c.timedOut && c.exitCode !== null && !c.infrastructure;
   // The marker is mined from the command's own output — PR test stdout can
   // print it too, so it is not tamper-proof (same property as the npm
-  // console-summary parsing).
+  // console-summary parsing). Runner-gated like the `[maven-test-report]`
+  // count mining below: only the Maven adapter emits the marker, so the same
+  // text in a non-Maven command's stdout is fabricated evidence.
   const freshTestFailures = (c: CommandResult): boolean =>
+    MAVEN_RUNNER_RE.test(c.command) &&
     /^\[maven-test-failure\] /m.test(c.output ?? '');
   // A zero exit over fresh failing reports (surefire `testFailureIgnore`),
   // or over framed errors a fail-never setting swallowed, is a FAILED run

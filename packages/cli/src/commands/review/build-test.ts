@@ -237,11 +237,17 @@ export function buildRunEnv(
 
 function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   const started = Date.now();
+  // spawnSync validates `timeout` as an unsigned integer: the adapters'
+  // budget arithmetic can hand it a fractional value (a decimal --timeout
+  // or --budget), which throws ERR_OUT_OF_RANGE and kills the whole call
+  // with no report, or zero, which arms no kill timer at all. Coerce once
+  // at the one boundary every command crosses.
+  const deadlineMs = Math.max(1, Math.round(timeoutMs));
   const r = spawnSync(command, {
     cwd,
     shell: true,
     encoding: 'utf8',
-    timeout: timeoutMs,
+    timeout: deadlineMs,
     maxBuffer: 64 * 1024 * 1024,
     // A build that asks a question is a build that hangs until the deadline.
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -258,7 +264,7 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
     output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
-    deadlineMs: timeoutMs,
+    deadlineMs,
   };
 }
 

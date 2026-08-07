@@ -1735,6 +1735,89 @@ describe('runTestPlan', () => {
       );
     });
 
+    it('does not read a maven failure marker out of a non-Maven run', () => {
+      // Only the Maven adapter emits `[maven-test-failure]`; a green npm
+      // run whose stdout merely prints the literal (any test can
+      // console.log it, and this repo's own suites do) must stay
+      // reproduced — the marker can never be legitimate evidence in a
+      // non-Maven result.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command: 'npm test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output:
+              '[maven-test-failure] core/target/surefire-reports/TEST-A.xml: example.ATest#fails',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `npm test`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'npm test');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.observed).toBe('exit 0');
+    });
+
+    it('contradicts a space-bearing -pl claim when the same-scope run failed inside it', () => {
+      // Module dirs with spaces pass the POM gate and shellSelector quotes
+      // them; the selector rejoin must advance past the flag before
+      // reading, or the duplicated first word breaks failure attribution
+      // against real report paths and silently discards the evidence.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              "./mvnw --batch-mode --no-transfer-progress -pl 'my module' -am test",
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output:
+              '[maven-test-report] my module/target/surefire-reports/TEST-A.xml: tests=2, failures=1, errors=0, skipped=0\n' +
+              '[maven-test-failure] my module/target/surefire-reports/TEST-A.xml: example.ATest#fails',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run(
+        "## Test Plan\n\nRan `./mvnw -pl 'my module' test`",
+        [],
+        bt,
+      );
+      expect(verdictOf(r.claims, "./mvnw -pl 'my module' test")).toBe(
+        'contradicted',
+      );
+    });
+
+    it('does not read -b/-t/-gt flag values as lifecycle phases', () => {
+      // Maven's other space-separated value flags consume their next
+      // token: a toolchains/builder FILE named `test` used to read as a
+      // claimed `test` phase and let a module-scoped test run certify a
+      // `verify` claim.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      for (const command of [
+        'mvn verify -t test',
+        'mvn verify -b test',
+        'mvn verify -gt test',
+      ]) {
+        const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
+        expect(verdictOf(r.claims, command)).toBe('unchecked');
+      }
+    });
+
     it('contradicts an -am claim when a same-scope run WITHOUT -am failed', () => {
       // The converse of the -am exclusion: a run that never pulled in
       // upstream modules and still failed inside the claimed module set

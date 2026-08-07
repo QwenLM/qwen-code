@@ -50,6 +50,13 @@ export interface MavenReactor {
    * `pom.xml` and must walk the inheritor closure too.
    */
   parentPomFiles?: string[];
+  /**
+   * Named parent files some project's `<parent>` declares, including ones the
+   * diff deleted: `parentPomFiles` only records edges that survived on disk,
+   * and a deleted parent's `Non-resolvable parent POM` death is the diff's
+   * own doing, so the file stays a dependency input either way.
+   */
+  declaredParentFiles?: string[];
 }
 
 export interface MavenOwnership {
@@ -443,6 +450,11 @@ export function readMavenReactor(root: string): MavenReactorResult {
   // change to a higher parent away from the modules that inherit it.
   const inheritors = new Map<string, string[]>();
   const namedParentPoms = new Set<string>();
+  // Named parent files some `<parent>` declaration names, including ones the
+  // diff deleted: parentPomFiles below only records edges that survive on
+  // disk, so a deleted file would otherwise stop being a dependency input
+  // exactly when the resolution failure it causes is the diff's own doing.
+  const declaredParentFiles = new Set<string>();
   const worklist: Array<{
     heir: string;
     fromDir: string;
@@ -481,6 +493,9 @@ export function readMavenReactor(root: string): MavenReactorResult {
     // name. A path that is not an existing file keeps the historical append,
     // so an absent target never resolves onto its parent directory.
     if (basename(parentPom) !== 'pom.xml') {
+      if (isInside(reactorRoot, parentPom)) {
+        declaredParentFiles.add(toPosix(relative(reactorRoot, parentPom)));
+      }
       let namedFile = false;
       try {
         namedFile = statSync(parentPom).isFile();
@@ -492,58 +507,75 @@ export function readMavenReactor(root: string): MavenReactorResult {
     const parentDir = dirname(parentPom);
     if (!isInside(reactorRoot, parentDir)) continue;
     const parentPath = toPosix(relative(reactorRoot, parentDir)) || '.';
-    if (parentPath === item.heir) continue;
-    // A named parent FILE is not a visited reactor POM: match the
-    // declaration against its own artifactId, not the directory's pom.xml
-    // (which may not exist, or may be a different project).
+    // Self-reference guard: only the heir's own `pom.xml` is a true
+    // self-parent. A NAMED parent file inside the heir's own dir keeps its
+    // full treatment below — registration and chain continuation — or the
+    // whole inheritance chain through it silently dies here.
+    if (parentPath === item.heir && basename(parentPom) === 'pom.xml') {
+      continue;
+    }
+    // A parent that is a visited reactor project matches that project's
+    // artifactId. Every other shape — a named parent FILE, or a `pom.xml`
+    // in a directory the reactor does not aggregate — is read directly:
+    // dropping the edge would scope a change to a higher parent away from
+    // every module that inherits through this chain.
     let targetArtifactId: string | null;
-    let namedStructure: PomStructure | null = null;
-    if (basename(parentPom) === 'pom.xml') {
+    let fileStructure: PomStructure | null = null;
+    if (basename(parentPom) === 'pom.xml' && structures.has(parentPath)) {
       targetArtifactId = structures.get(parentPath)?.artifactId ?? null;
     } else {
-      let namedPom: string;
+      let parentFile: string;
       try {
         if (statSync(parentPom).size > MAX_POM_BYTES) {
           return {
             error: `Maven POM ${toPosix(relative(reactorRoot, parentPom))} is larger than the ${MAX_POM_BYTES}-byte read cap.`,
           };
         }
-        namedPom = readFileSync(parentPom, 'utf8');
+        parentFile = readFileSync(parentPom, 'utf8');
       } catch (error) {
+        if (basename(parentPom) === 'pom.xml') {
+          // An absent `pom.xml` target: Maven falls back to repository
+          // resolution, so there is no local edge to model.
+          continue;
+        }
         return {
           error: `Cannot read ${toPosix(relative(reactorRoot, parentPom))}: ${(error as Error).message}`,
         };
       }
-      namedStructure = parsePomStructure(namedPom);
-      if (!namedStructure) {
+      fileStructure = parsePomStructure(parentFile);
+      if (!fileStructure) {
         return {
           error: `Cannot safely parse literal Maven modules from ${toPosix(relative(reactorRoot, parentPom))}.`,
         };
       }
-      targetArtifactId = namedStructure.artifactId;
+      targetArtifactId = fileStructure.artifactId;
     }
     if (targetArtifactId !== parent.artifactId) continue;
     if (basename(parentPom) !== 'pom.xml') {
       namedParentPoms.add(toPosix(relative(reactorRoot, parentPom)));
-      // The named file's own `<parent>` continues the chain, resolved
-      // from the file's own directory but still owed to the SAME heir.
-      if (namedStructure?.parent) {
-        const key = `${item.heir}\0${parentPom}`;
-        if (!enqueued.has(key)) {
-          enqueued.add(key);
-          worklist.push({
-            heir: item.heir,
-            fromDir: parentPath,
-            parent: namedStructure.parent,
-          });
-        }
+    }
+    // The parent file's own `<parent>` continues the chain, resolved
+    // from the file's own directory but still owed to the SAME heir.
+    if (fileStructure?.parent) {
+      const key = `${item.heir}\0${parentPom}`;
+      if (!enqueued.has(key)) {
+        enqueued.add(key);
+        worklist.push({
+          heir: item.heir,
+          fromDir: parentPath,
+          parent: fileStructure.parent,
+        });
       }
     }
-    const inherited = inheritors.get(parentPath);
-    if (inherited) {
-      if (!inherited.includes(item.heir)) inherited.push(item.heir);
-    } else {
-      inheritors.set(parentPath, [item.heir]);
+    // A named parent file inside the heir's own dir is parent config, not
+    // an inheritor of itself.
+    if (parentPath !== item.heir) {
+      const inherited = inheritors.get(parentPath);
+      if (inherited) {
+        if (!inherited.includes(item.heir)) inherited.push(item.heir);
+      } else {
+        inheritors.set(parentPath, [item.heir]);
+      }
     }
   }
 
@@ -555,6 +587,9 @@ export function readMavenReactor(root: string): MavenReactorResult {
       inheritors: edgeRecord(inheritors),
       ...(namedParentPoms.size > 0
         ? { parentPomFiles: [...namedParentPoms].sort() }
+        : {}),
+      ...(declaredParentFiles.size > 0
+        ? { declaredParentFiles: [...declaredParentFiles].sort() }
         : {}),
     },
   };
@@ -617,7 +652,10 @@ function isUnderTestSourceTree(
 ): boolean {
   return projectDirs.some((projectDir) => {
     const src = projectDir === '.' ? 'src' : `${projectDir}/src`;
-    return rel === src || rel.startsWith(`${src}/`);
+    // Strictly BENEATH `src/`: a real project located exactly at a project's
+    // src path is not test data, and reading it as one defeats the
+    // out-of-reactor fail-closed rule for that shape.
+    return rel.startsWith(`${src}/`);
   });
 }
 
@@ -693,7 +731,9 @@ export function detectMavenOwnership(
   for (const changedFile of changedFiles) {
     const path = normalizedChangedPath(root, changedFile);
     if (path === null) continue;
-    if (path === otherPlatformWrapper) continue;
+    // A wrapper-spelled file that is ALSO a recorded parent file is a build
+    // input first: the skip must not swallow its closure and routing.
+    if (path === otherPlatformWrapper && !namedParentDirs.has(path)) continue;
     const namedParentDir = namedParentDirs.get(path);
     if (namedParentDir !== undefined) {
       if (namedParentDir === '.') {
@@ -957,25 +997,30 @@ const TESTCASE_CLOSE_RE = /<\/testcase\s*>/gi;
 function stripOpaqueSections(xml: string): string {
   if (!xml.includes('<![CDATA[') && !xml.includes('<!--')) return xml;
   const chunks: string[] = [];
-  let from = 0;
-  for (;;) {
-    const cdata = xml.indexOf('<![CDATA[', from);
-    const comment = xml.indexOf('<!--', from);
-    if (cdata === -1 && comment === -1) {
-      chunks.push(xml.slice(from));
-      return chunks.join('');
+  let i = 0;
+  let chunkStart = 0;
+  while (i < xml.length) {
+    let closer: string | null = null;
+    let markerLength = 0;
+    if (xml.startsWith('<!--', i)) {
+      closer = '-->';
+      markerLength = 4;
+    } else if (xml.startsWith('<![CDATA[', i)) {
+      closer = ']]>';
+      markerLength = 9;
     }
-    const cdataFirst = cdata !== -1 && (comment === -1 || cdata < comment);
-    const start = cdataFirst ? cdata : comment;
-    const closer = cdataFirst ? ']]>' : '-->';
-    const end = xml.indexOf(closer, start + (cdataFirst ? 9 : 4));
-    if (end === -1) {
-      chunks.push(xml.slice(from));
-      return chunks.join('');
+    if (closer === null) {
+      i += 1;
+      continue;
     }
-    chunks.push(xml.slice(from, start));
-    from = end + closer.length;
+    const end = xml.indexOf(closer, i + markerLength);
+    if (end === -1) break;
+    chunks.push(xml.slice(chunkStart, i));
+    i = end + closer.length;
+    chunkStart = i;
   }
+  chunks.push(xml.slice(chunkStart));
+  return chunks.join('');
 }
 
 function parseTestReport(root: string, path: string): MavenTestSummary | null {
@@ -1557,6 +1602,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     // resolution inputs exactly like a member's `pom.xml`: ownership routing
     // already models them as build inputs (namedParentDirs).
     if ((parsed.reactor.parentPomFiles ?? []).includes(path)) return true;
+    // A named parent file the diff DELETED carries no parentPomFiles entry —
+    // the edge no longer resolves on disk — but the resolution failure it
+    // now causes is the diff's own doing.
+    if ((parsed.reactor.declaredParentFiles ?? []).includes(path)) return true;
     if (executedWrapper !== null && path === executedWrapper) return true;
     if (
       settingsInputs.some(

@@ -2895,6 +2895,194 @@ describe('maven toolchain adapter', () => {
     });
   });
 
+  it('walks an inheritance chain through an out-of-reactor pom.xml', () => {
+    // app inherits ../shared/parent/pom.xml, which the reactor aggregates
+    // nowhere and which itself inherits ../../parent-bom/pom.xml: Maven
+    // merges the WHOLE chain into app, so the edge must survive the
+    // pom.xml-spelled intermediate instead of dying on it.
+    writeProject('.', ['app', 'parent-bom']);
+    writeProject('app');
+    writeProject('parent-bom');
+    mkdirSync(join(root, 'shared', 'parent'), { recursive: true });
+    writeFileSync(
+      join(root, 'shared', 'parent', 'pom.xml'),
+      childPomInheriting('../../parent-bom/pom.xml'),
+    );
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../shared/parent/pom.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.reactor?.inheritors).toEqual({
+      'shared/parent': ['app'],
+      'parent-bom': ['app'],
+    });
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(root, ['parent-bom/pom.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'parent-bom'],
+      inactiveProjects: [],
+    });
+    // Changing the intermediate itself fails closed exactly like its
+    // named-file twin: it is a project outside the root reactor.
+    expect(
+      detectMavenOwnership(root, ['shared/parent/pom.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: [],
+      inactiveProjects: ['shared/parent'],
+    });
+  });
+
+  it('routes a wrapper-spelled named parent file instead of skipping it', () => {
+    // A root-level parent FILE literally named after the OTHER platform's
+    // wrapper is still a recorded build input: the wrapper skip must not
+    // swallow its closure into a green no-op.
+    writeProject('.', ['app']);
+    writeProject('app');
+    const wrapper = process.platform === 'win32' ? 'mvnw' : 'mvnw.cmd';
+    writeFileSync(join(root, wrapper), pom());
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting(`../${wrapper}`),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.reactor?.parentPomFiles).toEqual([wrapper]);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(detectMavenOwnership(root, [wrapper], parsed.reactor)).toEqual({
+      reactorWide: true,
+      modules: [],
+      inactiveProjects: [],
+    });
+  });
+
+  it('fails closed for a real project located exactly at a src path', () => {
+    // A standalone project at src/pom.xml is not test data: the fixture
+    // guard only fires strictly beneath src/, or the out-of-reactor abort
+    // never sees the shape and `-pl . -am` tests the wrong project.
+    writeProject('.');
+    writeProject('src');
+
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(root, ['src/main/java/App.java'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: [],
+      inactiveProjects: ['src'],
+    });
+  });
+
+  it('keeps the chain through a named parent file inside the heir dir', () => {
+    // core/pom.xml inherits core/parent.xml, which itself inherits
+    // ../gp/pom.xml; app inherits core through the same file. The self-dir
+    // guard must skip only a true pom.xml self-reference: the named file
+    // keeps its registration, its chain continuation, and its fan-out.
+    writeProject('.', ['core', 'app', 'gp']);
+    writeProject('core');
+    writeProject('app');
+    writeProject('gp');
+    writeFileSync(
+      join(root, 'core', 'pom.xml'),
+      childPomInheriting('parent.xml'),
+    );
+    writeFileSync(
+      join(root, 'core', 'parent.xml'),
+      childPomInheriting('../gp/pom.xml'),
+    );
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../core/parent.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.reactor?.inheritors).toEqual({
+      core: ['app'],
+      gp: ['app', 'core'],
+    });
+    expect(parsed.reactor?.parentPomFiles).toEqual(['core/parent.xml']);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(detectMavenOwnership(root, ['gp/pom.xml'], parsed.reactor)).toEqual({
+      reactorWide: false,
+      modules: ['app', 'core', 'gp'],
+      inactiveProjects: [],
+    });
+    expect(
+      detectMavenOwnership(root, ['core/parent.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'core'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('strips dense comment sections in linear time', () => {
+    // stripOpaqueSections re-ran indexOf for BOTH markers from the scan
+    // position on every iteration — quadratic on comment-dense CDATA-free
+    // reports (~34s per 1 MiB measured), on PR-controlled bytes. The
+    // forward walk must stay fast at this size.
+    writeReactor();
+    const startedAt = Date.now();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.CoreTest" name="passes"/>' +
+            '<!-- comment -->'.repeat(60_000) +
+            '</testsuite>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(report.ok).toBe(true);
+  }, 20_000);
+
+  it('treats a DELETED named parent file as a dependency input', () => {
+    // parentPomFiles only records edges that survive on disk: when the
+    // diff deletes the declared parent, the `Non-resolvable parent POM`
+    // death it causes must not be laundered into the infrastructure
+    // carve-out.
+    writeProject('.', ['app']);
+    writeProject('app');
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../parent.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.reactor?.declaredParentFiles).toEqual(['parent.xml']);
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['parent.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: '[ERROR] Non-resolvable parent POM for example:app',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
   it('adds the owning module of a changed named parent file to the scope', () => {
     // The named parent lives in ANOTHER module's tree: changing it must
     // build and test that module too, not only the inheritor closure.

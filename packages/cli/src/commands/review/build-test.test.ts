@@ -232,6 +232,31 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('will not guess');
   });
 
+  it('coerces fractional and zero deadlines at the spawn boundary', () => {
+    // spawnSync validates `timeout` as an unsigned integer: a decimal
+    // --timeout used to throw ERR_OUT_OF_RANGE out of the whole call (no
+    // report, no --out file), and --timeout 0 armed no kill timer at all.
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+
+    const fractional = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 0.1,
+      install: false,
+    });
+    expect(fractional.toolchain).toBe('maven');
+    expect(fractional.test).toHaveLength(1);
+
+    const zero = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 0,
+      install: false,
+    });
+    expect(zero.test[0]?.deadlineMs).toBe(1);
+  });
+
   it('leaves a Maven repo with a build-less package.json to the Maven adapter', () => {
     writeFileSync(
       join(root, 'package.json'),
