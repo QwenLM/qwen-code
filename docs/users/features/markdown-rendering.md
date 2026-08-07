@@ -40,7 +40,7 @@ current session view; it does not rewrite your settings file.
 
 ## Assistant and Tool Images
 
-The interactive TUI displays image parts returned in assistant responses and completed tool results (successful, failed, and cancelled) directly in the conversation. In assistant responses, text and images keep their original order; tool rows show the result text followed by its images. This behavior is independent of the Markdown `render` and `raw` modes. Other output surfaces, including headless, ACP, daemon/Web Shell, and IDE integrations, do not render image parts. IM channels can still deliver agent-generated image files through their own `[IMAGE: ...]` marker flow.
+The interactive TUI displays image parts returned in assistant responses and completed tool results (successful, failed, and cancelled) directly in the conversation. In assistant responses, text and images keep their original order; tool rows show the result text followed by its images. This behavior is independent of the Markdown `render` and `raw` modes. Other output surfaces, including headless, ACP, daemon/Web Shell, and IDE integrations, do not render image parts. The WeChat (weixin), WeCom, and DingTalk channels can still deliver agent-generated image files through their `[IMAGE: ...]` marker flow; other IM channels do not currently deliver outbound images.
 
 | Environment                                                        | Image display                                                                           |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
