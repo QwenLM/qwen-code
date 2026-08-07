@@ -58,18 +58,6 @@ function providerEnvKey(
     : config.envKey;
 }
 
-function modelIdsMatchBaseline(
-  modelIds: readonly string[],
-  defaults: readonly string[],
-  customModelIds: readonly string[],
-): boolean {
-  const baseline = new Set([...defaults, ...customModelIds]);
-  const actual = new Set(modelIds);
-  return (
-    actual.size === baseline.size && [...actual].every((id) => baseline.has(id))
-  );
-}
-
 // ---------------------------------------------------------------------------
 // State type
 // ---------------------------------------------------------------------------
@@ -144,8 +132,8 @@ export function useProviderSetupFlow(
   );
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
-  const [modelsDirty, setModelsDirty] = useState(false);
   const customModelIdsRef = useRef<string[]>([]);
+  const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -166,6 +154,7 @@ export function useProviderSetupFlow(
       existingEnv?: Record<string, string>,
       existingModelIds?: string[],
       initialBaseUrl?: string,
+      initialTrimmedDefaultModelIds?: string[],
     ) => {
       apiKeyDraftsRef.current.clear();
       protocolDraftsRef.current.clear();
@@ -208,10 +197,17 @@ export function useProviderSetupFlow(
       // flow.state.modelIds automatically based on the selected endpoint.
       const defaultIds = getDefaultModelIds(config, resolved);
       const customIds = existingModelIds ?? [];
+      const trimmedDefaultIds = new Set(initialTrimmedDefaultModelIds ?? []);
       customModelIdsRef.current = customIds;
-      setModelIds([...defaultIds, ...customIds].join(', '));
+      trimmedDefaultModelIdsRef.current.clear();
+      trimmedDefaultModelIdsRef.current.set(resolved, [...trimmedDefaultIds]);
+      setModelIds(
+        [
+          ...defaultIds.filter((id) => !trimmedDefaultIds.has(id)),
+          ...customIds,
+        ].join(', '),
+      );
       setModelIdsError(null);
-      setModelsDirty(false);
       setThinkingEnabled(false);
       setModalityEnabled(false);
       setModalityImage(true);
@@ -227,6 +223,7 @@ export function useProviderSetupFlow(
   const reset = useCallback(() => {
     apiKeyDraftsRef.current.clear();
     protocolDraftsRef.current.clear();
+    trimmedDefaultModelIdsRef.current.clear();
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
@@ -286,42 +283,36 @@ export function useProviderSetupFlow(
       if (provider && selectedUrl !== baseUrl) {
         setApiKeyError(null);
         setModelIdsError(null);
-        // Once the user has edited the models step the field is
-        // authoritative — rebuilding it here would resurrect defaults the
-        // user explicitly unchecked.
         const currentIds = normalizeModelIds(modelIds);
         const previousDefaults = getDefaultModelIds(provider, baseUrl);
-        const modelsActuallyDirty =
-          modelsDirty &&
-          !modelIdsMatchBaseline(
-            currentIds,
-            previousDefaults,
-            customModelIdsRef.current,
-          );
-        if (!modelsActuallyDirty) {
-          // Only the source and destination endpoints' defaults are
-          // replaceable: a typed id colliding with some other sibling
-          // endpoint's built-in is user input for the current endpoint and
-          // must survive the switch.
-          const previousDefaultSet = new Set(previousDefaults);
-          const fieldSet = new Set(currentIds);
-          const customIds = [
+        // Only the source and destination endpoints' defaults are
+        // replaceable: a typed id colliding with some other sibling
+        // endpoint's built-in is user input for the current endpoint and
+        // must survive the switch. Custom provenance plus per-endpoint trim
+        // state fully represents edits, so rebuilding is safe even after the
+        // user touched the field.
+        const previousDefaultSet = new Set(previousDefaults);
+        const trimmedNextDefaults = new Set(
+          trimmedDefaultModelIdsRef.current.get(selectedUrl) ?? [],
+        );
+        const fieldSet = new Set(currentIds);
+        const customIds = [
+          ...new Set([
+            ...customModelIdsRef.current.filter((id) => fieldSet.has(id)),
+            ...currentIds.filter((id) => !previousDefaultSet.has(id)),
+          ]),
+        ];
+        customModelIdsRef.current = customIds;
+        setModelIds(
+          [
             ...new Set([
-              ...customModelIdsRef.current.filter((id) => fieldSet.has(id)),
-              ...currentIds.filter((id) => !previousDefaultSet.has(id)),
+              ...getDefaultModelIds(provider, selectedUrl).filter(
+                (id) => !trimmedNextDefaults.has(id),
+              ),
+              ...customIds,
             ]),
-          ];
-          customModelIdsRef.current = customIds;
-          setModelIds(
-            [
-              ...new Set([
-                ...getDefaultModelIds(provider, selectedUrl),
-                ...customIds,
-              ]),
-            ].join(', '),
-          );
-          setModelsDirty(false);
-        }
+          ].join(', '),
+        );
         const previousEnvKey = providerEnvKey(provider, protocol, baseUrl);
         const nextEnvKey = providerEnvKey(provider, protocol, selectedUrl);
         if (nextEnvKey !== previousEnvKey) {
@@ -341,7 +332,6 @@ export function useProviderSetupFlow(
       existingProviderEnv,
       goNext,
       modelIds,
-      modelsDirty,
       protocol,
       provider,
     ],
@@ -443,11 +433,16 @@ export function useProviderSetupFlow(
       const normalized = normalizeModelIds(value);
       const defaults = provider ? getDefaultModelIds(provider, baseUrl) : [];
       const defaultSet = new Set(defaults);
-      customModelIdsRef.current = normalized.filter(
-        (id) => !defaultSet.has(id),
-      );
-      setModelsDirty(
-        !modelIdsMatchBaseline(normalized, defaults, customModelIdsRef.current),
+      const fieldSet = new Set(normalized);
+      customModelIdsRef.current = [
+        ...new Set([
+          ...customModelIdsRef.current.filter((id) => fieldSet.has(id)),
+          ...normalized.filter((id) => !defaultSet.has(id)),
+        ]),
+      ];
+      trimmedDefaultModelIdsRef.current.set(
+        baseUrl,
+        defaults.filter((id) => !fieldSet.has(id)),
       );
     },
     [baseUrl, provider],

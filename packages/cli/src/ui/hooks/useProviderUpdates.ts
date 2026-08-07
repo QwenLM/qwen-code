@@ -17,6 +17,7 @@ import {
   buildProviderTemplate,
   computeModelListVersion,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
   resolveBaseUrl,
@@ -153,10 +154,10 @@ interface PendingUpdate {
   diff: ModelUpdateDiff;
 }
 
-function readInstalledOwnedIds(
+function readInstalledModels(
   settings: LoadedSettings,
   provider: ProviderConfig,
-): string[] {
+): ProviderModelConfig[] {
   const protocol = provider.protocol;
   if (!protocol) return [];
   const mergedSettings = settings.merged as Record<string, unknown>;
@@ -166,9 +167,44 @@ function readInstalledOwnedIds(
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
-  return ownsFn
-    ? allModels.filter(ownsFn).map((m) => m.id)
-    : allModels.map((m) => m.id);
+  return ownsFn ? allModels.filter(ownsFn) : allModels;
+}
+
+function modelsAtBaseUrl(
+  models: ProviderModelConfig[],
+  baseUrl: string,
+): ProviderModelConfig[] {
+  const normalized = normalizeBaseUrlForMatching(baseUrl);
+  return models.filter(
+    (model) => normalizeBaseUrlForMatching(model.baseUrl) === normalized,
+  );
+}
+
+function persistEndpointMetadataMigration(
+  settings: LoadedSettings,
+  metadataKey: string,
+  baseUrl: string,
+  metadata: ProviderMetadata,
+): void {
+  if (!metadata.version) return;
+  const persistScope = getPersistScopeForModelSelection(settings);
+  settings.setValue(
+    persistScope,
+    `${PROVIDER_METADATA_NS}.${metadataKey}.version`,
+    metadata.version,
+  );
+  settings.setValue(
+    persistScope,
+    `${PROVIDER_METADATA_NS}.${metadataKey}.baseUrl`,
+    baseUrl,
+  );
+  if (metadata.ignoredVersion) {
+    settings.setValue(
+      persistScope,
+      `${PROVIDER_METADATA_NS}.${metadataKey}.ignoredVersion`,
+      metadata.ignoredVersion,
+    );
+  }
 }
 
 function getInstalledOwnedModelIds(
@@ -180,9 +216,80 @@ function getInstalledOwnedModelIds(
   // appear as "removed" in the diff since they were never part of the
   // provider's built-in list.
   const builtinIds = new Set(getDefaultModelIds(provider, baseUrl));
-  return readInstalledOwnedIds(settings, provider).filter((id) =>
-    builtinIds.has(id),
-  );
+  return modelsAtBaseUrl(readInstalledModels(settings, provider), baseUrl)
+    .map((model) => model.id)
+    .filter((id) => builtinIds.has(id));
+}
+
+function resolveUpdateTargets(
+  settings: LoadedSettings,
+  provider: ProviderConfig,
+): Array<{
+  metadataKey: string;
+  baseUrl: string;
+  metadata: ProviderMetadata;
+}> {
+  const legacyKey = resolveMetadataKey(provider);
+  if (!legacyKey) return [];
+  const legacyMetadata = getProviderMetadata(settings, legacyKey);
+
+  if (!provider.mergeModelsByIdentity || !Array.isArray(provider.baseUrl)) {
+    if (!legacyMetadata.version) return [];
+    return [
+      {
+        metadataKey: legacyKey,
+        baseUrl: legacyMetadata.baseUrl || resolveBaseUrl(provider),
+        metadata: legacyMetadata,
+      },
+    ];
+  }
+
+  const installedModels = readInstalledModels(settings, provider);
+  return provider.baseUrl.flatMap((option) => {
+    const endpointModels = modelsAtBaseUrl(installedModels, option.url);
+    if (endpointModels.length === 0) return [];
+    const metadataKey = resolveMetadataKey(provider, option.url);
+    if (!metadataKey) return [];
+    const endpointMetadata = getProviderMetadata(settings, metadataKey);
+    if (endpointMetadata.version) {
+      return [{ metadataKey, baseUrl: option.url, metadata: endpointMetadata }];
+    }
+    if (
+      legacyMetadata.version &&
+      normalizeBaseUrlForMatching(legacyMetadata.baseUrl) ===
+        normalizeBaseUrlForMatching(option.url)
+    ) {
+      const migratedMetadata = { ...legacyMetadata, ...endpointMetadata };
+      persistEndpointMetadataMigration(
+        settings,
+        metadataKey,
+        option.url,
+        migratedMetadata,
+      );
+      return [
+        {
+          metadataKey,
+          baseUrl: option.url,
+          metadata: migratedMetadata,
+        },
+      ];
+    }
+    const builtinIds = new Set(getDefaultModelIds(provider, option.url));
+    const installedBuiltins = endpointModels.filter((model) =>
+      builtinIds.has(model.id),
+    );
+    const inferredMetadata = {
+      ...endpointMetadata,
+      version: computeModelListVersion(installedBuiltins),
+    };
+    persistEndpointMetadataMigration(
+      settings,
+      metadataKey,
+      option.url,
+      inferredMetadata,
+    );
+    return [{ metadataKey, baseUrl: option.url, metadata: inferredMetadata }];
+  });
 }
 
 function findAllPendingUpdates(
@@ -191,28 +298,30 @@ function findAllPendingUpdates(
 ): PendingUpdate[] {
   const results: PendingUpdate[] = [];
   for (const provider of ALL_PROVIDERS) {
-    const metadataKey = resolveMetadataKey(provider);
-    if (!metadataKey) continue;
-
-    const metadata = getProviderMetadata(settings, metadataKey);
-    if (!metadata.version) continue;
-
-    const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentTemplate = buildProviderTemplate(provider, baseUrl);
-    const currentVersion = computeModelListVersion(currentTemplate);
-
-    if (metadata.version === currentVersion) continue;
-    if (metadata.ignoredVersion === currentVersion) continue;
-
-    const existingModelIds = getInstalledOwnedModelIds(
+    for (const { metadataKey, baseUrl, metadata } of resolveUpdateTargets(
       settings,
       provider,
-      baseUrl,
-    );
-    const newModelIds = getDefaultModelIds(provider, baseUrl);
-    const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
+    )) {
+      const currentTemplate = buildProviderTemplate(provider, baseUrl);
+      const currentVersion = computeModelListVersion(currentTemplate);
 
-    results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
+      if (metadata.version === currentVersion) continue;
+      if (metadata.ignoredVersion === currentVersion) continue;
+
+      const existingModelIds = getInstalledOwnedModelIds(
+        settings,
+        provider,
+        baseUrl,
+      );
+      const newModelIds = getDefaultModelIds(provider, baseUrl);
+      const diff = computeModelDiff(
+        existingModelIds,
+        newModelIds,
+        currentModel,
+      );
+
+      results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
+    }
   }
   return results;
 }
@@ -247,9 +356,10 @@ export function useProviderUpdates(
         // prepend-and-remove-owned merge.
         const defaultIds = getDefaultModelIds(providerCfg, resolved);
         const builtInIds = new Set(defaultIds);
-        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !builtInIds.has(id),
-        );
+        const installedOwnedModels = readInstalledModels(settings, providerCfg);
+        const customIds = modelsAtBaseUrl(installedOwnedModels, resolved)
+          .map((model) => model.id)
+          .filter((id) => !builtInIds.has(id));
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
@@ -257,14 +367,38 @@ export function useProviderUpdates(
         });
         delete installPlan.env;
         const previousModel = config.getModel();
+        const activeConfig = config.getContentGeneratorConfig();
+        const endpointOwnsModel = (model: ProviderModelConfig) =>
+          resolveOwnsModel(providerCfg)?.(model) === true &&
+          normalizeBaseUrlForMatching(model.baseUrl) ===
+            normalizeBaseUrlForMatching(resolved);
+        if (providerCfg.mergeModelsByIdentity) {
+          const patch = installPlan.modelProviders?.[0];
+          if (patch) patch.ownsModel = endpointOwnsModel;
+        }
         const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const previousModelStillAvailable = newConfigs.some(
-          (cfg) => cfg.id === previousModel,
+        const availableConfigs = providerCfg.mergeModelsByIdentity
+          ? [
+              ...newConfigs,
+              ...((
+                (settings.merged as Record<string, unknown>)[
+                  'modelProviders'
+                ] as Record<string, ProviderModelConfig[]> | undefined
+              )?.[providerCfg.protocol]?.filter(
+                (model) => !endpointOwnsModel(model),
+              ) ?? []),
+            ]
+          : newConfigs;
+        const previousModelStillAvailable = availableConfigs.some(
+          (cfg) =>
+            cfg.id === previousModel &&
+            (!activeConfig?.baseUrl ||
+              normalizeBaseUrlForMatching(cfg.baseUrl) ===
+                normalizeBaseUrlForMatching(activeConfig.baseUrl)),
         );
         if (previousModelStillAvailable) {
           delete installPlan.modelSelection;
         }
-        const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
           providerMatchesCredentials(

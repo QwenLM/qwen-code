@@ -56,6 +56,30 @@ export function modelIdsDifferFromDefaults(
   );
 }
 
+export function customModelIdsAfterEdit(
+  defaultIds: readonly string[],
+  currentCustomModelIds: readonly string[],
+  modelIds: readonly string[],
+): string[] {
+  const defaults = new Set(defaultIds);
+  const field = new Set(modelIds);
+  return [
+    ...new Set([
+      ...currentCustomModelIds.filter((id) => field.has(id)),
+      ...modelIds.filter((id) => !defaults.has(id)),
+    ]),
+  ];
+}
+
+export function trimmedDefaultModelIds(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+  modelIds: readonly string[],
+): string[] {
+  const field = new Set(modelIds);
+  return defaultModelIds(provider, baseUrl).filter((id) => !field.has(id));
+}
+
 /**
  * Clears per-credential-domain drafts so a draft typed for one provider is
  * never restored into another provider's field under a shared env key.
@@ -83,9 +107,11 @@ export function modelIdsAfterBaseUrlChange(
   nextBaseUrl: string,
   currentModelIds: string,
   customModelIds: readonly string[] = [],
+  trimmedNextDefaultModelIds: readonly string[] = [],
 ): { modelIds: string[]; customModelIds: string[] } {
   const previousDefaults = new Set(defaultModelIds(provider, previousBaseUrl));
   const nextDefaults = defaultModelIds(provider, nextBaseUrl);
+  const trimmedNextDefaults = new Set(trimmedNextDefaultModelIds);
   const fieldIds = parseModelIds(currentModelIds);
   const fieldSet = new Set(fieldIds);
   const nextCustomModelIds = [
@@ -96,7 +122,12 @@ export function modelIdsAfterBaseUrlChange(
     ]),
   ];
   return {
-    modelIds: [...new Set([...nextDefaults, ...nextCustomModelIds])],
+    modelIds: [
+      ...new Set([
+        ...nextDefaults.filter((id) => !trimmedNextDefaults.has(id)),
+        ...nextCustomModelIds,
+      ]),
+    ],
     customModelIds: nextCustomModelIds,
   };
 }

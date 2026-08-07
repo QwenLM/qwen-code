@@ -732,7 +732,12 @@ export function clearPersistedAuth(): void {
       for (const p of ALL_PROVIDERS) {
         try {
           const key = resolveMetadataKey(p);
-          if (key) delete pm[key];
+          if (!key) continue;
+          for (const metadataKey of Object.keys(pm)) {
+            if (metadataKey === key || metadataKey.startsWith(`${key}--`)) {
+              delete pm[metadataKey];
+            }
+          }
         } catch {
           /* skip metadata cleanup for a misconfigured provider id */
         }

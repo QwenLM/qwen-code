@@ -203,10 +203,15 @@ function buildModelConfigs(
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the provider's metadata key (same as `config.id`).
+ * Returns the provider's metadata key. Multi-endpoint providers that merge
+ * models by identity use a stable endpoint suffix so each installed endpoint
+ * can track its model-list version independently.
  * Only defined for providers with a static `models` list.
  */
-export function resolveMetadataKey(config: ProviderConfig): string | undefined {
+export function resolveMetadataKey(
+  config: ProviderConfig,
+  baseUrl?: string,
+): string | undefined {
   if (!config.models) return undefined;
   // setValue uses dotted-path traversal — a provider id containing '.' would
   // be split into multiple nested objects (`providerMetadata.foo.bar` →
@@ -217,6 +222,20 @@ export function resolveMetadataKey(config: ProviderConfig): string | undefined {
     throw new Error(
       `Provider id must not contain '.' (would corrupt providerMetadata.${config.id} dotted writes): ${config.id}`,
     );
+  }
+  if (
+    baseUrl &&
+    config.mergeModelsByIdentity &&
+    Array.isArray(config.baseUrl)
+  ) {
+    const normalizedBaseUrl = normalizeBaseUrlForMatching(baseUrl);
+    const option = config.baseUrl.find(
+      (candidate) =>
+        normalizeBaseUrlForMatching(candidate.url) === normalizedBaseUrl,
+    );
+    if (option) {
+      return `${config.id}--${option.id.replaceAll('.', '%2E')}`;
+    }
   }
   return config.id;
 }
@@ -232,7 +251,7 @@ function resolveProviderState(
   baseUrl: string,
   models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
-  const key = resolveMetadataKey(config);
+  const key = resolveMetadataKey(config, baseUrl);
   if (key) {
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
@@ -255,9 +274,17 @@ export function buildInstallPlan(
   const protocol = inputs.protocol ?? config.protocol;
   const envKey = resolveEnvKey(config, inputs);
   const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const providerOwnsModel = resolveOwnsModel(config);
+  const selectedEndpoint = normalizeBaseUrlForMatching(
+    resolveBaseUrl(config, inputs.baseUrl),
+  );
   const ownsModel = config.mergeModelsByIdentity
-    ? undefined
-    : resolveOwnsModel(config);
+    ? Array.isArray(config.baseUrl) && providerOwnsModel
+      ? (model: ProviderModelConfig) =>
+          providerOwnsModel(model) &&
+          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint
+      : undefined
+    : providerOwnsModel;
   const firstModel = models[0];
   if (models.length === 0) {
     throw new Error(

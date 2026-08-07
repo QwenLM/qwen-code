@@ -363,6 +363,124 @@ describe('useProviderUpdates', () => {
     ]);
   });
 
+  it('updates one Kimi endpoint without cloning sibling models into it', async () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const codingTemplate = buildProviderTemplate(kimiProvider, codingUrl);
+    const apiTemplate = buildProviderTemplate(kimiProvider, apiUrl);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'kimi'
+    ] = { baseUrl: apiUrl, version: 'old-version-hash' };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...codingTemplate, ...apiTemplate],
+    };
+    mockConfig.getModel.mockReturnValue('k3-256k');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: codingUrl,
+      apiKeyEnvKey: 'KIMI_CODE_API_KEY',
+    });
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+    const reloaded =
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0][
+        AuthType.USE_OPENAI
+      ];
+    expect(reloaded).toHaveLength(8);
+    expect(
+      reloaded.filter(
+        (model: { baseUrl?: string }) => model.baseUrl === apiUrl,
+      ),
+    ).toHaveLength(4);
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('detects updates for every installed Kimi endpoint with legacy metadata', async () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const olderCodingTemplate = buildProviderTemplate(
+      kimiProvider,
+      codingUrl,
+    ).slice(0, -1);
+    const apiTemplate = buildProviderTemplate(kimiProvider, apiUrl);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'kimi'
+    ] = {
+      baseUrl: apiUrl,
+      version: computeModelListVersion(apiTemplate),
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...olderCodingTemplate, ...apiTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    expect(result.current.providerUpdateRequest?.entries).toHaveLength(1);
+    expect(
+      result.current.providerUpdateRequest?.entries[0]?.diff.added,
+    ).toEqual(['kimi-for-coding-highspeed']);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--coding-plan.version`,
+      computeModelListVersion(olderCodingTemplate),
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--api-international.version`,
+      computeModelListVersion(apiTemplate),
+    );
+  });
+
+  it('honors endpoint-scoped ignoredVersion while reading legacy Kimi metadata', () => {
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const apiTemplate = buildProviderTemplate(kimiProvider, apiUrl);
+    const apiVersion = computeModelListVersion(apiTemplate);
+    const metadata = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadata['kimi'] = { baseUrl: apiUrl, version: 'old-version-hash' };
+    metadata['kimi--api-international'] = { ignoredVersion: apiVersion };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: apiTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+  });
+
   it('executes update when user confirms with "update"', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY

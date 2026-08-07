@@ -154,6 +154,7 @@ export function getExistingProviderSetup(
   initialProtocol: ProviderConfig['protocol'] | undefined;
   initialBaseUrl: string | undefined;
   customModelIds: string[];
+  trimmedDefaultModelIds: string[];
 } {
   const saved = findExistingProviderModels(providerConfig, modelProviders);
   const initialBaseUrl = saved?.models[0]?.baseUrl;
@@ -164,21 +165,25 @@ export function getExistingProviderSetup(
   const builtinIds = new Set(
     getDefaultModelIds(providerConfig, initialBaseUrl),
   );
+  const restoredModelIds =
+    saved?.models
+      .filter(
+        (model) =>
+          normalizeBaseUrlForMatching(model.baseUrl) ===
+          normalizeBaseUrlForMatching(initialBaseUrl),
+      )
+      .map((model) => model.id) ?? [];
+  const restoredModelIdSet = new Set(restoredModelIds);
   return {
     initialProtocol: saved?.protocol,
     initialBaseUrl,
     // The form restores the first saved model's endpoint, so seed only that
     // endpoint's custom models; siblings belong to their own endpoints and
     // would be reinstalled under the restored baseUrl/envKey on submit.
-    customModelIds:
-      saved?.models
-        .filter(
-          (model) =>
-            normalizeBaseUrlForMatching(model.baseUrl) ===
-            normalizeBaseUrlForMatching(initialBaseUrl),
-        )
-        .map((model) => model.id)
-        .filter((id) => !builtinIds.has(id)) ?? [],
+    customModelIds: restoredModelIds.filter((id) => !builtinIds.has(id)),
+    trimmedDefaultModelIds: saved
+      ? [...builtinIds].filter((id) => !restoredModelIdSet.has(id))
+      : [],
   };
 }
 
@@ -259,6 +264,7 @@ export function AuthDialog({
       existingEnv,
       existingSetup.customModelIds,
       existingSetup.initialBaseUrl,
+      existingSetup.trimmedDefaultModelIds,
     );
     pushView('provider-setup');
   };
@@ -334,6 +340,7 @@ export function AuthDialog({
           existingEnv,
           existingSetup.customModelIds,
           existingSetup.initialBaseUrl,
+          existingSetup.trimmedDefaultModelIds,
         );
         pushView('provider-setup');
         break;

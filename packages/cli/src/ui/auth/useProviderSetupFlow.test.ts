@@ -134,7 +134,7 @@ describe('useProviderSetupFlow', () => {
           id: 'second',
           label: 'Second',
           url: secondUrl,
-          models: [{ id: 'shared-id' }],
+          models: [{ id: 'shared-id' }, { id: 'second-default' }],
         },
       ],
       envKey: () => 'COLLISION_API_KEY',
@@ -149,7 +149,14 @@ describe('useProviderSetupFlow', () => {
     act(() => {
       result.current.selectBaseUrl(secondUrl);
     });
-    expect(result.current.state.modelIds).toBe('shared-id');
+    expect(result.current.state.modelIds).toBe('shared-id, second-default');
+
+    act(() => {
+      result.current.changeModelIds('shared-id');
+    });
+    act(() => {
+      result.current.changeModelIds('shared-id, second-default');
+    });
 
     act(() => {
       result.current.selectBaseUrl(firstUrl);
@@ -291,6 +298,64 @@ describe('useProviderSetupFlow', () => {
     });
 
     expect(result.current.state.modelIds).toBe('first-model-a');
+  });
+
+  it('does not resurrect persisted default trims after an endpoint round trip', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'persisted-trim-provider',
+      label: 'Persisted Trim Provider',
+      description: 'Provider with a saved default trim',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-model-a' }, { id: 'first-model-b' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-model' }],
+        },
+      ],
+      envKey: () => 'SHARED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Persisted Trim',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        provider,
+        undefined,
+        undefined,
+        ['shared-id'],
+        firstUrl,
+        ['first-model-b'],
+      );
+    });
+    expect(result.current.state.modelIds).toBe('first-model-a, shared-id');
+
+    act(() => {
+      result.current.changeModelIds('first-model-a');
+    });
+    act(() => {
+      result.current.changeModelIds('first-model-a, shared-id');
+    });
+
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    expect(result.current.state.modelIds).toBe('second-model, shared-id');
+    act(() => {
+      result.current.selectBaseUrl(firstUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('first-model-a, shared-id');
   });
 
   it('preserves edited models and API key when reselecting the current endpoint', () => {

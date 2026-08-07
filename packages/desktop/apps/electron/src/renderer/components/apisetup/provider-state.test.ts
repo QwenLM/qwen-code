@@ -2,12 +2,14 @@ import { describe, expect, it } from 'bun:test';
 import type { QwenProviderSummary } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
+  customModelIdsAfterEdit,
   defaultModelIds,
   initialApiKey,
   initialModelIds,
   modelIdsDifferFromDefaults,
   modelIdsAfterBaseUrlChange,
   shouldResetApiKeyAfterBaseUrlChange,
+  trimmedDefaultModelIds,
 } from './provider-state';
 
 const kimi: QwenProviderSummary = {
@@ -86,6 +88,64 @@ describe('provider endpoint state', () => {
 
     expect(afterRoundTrip.modelIds).toEqual(['k3-256k', 'kimi-k3']);
     expect(afterRoundTrip.customModelIds).toEqual(['kimi-k3']);
+  });
+
+  it('keeps seeded custom provenance through a destination-endpoint edit', () => {
+    expect(
+      customModelIdsAfterEdit(
+        ['kimi-k3', 'api-default'],
+        ['kimi-k3'],
+        ['kimi-k3', 'api-default'],
+      ),
+    ).toEqual(['kimi-k3']);
+  });
+
+  it('keeps persisted default trims across an endpoint round trip', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: codingUrl,
+          models: [{ id: 'k3-256k' }, { id: 'k3' }],
+        },
+        {
+          id: 'api',
+          label: 'API',
+          url: apiUrl,
+          models: [{ id: 'kimi-k3' }],
+        },
+      ],
+    };
+    const seeded = ['k3-256k', 'kimi-k3'];
+    const codingTrims = trimmedDefaultModelIds(provider, codingUrl, seeded);
+    const customsAfterNetZeroEdit = customModelIdsAfterEdit(
+      defaultModelIds(provider, codingUrl),
+      ['kimi-k3'],
+      seeded,
+    );
+    const afterSwitchAway = modelIdsAfterBaseUrlChange(
+      provider,
+      codingUrl,
+      apiUrl,
+      seeded.join(', '),
+      customsAfterNetZeroEdit,
+    );
+    const afterRoundTrip = modelIdsAfterBaseUrlChange(
+      provider,
+      apiUrl,
+      codingUrl,
+      afterSwitchAway.modelIds.join(', '),
+      afterSwitchAway.customModelIds,
+      codingTrims,
+    );
+
+    expect(codingTrims).toEqual(['k3']);
+    expect(afterSwitchAway.modelIds).toEqual(['kimi-k3']);
+    expect(afterRoundTrip.modelIds).toEqual(['k3-256k', 'kimi-k3']);
   });
 
   it('does not resurrect custom model IDs the user deleted before switching', () => {

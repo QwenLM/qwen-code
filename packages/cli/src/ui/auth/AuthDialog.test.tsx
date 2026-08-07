@@ -321,6 +321,11 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       initialProtocol: AuthType.USE_OPENAI,
       initialBaseUrl: 'https://api.moonshot.ai/v1',
       customModelIds: [],
+      trimmedDefaultModelIds: [
+        'kimi-k2.7-code',
+        'kimi-k2.7-code-highspeed',
+        'kimi-k2.6',
+      ],
     });
   });
 
@@ -361,6 +366,11 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       initialProtocol: AuthType.USE_OPENAI,
       initialBaseUrl: 'https://api.kimi.com/coding/v1',
       customModelIds: ['custom-code-model'],
+      trimmedDefaultModelIds: [
+        'k3',
+        'kimi-for-coding',
+        'kimi-for-coding-highspeed',
+      ],
     });
   });
 
@@ -393,6 +403,11 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       // endpoint and must stay in the seed instead of being deleted on the
       // next no-op resubmit.
       customModelIds: ['kimi-k3'],
+      trimmedDefaultModelIds: [
+        'k3',
+        'kimi-for-coding',
+        'kimi-for-coding-highspeed',
+      ],
     });
   });
 
@@ -426,6 +441,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       initialProtocol: AuthType.USE_OPENAI,
       initialBaseUrl: 'https://y.example/v1',
       customModelIds: ['gpt-oss', 'y-alias'],
+      trimmedDefaultModelIds: [],
     });
   });
 

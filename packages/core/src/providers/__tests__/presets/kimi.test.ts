@@ -269,8 +269,34 @@ describe('kimiProvider', () => {
       modelIds: ['kimi-k3'],
     });
 
-    expect(codePlan.modelProviders?.[0]).not.toHaveProperty('ownsModel');
-    expect(apiPlan.modelProviders?.[0]).not.toHaveProperty('ownsModel');
+    const codeOwnsModel = codePlan.modelProviders?.[0]?.ownsModel;
+    const apiOwnsModel = apiPlan.modelProviders?.[0]?.ownsModel;
+    expect(codeOwnsModel).toBeDefined();
+    expect(apiOwnsModel).toBeDefined();
+    expect(
+      codeOwnsModel?.({
+        id: 'old-code',
+        name: '[Kimi Code] old-code',
+        baseUrl: KIMI_CODE_BASE_URL,
+        envKey: KIMI_CODE_ENV_KEY,
+      }),
+    ).toBe(true);
+    expect(
+      codeOwnsModel?.({
+        id: 'sibling-api',
+        name: '[Kimi API] sibling-api',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        envKey: KIMI_API_ENV_KEY,
+      }),
+    ).toBe(false);
+    expect(
+      apiOwnsModel?.({
+        id: 'old-api',
+        name: '[Kimi API] old-api',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        envKey: KIMI_API_ENV_KEY,
+      }),
+    ).toBe(true);
     expect(codePlan.modelProviders?.[0]?.models[0]).toMatchObject({
       id: 'k3-256k',
       baseUrl: KIMI_CODE_BASE_URL,
@@ -284,24 +310,27 @@ describe('kimiProvider', () => {
   });
 
   it.each([
-    'https://api.kimi.com/coding/v1',
-    'https://api.moonshot.cn/v1',
-    'https://api.moonshot.ai/v1',
-  ])('records endpoint-scoped provider state for %s', (baseUrl) => {
-    const template = buildProviderTemplate(kimiProvider, baseUrl);
-    const plan = buildInstallPlan(kimiProvider, {
-      baseUrl,
-      apiKey: 'sk-kimi',
-      modelIds: template.map((model) => model.id),
-    });
-
-    expect(plan.providerState).toEqual({
-      'providerMetadata.kimi': {
+    ['https://api.kimi.com/coding/v1', 'kimi--coding-plan'],
+    ['https://api.moonshot.cn/v1', 'kimi--api-china'],
+    ['https://api.moonshot.ai/v1', 'kimi--api-international'],
+  ])(
+    'records endpoint-scoped provider state for %s',
+    (baseUrl, metadataKey) => {
+      const template = buildProviderTemplate(kimiProvider, baseUrl);
+      const plan = buildInstallPlan(kimiProvider, {
         baseUrl,
-        version: computeModelListVersion(template),
-      },
-    });
-  });
+        apiKey: 'sk-kimi',
+        modelIds: template.map((model) => model.id),
+      });
+
+      expect(plan.providerState).toEqual({
+        [`providerMetadata.${metadataKey}`]: {
+          baseUrl,
+          version: computeModelListVersion(template),
+        },
+      });
+    },
+  );
 
   it('owns installed models in both credential domains', () => {
     expect(

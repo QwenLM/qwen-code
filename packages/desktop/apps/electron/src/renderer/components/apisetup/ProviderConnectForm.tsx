@@ -32,13 +32,14 @@ import type {
 } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
+  customModelIdsAfterEdit,
   defaultBaseUrl,
   defaultModelIds,
   initialApiKey,
   initialModelIds,
-  modelIdsDifferFromDefaults,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
+  trimmedDefaultModelIds,
 } from './provider-state';
 
 type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
@@ -115,13 +116,13 @@ export function ProviderConnectForm({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [modelIdsText, setModelIdsText] = useState('');
-  const [modelsEdited, setModelsEdited] = useState(false);
   const [enableThinking, setEnableThinking] = useState(false);
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const apiKeyDraftsRef = useRef(new Map<string, string>());
   const customModelIdsRef = useRef<string[]>([]);
+  const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
 
   const groups = useMemo(
     () =>
@@ -193,12 +194,12 @@ export function ProviderConnectForm({
     customModelIdsRef.current = seededModelIds.filter(
       (id) => !seededDefaults.has(id),
     );
+    trimmedDefaultModelIdsRef.current.clear();
+    trimmedDefaultModelIdsRef.current.set(
+      baseUrl,
+      trimmedDefaultModelIds(provider, baseUrl, seededModelIds),
+    );
     setModelIdsText(seededModelIds.join(', '));
-    // Persisted model IDs are not an in-session edit — the models Textarea
-    // marks those. Seeding content-based made any saved custom or trimmed
-    // list skip the endpoint-switch rebuild and carry source-endpoint models
-    // onto the new endpoint (the CLI flow seeds modelsDirty=false too).
-    setModelsEdited(false);
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
@@ -450,20 +451,16 @@ export function ProviderConnectForm({
                         apiKeyDraftsRef.current,
                       ),
                     );
-                    // Once the user has edited the models field it is
-                    // authoritative — rebuilding it here would resurrect
-                    // defaults the user explicitly deleted.
-                    if (!modelsEdited) {
-                      const nextModelIds = modelIdsAfterBaseUrlChange(
-                        selectedProvider,
-                        baseUrl,
-                        value,
-                        modelIdsText,
-                        customModelIdsRef.current,
-                      );
-                      customModelIdsRef.current = nextModelIds.customModelIds;
-                      setModelIdsText(nextModelIds.modelIds.join(', '));
-                    }
+                    const nextModelIds = modelIdsAfterBaseUrlChange(
+                      selectedProvider,
+                      baseUrl,
+                      value,
+                      modelIdsText,
+                      customModelIdsRef.current,
+                      trimmedDefaultModelIdsRef.current.get(value),
+                    );
+                    customModelIdsRef.current = nextModelIds.customModelIds;
+                    setModelIdsText(nextModelIds.modelIds.join(', '));
                   }
                 }}
                 disabled={submitting}
@@ -518,16 +515,14 @@ export function ProviderConnectForm({
               const defaults = new Set(
                 defaultModelIds(selectedProvider, baseUrl),
               );
-              customModelIdsRef.current = ids.filter(
-                (id) => !defaults.has(id),
+              customModelIdsRef.current = customModelIdsAfterEdit(
+                [...defaults],
+                customModelIdsRef.current,
+                ids,
               );
-              setModelsEdited(
-                modelIdsDifferFromDefaults(
-                  selectedProvider,
-                  baseUrl,
-                  ids,
-                  customModelIdsRef.current,
-                ),
+              trimmedDefaultModelIdsRef.current.set(
+                baseUrl,
+                trimmedDefaultModelIds(selectedProvider, baseUrl, ids),
               );
             }}
             placeholder={t('providerConnect.modelsPlaceholder')}

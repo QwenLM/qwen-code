@@ -388,6 +388,9 @@ describe('settingsWriter', () => {
           'coding-plan': { version: '1' },
           deepseek: { version: '1' },
           openrouter: { version: '2' },
+          'kimi--coding-plan': { version: '3' },
+          'kimi--api-international': { version: '4' },
+          unrelated: { version: '5' },
         },
       };
       fs.writeFileSync(settingsPath, JSON.stringify(initial, null, 2), 'utf-8');
@@ -404,6 +407,9 @@ describe('settingsWriter', () => {
       expect(after.providerMetadata['coding-plan']).toBeUndefined();
       expect(after.providerMetadata['deepseek']).toBeUndefined();
       expect(after.providerMetadata['openrouter']).toBeUndefined();
+      expect(after.providerMetadata['kimi--coding-plan']).toBeUndefined();
+      expect(after.providerMetadata['kimi--api-international']).toBeUndefined();
+      expect(after.providerMetadata.unrelated).toEqual({ version: '5' });
     });
 
     it('continues clearing credentials when one derived env key throws', () => {
