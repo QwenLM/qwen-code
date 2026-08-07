@@ -19,6 +19,11 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import {
+  AGENT_CONTEXT_FILENAME,
+  DEFAULT_CONTEXT_FILENAME,
+  setGeminiMdFilename,
+} from './const.js';
+import {
   didWriteManagedMemory,
   didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
@@ -56,6 +61,7 @@ describe('managed memory refresh helper', () => {
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
+    setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
   });
 
   afterEach(async () => {
@@ -151,7 +157,9 @@ describe('managed memory refresh helper', () => {
         [
           {
             toolName: 'write_file',
-            args: { file_path: path.join(projectRoot, 'QWEN.md') },
+            args: {
+              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+            },
             status: 'success',
           },
         ],
@@ -163,7 +171,7 @@ describe('managed memory refresh helper', () => {
         [
           {
             toolName: 'edit',
-            args: { file_path: 'QWEN.md' },
+            args: { file_path: DEFAULT_CONTEXT_FILENAME },
             status: 'success',
           },
         ],
@@ -175,7 +183,7 @@ describe('managed memory refresh helper', () => {
         [
           {
             toolName: 'replace',
-            args: { target_file: 'QWEN.md' },
+            args: { target_file: DEFAULT_CONTEXT_FILENAME },
             status: 'success',
           },
         ],
@@ -187,7 +195,21 @@ describe('managed memory refresh helper', () => {
         [
           {
             toolName: 'write_file',
-            args: { file_path: path.join(projectRoot, 'QWEN.md') },
+            args: { file_path: path.join(projectRoot, AGENT_CONTEXT_FILENAME) },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+            },
             status: 'error',
           },
         ],
@@ -200,6 +222,65 @@ describe('managed memory refresh helper', () => {
           {
             toolName: 'write_file',
             args: { file_path: path.join(projectRoot, 'notes.md') },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join('docs', DEFAULT_CONTEXT_FILENAME),
+            },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(projectRoot, '..', DEFAULT_CONTEXT_FILENAME),
+            },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(false);
+  });
+
+  it('detects configured project context file writes', () => {
+    setGeminiMdFilename('PROJECT_CONTEXT.md');
+
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: { file_path: path.join(projectRoot, 'PROJECT_CONTEXT.md') },
+            status: 'success',
+          },
+        ],
+        projectRoot,
+      ),
+    ).toBe(true);
+    expect(
+      didWriteProjectContextFile(
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+            },
             status: 'success',
           },
         ],

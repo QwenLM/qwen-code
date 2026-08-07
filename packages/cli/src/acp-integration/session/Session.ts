@@ -7364,7 +7364,6 @@ export class Session implements SessionContext {
       await refreshMemoryInstruction(this.config, {
         logContext: `ACP session ${this.sessionId} context-file memory tool batch`,
       });
-      this.refreshContextFilesOnWrite = false;
     };
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by

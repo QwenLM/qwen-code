@@ -4155,7 +4155,6 @@ export const useGeminiStream = (
           await refreshMemoryInstruction(config, {
             logContext: 'interactive context-file memory tool batch',
           });
-          refreshContextFilesOnWriteRef.current = false;
         }
       }
       if (newSuccessfulMemorySaves.length > 0) {

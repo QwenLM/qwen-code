@@ -19243,7 +19243,7 @@ describe('Session', () => {
       );
     });
 
-    it('refreshes context-file instructions after ACP bare remember writes QWEN.md', async () => {
+    async function markAcpContextRefreshIntent() {
       vi.mocked(
         nonInteractiveCliCommands.handleSlashCommand,
       ).mockResolvedValueOnce({
@@ -19259,36 +19259,105 @@ describe('Session', () => {
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: '/remember fact' }],
       });
+    }
 
-      refreshMemoryAfterManagedWriteSpy.mockClear();
-      refreshMemoryInstructionSpy.mockClear();
-
+    function allowAcpWriteFile() {
       const execute = vi.fn().mockResolvedValue({
-        llmContent: 'wrote context',
-        returnDisplay: 'wrote context',
+        llmContent: 'wrote file',
+        returnDisplay: 'wrote file',
       });
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
       mockToolRegistry.getTool.mockReturnValue(
         mockAllowedTool(core.ToolNames.WRITE_FILE, execute),
       );
+    }
 
+    async function runAcpWriteFile(
+      filePath: string,
+      promptId: string,
+      callId = 'write_context',
+    ) {
       await (session as unknown as ToolCallInternals).runToolCalls(
         new AbortController().signal,
-        'prompt-context-write',
+        promptId,
         [
           {
-            id: 'write_context',
+            id: callId,
             name: core.ToolNames.WRITE_FILE,
-            args: { file_path: '/repo/QWEN.md' },
+            args: { file_path: filePath },
           },
         ],
       );
+    }
+
+    it('refreshes context-file instructions after ACP bare remember writes QWEN.md', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryAfterManagedWriteSpy.mockClear();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile('/repo/QWEN.md', 'prompt-context-write');
 
       expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
       expect(refreshMemoryInstructionSpy).toHaveBeenCalledWith(mockConfig, {
         logContext:
           'ACP session test-session-id context-file memory tool batch',
       });
+    });
+
+    it('keeps refreshing context-file instructions for later ACP writes in a marked turn', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/QWEN.md',
+        'prompt-context-write-1',
+        'write_context_1',
+      );
+      await runAcpWriteFile(
+        '/repo/QWEN.md',
+        'prompt-context-write-2',
+        'write_context_2',
+      );
+
+      expect(refreshMemoryInstructionSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not refresh context-file instructions for marked ACP writes to other files', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryAfterManagedWriteSpy.mockClear();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/notes.md',
+        'prompt-notes-write',
+        'write_notes',
+      );
+
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
+    });
+
+    it('clears unmatched context-file refresh intent on the next ordinary ACP turn', async () => {
+      await markAcpContextRefreshIntent();
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/notes.md',
+        'prompt-notes-write',
+        'write_notes',
+      );
+
+      refreshMemoryInstructionSpy.mockClear();
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ordinary turn' }],
+      });
+      await runAcpWriteFile('/repo/QWEN.md', 'prompt-ordinary-context-write');
+
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
     });
 
     it('does not refresh context-file instructions for ordinary ACP QWEN.md writes', async () => {
