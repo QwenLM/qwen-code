@@ -105,6 +105,9 @@ const ENVIRONMENT_KEYS = [
       approveWrite: true,
       expectedRequests: 1,
       expectsMcpConfirmation: false,
+      content:
+        'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
+      verifiesShortLiteral: true,
     },
     {
       name: 'shows long content literally and expands it before approval',
@@ -225,7 +228,8 @@ const ENVIRONMENT_KEYS = [
         ptyProcess.write('\x13');
         const expandedScreen = await waitForScreen(
           screen,
-          (value) => value.includes('CONFIRM_TAIL'),
+          (value) =>
+            value.includes('CONFIRM_TAIL') && !value.includes('lines hidden'),
           'expanded complete content confirmation',
         );
         expect(expandedScreen).toContain('CONFIRM_TAIL');
@@ -430,8 +434,8 @@ function runInteractive(rig: TestRig, ...args: string[]) {
   rig._interactiveOutput = '';
   const { Terminal } = xtermHeadless;
   const terminal = new Terminal({
-    cols: 100,
-    rows: 36,
+    cols: 110,
+    rows: 38,
     scrollback: 1000,
     allowProposedApi: true,
   });
@@ -441,8 +445,8 @@ function runInteractive(rig: TestRig, ...args: string[]) {
     [rig.bundlePath, '--no-chat-recording', ...args],
     {
       name: 'xterm-color',
-      cols: 100,
-      rows: 36,
+      cols: 110,
+      rows: 38,
       cwd: rig.testDir!,
       env: process.env as Record<string, string>,
     },
@@ -475,7 +479,8 @@ function runInteractive(rig: TestRig, ...args: string[]) {
     await pendingWrite;
     const buffer = terminal.buffer.active;
     const lines: string[] = [];
-    for (let index = 0; index < buffer.length; index += 1) {
+    const end = Math.min(buffer.length, buffer.viewportY + terminal.rows);
+    for (let index = buffer.viewportY; index < end; index += 1) {
       lines.push(buffer.getLine(index)?.translateToString(true) ?? '');
     }
     return lines.join('\n');

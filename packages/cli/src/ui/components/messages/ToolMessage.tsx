@@ -892,7 +892,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           status={status}
           description={description}
           emphasis={emphasis}
-          truncateDescription={
+          hideDescription={
             status === ToolCallStatus.Confirming &&
             confirmationDetails?.type === 'info' &&
             confirmationDetails.renderPromptAsPlainText === true &&
@@ -1035,9 +1035,13 @@ function isDescriptionRepeatedInPrompt(
     ) {
       return false;
     }
-    const stringValues = Object.values(parsed).filter(
-      (value): value is string => typeof value === 'string',
-    );
+    const values = Object.values(parsed);
+    if (
+      values.length === 0 ||
+      !values.every((value): value is string => typeof value === 'string')
+    ) {
+      return false;
+    }
     const promptValues = prompt.split('\n').flatMap((line) => {
       try {
         const value: unknown = JSON.parse(line);
@@ -1046,10 +1050,7 @@ function isDescriptionRepeatedInPrompt(
         return [];
       }
     });
-    return (
-      stringValues.length > 0 &&
-      stringValues.every((value) => promptValues.includes(value))
-    );
+    return values.every((value) => promptValues.includes(value));
   } catch {
     return false;
   }
@@ -1060,14 +1061,14 @@ type ToolInfo = {
   description: string;
   status: ToolCallStatus;
   emphasis: TextEmphasis;
-  truncateDescription?: boolean;
+  hideDescription?: boolean;
 };
 const ToolInfo: React.FC<ToolInfo> = ({
   name,
   description,
   status,
   emphasis,
-  truncateDescription,
+  hideDescription,
 }) => {
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
@@ -1085,14 +1086,16 @@ const ToolInfo: React.FC<ToolInfo> = ({
   }, [emphasis]);
   return (
     <Box flexGrow={1}>
-      <Text
-        wrap={truncateDescription ? 'truncate-end' : 'wrap'}
-        strikethrough={status === ToolCallStatus.Canceled}
-      >
+      <Text wrap="wrap" strikethrough={status === ToolCallStatus.Canceled}>
         <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
-        </Text>{' '}
-        <Text color={theme.text.secondary}>{description}</Text>
+        </Text>
+        {!hideDescription && (
+          <>
+            {' '}
+            <Text color={theme.text.secondary}>{description}</Text>
+          </>
+        )}
       </Text>
     </Box>
   );
