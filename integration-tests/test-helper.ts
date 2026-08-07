@@ -493,18 +493,12 @@ export class TestRig {
     }
   }
 
-  /**
-   * Waits for telemetry.log to hold event content. The result is
-   * advisory: records are exported on the batch processor tick or the
-   * exit flush, so callers racing a live CLI must keep polling after a
-   * false result instead of failing fast.
-   */
-  async waitForTelemetryReady(): Promise<boolean> {
+  async waitForTelemetryReady() {
     // Telemetry is always written to the test directory
     const logFilePath = join(this.testDir!, 'telemetry.log');
 
     // Wait for telemetry file to exist and have content
-    return this.poll(
+    await this.poll(
       () => {
         if (!fs.existsSync(logFilePath)) return false;
         try {

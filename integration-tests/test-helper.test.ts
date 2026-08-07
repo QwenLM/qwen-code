@@ -54,32 +54,25 @@ describe('TestRig', () => {
     expect(existsSync(testDir)).toBe(true);
   });
 
-  it('keeps polling for telemetry events when telemetry is not ready yet', async () => {
-    const rig = new TestRig();
-    vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(false);
-    const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
+  it.each([
+    [
+      'telemetry events',
+      (rig: TestRig) => rig.waitForTelemetryEvent('tool_call'),
+    ],
+    ['tool calls', (rig: TestRig) => rig.waitForToolCall('read_file')],
+    [
+      'any tool call',
+      (rig: TestRig) => rig.waitForAnyToolCall(['read_file', 'write_file']),
+    ],
+  ])(
+    'keeps polling for %s when telemetry is not ready yet',
+    async (_label, waitFor) => {
+      const rig = new TestRig();
+      vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(undefined);
+      const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
 
-    await expect(rig.waitForTelemetryEvent('tool_call')).resolves.toBe(false);
-    expect(poll).toHaveBeenCalled();
-  });
-
-  it('keeps polling for tool calls when telemetry is not ready yet', async () => {
-    const rig = new TestRig();
-    vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(false);
-    const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
-
-    await expect(rig.waitForToolCall('read_file')).resolves.toBe(false);
-    expect(poll).toHaveBeenCalled();
-  });
-
-  it('keeps polling for any tool call when telemetry is not ready yet', async () => {
-    const rig = new TestRig();
-    vi.spyOn(rig, 'waitForTelemetryReady').mockResolvedValue(false);
-    const poll = vi.spyOn(rig, 'poll').mockResolvedValue(false);
-
-    await expect(
-      rig.waitForAnyToolCall(['read_file', 'write_file']),
-    ).resolves.toBe(false);
-    expect(poll).toHaveBeenCalled();
-  });
+      await expect(waitFor(rig)).resolves.toBe(false);
+      expect(poll).toHaveBeenCalled();
+    },
+  );
 });
