@@ -22,9 +22,9 @@ describe('resolveAcpChannelFallback', () => {
     );
   });
 
-  it('reports desktop-shell for the Tauri desktop shell', () => {
+  it('reports desktop for the Tauri desktop shell', () => {
     expect(resolveAcpChannelFallback({ [QWEN_CODE_DESKTOP_ENV]: '1' })).toBe(
-      'desktop-shell',
+      'desktop',
     );
     // Tauri sessions are daemon-spawned too; the launcher identity wins.
     expect(
@@ -32,7 +32,7 @@ describe('resolveAcpChannelFallback', () => {
         [QWEN_CODE_SERVE_ENV]: '1',
         [QWEN_CODE_DESKTOP_ENV]: '1',
       }),
-    ).toBe('desktop-shell');
+    ).toBe('desktop');
   });
 
   it('ignores empty marker values', () => {

@@ -927,13 +927,13 @@ describe('parseArguments', () => {
     }
   });
 
-  it('reports the desktop-shell channel for the Tauri desktop shell', async () => {
+  it('reports the desktop channel for the Tauri desktop shell', async () => {
     vi.stubEnv('QWEN_CODE_SERVE', '1');
     vi.stubEnv('QWEN_CODE_DESKTOP', '1');
     try {
       process.argv = ['node', 'script.js', '--acp'];
       const argv = await parseArguments();
-      expect(argv.channel).toBe('desktop-shell');
+      expect(argv.channel).toBe('desktop');
     } finally {
       vi.unstubAllEnvs();
     }
