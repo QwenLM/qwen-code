@@ -847,7 +847,7 @@ describe('BackgroundTasksDialog', () => {
     expect(h.workflowResume).toHaveBeenCalledTimes(1);
   });
 
-  it('does not toggle a workflow while it is cooperatively pausing', () => {
+  it('flashes the registry refusal when p is pressed on a pausing workflow', () => {
     const h = setup([workflowEntry({ status: 'pausing' })]);
 
     h.call(() => h.probe.current!.actions.openDialog());
@@ -855,13 +855,18 @@ describe('BackgroundTasksDialog', () => {
     // the detail body's Pausing explainer carries the signal instead.
     expect(h.lastFrame()).not.toContain('p pause');
     expect(h.lastFrame()).not.toContain('p resume');
+    // The real registry refuses a pause request while still pausing.
+    h.workflowPause.mockReturnValue(false);
     h.pressKey({ sequence: 'p' });
 
-    expect(h.workflowPause).not.toHaveBeenCalled();
+    expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
     expect(h.workflowResume).not.toHaveBeenCalled();
-    // R10-4: a not-applicable keypress (null verdict) must not light the
-    // rejection flash — only a real registry refusal (false) does.
-    expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
+    // R12 (doudouOUC): pausing can last a full subagent dispatch, so a
+    // silent keypress reads as a stuck UI. The request goes to the
+    // registry and its refusal lights the existing flash. R10-4's
+    // no-flash rule still covers genuinely not-applicable keypresses
+    // (non-workflow rows, foreground runs) — those keep the null verdict.
+    expect(h.lastFrame()).toContain('Pause/resume was rejected');
   });
 
   it('flashes a footer note when the registry rejects a pause/resume', () => {

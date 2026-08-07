@@ -839,6 +839,136 @@ describe('WorkflowOrchestrator', () => {
     await expect(run).resolves.toMatchObject({ result: 'nested result' });
   });
 
+  // R12 (doudouOUC): the budget gate and agent cap used to return bare
+  // Promise.reject, bypassing the pause gate — a paused run whose script
+  // caught the rejection kept executing. Entry-gate rejections must
+  // settle through the same gate as every other settlement path.
+  it('holds a budget-gate rejection behind the pause gate until resume', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100); // already over cap at entry
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    expect(scheduler.snapshot().state).toBe('paused');
+
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'unused';
+    });
+    const run = orchestrator.run({
+      script: `
+        let msg = 'none';
+        try { await agent('over-budget'); } catch (e) { msg = e.message; }
+        return msg;
+      `,
+      args: undefined,
+      budget,
+      scheduler,
+    });
+
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush microtasks + a timer tick: without the gate the rejection
+    // settles in a few microtasks, so a still-pending run after a tick
+    // proves the pause gate held it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({
+      result: expect.stringContaining('exceeded the token budget'),
+    });
+    expect(dispatchCalls).toBe(0);
+  });
+
+  it('holds an agent-cap rejection behind the pause gate until resume', async () => {
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '1';
+    try {
+      const scheduler = new WorkflowDispatchScheduler(1);
+      scheduler.pause();
+      expect(scheduler.snapshot().state).toBe('paused');
+
+      let dispatchCalls = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatchCalls += 1;
+        return 'ok';
+      });
+      const run = orchestrator.run({
+        script: `
+          const p = agent('first');
+          let msg = 'none';
+          try { await agent('second'); } catch (e) { msg = e.message; }
+          return msg;
+        `,
+        args: undefined,
+        scheduler,
+      });
+
+      let settled = false;
+      void run.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(settled).toBe(false);
+
+      scheduler.resume();
+      await expect(run).resolves.toMatchObject({
+        result: expect.stringMatching(/exceeded the maximum of 1 agent/),
+      });
+      // 'first' passed the cap and dispatched on resume; 'second' never did.
+      await vi.waitFor(() => expect(dispatchCalls).toBe(1));
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
+
+  it('preserves an entry-gate rejection when cancellation aborts its pause gate', async () => {
+    // Mirrors the dispatch-error variant: abort rejects the gate waiter,
+    // and the reject arm must still surface the real entry-gate error.
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100);
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    scheduler.pause();
+    expect(scheduler.snapshot().state).toBe('paused');
+
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const run = orchestrator.run({
+      script: `
+        let msg = 'none';
+        try { await agent('over-budget'); } catch (e) { msg = e.message; }
+        return msg;
+      `,
+      args: undefined,
+      budget,
+      scheduler,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({
+      result: expect.stringContaining('exceeded the token budget'),
+    });
+  });
+
   it('P-nested: nested args are passed to the child script', async () => {
     const orchestrator = new WorkflowOrchestrator(async () => 'unused');
     const resolveSavedWorkflow = async () => ({

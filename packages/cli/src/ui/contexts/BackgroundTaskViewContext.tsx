@@ -309,6 +309,11 @@ export function BackgroundTaskViewProvider({
     const registry = config.getWorkflowRunRegistry();
     if (target.status === 'running') return registry.pause(target.runId);
     if (target.status === 'paused') return registry.resume(target.runId);
+    // R12 (doudouOUC): `pausing` can last a full subagent dispatch, so a
+    // silent keypress reads as a stuck UI. The registry refuses the
+    // transition (returns false), which lights the existing rejection
+    // flash — same surface as any other refused pause/resume.
+    if (target.status === 'pausing') return registry.pause(target.runId);
     return null;
   }, [config, entries, selectedIndex]);
 

@@ -1347,6 +1347,21 @@ export class WorkflowOrchestrator {
       req.scheduler ??
       new WorkflowDispatchScheduler(resolveConcurrencyLimit(), signal);
 
+    // R12 (doudouOUC): entry-gate rejections must settle through the pause
+    // gate like every other settlement path below. A bare Promise.reject
+    // delivers immediately while the run is `paused`, so a script that
+    // catches the rejection keeps executing during pause — silently
+    // ineffective pause on the budget / agent-cap path.
+    const rejectThroughPauseGate = (error: unknown): Promise<never> =>
+      scheduler.waitUntilRunning().then(
+        () => {
+          throw error;
+        },
+        () => {
+          throw error;
+        },
+      );
+
     // Every agent() call — sequential, parallel(), or pipeline() — funnels
     // through this one wrapped dispatch: the counter enforces the per-run agent
     // cap regardless of launch path (increment-then-check: calls 1..max pass,
@@ -1459,7 +1474,7 @@ export class WorkflowOrchestrator {
           `[Workflow] budget gate refused dispatch at entry: ` +
             `runId=${runId} spent=${budget.spent()} total=${budget.total}`,
         );
-        return Promise.reject(
+        return rejectThroughPauseGate(
           new WorkflowBudgetExceededError(runId, budget.total, budget.spent()),
         );
       }
@@ -1467,7 +1482,7 @@ export class WorkflowOrchestrator {
       // See the reordering rationale at the top of countedDispatch.
       agentCount += 1;
       if (agentCount > maxAgents) {
-        return Promise.reject(
+        return rejectThroughPauseGate(
           new Error(
             `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
           ),

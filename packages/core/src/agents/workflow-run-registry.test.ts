@@ -768,7 +768,10 @@ describe('WorkflowRunRegistry', () => {
       if (status !== 'running') r.onDispatchStateChange(entry.runId, 'pausing');
       if (status === 'paused') r.onDispatchStateChange(entry.runId, 'paused');
 
-      expect(r.hasRunningEntries()).toBe(true);
+      // R12 (doudouOUC): paused is still an ACTIVE registry state (duplicate
+      // register throws, mutations land) but no longer a BLOCKING one — a
+      // paused-and-forgotten run must not block /clear forever.
+      expect(r.hasRunningEntries()).toBe(status !== 'paused');
       expect(() => r.register(reg(entry.runId))).toThrow(/already active/);
       r.onPhaseStarted(entry.runId, 'Active phase');
       r.onAgentDispatched(entry.runId);
@@ -1249,19 +1252,38 @@ describe('WorkflowRunRegistry', () => {
     expect(r.get('wf_done')!.status).toBe('completed');
   });
 
-  it.each(['running', 'pausing', 'paused'] as const)(
-    'hasRunningEntries() treats %s as active',
+  it.each(['running', 'pausing'] as const)(
+    'hasRunningEntries() treats %s as blocking',
     (status) => {
       const r = new WorkflowRunRegistry();
       expect(r.hasRunningEntries()).toBe(false);
       r.register(reg('wf_1'));
       if (status !== 'running') r.onDispatchStateChange('wf_1', 'pausing');
-      if (status === 'paused') r.onDispatchStateChange('wf_1', 'paused');
       expect(r.hasRunningEntries()).toBe(true);
       r.complete('wf_1', null, 1_000);
       expect(r.hasRunningEntries()).toBe(false);
     },
   );
+
+  // R12 (doudouOUC): a paused run has drained its dispatches and its
+  // wall-clock watchdog is suspended — counting it as blocking would let
+  // a paused-and-forgotten run block /clear and session switching
+  // forever. Mirrors BackgroundTaskRegistry.hasRunningTasks(), which
+  // also excludes paused. Session-switch teardown cancels paused runs
+  // via abortAll() instead of blocking on them.
+  it('hasRunningEntries() does not block on a paused run', () => {
+    const r = new WorkflowRunRegistry();
+    expect(r.hasRunningEntries()).toBe(false);
+    r.register(reg('wf_1'));
+    r.onDispatchStateChange('wf_1', 'pausing');
+    r.onDispatchStateChange('wf_1', 'paused');
+    expect(r.hasRunningEntries()).toBe(false);
+    // Resume re-arms the block; terminal settles it again.
+    r.onDispatchStateChange('wf_1', 'running');
+    expect(r.hasRunningEntries()).toBe(true);
+    r.complete('wf_1', null, 1_000);
+    expect(r.hasRunningEntries()).toBe(false);
+  });
 
   // ── P5: budget + warning latch ─────────────────────────────────────
 

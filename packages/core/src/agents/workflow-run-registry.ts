@@ -850,16 +850,28 @@ export class WorkflowRunRegistry {
   }
 
   /**
-   * R7 (wenshao): true if any entry is still active. Mirrors the
-   * three sibling registries' `hasUnfinalizedTasks()` /
+   * R7 (wenshao): true if any entry is still actively executing.
+   * Mirrors the three sibling registries' `hasUnfinalizedTasks()` /
    * `hasRunningEntries()` / `getRunning().length > 0` so the unified
    * `hasBlockingBackgroundWork()` helper (the gate `/clear` and session-
    * resume both use to refuse a switch with live work) can count
    * workflow runs the same way.
+   *
+   * R12 (doudouOUC): `paused` deliberately does NOT count. A paused run
+   * has drained its dispatches and executes nothing, and its wall-clock
+   * watchdog is suspended — if it blocked the switch, a paused-and-
+   * forgotten run would block `/clear` and session switching forever
+   * with no backstop to release it. Mirrors the sibling
+   * `BackgroundTaskRegistry.hasRunningTasks()`, which also counts only
+   * `running` (a paused background agent does not block a switch).
+   * Session-switch teardown cancels paused runs via `abortAll()` before
+   * `reset()` so they settle terminal instead of leaking.
    */
   hasRunningEntries(): boolean {
     for (const entry of this.entries.values()) {
-      if (isActiveWorkflowStatus(entry.status)) return true;
+      if (entry.status === 'running' || entry.status === 'pausing') {
+        return true;
+      }
     }
     return false;
   }
