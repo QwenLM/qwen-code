@@ -1,0 +1,44 @@
+# Daemon turn-status endpoint
+
+## Goal
+
+Let clients that do not keep the session SSE stream open poll the state and raw final main answer of an admitted daemon prompt by `promptId`.
+
+The feature is advertised by the always-on `session_turn_status` capability. It has no setting, flag, or environment variable.
+
+## Scope and ownership
+
+The read-only routes are Session-scoped:
+
+- `GET /session/:id/turns/:promptId`
+- `GET /session/:id/turns/current`
+
+They resolve the live runtime that owns `sessionId`, apply the same client-id authorization as `/prompt`, and never scan another workspace or fall back to the primary runtime. The Session must already be live; polling does not load or resume an offline Session.
+
+`current` returns the running prompt, otherwise the FIFO queued head, otherwise the newest settled result, otherwise `idle`. The exact route returns `404 prompt_not_found` when the live queue, the bounded bridge overlay, and the bounded active-transcript scan contain no matching result. This does not prove that the prompt never existed.
+
+## Result semantics
+
+States are `idle`, `queued`, `running`, `completed`, `cancelled`, and `error`. `queuedAt` is admission time. `startedAt` is present only after actual FIFO dispatch into Session/model execution. `endedAt` is terminal time.
+
+`resultText` is the raw canonical final main answer: top-level, non-thought text from the last primary-model response block that does not contain a tool call. Text emitted before a tool call is discarded. Tool output, thought text, subagent stream updates, diagnostics, background messages, slash-command output, and future output from a sent sub-session are excluded. Optional message rewriting is downstream presentation and does not change this field. A completed turn can therefore have no `resultText` when the parent model produced no final text.
+
+`promptText` and `resultText` are limited to 32,768 UTF-16 code units. A truncated result has `resultTruncated: true` and `resultCode: "RESULT_TEXT_TRUNCATED"`. Error messages and codes are normalized without invoking unsafe getters and are limited to 4,096 and 256 code units respectively.
+
+## Live and persisted sources
+
+The bridge owns live FIFO state plus a fixed 64-entry terminal overlay. Formal terminal publication is first-writer-wins. Pending entries that are removed or already terminal are never projected as queued/running. Polling re-reads the overlay after an awaited child read, including when that read fails, so a concurrent terminal cannot regress to queued or not-found. When overlay and transcript contain the same prompt, the overlay outcome remains authoritative and the transcript can enrich it with `resultText`.
+
+Session is the only transcript writer. A daemon prompt that reaches `Session.prompt()` appends one best-effort `turn_result` system record through `ChatRecordingService`. Recording failure never changes the prompt lifecycle. Reads best-effort flush the recorder and walk at most 10 backward pages of 500 active records, with the existing 4 MiB page and snapshot limits. Invalid cursor, unavailable snapshot, oversized snapshot, and oversized page errors remain structured errors rather than becoming not-found.
+
+Normal restart lookup therefore requires recording to be enabled, the append to have succeeded, the result to remain on the active branch and within the bounded scan window, and the Session to be loaded live again. Deleting the JSONL, disabling recording, a failed append, or leaving the bounded window removes that guarantee.
+
+Prompts accepted only by the bridge but never dispatched into Session, including queued removal, queued deadline, close/kill cancellation, or forward failure, are available from the in-process overlay only. Unexpected process crashes and daemon shutdown do not trigger transcript backfill.
+
+## History operations
+
+A failed rewind keeps the overlay. A successful rewind clears it; the child reader's active transcript branch then decides which results remain queryable. Forking excludes `turn_result` records so a new Session cannot inherit source prompt identities.
+
+## Non-goals
+
+This is not an exactly-once or permanent result store. It adds no strict teardown persistence, close/kill write barrier, crash recovery journal, daemon transcript writer, offline workspace scan, promptId index, rewind coordinate map, or message-rewrite refactor.

@@ -25,6 +25,7 @@ import type {
 import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
+  TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
@@ -34,7 +35,10 @@ import {
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  TURN_RESULT_CODE_TEXT_TRUNCATED,
+  TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
+  normalizeTurnResultError,
   normalizeSnapshotPayload,
   ShellExecutionService,
   type InvocationContextV1,
@@ -152,6 +156,7 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  BridgeTurnStatus,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -968,6 +973,8 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  /** Recent formal terminals bridge-published before transcript visibility. */
+  terminalTurnStatuses: Map<string, BridgeTurnStatus>;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
@@ -1650,6 +1657,66 @@ type PromptTerminal =
   | { kind: 'cancelled' }
   | { kind: 'error'; err: unknown };
 
+const TERMINAL_TURN_STATUS_OVERLAY_LIMIT = 64;
+
+function truncateTurnText(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  const truncated = text.length > TURN_RESULT_TEXT_MAX_CHARS;
+  return {
+    text: truncated ? text.slice(0, TURN_RESULT_TEXT_MAX_CHARS) : text,
+    truncated,
+  };
+}
+
+function rememberTerminalTurnStatus(
+  entry: SessionEntry,
+  pending: PendingPromptEntry,
+  terminal: PromptTerminal,
+): void {
+  const promptText = truncateTurnText(pending.text);
+  const shared = {
+    sessionId: entry.sessionId,
+    promptId: pending.promptId,
+    promptText: promptText.text,
+    ...(promptText.truncated ? { promptTextTruncated: true } : {}),
+    queuedAt: pending.queuedAt,
+    ...(pending.startedAt !== undefined
+      ? { startedAt: pending.startedAt }
+      : {}),
+    endedAt: Date.now(),
+    ...(pending.originatorClientId !== undefined
+      ? { originatorClientId: pending.originatorClientId }
+      : {}),
+  };
+  const status: BridgeTurnStatus =
+    terminal.kind === 'complete'
+      ? {
+          ...shared,
+          state:
+            terminal.result.stopReason === 'cancelled'
+              ? 'cancelled'
+              : 'completed',
+          ...(terminal.result.stopReason !== undefined
+            ? { stopReason: terminal.result.stopReason }
+            : {}),
+        }
+      : terminal.kind === 'cancelled'
+        ? { ...shared, state: 'cancelled', stopReason: 'cancelled' }
+        : {
+            ...shared,
+            state: 'error',
+            error: normalizeTurnResultError(terminal.err),
+          };
+  entry.terminalTurnStatuses.set(pending.promptId, status);
+  while (entry.terminalTurnStatuses.size > TERMINAL_TURN_STATUS_OVERLAY_LIMIT) {
+    const oldest = entry.terminalTurnStatuses.keys().next().value;
+    if (oldest === undefined) break;
+    entry.terminalTurnStatuses.delete(oldest);
+  }
+}
+
 /**
  * Publish the formal terminal event for an accepted prompt exactly once.
  * All terminal paths (agent settle, queued removal, deadline, session
@@ -1675,6 +1742,7 @@ function publishPromptTerminal(
     return;
   }
   pendingEntry.terminalPublished = true;
+  rememberTerminalTurnStatus(entry, pendingEntry, terminal);
   const originatorClientId = pendingEntry.originatorClientId;
   if (terminal.kind === 'complete') {
     broadcastTurnComplete(
@@ -1775,6 +1843,117 @@ function extractPromptText(
     }
   }
   return hasImage ? '[image]' : '';
+}
+
+function liveTurnStatus(
+  sessionId: string,
+  pending: PendingPromptEntry,
+): BridgeTurnStatus {
+  const promptText = truncateTurnText(pending.text);
+  return {
+    sessionId,
+    state: pending.state === 'running' ? 'running' : 'queued',
+    promptId: pending.promptId,
+    promptText: promptText.text,
+    ...(promptText.truncated ? { promptTextTruncated: true } : {}),
+    queuedAt: pending.queuedAt,
+    ...(pending.startedAt !== undefined
+      ? { startedAt: pending.startedAt }
+      : {}),
+    ...(pending.originatorClientId !== undefined
+      ? { originatorClientId: pending.originatorClientId }
+      : {}),
+  };
+}
+
+function findLiveTurnStatus(
+  entry: SessionEntry,
+  promptId?: string,
+): BridgeTurnStatus | undefined {
+  const live = entry.pendingPromptList.filter(
+    (pending) => !pending.removed && !pending.terminalPublished,
+  );
+  if (promptId !== undefined) {
+    const match = live.find((pending) => pending.promptId === promptId);
+    return match ? liveTurnStatus(entry.sessionId, match) : undefined;
+  }
+  const running = live.find((pending) => pending.state === 'running');
+  if (running) return liveTurnStatus(entry.sessionId, running);
+  const queued = live.find((pending) => pending.state === 'queued');
+  return queued ? liveTurnStatus(entry.sessionId, queued) : undefined;
+}
+
+function settledTurnStatus(
+  sessionId: string,
+  record: TurnResultRecordPayload,
+): BridgeTurnStatus {
+  return {
+    sessionId,
+    state: record.state,
+    promptId: record.promptId,
+    ...(record.stopReason !== undefined
+      ? { stopReason: record.stopReason }
+      : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
+    ...(record.startedAt !== undefined ? { startedAt: record.startedAt } : {}),
+    endedAt: record.endedAt,
+    ...(record.promptText !== undefined
+      ? { promptText: record.promptText }
+      : {}),
+    ...(record.promptTextTruncated !== undefined
+      ? { promptTextTruncated: record.promptTextTruncated }
+      : {}),
+    ...(record.resultText !== undefined
+      ? { resultText: record.resultText }
+      : {}),
+    ...(record.resultTruncated !== undefined
+      ? { resultTruncated: record.resultTruncated }
+      : {}),
+    ...(record.resultTruncated === true
+      ? { resultCode: record.resultCode ?? TURN_RESULT_CODE_TEXT_TRUNCATED }
+      : {}),
+    ...(record.originatorClientId !== undefined
+      ? { originatorClientId: record.originatorClientId }
+      : {}),
+  };
+}
+
+function enrichTerminalTurnStatus(
+  terminal: BridgeTurnStatus,
+  persisted: BridgeTurnStatus,
+): BridgeTurnStatus {
+  return {
+    ...terminal,
+    ...(persisted.promptText !== undefined
+      ? { promptText: persisted.promptText }
+      : {}),
+    ...(persisted.promptTextTruncated !== undefined
+      ? { promptTextTruncated: persisted.promptTextTruncated }
+      : {}),
+    ...(persisted.resultText !== undefined
+      ? { resultText: persisted.resultText }
+      : {}),
+    ...(persisted.resultTruncated !== undefined
+      ? { resultTruncated: persisted.resultTruncated }
+      : {}),
+    ...(persisted.resultCode !== undefined
+      ? { resultCode: persisted.resultCode }
+      : {}),
+    ...(terminal.originatorClientId === undefined &&
+    persisted.originatorClientId !== undefined
+      ? { originatorClientId: persisted.originatorClientId }
+      : {}),
+  };
+}
+
+function latestTerminalTurnStatus(
+  entry: SessionEntry,
+): BridgeTurnStatus | undefined {
+  let latest: BridgeTurnStatus | undefined;
+  for (const status of entry.terminalTurnStatuses.values()) {
+    if ((status.endedAt ?? 0) >= (latest?.endedAt ?? 0)) latest = status;
+  }
+  return latest;
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
@@ -5057,6 +5236,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingPromptCount: 0,
       pendingAgentNotificationCount: 0,
       pendingPromptList: [],
+      terminalTurnStatuses: new Map(),
       midTurnMessageQueue: [],
       settledMidTurnMessageIds: [],
       promotedMidTurnMessageIds: [],
@@ -7352,6 +7532,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             }
             throw new DOMException('Prompt aborted', 'AbortError');
           }
+          pendingEntry.startedAt = Date.now();
           // If this prompt was queued behind another, promote it to
           // 'running' and publish a started event now that it has reached the
           // head of the FIFO. A promoted mid-turn message that starts
@@ -9512,7 +9693,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Authorize the caller against this session — mirrors /prompt.
       resolveTrustedClientId(entry, context?.clientId);
       return entry.pendingPromptList
-        .filter((p) => !p.removed)
+        .filter((p) => !p.removed && !p.terminalPublished)
         .map((p) => ({
           promptId: p.promptId,
           text: p.text,
@@ -9522,6 +9703,74 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ? { originatorClientId: p.originatorClientId }
             : {}),
         }));
+    },
+
+    async getSessionTurnStatus(sessionId, context, promptId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+
+      const liveBeforeRead = findLiveTurnStatus(entry, promptId);
+      if (liveBeforeRead) return liveBeforeRead;
+
+      const terminalBeforeRead =
+        promptId !== undefined
+          ? entry.terminalTurnStatuses.get(promptId)
+          : latestTerminalTurnStatus(entry);
+      let result: {
+        v: number;
+        sessionId: string;
+        turnResult: TurnResultRecordPayload | null;
+      };
+      try {
+        result = await requestSessionStatus(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionTurnStatus,
+          { ...(promptId !== undefined ? { promptId } : {}) },
+        );
+      } catch (error) {
+        const liveAfterFailure = findLiveTurnStatus(entry, promptId);
+        if (liveAfterFailure) return liveAfterFailure;
+        const terminalAfterFailure =
+          promptId !== undefined
+            ? entry.terminalTurnStatuses.get(promptId)
+            : latestTerminalTurnStatus(entry);
+        if (terminalAfterFailure ?? terminalBeforeRead) {
+          return terminalAfterFailure ?? terminalBeforeRead;
+        }
+        throw error;
+      }
+      const liveAfterRead = findLiveTurnStatus(entry, promptId);
+      if (liveAfterRead) return liveAfterRead;
+      const terminal =
+        promptId !== undefined
+          ? entry.terminalTurnStatuses.get(promptId)
+          : latestTerminalTurnStatus(entry);
+      const persisted = result.turnResult
+        ? settledTurnStatus(sessionId, result.turnResult)
+        : undefined;
+      if (promptId !== undefined) {
+        if (terminal && persisted) {
+          return enrichTerminalTurnStatus(terminal, persisted);
+        }
+        if (terminal) return terminal;
+        if (persisted) return persisted;
+      } else {
+        if (terminal && persisted && terminal.promptId === persisted.promptId) {
+          return enrichTerminalTurnStatus(terminal, persisted);
+        }
+        if (terminal && persisted) {
+          return (terminal.endedAt ?? 0) >= (persisted.endedAt ?? 0)
+            ? terminal
+            : persisted;
+        }
+        if (terminal) return terminal;
+        if (persisted) return persisted;
+      }
+      if (promptId !== undefined) {
+        return undefined;
+      }
+      return { sessionId, state: 'idle' as const };
     },
 
     removePendingPrompt(sessionId, promptId, context) {
@@ -10154,6 +10403,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         throw err;
       }
+
+      entry.terminalTurnStatuses.clear();
 
       const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
       const filesChanged = (response['filesChanged'] as string[]) ?? [];

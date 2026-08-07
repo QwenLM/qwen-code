@@ -12,8 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   ChatRecordingService,
+  isTurnResultRecordPayload,
+  normalizeTurnResultError,
+  TURN_RESULT_ERROR_CODE_MAX_CHARS,
+  TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
   type ChatRecord,
   type AtCommandRecordPayload,
+  type TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -862,6 +867,96 @@ describe('ChatRecordingService', () => {
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('user_text_elements');
       expect(record.systemPayload).toEqual(payload);
+    });
+  });
+
+  describe('recordTurnResult', () => {
+    it('normalizes hostile and oversized error fields without throwing', () => {
+      const hostile = Object.create(null, {
+        message: { get: () => 'm'.repeat(5_000) },
+        code: {
+          get: () => 'c'.repeat(500),
+        },
+      });
+
+      expect(normalizeTurnResultError(hostile)).toEqual({
+        message: 'm'.repeat(TURN_RESULT_ERROR_MESSAGE_MAX_CHARS),
+        messageTruncated: true,
+        code: 'c'.repeat(TURN_RESULT_ERROR_CODE_MAX_CHARS),
+        codeTruncated: true,
+      });
+      expect(
+        normalizeTurnResultError(
+          Object.create(null, {
+            message: {
+              get: () => {
+                throw new Error('getter exploded');
+              },
+            },
+            toString: {
+              value: () => {
+                throw new Error('conversion exploded');
+              },
+            },
+          }),
+        ),
+      ).toEqual({ message: 'Unknown error' });
+    });
+
+    it('validates the bounded turn_result transcript contract', () => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2_000,
+          resultText: 'bounded prefix',
+          resultTruncated: true,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        }),
+      ).toBe(true);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2_000,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        }),
+      ).toBe(false);
+    });
+
+    it('records a settled turn outcome as a system payload', async () => {
+      const payload: TurnResultRecordPayload = {
+        promptId: 'prompt-1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'hello',
+        resultText: 'world',
+        originatorClientId: 'client-1',
+      };
+
+      chatRecordingService.recordTurnResult(payload);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('turn_result');
+      expect(record.systemPayload).toEqual(payload);
+    });
+
+    it('is best-effort when recording is inactive', () => {
+      const inactive = new ChatRecordingService(mockConfig);
+      expect(() =>
+        inactive.recordTurnResult({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1000,
+          endedAt: 1500,
+        }),
+      ).not.toThrow();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
   });
 

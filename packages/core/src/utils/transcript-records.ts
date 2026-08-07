@@ -127,6 +127,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'session_source',
   'goal_state',
   'goal_runtime',
+  'turn_result',
   ...ARTIFACT_RECORD_SUBTYPES,
 ]);
 

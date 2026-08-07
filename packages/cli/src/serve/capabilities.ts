@@ -52,6 +52,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_turn_status: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
   // `GET /session/:id/mid-turn-messages` returns the messages still waiting

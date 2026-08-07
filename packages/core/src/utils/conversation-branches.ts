@@ -17,6 +17,7 @@ const NEUTRAL_TAIL_SUBTYPES = new Set([
   'custom_title',
   'session_artifact_event',
   'session_artifact_snapshot',
+  'turn_result',
 ]);
 
 export type ConversationBranchClassification =

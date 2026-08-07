@@ -93,6 +93,7 @@ import {
   ShellExecutionService,
   stableSessionArtifactId,
   ToolNames,
+  TURN_RESULT_TEXT_MAX_CHARS,
 } from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
@@ -11284,6 +11285,738 @@ describe('createAcpSessionBridge', () => {
     it('getPendingPrompts throws SessionNotFoundError for unknown sessions', () => {
       const bridge = makeBridge();
       expect(() => bridge.getPendingPrompts('unknown')).toThrow(
+        SessionNotFoundError,
+      );
+    });
+  });
+
+  describe('getSessionTurnStatus', () => {
+    it('does not report startedAt before FIFO dispatch begins', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      let admittedStatus: Promise<unknown> | undefined;
+
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'dispatch boundary' }],
+        },
+        undefined,
+        {
+          promptId: 'prompt-dispatch-boundary',
+          onPromptAdmitted: () => {
+            expect(handle.agent.promptCalls).toHaveLength(0);
+            admittedStatus = bridge.getSessionTurnStatus(
+              session.sessionId,
+              undefined,
+              'prompt-dispatch-boundary',
+            );
+          },
+        },
+      );
+
+      await expect(admittedStatus).resolves.toMatchObject({
+        state: 'running',
+        promptId: 'prompt-dispatch-boundary',
+      });
+      await expect(admittedStatus).resolves.not.toHaveProperty('startedAt');
+
+      await prompt;
+      await bridge.shutdown();
+    });
+
+    it('reports the running turn from the live pending list', async () => {
+      let resolveTurn: (() => void) | undefined;
+      const turnGate = new Promise<void>((r) => {
+        resolveTurn = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await turnGate;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'live turn' }],
+        },
+        undefined,
+        { promptId: 'prompt-live' },
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+      });
+
+      const current = await bridge.getSessionTurnStatus(session.sessionId);
+      expect(current).toMatchObject({
+        sessionId: session.sessionId,
+        state: 'running',
+        promptId: 'prompt-live',
+        promptText: 'live turn',
+      });
+      expect(current?.queuedAt).toBeTypeOf('number');
+      expect(current?.startedAt).toBeTypeOf('number');
+
+      const byId = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-live',
+      );
+      expect(byId).toEqual(current);
+
+      resolveTurn!();
+      await promptPromise;
+      await bridge.shutdown();
+    });
+
+    it('caps live promptText at TURN_RESULT_TEXT_MAX_CHARS', async () => {
+      let resolveTurn: (() => void) | undefined;
+      const turnGate = new Promise<void>((r) => {
+        resolveTurn = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await turnGate;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const longText = 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100);
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: longText }],
+        },
+        undefined,
+        { promptId: 'prompt-long' },
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+      });
+
+      const status = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-long',
+      );
+      expect(status?.promptText).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
+      expect(status?.promptTextTruncated).toBe(true);
+
+      resolveTurn!();
+      await promptPromise;
+      await bridge.shutdown();
+    });
+
+    it('rejects a foreign clientId like /prompt does', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId, {
+          clientId: 'forged-client',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await bridge.shutdown();
+    });
+
+    it('reports queued prompts behind a running turn', async () => {
+      let resolveFirst: (() => void) | undefined;
+      const firstGate = new Promise<void>((r) => {
+        resolveFirst = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'blocking') {
+            await firstGate;
+          }
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocking' }],
+        },
+        undefined,
+        { promptId: 'prompt-first' },
+      );
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'waiting' }],
+        },
+        undefined,
+        { promptId: 'prompt-second' },
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+
+      // Current = the running turn, not the queued head.
+      const current = await bridge.getSessionTurnStatus(session.sessionId);
+      expect(current).toMatchObject({
+        state: 'running',
+        promptId: 'prompt-first',
+      });
+
+      const queued = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-second',
+      );
+      expect(queued).toMatchObject({
+        state: 'queued',
+        promptId: 'prompt-second',
+        promptText: 'waiting',
+      });
+      expect(queued?.startedAt).toBeUndefined();
+
+      resolveFirst!();
+      await p1;
+      await p2;
+      await bridge.shutdown();
+    });
+
+    it('falls back to persisted turn_result records once settled', async () => {
+      const turnResult = {
+        promptId: 'prompt-done',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'settled prompt',
+        resultText: 'settled answer',
+        originatorClientId: 'client-9',
+      };
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return { v: 1, sessionId: 'ignored', turnResult };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'settled prompt' }],
+        },
+        undefined,
+        { promptId: 'prompt-done' },
+      );
+
+      const byId = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-done',
+      );
+      expect(byId).toMatchObject({
+        sessionId: session.sessionId,
+        state: 'completed',
+        promptId: 'prompt-done',
+        stopReason: 'end_turn',
+        resultText: 'settled answer',
+        originatorClientId: 'client-9',
+      });
+
+      const current = await bridge.getSessionTurnStatus(session.sessionId);
+      expect(current).toEqual(byId);
+      await bridge.shutdown();
+    });
+
+    it('resolves undefined for unknown promptId and idle for empty current', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'missing'),
+      ).resolves.toBeUndefined();
+
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId),
+      ).resolves.toEqual({ sessionId: session.sessionId, state: 'idle' });
+      await bridge.shutdown();
+    });
+
+    it('prefers live queue state over persisted records', async () => {
+      let resolveTurn: (() => void) | undefined;
+      const turnGate = new Promise<void>((r) => {
+        resolveTurn = r;
+      });
+      const extCalls: string[] = [];
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await turnGate;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            extCalls.push(method);
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'live wins' }],
+        },
+        undefined,
+        { promptId: 'prompt-live' },
+      );
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+      });
+
+      const status = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-live',
+      );
+      expect(status?.state).toBe('running');
+      expect(extCalls).toHaveLength(0);
+
+      resolveTurn!();
+      await promptPromise;
+      await bridge.shutdown();
+    });
+
+    it('keeps a completed turn pollable before its transcript record appears', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? { v: 1, sessionId: 'ignored', turnResult: null }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'answer before persistence' }],
+        },
+        undefined,
+        { promptId: 'prompt-overlay' },
+      );
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-overlay',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        promptId: 'prompt-overlay',
+        promptText: 'answer before persistence',
+      });
+      await bridge.shutdown();
+    });
+
+    it('observes a terminal published while persisted lookup is pending', async () => {
+      let resolveLookup!: () => void;
+      const lookupGate = new Promise<void>((resolve) => {
+        resolveLookup = resolve;
+      });
+      let lookupStarted = false;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            lookupStarted = true;
+            await lookupGate;
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const status = bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-race',
+      );
+      await vi.waitFor(() => expect(lookupStarted).toBe(true));
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'settles during read' }],
+        },
+        undefined,
+        { promptId: 'prompt-race' },
+      );
+      resolveLookup();
+
+      await expect(status).resolves.toMatchObject({
+        state: 'completed',
+        promptId: 'prompt-race',
+      });
+      await bridge.shutdown();
+    });
+
+    it('observes an exact live turn admitted while persisted lookup is pending', async () => {
+      const lookup = deferred<{
+        v: number;
+        sessionId: string;
+        turnResult: null;
+      }>();
+      const turn = deferred<PromptResponse>();
+      let lookupStarted = false;
+      const handle = makeChannel({
+        promptImpl: () => turn.promise,
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            lookupStarted = true;
+            return lookup.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const status = bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-live-race',
+      );
+      await vi.waitFor(() => expect(lookupStarted).toBe(true));
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'starts during read' }],
+        },
+        undefined,
+        { promptId: 'prompt-live-race' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      lookup.resolve({ v: 1, sessionId: session.sessionId, turnResult: null });
+
+      await expect(status).resolves.toMatchObject({
+        state: 'running',
+        promptId: 'prompt-live-race',
+      });
+      turn.resolve({ stopReason: 'end_turn' });
+      await prompt;
+      await bridge.shutdown();
+    });
+
+    it('uses a terminal published while persisted lookup rejects', async () => {
+      let rejectLookup!: (error: Error) => void;
+      const lookupGate = new Promise<never>((_resolve, reject) => {
+        rejectLookup = reject;
+      });
+      let lookupStarted = false;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            lookupStarted = true;
+            return lookupGate;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const status = bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-race-failure',
+      );
+      await vi.waitFor(() => expect(lookupStarted).toBe(true));
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'settles during failed read' }],
+        },
+        undefined,
+        { promptId: 'prompt-race-failure' },
+      );
+      rejectLookup(new Error('transcript unavailable'));
+
+      await expect(status).resolves.toMatchObject({
+        state: 'completed',
+        promptId: 'prompt-race-failure',
+      });
+      await bridge.shutdown();
+    });
+
+    it('observes a current live turn admitted while persisted lookup rejects', async () => {
+      const lookup = deferred<never>();
+      const turn = deferred<PromptResponse>();
+      let lookupStarted = false;
+      const handle = makeChannel({
+        promptImpl: () => turn.promise,
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            lookupStarted = true;
+            return lookup.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const status = bridge.getSessionTurnStatus(session.sessionId);
+      await vi.waitFor(() => expect(lookupStarted).toBe(true));
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'starts during failed read' }],
+        },
+        undefined,
+        { promptId: 'prompt-live-current-race' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      lookup.reject(new Error('transcript unavailable'));
+
+      await expect(status).resolves.toMatchObject({
+        state: 'running',
+        promptId: 'prompt-live-current-race',
+      });
+      turn.resolve({ stopReason: 'end_turn' });
+      await prompt;
+      await bridge.shutdown();
+    });
+
+    it('keeps terminal outcome authoritative while persisted text enriches it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? {
+                v: 1,
+                sessionId: 'ignored',
+                turnResult: {
+                  promptId: 'prompt-enriched',
+                  state: 'error',
+                  error: { message: 'stale child error' },
+                  endedAt: 1,
+                  resultText: 'final parent answer',
+                },
+              }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'answer me' }],
+        },
+        undefined,
+        { promptId: 'prompt-enriched' },
+      );
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-enriched',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        stopReason: 'end_turn',
+        resultText: 'final parent answer',
+      });
+      await bridge.shutdown();
+    });
+
+    it('keeps the trusted prompt display projection after persistence', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? {
+                v: 1,
+                sessionId: 'ignored',
+                turnResult: {
+                  promptId: 'prompt-display',
+                  state: 'completed',
+                  stopReason: 'end_turn',
+                  endedAt: 1,
+                  promptText: 'hello',
+                },
+              }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [
+            {
+              type: 'text',
+              text: 'internal channel instructions\n\nhello',
+            },
+          ],
+        },
+        undefined,
+        { promptId: 'prompt-display', promptDisplayText: 'hello' },
+      );
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-display',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        promptText: 'hello',
+      });
+      await bridge.shutdown();
+    });
+
+    it('keeps only the latest 64 in-memory terminal statuses', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? { v: 1, sessionId: 'ignored', turnResult: null }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      for (let index = 0; index < 65; index += 1) {
+        await bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: `prompt ${index}` }],
+          },
+          undefined,
+          { promptId: `prompt-${index}` },
+        );
+      }
+
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-0'),
+      ).resolves.toBeUndefined();
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-1'),
+      ).resolves.toMatchObject({ state: 'completed', promptId: 'prompt-1' });
+      await bridge.shutdown();
+    });
+
+    it('clears terminal overlays only after a successful rewind', async () => {
+      let rewindFails = true;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            if (rewindFails) throw new Error('rewind failed');
+            return { targetTurnIndex: 0, filesChanged: [], filesFailed: [] };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'rewind me' }],
+        },
+        undefined,
+        { promptId: 'prompt-rewind-overlay' },
+      );
+
+      await expect(
+        bridge.rewindSession(session.sessionId, { promptId: 'target' }),
+      ).rejects.toThrow();
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-rewind-overlay',
+        ),
+      ).resolves.toMatchObject({ state: 'completed' });
+
+      rewindFails = false;
+      await bridge.rewindSession(session.sessionId, { promptId: 'target' });
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-rewind-overlay',
+        ),
+      ).resolves.toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown sessions', async () => {
+      const bridge = makeBridge();
+      await expect(bridge.getSessionTurnStatus('unknown')).rejects.toThrow(
         SessionNotFoundError,
       );
     });
