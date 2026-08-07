@@ -118,9 +118,8 @@ const VirtualizedListItem = memo(
     onHeightChangeRef.current = onHeightChange;
 
     useLayoutEffect(() => {
-      const measuredHeight = itemRef.current
-        ? measureElementPosition(itemRef.current).height
-        : height;
+      const measuredHeight =
+        itemRef.current?.yogaNode?.getComputedHeight() ?? height;
       if (hasMeasured && measuredHeight > 0) {
         onHeightChangeRef.current(itemKey, measuredHeight);
       }
