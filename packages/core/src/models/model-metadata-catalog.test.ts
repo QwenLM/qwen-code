@@ -204,6 +204,29 @@ describe('getCatalogModalities', () => {
     ).toBeUndefined();
   });
 
+  it('uses the protocol catalog for its canonical base URL', () => {
+    expect(
+      getCatalogModalities(
+        {
+          openai: {
+            env: ['OPENAI_API_KEY'],
+            models: {
+              'gpt-4o': {
+                modalities: { input: ['text', 'image', 'pdf'] },
+              },
+            },
+          },
+        },
+        {
+          providerId: 'openai',
+          authType: 'openai',
+          modelId: 'gpt-4o',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+      ),
+    ).toEqual({ image: true, pdf: true });
+  });
+
   it.each(['coding-plan', 'token-plan'])(
     'does not borrow the default %s catalog for an unknown endpoint',
     (providerId) => {

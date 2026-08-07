@@ -7,9 +7,10 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import type { InputModalities } from '../core/contentGenerator.js';
+import type { AuthType, InputModalities } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
 import { findProviderByCredentials } from '../providers/all-providers.js';
+import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
@@ -431,6 +432,16 @@ function resolveCatalogProviderId(
     );
     if (modelMatch) return modelMatch[0];
     if (endpointMatches[0]) return endpointMatches[0][0];
+  }
+
+  const canonicalProtocolBaseUrl = normalizeUrl(
+    getDefaultBaseUrlForProtocol(lookup.authType as AuthType | undefined),
+  );
+  if (normalizedBaseUrl && normalizedBaseUrl === canonicalProtocolBaseUrl) {
+    const protocolProviderId = mapProviderId(lookup.authType);
+    if (protocolProviderId && catalog[protocolProviderId]) {
+      return protocolProviderId;
+    }
   }
 
   if (sourceProviderId === 'idealab') {

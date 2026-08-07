@@ -302,6 +302,31 @@ describe('ModelRegistry', () => {
       expect(model && registry.getModalitiesSource(model)).toBe('catalog');
     });
 
+    it('uses catalog metadata at the canonical OpenAI endpoint', () => {
+      const registry = new ModelRegistry(
+        { openai: [{ id: 'gpt-4o' }] },
+        undefined,
+        {
+          openai: {
+            env: ['OPENAI_API_KEY'],
+            models: {
+              'gpt-4o': {
+                modalities: { input: ['text', 'image', 'pdf'] },
+              },
+            },
+          },
+        },
+      );
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4o');
+      expect(model?.baseUrl).toBe('https://api.openai.com/v1');
+      expect(model?.generationConfig.modalities).toEqual({
+        image: true,
+        pdf: true,
+      });
+      expect(model && registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
     it('uses the resolved session endpoint for catalog lookup', () => {
       const registry = new ModelRegistry(
         { myproxy: [{ id: 'meta-llama/llama-4-maverick' }] },

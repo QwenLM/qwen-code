@@ -82,6 +82,62 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getModel()).toBe('chat-model');
   });
 
+  it('does not reuse a modelProviders endpoint as a protocol default', async () => {
+    const idealabBaseUrl = 'https://idealab.example.com/v1';
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        idealab: [{ id: 'gpt-new', baseUrl: idealabBaseUrl }],
+        openai: [{ id: 'gpt-4o' }],
+      },
+      providerProtocolConfig: { idealab: 'openai' },
+      generationConfig: {
+        model: 'gpt-new',
+        baseUrl: idealabBaseUrl,
+      },
+      generationConfigSources: {
+        model: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'gpt-new',
+          detail: 'model.id',
+        },
+        baseUrl: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'gpt-new',
+          detail: 'baseUrl',
+        },
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4o');
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(
+      'https://api.openai.com/v1',
+    );
+  });
+
+  it('keeps a CLI endpoint as the protocol default', async () => {
+    const cliBaseUrl = 'https://session-proxy.example.com/v1';
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: { openai: [{ id: 'gpt-4o' }] },
+      generationConfig: {
+        model: 'runtime-model',
+        baseUrl: cliBaseUrl,
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        baseUrl: { kind: 'cli', detail: '--base-url' },
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4o');
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(cliBaseUrl);
+  });
+
   it('should fully rollback state when switchModel fails after applying defaults (authType change)', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [

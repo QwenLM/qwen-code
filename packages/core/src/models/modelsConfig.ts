@@ -164,7 +164,9 @@ export class ModelsConfig {
       options.modelProvidersConfig,
       options.providerProtocolConfig,
       options.modelMetadataCatalog,
-      options.initialAuthType && options.generationConfig?.baseUrl
+      options.initialAuthType &&
+      options.generationConfig?.baseUrl &&
+      options.generationConfigSources?.['baseUrl']?.kind !== 'modelProviders'
         ? {
             authType: options.initialAuthType,
             baseUrl: options.generationConfig.baseUrl,
