@@ -1032,6 +1032,11 @@ describe('ChatEditor toolbar popovers', () => {
     expect(popover?.textContent).toContain('Low');
     expect(popover?.textContent).toContain('Medium');
     expect(popover?.textContent).toContain('Extra High');
+    expect(
+      popover?.querySelector('[data-web-shell-model-submenu-trigger]')
+        ?.textContent,
+    ).toContain('Qwen 3.8 Max');
+    expect(popover?.querySelector('input[type="search"]')).toBeNull();
 
     const medium = Array.from(
       popover?.querySelectorAll<HTMLButtonElement>('button') ?? [],
@@ -1039,6 +1044,75 @@ describe('ChatEditor toolbar popovers', () => {
     act(() => medium?.click());
     expect(onSelectReasoningOption).toHaveBeenCalledWith('effort', 'medium');
     expect(trigger?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('opens model search as a second-level menu for reasoning models', () => {
+    const onSelectModel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [
+        { id: 'qwen-max', label: 'Qwen Max' },
+        { id: 'qwen-plus', label: 'Qwen Plus' },
+      ],
+      reasoningControlsSupported: true,
+      reasoningState: {
+        thinking: { enabled: true },
+        effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+      },
+      onSelectReasoningOption: vi.fn(),
+      onSelectModel,
+    });
+
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click(),
+    );
+    const submenuTrigger = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-submenu-trigger]',
+    );
+    expect(submenuTrigger).not.toBeNull();
+    expect(document.querySelector('input[type="search"]')).toBeNull();
+
+    act(() => {
+      submenuTrigger?.focus();
+      submenuTrigger?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const search = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-toolbar-popover] input[type="search"]',
+    );
+    expect(search).not.toBeNull();
+    expect(document.activeElement).toBe(search);
+    expect(
+      document.querySelector('[data-web-shell-model-submenu-back]'),
+    ).not.toBeNull();
+
+    act(() =>
+      document
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-submenu-back]')
+        ?.click(),
+    );
+    const reopenedSubmenuTrigger = document.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-submenu-trigger]',
+    );
+    expect(document.querySelector('input[type="search"]')).toBeNull();
+    expect(document.activeElement).toBe(reopenedSubmenuTrigger);
+    act(() => reopenedSubmenuTrigger?.click());
+
+    const plus = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.trim() === 'Qwen Plus');
+    act(() => plus?.click());
+    expect(onSelectModel).toHaveBeenCalledWith('qwen-plus');
   });
 
   it('renders a thinking-only registered model without an effort section', () => {

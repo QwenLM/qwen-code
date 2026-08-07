@@ -106,6 +106,14 @@ test('updates qwen3.8-max Thinking and Effort through the mock daemon', async ({
   const modelButton = page.locator('[data-web-shell-model-button]');
   await expect(modelButton).toContainText('Extra High');
   await modelButton.click();
+  await expect(
+    page.locator('[data-web-shell-toolbar-popover] input[type="search"]'),
+  ).toHaveCount(0);
+  await page.locator('[data-web-shell-model-submenu-trigger]').click();
+  await expect(
+    page.locator('[data-web-shell-toolbar-popover] input[type="search"]'),
+  ).toBeFocused();
+  await page.locator('[data-web-shell-model-submenu-back]').click();
 
   if (process.env['PLAYWRIGHT_INTERACTIVE_DEMO'] === '1') {
     testInfo.setTimeout(0);

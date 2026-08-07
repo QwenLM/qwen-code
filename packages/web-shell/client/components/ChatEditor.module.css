@@ -1216,6 +1216,28 @@
   background: var(--accent);
 }
 
+.dropdownSubmenuTrigger,
+.dropdownSubmenuBack {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dropdownSubmenuTrigger svg,
+.dropdownSubmenuBack svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.dropdownSubmenuBack {
+  justify-content: flex-start;
+  color: var(--muted-foreground);
+}
+
 .reasoningOptions {
   display: flex;
   flex-direction: column;
