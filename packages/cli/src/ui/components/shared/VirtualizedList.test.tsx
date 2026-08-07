@@ -296,6 +296,69 @@ describe('<VirtualizedList />', () => {
     expect(listRef!.getScrollIndex()).toBe(5);
   });
 
+  it('clamps an out-of-range targetScrollIndex instead of freezing the walk-back', () => {
+    const ref: RefObject<VirtualizedListRef<Item> | null> = { current: null };
+
+    function Wrapper({ target }: { target: number }) {
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={makeItems(10)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          targetScrollIndex={target}
+          containerHeight={4}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { rerender } = render(<Wrapper target={5} />);
+    expect(ref.current).not.toBeNull();
+    expect(ref.current!.getScrollIndex()).toBe(5);
+
+    // SCROLL_TO_ITEM_END is Number.MAX_SAFE_INTEGER: unclamped, the
+    // walk-back would compare undefined offsets ~9e15 times and freeze
+    // the render phase instead of anchoring. Clamped to the last item,
+    // its offset exceeds maxScroll, so the clamp effect re-anchors to the
+    // bottom pixel — the same anchor scrollToIndex({ index: 9 }) resolves
+    // to here.
+    rerender(<Wrapper target={SCROLL_TO_ITEM_END} />);
+    expect(ref.current!.getScrollIndex()).toBe(6);
+
+    rerender(<Wrapper target={-5} />);
+    expect(ref.current!.getScrollIndex()).toBe(0);
+  });
+
+  it('walks a mount-time targetScrollIndex anchor back to the run start', () => {
+    const ref: RefObject<VirtualizedListRef<Item> | null> = { current: null };
+    // Items 2..5 estimate 0, so their offsets coincide and index 4 sits
+    // mid-run; the run's first item is index 2.
+    const zeroRunEstimate = (i: number) => (i >= 2 && i <= 5 ? 0 : 2);
+
+    function Wrapper() {
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={makeItems(10)}
+          renderItem={renderItem}
+          estimatedItemHeight={zeroRunEstimate}
+          keyExtractor={keyExtractor}
+          targetScrollIndex={4}
+          containerHeight={5}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    render(<Wrapper />);
+    expect(ref.current).not.toBeNull();
+    expect(ref.current!.getScrollIndex()).toBe(2);
+  });
+
   it('exposes scrollToEnd via imperative ref and snaps to the last item', () => {
     type RefShape = VirtualizedListRef<Item>;
     let listRef: RefShape | null = null;
@@ -1107,6 +1170,7 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     // Every cached zero must be healed in this one pass: each unhealed
     // continuation leaves scrollHeight 12 rows short of the fully
     // healed total.
+    // 137 = user(2) + expanded head(14) + 5×12 continuation rows + answer(61)
     expect(ref.current!.getScrollState().scrollHeight).toBe(137);
   });
 
@@ -1204,6 +1268,7 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     const lines = (harness.lastFrame() ?? '').split('\n');
     expect(lines.filter((l) => l.trim() !== '').length).toBeGreaterThan(0);
     expect(/thought line|answer/.test(harness.lastFrame() ?? '')).toBe(true);
+    // 159 = user(2) + expanded head(32) + 4×30 continuation rows + answer(5)
     expect(ref.current!.getScrollState().scrollHeight).toBe(159);
   });
 

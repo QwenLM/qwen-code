@@ -311,7 +311,11 @@ function VirtualizedList<T>(
   const [prevTargetScrollIndex, setPrevTargetScrollIndex] = useState(
     props.targetScrollIndex,
   );
-  const prevOffsetsLength = useRef(offsets.length);
+  // Seeded unusable so the first render with usable offsets re-walks the
+  // mount-time targetScrollIndex anchor like every other anchor path;
+  // seeding with offsets.length would leave an initial anchor inside a
+  // coincident-offset run uncorrected.
+  const prevOffsetsLength = useRef(1);
 
   // Render-phase state update — React-endorsed pattern for adjusting state
   // based on previous-render information (see React docs: "Adjusting state
@@ -331,7 +335,14 @@ function VirtualizedList<T>(
       if (isStickingToBottom) {
         setIsStickingToBottom(false);
       }
-      const anchoredIndex = firstIndexOfOffsetRun(offsets, target);
+      // Clamp before the walk-back: for an out-of-range index both sides
+      // of the comparison read undefined (undefined === undefined), so the
+      // walk would decrement through the whole hole — a render-phase
+      // freeze when target is the SCROLL_TO_ITEM_END sentinel.
+      const anchoredIndex = firstIndexOfOffsetRun(
+        offsets,
+        Math.max(0, Math.min(data.length - 1, target)),
+      );
       if (scrollAnchor.index !== anchoredIndex || scrollAnchor.offset !== 0) {
         setScrollAnchor({ index: anchoredIndex, offset: 0 });
       }
