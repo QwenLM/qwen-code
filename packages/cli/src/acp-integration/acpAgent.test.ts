@@ -190,8 +190,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
       .parseInvocationContext,
   ),
-  isQwen38MaxStableWireModel: (model: string | undefined) =>
-    model === 'qwen3.8-max',
+  getModelReasoningControls: (model: string | undefined) =>
+    model === 'qwen3.8-max'
+      ? {
+          thinking: { defaultEnabled: true },
+          effort: {
+            supported: ['low', 'medium', 'xhigh'],
+            default: 'xhigh',
+          },
+        }
+      : undefined,
+  normalizeModelReasoningEffort: (
+    _registration: unknown,
+    effort: string | undefined,
+  ) =>
+    effort === 'low' || effort === 'medium' || effort === 'xhigh'
+      ? effort
+      : 'xhigh',
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
@@ -6222,6 +6237,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           label: 'Qwen 3.8 Max',
           authType: 'api-key',
         },
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max Snapshot',
+          authType: 'api-key',
+          isRuntimeModel: true,
+          runtimeSnapshotId: '$runtime|api-key|qwen3.8-max',
+        },
       ]),
     });
 
@@ -6241,6 +6263,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       cwd: '/tmp',
       mcpServers: [],
     })) as {
+      models: {
+        availableModels: Array<{
+          modelId: string;
+          _meta?: { reasoningControls?: unknown };
+        }>;
+      };
       configOptions: Array<{
         id: string;
         currentValue: string;
@@ -6259,6 +6287,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         .find((option) => option.id === 'effort')
         ?.options.map((option) => option.value),
     ).toEqual(['low', 'medium', 'xhigh']);
+    expect(created.models.availableModels[0]?._meta?.reasoningControls).toEqual(
+      {
+        thinking: { defaultEnabled: true },
+        effort: {
+          supported: ['low', 'medium', 'xhigh'],
+          default: 'xhigh',
+        },
+      },
+    );
+    expect(
+      created.models.availableModels.find((model) =>
+        model.modelId.startsWith('$runtime|'),
+      )?._meta?.reasoningControls,
+    ).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;

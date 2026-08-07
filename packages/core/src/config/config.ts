@@ -44,6 +44,10 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
+import {
+  getModelReasoningControls,
+  resolveModelReasoningControls,
+} from '../core/model-reasoning-controls.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
@@ -3689,6 +3693,41 @@ export class Config {
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
+    const reasoningControls = getModelReasoningControls(
+      this.contentGeneratorConfig.model,
+    );
+    if (reasoningControls) {
+      const resolvedReasoning = resolveModelReasoningControls(
+        this.contentGeneratorConfig.model,
+        {
+          ...(reasoningControls.thinking &&
+          this.contentGeneratorConfig.reasoning !== undefined
+            ? {
+                thinkingEnabled:
+                  this.contentGeneratorConfig.reasoning !== false,
+              }
+            : {}),
+          ...(reasoningControls.effort && this.contentGeneratorConfig.reasoning
+            ? { effort: this.contentGeneratorConfig.reasoning.effort }
+            : {}),
+        },
+      );
+      if (
+        reasoningControls.thinking &&
+        resolvedReasoning?.thinkingEnabled === false
+      ) {
+        this.contentGeneratorConfig.reasoning = false;
+      } else if (
+        reasoningControls.effort &&
+        this.contentGeneratorConfig.reasoning !== false &&
+        resolvedReasoning?.effort
+      ) {
+        this.contentGeneratorConfig.reasoning = {
+          ...(this.contentGeneratorConfig.reasoning ?? {}),
+          effort: resolvedReasoning.effort,
+        };
+      }
+    }
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
@@ -4442,12 +4481,15 @@ export class Config {
       return;
     }
 
-    // Reasoning effort is a global, model-independent preference (set via
-    // /effort). Capture it before the rebuild and re-apply after, so switching
-    // models never silently drops the user's chosen effort — neither the
-    // hot-update path (which copies a fixed field set, not `reasoning`) nor the
-    // full refresh path (which rebuilds the config from scratch).
-    const priorReasoningEffort = this.getReasoningEffort();
+    // Unregistered models share the global /effort preference, so preserve it
+    // across rebuilds. Registered source models keep independent reasoning
+    // state, while registered targets are detected after their config resolves.
+    const previousModelHasReasoningControls = Boolean(
+      getModelReasoningControls(this.contentGeneratorConfig.model),
+    );
+    const priorReasoningEffort = previousModelHasReasoningControls
+      ? undefined
+      : this.getReasoningEffort();
 
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
@@ -4471,13 +4513,14 @@ export class Config {
             this.modelsConfig.isStrictModelProviderSelection(),
         },
       );
+      const modelScopedReasoningSwitch =
+        previousModelHasReasoningControls ||
+        Boolean(getModelReasoningControls(config.model));
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
-      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
-      // preference captured in `priorReasoningEffort` above and re-applied via
-      // setReasoningEffort() below. Do not add `reasoning` here — that would
-      // overwrite the live tier with the new model's default and make the
-      // restore a no-op.
+      // The global preference is captured above and re-applied below. When the
+      // source model uses registered, model-scoped reasoning, copy the target
+      // config instead so its switch/effort cannot leak to the next model.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
@@ -4491,6 +4534,9 @@ export class Config {
       this.contentGeneratorConfig.splitToolMedia = config.splitToolMedia;
       this.contentGeneratorConfig.toolResultContentFormat =
         config.toolResultContentFormat;
+      if (modelScopedReasoningSwitch) {
+        this.contentGeneratorConfig.reasoning = config.reasoning;
+      }
       // Modalities are model-derived: a hot switch between oauth models with
       // different image support must update them, or the vision-bridge gate and
       // image-stripping read the previous model's modalities.
@@ -4535,7 +4581,7 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (priorReasoningEffort) {
+      if (priorReasoningEffort && !modelScopedReasoningSwitch) {
         this.setReasoningEffort(priorReasoningEffort);
       }
       resetPreloadedContentGenerator(this.contentGenerator);
@@ -4552,7 +4598,10 @@ export class Config {
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
     await this.refreshAuth(authType);
-    if (priorReasoningEffort) {
+    if (
+      priorReasoningEffort &&
+      !getModelReasoningControls(this.contentGeneratorConfig.model)
+    ) {
       this.setReasoningEffort(priorReasoningEffort);
     }
   }

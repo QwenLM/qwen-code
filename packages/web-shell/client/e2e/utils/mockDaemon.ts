@@ -766,10 +766,22 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'POST' && path === '/workspace/settings') {
+    const key = getRecordValue(body, 'key') ?? 'unknown';
+    const value = getRecordValue(body, 'value');
+    const scope = getRecordValue(body, 'scope') ?? 'workspace';
+    const descriptor = scenario.settings.settings.find(
+      (setting) => setting.key === key,
+    );
+    if (descriptor) {
+      descriptor.values.effective = value;
+      if (scope === 'user' || scope === 'workspace') {
+        descriptor.values[scope] = value;
+      }
+    }
     await json(route, {
-      key: getRecordValue(body, 'key') ?? 'unknown',
-      scope: getRecordValue(body, 'scope') ?? 'workspace',
-      value: getRecordValue(body, 'value'),
+      key,
+      scope,
+      value,
       requiresRestart: false,
     });
     return;

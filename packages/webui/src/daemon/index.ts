@@ -39,6 +39,8 @@ export type {
   DaemonConnectionState,
   DaemonConnectionStatus,
   DaemonModelInfo,
+  DaemonReasoningEffort,
+  DaemonReasoningState,
   DaemonNoticeCategory,
   DaemonNoticeOperation,
   DaemonNoticeSeverity,

@@ -9,9 +9,10 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
-  isQwen38MaxStableWireModel,
+  getModelReasoningControls,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
+  resolveModelReasoningControls,
   resolveModelConfig,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
@@ -21,6 +22,7 @@ import {
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
+import { getModelReasoningPreference } from '../config/model-reasoning-preferences.js';
 import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
 
 /**
@@ -432,21 +434,31 @@ export function resolveCliGenerationConfig(
   // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
   // normalizes to undefined and is silently skipped below. Surface it as a
   // warning so the user isn't left wondering why /effort had no effect.
+  const reasoningRegistration = getModelReasoningControls(
+    resolved.config.model,
+  );
   const invalidReasoningEffortWarning =
-    rawReasoningEffort && !reasoningEffort
+    !reasoningRegistration && rawReasoningEffort && !reasoningEffort
       ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
-  const stableQwen38Max = isQwen38MaxStableWireModel(resolved.config.model);
-  if (stableQwen38Max && settings.model?.thinkingEnabled === false) {
-    generationConfig.reasoning = false;
-  } else if (stableQwen38Max) {
-    generationConfig.reasoning = {
-      ...(generationConfig.reasoning || {}),
-      effort:
-        reasoningEffort === 'low' || reasoningEffort === 'medium'
-          ? reasoningEffort
-          : 'xhigh',
-    };
+  if (reasoningRegistration) {
+    const resolvedReasoning = resolveModelReasoningControls(
+      resolved.config.model,
+      getModelReasoningPreference(settings, resolved.config.model || ''),
+    );
+    if (resolvedReasoning?.thinkingEnabled === false) {
+      generationConfig.reasoning = false;
+    } else if (resolvedReasoning?.effort) {
+      generationConfig.reasoning = {
+        ...(generationConfig.reasoning || {}),
+        effort: resolvedReasoning.effort,
+      };
+    } else if (
+      reasoningRegistration.thinking &&
+      generationConfig.reasoning === false
+    ) {
+      generationConfig.reasoning = undefined;
+    }
   } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),

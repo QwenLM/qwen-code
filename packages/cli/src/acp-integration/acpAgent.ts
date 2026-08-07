@@ -92,7 +92,8 @@ import {
   refreshMemoryInstruction,
   extractDaemonTraceContext,
   withDaemonSpan,
-  isQwen38MaxStableWireModel,
+  getModelReasoningControls,
+  normalizeModelReasoningEffort,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -11845,14 +11846,20 @@ class QwenAgent implements Agent {
         : config.getCurrentModelRegistryBaseUrl?.(),
     );
 
-    const mappedAvailableModels = modelOptions.map(({ model, modelId }) => ({
-      modelId,
-      name: model.label,
-      description: model.description ?? null,
-      _meta: {
-        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
-      },
-    }));
+    const mappedAvailableModels = modelOptions.map(({ model, modelId }) => {
+      const reasoningControls = model.isRuntimeModel
+        ? undefined
+        : getModelReasoningControls(model.id);
+      return {
+        modelId,
+        name: model.label,
+        description: model.description ?? null,
+        _meta: {
+          contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
+          ...(reasoningControls ? { reasoningControls } : {}),
+        },
+      };
+    });
 
     return {
       currentModelId,
@@ -11924,39 +11931,42 @@ class QwenAgent implements Agent {
     };
 
     const configOptions = [modeConfigOption, modelConfigOption];
-    if (isQwen38MaxStableWireModel(rawCurrentModelId)) {
-      const preferredEffort = config.getReasoningEffortPreference();
-      const effort =
-        preferredEffort === 'low' || preferredEffort === 'medium'
-          ? preferredEffort
-          : 'xhigh';
-      configOptions.push(
-        {
-          id: 'thinking',
-          name: 'Thinking',
-          description: 'Enable or disable thinking for qwen3.8-max',
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue: config.isThinkingEnabled() ? 'on' : 'off',
-          options: [
-            { value: 'on', name: 'On', description: '' },
-            { value: 'off', name: 'Off', description: '' },
-          ],
-        },
-        {
-          id: 'effort',
-          name: 'Effort',
-          description: 'Reasoning effort for qwen3.8-max',
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue: effort,
-          options: [
-            { value: 'low', name: 'Low', description: '' },
-            { value: 'medium', name: 'Medium', description: '' },
-            { value: 'xhigh', name: 'Extra High', description: '' },
-          ],
-        },
-      );
+    const reasoningControls = getModelReasoningControls(rawCurrentModelId);
+    if (reasoningControls?.thinking) {
+      configOptions.push({
+        id: 'thinking',
+        name: 'Thinking',
+        description: `Enable or disable thinking for ${rawCurrentModelId}`,
+        category: 'thought_level',
+        type: 'select' as const,
+        currentValue: config.isThinkingEnabled() ? 'on' : 'off',
+        options: [
+          { value: 'on', name: 'On', description: '' },
+          { value: 'off', name: 'Off', description: '' },
+        ],
+      });
+    }
+    if (reasoningControls?.effort) {
+      const effort = normalizeModelReasoningEffort(
+        reasoningControls,
+        config.getReasoningEffortPreference(),
+      )!;
+      configOptions.push({
+        id: 'effort',
+        name: 'Effort',
+        description: `Reasoning effort for ${rawCurrentModelId}`,
+        category: 'thought_level',
+        type: 'select' as const,
+        currentValue: effort,
+        options: reasoningControls.effort.supported.map((value) => ({
+          value,
+          name:
+            value === 'xhigh'
+              ? 'Extra High'
+              : value.charAt(0).toUpperCase() + value.slice(1),
+          description: '',
+        })),
+      });
     }
     return configOptions;
   }

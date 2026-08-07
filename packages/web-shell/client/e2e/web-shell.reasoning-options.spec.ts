@@ -13,7 +13,11 @@ function reasoningConfigOptions(
 ) {
   return [
     { id: 'thinking', currentValue: thinking },
-    { id: 'effort', currentValue: effort },
+    {
+      id: 'effort',
+      currentValue: effort,
+      options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+    },
   ];
 }
 
@@ -22,9 +26,49 @@ function createReasoningScenario(
 ): WebShellDaemonScenario {
   const scenario = createWebShellDaemonScenario({
     currentModel,
-    state: { configOptions: reasoningConfigOptions() },
+    state: {
+      configOptions:
+        currentModel === 'qwen3.8-max' ? reasoningConfigOptions() : [],
+    },
   });
   scenario.capabilities.features.push('session_reasoning_control');
+  if (currentModel === 'qwen3.8-max') {
+    const reasoningControls = {
+      thinking: { defaultEnabled: true },
+      effort: {
+        supported: ['low', 'medium', 'xhigh'] as const,
+        default: 'xhigh' as const,
+      },
+    };
+    scenario.providers.providers = scenario.providers.providers.map(
+      (provider) => ({
+        ...provider,
+        models: provider.models.map((model) => ({
+          ...model,
+          ...(model.baseModelId === currentModel
+            ? {
+                reasoningControls: {
+                  ...reasoningControls,
+                  effort: {
+                    ...reasoningControls.effort,
+                    supported: [...reasoningControls.effort.supported],
+                  },
+                },
+              }
+            : {}),
+        })),
+      }),
+    );
+    scenario.settings.settings.push({
+      key: 'model.reasoningPreferences',
+      type: 'object',
+      label: 'Model Reasoning Preferences',
+      category: 'Model',
+      requiresRestart: false,
+      default: {},
+      values: { effective: {}, user: {} },
+    });
+  }
   return scenario;
 }
 
@@ -112,4 +156,47 @@ test('does not expose controls when the daemon lacks the capability', async ({
 
   await page.locator('[data-web-shell-model-button]').click();
   await expect(page.getByRole('switch', { name: 'Thinking' })).toHaveCount(0);
+});
+
+test('uses catalog capabilities before a session exists', async ({
+  page,
+}, testInfo) => {
+  const scenario = createReasoningScenario();
+  scenario.sessions = [];
+  const preferences = scenario.settings.settings.find(
+    (setting) => setting.key === 'model.reasoningPreferences',
+  );
+  const existingPreferences = { 'other-model': { effort: 'high' } };
+  if (preferences) {
+    preferences.values.effective = existingPreferences;
+    preferences.values.user = existingPreferences;
+  }
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await expect(modelButton).toContainText('Extra High');
+  await modelButton.click();
+  await page.getByRole('button', { name: 'Medium' }).click();
+
+  await expect
+    .poll(
+      () =>
+        daemon.requests
+          .filter(
+            (request) =>
+              request.method === 'POST' &&
+              request.path === '/workspace/settings',
+          )
+          .at(-1)?.body,
+    )
+    .toEqual({
+      scope: 'user',
+      key: 'model.reasoningPreferences',
+      value: {
+        'other-model': { effort: 'high' },
+        'qwen3.8-max': { effort: 'medium' },
+      },
+    });
 });

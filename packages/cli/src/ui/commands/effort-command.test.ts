@@ -33,6 +33,7 @@ describe('effortCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
+          getModel: vi.fn().mockReturnValue('unregistered-model'),
           getReasoningEffort,
           setReasoningEffort,
         } as unknown as Config,
@@ -41,6 +42,8 @@ describe('effortCommand', () => {
           isTrusted: true,
           user: { settings: {} },
           workspace: { settings: {} },
+          merged: {},
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
         } as never,
       },
     });
@@ -97,6 +100,18 @@ describe('effortCommand', () => {
   it('normalizes aliases such as x-high', async () => {
     await effortCommand.action!(context, 'x-high');
     expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
+  });
+
+  it('normalizes and persists effort per registered model', async () => {
+    vi.mocked(context.services.config!.getModel).mockReturnValue('qwen3.8-max');
+    const res = await effortCommand.action!(context, 'max');
+    expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningPreferences',
+      { 'qwen3.8-max': { effort: 'xhigh' } },
+    );
+    expect((res as { content: string }).content).toContain('normalized');
   });
 
   it('rejects an unknown tier without mutating config or settings', async () => {

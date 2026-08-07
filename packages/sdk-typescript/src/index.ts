@@ -277,6 +277,8 @@ export {
   type DaemonWorkspaceMcpInitializeResult,
   type DaemonWorkspaceAcpStatusResult,
   type DaemonWorkspaceAcpPreheatResult,
+  type DaemonModelReasoningControls,
+  type DaemonModelReasoningEffort,
   type DaemonWorkspaceProviderCurrent,
   type DaemonWorkspaceProviderModel,
   type DaemonWorkspaceProviderStatus,

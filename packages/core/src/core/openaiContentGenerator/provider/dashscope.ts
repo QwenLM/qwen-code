@@ -19,10 +19,13 @@ import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js'
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import {
-  isQwen38MaxStableWireModel,
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
+import {
+  getModelReasoningControls,
+  normalizeModelReasoningEffort,
+} from '../../model-reasoning-controls.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
@@ -340,11 +343,16 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return {};
     }
     const rawWireModel = model ?? this.contentGeneratorConfig.model ?? '';
-    if (isQwen38MaxStableWireModel(rawWireModel)) {
-      const effort = reasoning.effort;
+    const reasoningControls =
+      rawWireModel === 'qwen3.8-max'
+        ? getModelReasoningControls(rawWireModel)
+        : undefined;
+    if (reasoningControls?.effort) {
       return {
-        reasoning_effort:
-          effort === 'low' || effort === 'medium' ? effort : 'xhigh',
+        reasoning_effort: normalizeModelReasoningEffort(
+          reasoningControls,
+          reasoning.effort,
+        ),
       };
     }
     const wireModel = this.resolveWireModel(model);

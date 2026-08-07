@@ -19,12 +19,17 @@ describe('useEffortCommand', () => {
   beforeEach(() => {
     setReasoningEffort = vi.fn();
     setValue = vi.fn();
-    config = { setReasoningEffort } as unknown as Config;
+    config = {
+      getModel: vi.fn().mockReturnValue('unregistered-model'),
+      setReasoningEffort,
+    } as unknown as Config;
     settings = {
       setValue,
       isTrusted: true,
       user: { settings: {} },
       workspace: { settings: {} },
+      merged: {},
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
     } as unknown as LoadedSettings;
   });
 
@@ -65,6 +70,7 @@ describe('useEffortCommand', () => {
   it('confirms the requested tier in-chat on success', () => {
     const addItem = vi.fn();
     config = {
+      getModel: vi.fn().mockReturnValue('unregistered-model'),
       setReasoningEffort,
       getReasoningEffort: vi.fn().mockReturnValue('xhigh'),
     } as unknown as Config;
@@ -84,6 +90,7 @@ describe('useEffortCommand', () => {
   it('warns in-chat when thinking is disabled (tier did not take effect)', () => {
     const addItem = vi.fn();
     config = {
+      getModel: vi.fn().mockReturnValue('unregistered-model'),
       setReasoningEffort,
       // Thinking disabled: setReasoningEffort is a no-op, so the read-back
       // returns something other than the requested tier.

@@ -36,6 +36,8 @@ import type {
   DaemonTranscriptStore,
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonModelReasoningControls,
+  DaemonModelReasoningEffort,
   HeartbeatResult,
   PermissionResponse,
   PromptResult,
@@ -97,11 +99,14 @@ export interface DaemonConnectionState {
   missingSession?: boolean;
 }
 
-export type DaemonReasoningEffort = 'low' | 'medium' | 'xhigh';
+export type DaemonReasoningEffort = DaemonModelReasoningEffort;
 
 export interface DaemonReasoningState {
-  thinkingEnabled: boolean;
-  effort: DaemonReasoningEffort;
+  thinking?: { enabled: boolean };
+  effort?: {
+    value: DaemonReasoningEffort;
+    options: DaemonReasoningEffort[];
+  };
 }
 
 export interface DaemonTokenUsage {
@@ -248,6 +253,7 @@ export interface DaemonModelInfo {
   };
   baseUrl?: string;
   envKey?: string;
+  reasoningControls?: DaemonModelReasoningControls;
   isRuntime?: boolean;
 }
 

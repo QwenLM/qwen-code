@@ -103,6 +103,7 @@ export function getConnectionAfterSessionClear(
     // check refetch fresh data for the next session.
     delete next.supportedCommands;
     delete next.context;
+    delete next.reasoning;
     // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
     // MCP-prompt and workflow slash commands all live at the workspace/config
     // level, not the session), so they stay valid after the session is
@@ -531,7 +532,11 @@ export function createDaemonSessionActions({
           session.setModel(modelId),
           'Set model timed out',
         );
-        setConnection((current) => ({ ...current, currentModel: modelId }));
+        setConnection((current) => ({
+          ...current,
+          currentModel: modelId,
+          reasoning: undefined,
+        }));
         return result;
       } catch (error) {
         throw dispatchActionError(

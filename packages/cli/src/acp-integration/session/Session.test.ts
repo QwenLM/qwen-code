@@ -724,6 +724,13 @@ describe('Session', () => {
       isTrusted: false,
       user: { settings: {} },
       workspace: { settings: {} },
+      forScope: vi
+        .fn()
+        .mockImplementation((scope: SettingScope) =>
+          scope === SettingScope.Workspace
+            ? mockSettings.workspace
+            : mockSettings.user,
+        ),
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
     } as unknown as LoadedSettings;
@@ -2761,9 +2768,16 @@ describe('Session', () => {
       const restoredSettings = {
         ...mockSettings,
         merged: {
-          model: { reasoningEffort: 'medium', thinkingEnabled: false },
+          model: {
+            reasoningPreferences: {
+              'qwen3.8-max': {
+                effort: 'medium',
+                thinkingEnabled: false,
+              },
+            },
+          },
         },
-      } as LoadedSettings;
+      } as unknown as LoadedSettings;
 
       new Session('restored-session', mockConfig, mockClient, restoredSettings);
 
@@ -2785,13 +2799,10 @@ describe('Session', () => {
       );
       expect(mockSettings.setValue).toHaveBeenCalledWith(
         SettingScope.User,
-        'model.thinkingEnabled',
-        false,
-      );
-      expect(mockSettings.setValue).toHaveBeenCalledWith(
-        SettingScope.User,
-        'model.reasoningEffort',
-        'xhigh',
+        'model.reasoningPreferences',
+        {
+          'qwen3.8-max': { thinkingEnabled: false, effort: 'xhigh' },
+        },
       );
     });
 
@@ -2802,14 +2813,14 @@ describe('Session', () => {
       expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith('medium');
 
       await expect(session.setEffort('max')).rejects.toThrow(
-        'Unknown qwen3.8-max effort',
+        'Unknown effort for qwen3.8-max',
       );
     });
 
     it('rejects the preview model', async () => {
       currentModel = 'qwen3.8-max-preview';
       await expect(session.setThinking('off')).rejects.toThrow(
-        'only available for qwen3.8-max',
+        'not available for qwen3.8-max-preview',
       );
     });
 
@@ -2831,9 +2842,16 @@ describe('Session', () => {
       const restoredSettings = {
         ...mockSettings,
         merged: {
-          model: { reasoningEffort: 'medium', thinkingEnabled: false },
+          model: {
+            reasoningPreferences: {
+              'qwen3.8-max': {
+                effort: 'medium',
+                thinkingEnabled: false,
+              },
+            },
+          },
         },
-      } as LoadedSettings;
+      } as unknown as LoadedSettings;
       const restoredSession = new Session(
         'model-switch-session',
         mockConfig,

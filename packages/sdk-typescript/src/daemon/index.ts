@@ -605,6 +605,8 @@ export type {
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceAcpStatusResult,
   DaemonWorkspaceAcpPreheatResult,
+  DaemonModelReasoningControls,
+  DaemonModelReasoningEffort,
   DaemonWorkspaceProviderCurrent,
   DaemonWorkspaceProviderModel,
   DaemonWorkspaceProviderStatus,

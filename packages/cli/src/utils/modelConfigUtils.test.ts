@@ -1850,7 +1850,13 @@ describe('modelConfigUtils', () => {
           expect(
             resolveForModel('qwen3.8-max', {
               name: 'qwen3.8-max',
-              reasoningEffort,
+              ...(reasoningEffort
+                ? {
+                    reasoningPreferences: {
+                      'qwen3.8-max': { effort: reasoningEffort },
+                    },
+                  }
+                : {}),
             }).generationConfig.reasoning,
           ).toEqual({ effort: 'xhigh' });
         },
@@ -1860,7 +1866,7 @@ describe('modelConfigUtils', () => {
         expect(
           resolveForModel('qwen3.8-max', {
             name: 'qwen3.8-max',
-            reasoningEffort: effort,
+            reasoningPreferences: { 'qwen3.8-max': { effort } },
           }).generationConfig.reasoning,
         ).toEqual({ effort });
       });
@@ -1869,8 +1875,12 @@ describe('modelConfigUtils', () => {
         expect(
           resolveForModel('qwen3.8-max', {
             name: 'qwen3.8-max',
-            reasoningEffort: 'medium',
-            thinkingEnabled: false,
+            reasoningPreferences: {
+              'qwen3.8-max': {
+                effort: 'medium',
+                thinkingEnabled: false,
+              },
+            },
           }).generationConfig.reasoning,
         ).toBe(false);
       });

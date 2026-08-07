@@ -274,6 +274,30 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(modelIds).not.toContain('voice-model(openai)');
   });
 
+  it('publishes registered reasoning controls with the model catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [{ id: 'qwen3.8-max', name: 'Qwen 3.8 Max' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'qwen3.8-max');
+
+    expect(model?.reasoningControls).toEqual({
+      thinking: { defaultEnabled: true },
+      effort: {
+        supported: ['low', 'medium', 'xhigh'],
+        default: 'xhigh',
+      },
+    });
+  });
+
   it('reports custom providerProtocol models under their resolved auth type', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

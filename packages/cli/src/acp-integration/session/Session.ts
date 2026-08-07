@@ -166,10 +166,14 @@ import {
   approxBase64Bytes,
   runWithRuntimeContentGenerator,
   getInvocationContext,
-  isQwen38MaxStableWireModel,
-  normalizeReasoningEffort,
+  getModelReasoningControls,
+  resolveModelReasoningControls,
   runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
+import {
+  getModelReasoningPreference,
+  mergeModelReasoningPreference,
+} from '../../config/model-reasoning-preferences.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
@@ -6857,10 +6861,12 @@ export class Session implements SessionContext {
   }
 
   async setThinking(value: string): Promise<void> {
-    if (!isQwen38MaxStableWireModel(this.config.getModel())) {
+    const model = this.config.getModel();
+    const registration = getModelReasoningControls(model);
+    if (!registration?.thinking) {
       throw RequestError.invalidParams(
         undefined,
-        'Thinking controls are only available for qwen3.8-max',
+        `Thinking controls are not available for ${model}`,
       );
     }
     if (value !== 'on' && value !== 'off') {
@@ -6869,48 +6875,75 @@ export class Session implements SessionContext {
         `Unknown thinking value: ${value}`,
       );
     }
-    const current = this.config.getReasoningEffortPreference();
-    const effort =
-      current === 'low' || current === 'medium' ? current : 'xhigh';
-    this.config.setThinkingEnabled(value === 'on', effort);
+    const resolved = resolveModelReasoningControls(
+      model,
+      getModelReasoningPreference(this.settings.merged, model),
+    );
+    this.config.setThinkingEnabled(value === 'on', resolved?.effort);
     const scope = getPersistScopeForModelSelection(this.settings);
-    this.settings.setValue(scope, 'model.thinkingEnabled', value === 'on');
-    this.settings.setValue(scope, 'model.reasoningEffort', effort);
+    this.settings.setValue(
+      scope,
+      'model.reasoningPreferences',
+      mergeModelReasoningPreference(
+        this.settings.forScope(scope).settings,
+        model,
+        {
+          thinkingEnabled: value === 'on',
+          ...(resolved?.effort ? { effort: resolved.effort } : {}),
+        },
+      ),
+    );
   }
 
   #syncReasoningSettingsForCurrentModel(): void {
-    const persistedEffort = normalizeReasoningEffort(
-      this.settings.merged.model?.reasoningEffort,
+    const model = this.config.getModel();
+    const registration = getModelReasoningControls(model);
+    if (!registration) return;
+    const resolved = resolveModelReasoningControls(
+      model,
+      getModelReasoningPreference(this.settings.merged, model),
     );
-    if (isQwen38MaxStableWireModel(this.config.getModel())) {
-      const effort =
-        persistedEffort === 'low' || persistedEffort === 'medium'
-          ? persistedEffort
-          : 'xhigh';
-      this.config.setReasoningEffort(effort);
-      this.config.setThinkingEnabled(
-        this.settings.merged.model?.thinkingEnabled !== false,
-        effort,
-      );
+    if (resolved?.effort) {
+      this.config.setReasoningEffort(resolved.effort);
+    }
+    if (registration.thinking && resolved?.thinkingEnabled !== undefined) {
+      this.config.setThinkingEnabled(resolved.thinkingEnabled, resolved.effort);
     }
   }
 
   async setEffort(value: string): Promise<void> {
-    if (!isQwen38MaxStableWireModel(this.config.getModel())) {
+    const model = this.config.getModel();
+    const registration = getModelReasoningControls(model);
+    if (!registration?.effort) {
       throw RequestError.invalidParams(
         undefined,
-        'Effort controls are only available for qwen3.8-max',
+        `Effort controls are not available for ${model}`,
       );
     }
-    if (value !== 'low' && value !== 'medium' && value !== 'xhigh') {
+    if (
+      !registration.effort.supported.includes(
+        value as (typeof registration.effort.supported)[number],
+      )
+    ) {
       throw RequestError.invalidParams(
         undefined,
-        `Unknown qwen3.8-max effort: ${value}`,
+        `Unknown effort for ${model}: ${value}`,
       );
     }
-    this.config.setReasoningEffort(value);
+    const effort = value as (typeof registration.effort.supported)[number];
+    this.config.setReasoningEffort(effort);
     const scope = getPersistScopeForModelSelection(this.settings);
-    this.settings.setValue(scope, 'model.reasoningEffort', value);
+    this.settings.setValue(
+      scope,
+      'model.reasoningPreferences',
+      mergeModelReasoningPreference(
+        this.settings.forScope(scope).settings,
+        model,
+        {
+          effort,
+        },
+      ),
+    );
   }
 
   async sendConfigOptionsUpdate(

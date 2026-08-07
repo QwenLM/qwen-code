@@ -114,31 +114,34 @@ describe('POST /workspace/settings', () => {
     );
   });
 
-  it('exposes and persists the WebShell Thinking setting', async () => {
+  it('exposes and persists model reasoning preferences', async () => {
     const { app, persistSetting } = makeApp();
 
     const read = await request(app).get('/workspace/settings');
     expect(
       read.body.settings.find(
-        (setting: { key?: string }) => setting.key === 'model.thinkingEnabled',
+        (setting: { key?: string }) =>
+          setting.key === 'model.reasoningPreferences',
       ),
     ).toMatchObject({
-      default: true,
+      default: {},
       requiresRestart: false,
-      values: { effective: true },
+      values: { effective: {} },
     });
 
-    const write = await request(app).post('/workspace/settings').send({
-      scope: 'user',
-      key: 'model.thinkingEnabled',
-      value: false,
-    });
+    const write = await request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'user',
+        key: 'model.reasoningPreferences',
+        value: { 'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' } },
+      });
     expect(write.status).toBe(200);
     expect(persistSetting).toHaveBeenCalledWith(
       '/workspace',
       expect.any(String),
-      'model.thinkingEnabled',
-      false,
+      'model.reasoningPreferences',
+      { 'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' } },
     );
   });
 

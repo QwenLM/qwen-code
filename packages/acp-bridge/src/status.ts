@@ -486,6 +486,21 @@ export interface ServeWorkspaceProviderCurrent {
   visionModelId?: string;
 }
 
+export type ServeModelReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
+export interface ServeModelReasoningControls {
+  thinking?: { defaultEnabled: boolean };
+  effort?: {
+    supported: ServeModelReasoningEffort[];
+    default: ServeModelReasoningEffort;
+  };
+}
+
 export interface ServeWorkspaceProviderModel {
   modelId: string;
   baseModelId: string;
@@ -500,6 +515,7 @@ export interface ServeWorkspaceProviderModel {
   };
   baseUrl?: string;
   envKey?: string;
+  reasoningControls?: ServeModelReasoningControls;
   isCurrent: boolean;
   isRuntime: boolean;
 }

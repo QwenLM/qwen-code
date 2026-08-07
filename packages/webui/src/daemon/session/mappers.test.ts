@@ -50,13 +50,20 @@ function applyEvent(
 describe('reasoning config options', () => {
   const configOptions = [
     { id: 'thinking', currentValue: 'off' },
-    { id: 'effort', currentValue: 'medium' },
+    {
+      id: 'effort',
+      currentValue: 'medium',
+      options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+    },
   ];
 
   it('maps the ACP config option snapshot', () => {
     expect(mapReasoningConfigOptions(configOptions)).toEqual({
-      thinkingEnabled: false,
-      effort: 'medium',
+      thinking: { enabled: false },
+      effort: {
+        value: 'medium',
+        options: ['low', 'medium', 'xhigh'],
+      },
     });
   });
 
@@ -72,9 +79,48 @@ describe('reasoning config options', () => {
       },
     } as DaemonEvent);
     expect(next.reasoning).toEqual({
-      thinkingEnabled: false,
-      effort: 'medium',
+      thinking: { enabled: false },
+      effort: {
+        value: 'medium',
+        options: ['low', 'medium', 'xhigh'],
+      },
     });
+  });
+
+  it('maps thinking-only and effort-only option sets independently', () => {
+    expect(
+      mapReasoningConfigOptions([{ id: 'thinking', currentValue: 'on' }]),
+    ).toEqual({ thinking: { enabled: true } });
+    expect(
+      mapReasoningConfigOptions([
+        {
+          id: 'effort',
+          currentValue: 'max',
+          options: [{ value: 'high' }, { value: 'max' }],
+        },
+      ]),
+    ).toEqual({
+      effort: { value: 'max', options: ['high', 'max'] },
+    });
+  });
+
+  it('clears stale reasoning state when a peer switches models', () => {
+    const next = applyEvent(
+      {
+        status: 'connected',
+        currentModel: 'previous-model',
+        reasoning: {
+          effort: { value: 'medium', options: ['medium', 'xhigh'] },
+        },
+      },
+      {
+        v: 1,
+        type: 'model_switched',
+        data: { modelId: 'next-model' },
+      } as DaemonEvent,
+    );
+    expect(next.currentModel).toBe('next-model');
+    expect(next.reasoning).toBeUndefined();
   });
 });
 

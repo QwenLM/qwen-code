@@ -1601,6 +1601,21 @@ export interface DaemonWorkspaceProviderCurrent {
   fastModelId?: string;
 }
 
+export type DaemonModelReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
+export interface DaemonModelReasoningControls {
+  thinking?: { defaultEnabled: boolean };
+  effort?: {
+    supported: DaemonModelReasoningEffort[];
+    default: DaemonModelReasoningEffort;
+  };
+}
+
 export interface DaemonWorkspaceProviderModel {
   modelId: string;
   baseModelId: string;
@@ -1615,6 +1630,7 @@ export interface DaemonWorkspaceProviderModel {
   };
   baseUrl?: string;
   envKey?: string;
+  reasoningControls?: DaemonModelReasoningControls;
   isCurrent: boolean;
   isRuntime: boolean;
 }

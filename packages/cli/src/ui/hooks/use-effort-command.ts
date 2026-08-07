@@ -5,11 +5,17 @@
  */
 
 import { useState, useCallback } from 'react';
-import type { Config, ReasoningEffort } from '@qwen-code/qwen-code-core';
+import {
+  getModelReasoningControls,
+  normalizeModelReasoningEffort,
+  type Config,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import { t } from '../../i18n/index.js';
+import { mergeModelReasoningPreference } from '../../config/model-reasoning-preferences.js';
 
 interface UseEffortCommandReturn {
   isEffortDialogOpen: boolean;
@@ -37,12 +43,25 @@ export const useEffortCommand = (
         }
         // Apply at runtime (next turn) and persist for future sessions; provider
         // adapters clamp the tier to what the active model supports.
-        config.setReasoningEffort(effort);
-        loadedSettings.setValue(
-          getPersistScopeForModelSelection(loadedSettings),
-          'model.reasoningEffort',
-          effort,
-        );
+        const registration = getModelReasoningControls(config.getModel());
+        const effectiveEffort = registration?.effort
+          ? normalizeModelReasoningEffort(registration, effort)!
+          : effort;
+        config.setReasoningEffort(effectiveEffort);
+        const scope = getPersistScopeForModelSelection(loadedSettings);
+        if (registration?.effort) {
+          loadedSettings.setValue(
+            scope,
+            'model.reasoningPreferences',
+            mergeModelReasoningPreference(
+              loadedSettings.forScope(scope).settings,
+              config.getModel(),
+              { effort: effectiveEffort },
+            ),
+          );
+        } else {
+          loadedSettings.setValue(scope, 'model.reasoningEffort', effort);
+        }
         // Mirror the slash-command path's read-back so the dialog reports the
         // outcome in-chat instead of silently closing (the status line is the
         // only other signal). `setReasoningEffort` is a no-op when thinking is
@@ -50,13 +69,13 @@ export const useEffortCommand = (
         // for future sessions, but say it won't take effect until thinking is
         // re-enabled; otherwise confirm the requested tier.
         if (addItem) {
-          if (config.getReasoningEffort() !== effort) {
+          if (config.getReasoningEffort() !== effectiveEffort) {
             addItem(
               {
                 type: MessageType.INFO,
                 text: t(
                   'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-                  { tier: effort },
+                  { tier: effectiveEffort },
                 ),
               },
               Date.now(),
@@ -65,10 +84,16 @@ export const useEffortCommand = (
             addItem(
               {
                 type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
-                  { tier: effort },
-                ),
+                text:
+                  effectiveEffort === effort
+                    ? t(
+                        'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
+                        { tier: effort },
+                      )
+                    : t(
+                        'Reasoning effort: {{tier}} (normalized from {{requested}} for the active model).',
+                        { tier: effectiveEffort, requested: effort },
+                      ),
               },
               Date.now(),
             );

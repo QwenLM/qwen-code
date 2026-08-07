@@ -28,6 +28,9 @@ describe('getConnectionAfterSessionClear', () => {
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
         context: contextStatus('session-a'),
+        reasoning: {
+          effort: { value: 'medium', options: ['medium', 'xhigh'] },
+        },
         loadingTranscript: true,
         catchingUp: true,
         error: 'old error',
@@ -52,6 +55,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
+    expect(next).not.toHaveProperty('reasoning');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
     // commands (e.g. /review) keep autocompleting in the fresh deferred session
     // before its first prompt creates a session (mirrors #6153 / #6066).
@@ -551,7 +555,11 @@ describe('createDaemonSessionActions', () => {
     session.setConfigOption.mockResolvedValueOnce({
       configOptions: [
         { id: 'thinking', currentValue: 'off' },
-        { id: 'effort', currentValue: 'medium' },
+        {
+          id: 'effort',
+          currentValue: 'medium',
+          options: [{ value: 'medium' }, { value: 'xhigh' }],
+        },
       ],
     });
     const { actions, getConnection } = createActionsHarness({ session });
@@ -560,9 +568,30 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.setConfigOption).toHaveBeenCalledWith('thinking', 'off');
     expect(getConnection().reasoning).toEqual({
-      thinkingEnabled: false,
-      effort: 'medium',
+      thinking: { enabled: false },
+      effort: { value: 'medium', options: ['medium', 'xhigh'] },
     });
+  });
+
+  it('clears the previous model reasoning state after a model switch', async () => {
+    const session = createMockSession('session-a');
+    session.setModel.mockResolvedValueOnce({ modelId: 'next-model' });
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        currentModel: 'previous-model',
+        reasoning: {
+          thinking: { enabled: false },
+          effort: { value: 'medium', options: ['medium', 'xhigh'] },
+        },
+      },
+    });
+
+    await actions.setModel('next-model');
+
+    expect(getConnection()).toMatchObject({ currentModel: 'next-model' });
+    expect(getConnection().reasoning).toBeUndefined();
   });
 
   it('reports getTasks failures by default', async () => {
@@ -886,6 +915,7 @@ function createMockSession(sessionId: string) {
     cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
+    setModel: vi.fn(async (modelId: string) => ({ modelId })),
     setConfigOption: vi.fn(
       async (): Promise<{ configOptions: unknown[] }> => ({
         configOptions: [],

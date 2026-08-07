@@ -5087,19 +5087,64 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
     )?.values.effective === true;
-  const persistedThinkingEnabled =
-    workspaceSettings.find((setting) => setting.key === 'model.thinkingEnabled')
-      ?.values.effective !== false;
-  const persistedReasoningEffort = (() => {
-    const value = workspaceSettings.find(
-      (setting) => setting.key === 'model.reasoningEffort',
-    )?.values.effective;
-    return value === 'low' || value === 'medium' ? value : 'xhigh';
+  const reasoningPreferencesSetting = workspaceSettings.find(
+    (setting) => setting.key === 'model.reasoningPreferences',
+  );
+  const persistedReasoningPreferences = (() => {
+    const value = reasoningPreferencesSetting?.values.effective;
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
   })();
-  const composerReasoningState = connection.reasoning ?? {
-    thinkingEnabled: persistedThinkingEnabled,
-    effort: persistedReasoningEffort,
-  };
+  const composerReasoningState = useMemo(() => {
+    if (connection.reasoning) return connection.reasoning;
+    const model = connection.models?.find(
+      (candidate) => candidate.id === connection.currentModel,
+    );
+    const controls = model?.reasoningControls;
+    if (!controls) return undefined;
+    const rawPreference = model.baseModelId
+      ? persistedReasoningPreferences[model.baseModelId]
+      : undefined;
+    const preference =
+      rawPreference &&
+      typeof rawPreference === 'object' &&
+      !Array.isArray(rawPreference)
+        ? (rawPreference as Record<string, unknown>)
+        : undefined;
+    const storedEffort = preference?.['effort'];
+    return {
+      ...(controls.thinking
+        ? {
+            thinking: {
+              enabled:
+                typeof preference?.['thinkingEnabled'] === 'boolean'
+                  ? preference['thinkingEnabled']
+                  : controls.thinking.defaultEnabled,
+            },
+          }
+        : {}),
+      ...(controls.effort
+        ? {
+            effort: {
+              value:
+                typeof storedEffort === 'string' &&
+                controls.effort.supported.includes(
+                  storedEffort as (typeof controls.effort.supported)[number],
+                )
+                  ? (storedEffort as (typeof controls.effort.supported)[number])
+                  : controls.effort.default,
+              options: controls.effort.supported,
+            },
+          }
+        : {}),
+    };
+  }, [
+    connection.currentModel,
+    connection.models,
+    connection.reasoning,
+    persistedReasoningPreferences,
+  ]);
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -8227,25 +8272,44 @@ export function App({
         ? sessionActions.setConfigOption(configId, value)
         : (() => {
             const scope = providersState.status?.modelConfigScope ?? 'user';
-            const writes: Promise<unknown>[] = [
-              setWorkspaceSetting(
-                scope,
-                configId === 'thinking'
-                  ? 'model.thinkingEnabled'
-                  : 'model.reasoningEffort',
-                configId === 'thinking' ? value === 'on' : value,
-              ),
-            ];
-            if (configId === 'thinking') {
-              writes.push(
-                setWorkspaceSetting(
-                  scope,
-                  'model.reasoningEffort',
-                  composerReasoningState.effort,
-                ),
-              );
+            const scopedPreferences =
+              reasoningPreferencesSetting?.values[scope];
+            const currentScopedPreferences =
+              scopedPreferences &&
+              typeof scopedPreferences === 'object' &&
+              !Array.isArray(scopedPreferences)
+                ? (scopedPreferences as Record<string, unknown>)
+                : {};
+            const model = connectionRef.current.models?.find(
+              (candidate) =>
+                candidate.id === connectionRef.current.currentModel,
+            );
+            if (!model?.baseModelId) {
+              return Promise.reject(new Error('Current model is unavailable'));
             }
-            return Promise.all(writes).then(() => reloadWorkspaceSettings());
+            const currentPreference =
+              currentScopedPreferences[model.baseModelId];
+            const updatedPreferences = {
+              ...currentScopedPreferences,
+              [model.baseModelId]: {
+                ...(currentPreference &&
+                typeof currentPreference === 'object' &&
+                !Array.isArray(currentPreference)
+                  ? currentPreference
+                  : {}),
+                ...(configId === 'thinking'
+                  ? { thinkingEnabled: value === 'on' }
+                  : { effort: value }),
+                ...(configId === 'thinking' && composerReasoningState?.effort
+                  ? { effort: composerReasoningState.effort.value }
+                  : {}),
+              },
+            };
+            return setWorkspaceSetting(
+              scope,
+              'model.reasoningPreferences',
+              updatedPreferences,
+            ).then(() => reloadWorkspaceSettings());
           })();
       void update
         .catch((error: unknown) => {
@@ -8259,7 +8323,8 @@ export function App({
         );
     },
     [
-      composerReasoningState.effort,
+      composerReasoningState?.effort,
+      reasoningPreferencesSetting,
       reloadWorkspaceSettings,
       reportError,
       providersState.status?.modelConfigScope,

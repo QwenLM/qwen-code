@@ -641,10 +641,28 @@
             "max"
           ]
         },
-        "thinkingEnabled": {
-          "description": "Whether qwen3.8-max uses thinking. Only applies to the exact stable model id.",
-          "type": "boolean",
-          "default": true
+        "reasoningPreferences": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "thinkingEnabled": {
+                "type": "boolean"
+              },
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": "Thinking and effort preferences for models registered with configurable reasoning controls."
         },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",

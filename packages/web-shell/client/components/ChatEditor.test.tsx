@@ -270,8 +270,11 @@ function renderChatEditor(props: {
   onSelectModel?: (model: string) => void;
   reasoningControlsSupported?: boolean;
   reasoningState?: {
-    thinkingEnabled: boolean;
-    effort: 'low' | 'medium' | 'xhigh';
+    thinking?: { enabled: boolean };
+    effort?: {
+      value: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+      options: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>;
+    };
   };
   reasoningBusy?: boolean;
   onSelectReasoningOption?: (
@@ -1011,7 +1014,10 @@ describe('ChatEditor toolbar popovers', () => {
         },
       ],
       reasoningControlsSupported: true,
-      reasoningState: { thinkingEnabled: true, effort: 'xhigh' },
+      reasoningState: {
+        thinking: { enabled: true },
+        effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+      },
       onSelectReasoningOption,
     });
 
@@ -1035,6 +1041,47 @@ describe('ChatEditor toolbar popovers', () => {
     expect(trigger?.getAttribute('aria-expanded')).toBe('true');
   });
 
+  it('renders a thinking-only registered model without an effort section', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'thinking-only',
+      availableModels: [{ id: 'thinking-only', label: 'Thinking Only' }],
+      reasoningControlsSupported: true,
+      reasoningState: { thinking: { enabled: true } },
+      onSelectReasoningOption: vi.fn(),
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(trigger?.textContent?.trim()).toBe('Thinking Only');
+    act(() => trigger?.click());
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover?.querySelector('[role="switch"]')).not.toBeNull();
+    expect(popover?.textContent).not.toContain('Effort');
+  });
+
+  it('renders an effort-only model using the daemon-provided tiers', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'effort-only',
+      availableModels: [{ id: 'effort-only', label: 'Effort Only' }],
+      reasoningControlsSupported: true,
+      reasoningState: {
+        effort: { value: 'max', options: ['high', 'max'] },
+      },
+      onSelectReasoningOption: vi.fn(),
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(trigger?.textContent).toContain('Effort Only · Max');
+    act(() => trigger?.click());
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover?.querySelector('[role="switch"]')).toBeNull();
+    expect(popover?.textContent).toContain('High');
+    expect(popover?.textContent).toContain('Max');
+  });
+
   it('does not expose reasoning options for qwen3.8-max-preview', () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['model'],
@@ -1047,7 +1094,6 @@ describe('ChatEditor toolbar popovers', () => {
         },
       ],
       reasoningControlsSupported: true,
-      reasoningState: { thinkingEnabled: true, effort: 'xhigh' },
       onSelectReasoningOption: vi.fn(),
     });
     act(() =>

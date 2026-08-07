@@ -13,6 +13,7 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
   ProviderProtocolConfig,
+  ModelReasoningPreference,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -1464,15 +1465,29 @@ const SETTINGS_SCHEMA = {
           { value: 'max', label: 'Max' },
         ],
       },
-      thinkingEnabled: {
-        type: 'boolean',
-        label: 'Thinking',
+      reasoningPreferences: {
+        type: 'object',
+        label: 'Model Reasoning Preferences',
         category: 'Model',
         requiresRestart: false,
-        default: true,
+        default: {} as Record<string, ModelReasoningPreference>,
         description:
-          'Whether qwen3.8-max uses thinking. Only applies to the exact stable model id.',
+          'Thinking and effort preferences for models registered with configurable reasoning controls.',
         showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: {
+            type: 'object',
+            properties: {
+              thinkingEnabled: { type: 'boolean' },
+              effort: {
+                type: 'string',
+                enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+              },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       maxSessionTurns: {
         type: 'integer',
