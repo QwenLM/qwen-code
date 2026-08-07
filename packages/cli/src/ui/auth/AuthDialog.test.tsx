@@ -463,6 +463,26 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     expect(frame).toContain('▼');
   });
 
+  it('should paginate the provider sub-menu when the dialog height is small', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      17,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(17);
+    expect(frame).toContain('Third-party Providers · Provider');
+    expect(frame).toContain('DeepSeek API Key');
+    expect(frame).not.toContain('Z.AI API Key');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
   it('keeps the main menu within the exact height when an error is shown', () => {
     const { lastFrame } = renderAuthDialog(
       createSettings(),

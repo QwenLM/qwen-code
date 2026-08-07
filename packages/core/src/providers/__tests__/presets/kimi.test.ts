@@ -89,6 +89,20 @@ describe('kimiProvider', () => {
     expect(plan.modelProviders?.[0]?.models?.[0]?.envKey).toBe(
       KIMI_CODE_ENV_KEY,
     );
+
+    expect(typeof kimiProvider.documentationUrl).toBe('function');
+    const documentationUrl = kimiProvider.documentationUrl as (
+      baseUrl: string,
+    ) => string;
+    expect(documentationUrl(`${KIMI_CODE_BASE_URL}/`)).toBe(
+      'https://www.kimi.com/code/docs/en/',
+    );
+    expect(documentationUrl('https://api.moonshot.cn/v1/')).toBe(
+      'https://platform.kimi.com/docs/api/overview',
+    );
+    expect(documentationUrl('https://api.moonshot.ai/v1/')).toBe(
+      'https://platform.kimi.ai/docs/api/overview',
+    );
   });
 
   it('offers one provider with Coding Plan and regional API choices', () => {

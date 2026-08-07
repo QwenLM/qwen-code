@@ -119,7 +119,8 @@ export const kimiProvider: ProviderConfig = {
   documentationUrl: (baseUrl) =>
     isKimiCode(baseUrl)
       ? 'https://www.kimi.com/code/docs/en/'
-      : baseUrl === 'https://api.moonshot.cn/v1'
+      : normalizeBaseUrlForMatching(baseUrl) ===
+          normalizeBaseUrlForMatching('https://api.moonshot.cn/v1')
         ? 'https://platform.kimi.com/docs/api/overview'
         : 'https://platform.kimi.ai/docs/api/overview',
   ownsModel: ownsKimiModel,
