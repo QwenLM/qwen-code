@@ -80,7 +80,7 @@ export async function startInteractiveUI(
   const { pickRenderer, isExperimentalRenderer } = await import('./render/dispatch.js');
   if (isExperimentalRenderer(pickRenderer())) {
     const { startOpenTuiUI } = await import('./render/opentuiEntry.js');
-    await startOpenTuiUI();
+    await startOpenTuiUI({ config });
     return;
   }
 

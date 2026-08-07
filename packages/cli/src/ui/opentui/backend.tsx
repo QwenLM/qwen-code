@@ -26,6 +26,8 @@ import { buildScenario, TOKEN_INTERVAL_MS, type StreamEvent } from "./stream-scr
 
 // Data shapes come from the framework-neutral model (single source of truth).
 import type { HistoryItem as ChatItem } from "../model/streamingModel";
+import type { Config } from "../../../core/src/config/config.js";
+import { livePromptEvents } from "./liveSession.js";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -188,7 +190,7 @@ function AssistantMessage(props: { item: Extract<ChatItem, { kind: "assistant" }
 // app
 // ---------------------------------------------------------------------------
 
-function App({ events }: { events?: AsyncIterable<StreamEvent> }) {
+function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?: Config }) {
   const renderer = useRenderer();
   const { width } = useTerminalDimensions();
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -374,8 +376,19 @@ function App({ events }: { events?: AsyncIterable<StreamEvent> }) {
     el?.requestRender();
     if (!text) return;
     setItems((prev) => [...prev, { kind: "user", id: nid("u"), text }]);
+    if (config) {
+      // Live client wiring: submit to the real agent loop.
+      (async () => {
+        try {
+          for await (const ev of livePromptEvents(config, text)) applyEvent(ev);
+        } catch (err) {
+          applyEvent({ type: "text", delta: `\n[live error] ${String(err)}` });
+        }
+      })();
+      return;
+    }
     startStream(); // scripted: every submission replays the scenario
-  }, [startStream]);
+  }, [startStream, config, applyEvent]);
 
   return (
     <box flexDirection="column" width={width} height="100%">

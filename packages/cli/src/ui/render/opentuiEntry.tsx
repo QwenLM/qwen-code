@@ -22,14 +22,16 @@ import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { App } from '../opentui/backend.js';
 import type { StreamEvent } from '../model/streamingModel.js';
+import type { Config } from '../../../core/src/config/config.js';
 
 /**
- * @param events optional real agent-loop stream (already adapted to the
- *   neutral `StreamEvent` via `./eventAdapter`); when omitted the backend runs
- *   its scripted validation conversation.
+ * @param events optional pre-adapted neutral stream (resume mode).
+ * @param config when provided, the backend submits prompts to the REAL client
+ *   (`liveSession`) for live conversations (requires credentials).
  */
 export async function startOpenTuiUI(opts?: {
   events?: AsyncIterable<StreamEvent>;
+  config?: Config;
 }): Promise<void> {
   const renderer = await createCliRenderer({
     targetFps: 60,
@@ -39,5 +41,5 @@ export async function startOpenTuiUI(opts?: {
     externalOutputMode: 'passthrough',
     autoFocus: true,
   });
-  createRoot(renderer).render(<App events={opts?.events} />);
+  createRoot(renderer).render(<App events={opts?.events} config={opts?.config} />);
 }
