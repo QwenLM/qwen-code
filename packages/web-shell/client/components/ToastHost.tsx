@@ -10,12 +10,13 @@ export interface WebShellToast {
   id: string;
   tone: ToastTone;
   message: string;
+  /** Epoch ms when the toast auto-dismisses; survives host remounts. */
+  dismissAt: number;
 }
 
 interface ToastHostProps {
   toasts: readonly WebShellToast[];
   onDismiss: (id: string) => void;
-  autoDismissMs?: number;
   /** Paint above dialog-backdrop-tier surfaces (fullscreen artifact panel). */
   elevated?: boolean;
 }
@@ -23,7 +24,6 @@ interface ToastHostProps {
 export function ToastHost({
   toasts,
   onDismiss,
-  autoDismissMs = 5000,
   elevated = false,
 }: ToastHostProps) {
   const portalRoot = useWebShellPortalRoot();
@@ -36,12 +36,7 @@ export function ToastHost({
       data-web-shell-toast-host
     >
       {toasts.map((toast) => (
-        <ToastItem
-          key={toast.id}
-          toast={toast}
-          onDismiss={onDismiss}
-          autoDismissMs={autoDismissMs}
-        />
+        <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
       ))}
     </div>
   );
@@ -56,17 +51,20 @@ export function ToastHost({
 function ToastItem({
   toast,
   onDismiss,
-  autoDismissMs,
 }: {
   toast: WebShellToast;
   onDismiss: (id: string) => void;
-  autoDismissMs: number;
 }) {
   const { t } = useI18n();
   useEffect(() => {
-    const timer = window.setTimeout(() => onDismiss(toast.id), autoDismissMs);
+    // Schedule against the deadline, not a fresh duration: toggling
+    // `elevated` moves the host between the app tree and the portal root,
+    // remounting this item, and a full new timer per remount would keep a
+    // toast on screen indefinitely across repeated toggles.
+    const delay = Math.max(0, toast.dismissAt - Date.now());
+    const timer = window.setTimeout(() => onDismiss(toast.id), delay);
     return () => window.clearTimeout(timer);
-  }, [autoDismissMs, onDismiss, toast.id]);
+  }, [onDismiss, toast.id, toast.dismissAt]);
 
   return (
     <div

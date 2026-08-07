@@ -1652,6 +1652,10 @@ describe('task activity key', () => {
     expect(
       fullscreenOverlay?.closest('[data-web-shell-portal-root]'),
     ).not.toBeNull();
+    // Modal role/name parity with the floating variant, where vaul's Radix
+    // dialog supplies them.
+    expect(fullscreenOverlay?.getAttribute('role')).toBe('dialog');
+    expect(fullscreenOverlay?.getAttribute('aria-label')).toBe('Right panel');
     // Chat-only interaction is gated while the surface covers the chat.
     expect(testState.latestChatEditorProps?.disabled).toBe(true);
     // Panel toasts elevate alongside the surface.
@@ -1693,6 +1697,12 @@ describe('task activity key', () => {
     // The surface moved back into the app tree's layout slot, and the chat
     // interaction gate and toast elevation reset with it.
     expect(container.contains(dockedAside)).toBe(true);
+    // The docked (non-modal) panel drops the dialog role again.
+    expect(
+      dockedAside
+        ?.closest('[class*="artifactPanelDock"]')
+        ?.getAttribute('role'),
+    ).toBeNull();
     expect(testState.latestChatEditorProps?.disabled).toBe(false);
     expect(testState.latestToastHostElevated).toBe(false);
     // The dock node just swapped back from fullscreen: suppress its open
@@ -2924,6 +2934,267 @@ describe('artifact panel fullscreen', () => {
       ),
     ).not.toBeNull();
     globalThis.ResizeObserver = originalResizeObserver;
+  });
+
+  it('keeps the elevated toast host out of the fullscreen aria-hidden sweep', async () => {
+    const { container } = renderApp();
+    await flush();
+    // Elevation portals the toast host into the same portal root the
+    // fullscreen slot parks in; plant one before the surface goes up.
+    const portalRoot = document.querySelector('[data-web-shell-portal-root]');
+    expect(portalRoot).not.toBeNull();
+    const toastHost = document.createElement('div');
+    toastHost.setAttribute('data-web-shell-toast-host', '');
+    portalRoot!.appendChild(toastHost);
+    try {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        document.querySelector('[class*="artifactPanelFullscreen"]'),
+      ).not.toBeNull();
+      // Toasts carry functional messages (connection lost, side-task
+      // failures) — the sweep must hide the app without silencing them.
+      expect(toastHost.getAttribute('aria-hidden')).toBeNull();
+      // Control: the sweep still hides the app container.
+      expect(container.getAttribute('aria-hidden')).toBe('true');
+    } finally {
+      toastHost.remove();
+    }
+  });
+
+  it('defers aria-hidden restoration while a hideOthers lock owns the node', async () => {
+    const { container } = renderApp();
+    await flush();
+    // A body-level sibling of the portal root, hidden by the sweep like the
+    // app container is.
+    const probe = document.createElement('div');
+    document.body.appendChild(probe);
+    try {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(probe.getAttribute('aria-hidden')).toBe('true');
+      // A DialogShell opened over the surface marks its controlled nodes;
+      // it recorded this one as already hidden, so its unlock will not
+      // restore it.
+      probe.setAttribute('data-aria-hidden', 'true');
+      await act(async () => {
+        document
+          .querySelector('[class*="artifactPanelFullscreen"]')
+          ?.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'Escape',
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        document.querySelector('[class*="artifactPanelFullscreen"]'),
+      ).toBeNull();
+      // Restoring now would expose the app behind the open modal, and the
+      // control node without a lock restores immediately.
+      expect(probe.getAttribute('aria-hidden')).toBe('true');
+      expect(container.getAttribute('aria-hidden')).toBeNull();
+      // The lock releases; the deferred restore returns the node's state.
+      probe.removeAttribute('data-aria-hidden');
+      await flush();
+      expect(probe.hasAttribute('aria-hidden')).toBe(false);
+    } finally {
+      probe.remove();
+    }
+  });
+
+  it('keeps an open modal focus trap active when the docked panel mounts', async () => {
+    // Stand-in for an open DialogShell modal: a real Radix FocusScope trap,
+    // on the same module-global focus-scope stack a dialog registers in.
+    const { FocusScope } = await import('@radix-ui/react-focus-scope');
+    const trapContainer = document.createElement('div');
+    document.body.appendChild(trapContainer);
+    const trapRoot = createRoot(trapContainer);
+    try {
+      act(() => {
+        trapRoot.render(
+          <FocusScope trapped>
+            <button type="button">inside dialog</button>
+          </FocusScope>,
+        );
+      });
+      const trappedButton =
+        trapContainer.querySelector<HTMLButtonElement>('button');
+      expect(trappedButton).not.toBeNull();
+      expect(document.activeElement).toBe(trappedButton);
+
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).not.toBeNull();
+
+      // Focus escaping the modal must be pulled back into it; a trap paused
+      // by the panel mounting (the regression) leaves it outside.
+      const outside = container.querySelector<HTMLElement>(
+        '[data-testid="submit"]',
+      );
+      expect(outside).not.toBeNull();
+      outside!.focus();
+      expect(document.activeElement).toBe(trappedButton);
+    } finally {
+      act(() => trapRoot.unmount());
+      trapContainer.remove();
+    }
+  });
+
+  it('wraps Tab at the fullscreen surface edges', async () => {
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const surface = document.querySelector<HTMLElement>(
+      '[class*="artifactPanelFullscreen"]',
+    );
+    expect(surface).not.toBeNull();
+    const tabbables = Array.from(
+      surface!.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    expect(tabbables.length).toBeGreaterThan(1);
+    const first = tabbables[0]!;
+    const last = tabbables[tabbables.length - 1]!;
+    last.focus();
+    expect(document.activeElement).toBe(last);
+    await act(async () => {
+      surface!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(document.activeElement).toBe(first);
+    await act(async () => {
+      surface!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('shrinks fullscreen with one Escape while a forced session drawer is open', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]')?.className,
+    ).toContain('mobileDrawerForced');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // One Escape shrinks the surface: the forced (display:none) drawer must
+    // not swallow the key and force a second press.
+    await act(async () => {
+      document
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    // Escape only shrunk the surface; the drawer stays as it was.
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
   });
 });
 

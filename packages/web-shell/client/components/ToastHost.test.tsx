@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -23,7 +23,12 @@ function renderToastHost(
   const root = createRoot(container);
   mounted.push({ root, containers });
   const toasts: readonly WebShellToast[] = props.toasts ?? [
-    { id: 'toast-1', tone: 'info', message: 'Saved' },
+    {
+      id: 'toast-1',
+      tone: 'info',
+      message: 'Saved',
+      dismissAt: Date.now() + 5000,
+    },
   ];
   act(() => {
     root.render(
@@ -90,5 +95,58 @@ describe('ToastHost elevation', () => {
   it('renders nothing without toasts', () => {
     const container = renderToastHost({ elevated: true, toasts: [] });
     expect(findHost(container)).toBeNull();
+  });
+
+  it('keeps the auto-dismiss countdown across an elevation remount', () => {
+    vi.useFakeTimers();
+    const onDismiss = vi.fn();
+    const toast: WebShellToast = {
+      id: 'toast-1',
+      tone: 'info',
+      message: 'Saved',
+      dismissAt: Date.now() + 5000,
+    };
+    const portalRoot = document.createElement('div');
+    document.body.appendChild(portalRoot);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, containers: [container, portalRoot] });
+    const render = (elevated: boolean) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellPortalRootContext.Provider value={portalRoot}>
+              <ToastHost
+                toasts={[toast]}
+                onDismiss={onDismiss}
+                elevated={elevated}
+              />
+            </WebShellPortalRootContext.Provider>
+          </I18nProvider>,
+        );
+      });
+    try {
+      render(false);
+      act(() => {
+        vi.advanceTimersByTime(2500);
+      });
+      // Elevating portals the host out of the app tree, remounting the item;
+      // the countdown must continue from the original deadline, not restart.
+      render(true);
+      expect(findHost(portalRoot)).not.toBeNull();
+      expect(onDismiss).not.toHaveBeenCalled();
+      act(() => {
+        vi.advanceTimersByTime(2500);
+      });
+      expect(onDismiss).toHaveBeenCalledWith('toast-1');
+      // A re-armed full timer on the remount would dismiss again at 7500ms.
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(onDismiss).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
