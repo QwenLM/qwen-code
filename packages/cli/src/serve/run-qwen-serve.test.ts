@@ -1257,6 +1257,11 @@ describe('runQwenServe telemetry validation', () => {
       await closing;
     }
     expect(createBridge).toHaveBeenCalledTimes(2);
+    for (const [options] of createBridge.mock.calls) {
+      expect(options).toMatchObject({
+        delegateReadTextFileToClient: false,
+      });
+    }
     for (const result of createBridge.mock.results) {
       expect(result.value.shutdown).toHaveBeenCalledWith({
         reason: 'daemon_shutdown',
@@ -1485,6 +1490,11 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      for (const [options] of createBridge.mock.calls) {
+        expect(options).toMatchObject({
+          delegateReadTextFileToClient: false,
+        });
+      }
       let releaseRemoval!: (count: number) => void;
       removeByIds.mockImplementationOnce(
         () =>
