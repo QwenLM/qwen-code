@@ -596,6 +596,33 @@ describe('git extension helpers', () => {
       },
     );
 
+    it('uses the peeled commit when checking a recorded annotated tag', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/example/sample-qoder-plugin',
+          originSource: 'Qoder',
+          gitCommit: 'local-hash',
+          ref: 'v1.0.0',
+        },
+      });
+      mockGit.listRemote.mockResolvedValue(
+        'tag-hash\trefs/tags/v1.0.0\nlocal-hash\trefs/tags/v1.0.0^{}',
+      );
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      expect(mockGit.listRemote).toHaveBeenCalledWith([
+        'https://github.com/example/sample-qoder-plugin',
+        'v1.0.0',
+        'v1.0.0^{}',
+      ]);
+    });
+
     it('does not update-check legacy Qoder Git installs without a recorded commit', async () => {
       const extension = createExtension({
         installMetadata: {

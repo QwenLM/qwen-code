@@ -16,6 +16,7 @@ import {
 } from './claude-converter.js';
 import { realPathWithin } from './gemini-converter.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 export const QODER_PLUGIN_MANIFEST = '.qoder-plugin/plugin.json';
 
@@ -36,7 +37,16 @@ function loadQoderConfig(extensionDir: string): QoderPluginConfig {
     );
   }
 
-  const parsed: unknown = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  } catch (error) {
+    throw new Error(
+      stripAnsiAndControl(
+        `Invalid Qoder plugin configuration at ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+  }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(
       `Invalid Qoder plugin configuration at ${configPath}: expected a JSON object`,
@@ -71,7 +81,9 @@ function loadMcpServersFile(
     parsed = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
   } catch (error) {
     throw new Error(
-      `Invalid Qoder MCP configuration at ${mcpPath}: ${error instanceof Error ? error.message : String(error)}`,
+      stripAnsiAndControl(
+        `Invalid Qoder MCP configuration at ${mcpPath}: ${error instanceof Error ? error.message : String(error)}`,
+      ),
     );
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {

@@ -497,8 +497,11 @@ export async function checkForExtensionUpdate(
         installMetadata.networkPolicy,
       );
       const refToCheck = installMetadata.ref || 'HEAD';
+      const refPatterns = installMetadata.ref
+        ? [refToCheck, `${refToCheck}^{}`]
+        : [refToCheck];
 
-      const lsRemoteOutput = await git.listRemote([remoteUrl, refToCheck]);
+      const lsRemoteOutput = await git.listRemote([remoteUrl, ...refPatterns]);
       signal?.throwIfAborted();
 
       if (typeof lsRemoteOutput !== 'string' || lsRemoteOutput.trim() === '') {
@@ -506,7 +509,12 @@ export async function checkForExtensionUpdate(
         return ExtensionUpdateState.ERROR;
       }
 
-      const remoteHash = lsRemoteOutput.split('\t')[0];
+      const remoteLines = lsRemoteOutput.trim().split('\n');
+      const peeledLine = remoteLines.find((line) =>
+        line.split('\t')[1]?.endsWith('^{}'),
+      );
+      const remoteLine = peeledLine ?? remoteLines[0];
+      const remoteHash = remoteLine?.split('\t')[0];
       signal?.throwIfAborted();
 
       if (!remoteHash) {

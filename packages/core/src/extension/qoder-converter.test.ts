@@ -188,11 +188,15 @@ describe('convertQoderPlugin', () => {
 
   it('rejects malformed root MCP config', async () => {
     writeManifest({ name: 'sample-qoder-plugin' });
-    fs.writeFileSync(path.join(root, '.mcp.json'), '{', 'utf-8');
+    fs.writeFileSync(path.join(root, '.mcp.json'), '\u001b[31m{', 'utf-8');
 
-    await expect(convertQoderPlugin(root)).rejects.toThrow(
-      /Invalid Qoder MCP configuration/,
+    const error = await convertQoderPlugin(root).catch(
+      (caught: unknown) => caught,
     );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\u001b');
+    expect((error as Error).message).toMatch(/Invalid Qoder MCP configuration/);
   });
 
   it('rejects an invalid MCP wrapper from a configured path', async () => {
@@ -249,6 +253,24 @@ describe('convertQoderPlugin', () => {
       /resolves through a symlink outside/,
     );
     fs.rmSync(external, { recursive: true, force: true });
+  });
+
+  it('sanitizes control sequences from manifest parse errors', async () => {
+    fs.writeFileSync(
+      path.join(root, QODER_PLUGIN_MANIFEST),
+      '\u001b[31minvalid',
+      'utf-8',
+    );
+
+    const error = await convertQoderPlugin(root).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\u001b');
+    expect((error as Error).message).toMatch(
+      /Invalid Qoder plugin configuration/,
+    );
   });
 
   it('does not copy escaping symlinks or load unsafe context paths', async () => {
