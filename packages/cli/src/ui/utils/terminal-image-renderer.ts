@@ -21,6 +21,7 @@ import {
   shouldRunThroughShell,
   type KittyImagePlaceholder,
 } from './mermaidImageRenderer.js';
+import { MAX_INLINE_IMAGE_ENCODED_LENGTH } from './inline-image-parts.js';
 
 const CHAFA_TIMEOUT_MS = 8000;
 const CHAFA_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -29,6 +30,8 @@ const MAX_PREVIEW_ROWS = 24;
 const ESTIMATED_CELL_WIDTH_PX = 8;
 const ESTIMATED_CELL_HEIGHT_PX = 16;
 const MAX_REASON_CHARS = 200;
+const MAX_INLINE_IMAGE_DIMENSION = 1_000_000;
+export const MAX_INLINE_IMAGE_PIXELS = 64_000_000;
 // cmd.exe treats these as command separators / metacharacters. With shell:true
 // Node forwards arguments unquoted, so a model-chosen path containing any of
 // them is a command-injection vector through a .cmd/.bat chafa shim.
@@ -43,6 +46,11 @@ const RENDER_CACHE_LIMIT = 40;
 const RENDER_CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
 const renderCache = new Map<string, TerminalImageRenderResult>();
 let renderCacheBytes = 0;
+const INLINE_DECODE_CACHE_LIMIT = 4;
+const inlineDecodeCache = new Map<
+  string,
+  { png: Buffer; size: { width: number; height: number } }
+>();
 
 // A Kitty terminal keeps a transmitted image and redraws it from the placeholder
 // cells alone. The live-row -> Static-row move and every resize remount
@@ -85,6 +93,21 @@ export interface TerminalImageRenderOptions {
   availableTerminalHeight?: number;
   env?: NodeJS.ProcessEnv;
   stdoutIsTTY?: boolean;
+}
+
+export interface InlineTerminalImageRenderOptions {
+  data: string;
+  mimeType: string;
+  contentWidth: number;
+  availableTerminalHeight?: number;
+  env?: NodeJS.ProcessEnv;
+  stdoutIsTTY?: boolean;
+  disabled?: boolean;
+}
+
+export interface PreparedInlineTerminalImage {
+  fallbackText: string;
+  result: TerminalImageRenderResult | null;
 }
 
 export function supportsKittyImageProtocol(
@@ -131,6 +154,50 @@ export function getTerminalImageRenderSupport(
 
 export function containsCmdShellMetacharacters(filePath: string): boolean {
   return CMD_SHELL_METACHARACTERS.test(filePath);
+}
+
+export function prepareInlineTerminalImage({
+  data,
+  mimeType,
+  contentWidth,
+  availableTerminalHeight,
+  env = process.env,
+  stdoutIsTTY = process.stdout.isTTY,
+  disabled = false,
+}: InlineTerminalImageRenderOptions): PreparedInlineTerminalImage {
+  const format = getImageFormat(mimeType);
+  const emptyFallback = format ? `[image: ${format}]` : '[image]';
+  if (format !== 'png') {
+    return { fallbackText: emptyFallback, result: null };
+  }
+
+  const decoded = getDecodedInlinePng(data);
+  if (!decoded) {
+    return { fallbackText: emptyFallback, result: null };
+  }
+  const { png, size } = decoded;
+
+  const fallbackText = `[image: ${size.width}x${size.height} png]`;
+  if (disabled) {
+    return { fallbackText, result: null };
+  }
+
+  const shape = fitImageToTerminal(size, contentWidth, availableTerminalHeight);
+  const useKitty = supportsKittyImageProtocol(env, stdoutIsTTY);
+  const chafaPath = useKitty ? null : findExecutable('chafa', env);
+  const cacheKey = createInlineRenderCacheKey(png, shape, useKitty, chafaPath);
+  const cached = getCachedRenderResult(cacheKey);
+  if (cached) {
+    return { fallbackText, result: cached };
+  }
+
+  const result: TerminalImageRenderResult = useKitty
+    ? { ...renderKitty(png, shape), key: cacheKey }
+    : renderWithChafa({ data: png }, shape, env, chafaPath);
+  if (result.kind !== 'unavailable') {
+    rememberRenderResult(cacheKey, result);
+  }
+  return { fallbackText, result };
 }
 
 export function renderTerminalImage({
@@ -208,7 +275,7 @@ export function renderTerminalImage({
 
   const result: TerminalImageRenderResult = useKitty
     ? { ...renderKitty(png, shape), key: cacheKey }
-    : renderWithChafa(display.filePath, shape, env, chafaPath);
+    : renderWithChafa({ filePath: display.filePath }, shape, env, chafaPath);
   if (result.kind !== 'unavailable') {
     rememberRenderResult(cacheKey, result);
   }
@@ -252,6 +319,105 @@ function createRenderCacheKey(
     shape.rows,
     useKitty ? 'kitty' : (chafaPath ?? 'none'),
   ].join('\0');
+}
+
+function createInlineRenderCacheKey(
+  png: Buffer,
+  shape: { widthCells: number; rows: number },
+  useKitty: boolean,
+  chafaPath: string | null,
+): string {
+  return [
+    'inline',
+    crypto.createHash('sha256').update(png).digest('hex'),
+    shape.widthCells,
+    shape.rows,
+    useKitty ? 'kitty' : (chafaPath ?? 'none'),
+  ].join('\0');
+}
+
+function getImageFormat(mimeType: string): string | null {
+  const match = /^image\/([a-z0-9][a-z0-9.+-]*)$/.exec(
+    mimeType.trim().toLowerCase(),
+  );
+  return match?.[1] ?? null;
+}
+
+function decodeInlineImage(data: string): Buffer | null {
+  if (data.length === 0 || data.length > MAX_INLINE_IMAGE_ENCODED_LENGTH) {
+    return null;
+  }
+
+  const normalized = data.replace(/\s/g, '');
+  if (
+    normalized.length === 0 ||
+    normalized.length % 4 === 1 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)
+  ) {
+    return null;
+  }
+
+  const decoded = Buffer.from(normalized, 'base64');
+  if (
+    decoded.length === 0 ||
+    decoded.length > MAX_TERMINAL_IMAGE_BYTES ||
+    decoded.toString('base64').replace(/=+$/, '') !==
+      normalized.replace(/=+$/, '')
+  ) {
+    return null;
+  }
+  return decoded;
+}
+
+function getDecodedInlinePng(
+  data: string,
+): { png: Buffer; size: { width: number; height: number } } | null {
+  const cached = inlineDecodeCache.get(data);
+  if (cached) {
+    inlineDecodeCache.delete(data);
+    inlineDecodeCache.set(data, cached);
+    return cached;
+  }
+
+  const png = decodeInlineImage(data);
+  if (!png) return null;
+  const size = readValidatedInlinePngSize(png);
+  if (!size) return null;
+
+  const decoded = { png, size };
+  inlineDecodeCache.set(data, decoded);
+  while (inlineDecodeCache.size > INLINE_DECODE_CACHE_LIMIT) {
+    const oldest = inlineDecodeCache.keys().next().value;
+    if (oldest === undefined) break;
+    inlineDecodeCache.delete(oldest);
+  }
+  return decoded;
+}
+
+function readValidatedInlinePngSize(
+  png: Buffer,
+): { width: number; height: number } | null {
+  if (
+    png.length < 24 ||
+    png.readUInt32BE(8) !== 13 ||
+    png.subarray(12, 16).toString('ascii') !== 'IHDR'
+  ) {
+    return null;
+  }
+  const size = readPngSize(png);
+  if (
+    !size ||
+    !Number.isInteger(size.width) ||
+    !Number.isInteger(size.height) ||
+    size.width <= 0 ||
+    size.height <= 0 ||
+    size.width > MAX_INLINE_IMAGE_DIMENSION ||
+    size.height > MAX_INLINE_IMAGE_DIMENSION ||
+    size.width * size.height > MAX_INLINE_IMAGE_PIXELS
+  ) {
+    return null;
+  }
+  return size;
 }
 
 function getCachedRenderResult(
@@ -385,8 +551,10 @@ function renderKitty(
   };
 }
 
+type ChafaImageSource = { filePath: string } | { data: Buffer };
+
 function renderWithChafa(
-  filePath: string,
+  source: ChafaImageSource,
   shape: { widthCells: number; rows: number },
   env: NodeJS.ProcessEnv,
   chafaPath: string | null,
@@ -402,7 +570,11 @@ function renderWithChafa(
     };
   }
   const useShell = shouldRunThroughShell(chafaPath);
-  if (useShell && containsCmdShellMetacharacters(filePath)) {
+  if (
+    useShell &&
+    'filePath' in source &&
+    containsCmdShellMetacharacters(source.filePath)
+  ) {
     return {
       kind: 'unavailable',
       reason:
@@ -418,7 +590,7 @@ function renderWithChafa(
         '--format=symbols',
         '--symbols=block',
         `--size=${shape.widthCells}x${shape.rows}`,
-        filePath,
+        'filePath' in source ? source.filePath : '-',
       ],
       {
         encoding: 'utf8',
@@ -426,6 +598,7 @@ function renderWithChafa(
         shell: useShell,
         maxBuffer: CHAFA_MAX_OUTPUT_BYTES,
         timeout: CHAFA_TIMEOUT_MS,
+        ...('data' in source ? { input: source.data } : {}),
       },
     );
     const lines = stdout.split(/\r?\n/).filter((line) => line.length > 0);

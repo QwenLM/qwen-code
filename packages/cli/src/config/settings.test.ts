@@ -3332,6 +3332,123 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('allowedInsecureVoiceBaseUrls scope handling', () => {
+    it('should honor the allowlist from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-a.internal.example/v1',
+                ],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedInsecureVoiceBaseUrls).toEqual([
+        'http://voice.region-a.internal.example/v1',
+      ]);
+    });
+
+    it('should strip and warn about the allowlist from workspace scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-a.internal.example/v1',
+                ],
+                allowedHttpHookUrls: ['https://hooks.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(
+        settings.merged.security?.allowedInsecureVoiceBaseUrls,
+      ).toBeUndefined();
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.example.com/*',
+      ]);
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('security.allowedInsecureVoiceBaseUrls'),
+        ),
+      ).toBe(true);
+    });
+
+    it('should preserve a user allowlist when workspace defines another', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-a.internal.example/v1',
+                ],
+              },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://voice.region-b.internal.example/v1',
+                ],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedInsecureVoiceBaseUrls).toEqual([
+        'http://voice.region-a.internal.example/v1',
+      ]);
+    });
+
+    it('should let a system-scope empty allowlist revoke a user entry', () => {
+      const systemSettingsPath = '/mock/system/settings.json';
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
+      try {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                security: {
+                  allowedInsecureVoiceBaseUrls: [
+                    'http://voice.region-a.internal.example/v1',
+                  ],
+                },
+              });
+            if (p === systemSettingsPath)
+              return JSON.stringify({
+                security: { allowedInsecureVoiceBaseUrls: [] },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.security?.allowedInsecureVoiceBaseUrls).toEqual(
+          [],
+        );
+      } finally {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      }
+    });
+  });
+
   describe('reloadScopeFromDisk', () => {
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(
@@ -3559,6 +3676,8 @@ describe('Settings Loading and Merging', () => {
         SettingScope.User,
         'model.name',
         'manually-added-model',
+        undefined,
+        { throwOnWriteFailure: true },
       );
 
       const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
@@ -3569,6 +3688,27 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent.modelProviders.openai).toEqual(
         externallyModifiedUserSettingsContent.modelProviders.openai,
       );
+    });
+
+    it('throws without mutating when a surgical update cannot be written', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValueOnce(false);
+
+      expect(() =>
+        settings.setValue(
+          SettingScope.User,
+          'general.language',
+          'zh',
+          undefined,
+          { throwOnWriteFailure: true },
+        ),
+      ).toThrow(
+        /saveSettings: updateSettingsFilePreservingFormat returned false/,
+      );
+      expect(settings.user.settings.general?.language).toBeUndefined();
     });
 
     it('strips a runtime snapshot prefix before persisting model.name', () => {

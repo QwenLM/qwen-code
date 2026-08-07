@@ -166,6 +166,40 @@ vi.mock('command-exists', () => ({
   },
 }));
 
+// #7734 added a sandbox runtime probe that spawns a real `docker version`
+// subprocess during sandbox selection. These tests enable the sandbox to assert
+// image precedence, not which runtime is chosen, so left unmocked the probe runs
+// for real and the suite fails on any non-macOS host without a running daemon
+// (macOS is masked because the sandbox-exec branch returns before probing).
+// Report the runtime probe healthy; leave every other spawnSync call real.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const spawnSync = vi.fn(
+    (command: string, args?: readonly string[], options?: unknown) => {
+      if (
+        (command === 'docker' || command === 'podman') &&
+        args?.[0] === 'version'
+      ) {
+        return {
+          status: 0,
+          stdout: '',
+          stderr: '',
+          signal: null,
+          pid: 0,
+          output: [],
+          error: undefined,
+        };
+      }
+      return (actual.spawnSync as unknown as (...a: unknown[]) => unknown)(
+        command,
+        args,
+        options,
+      );
+    },
+  );
+  return { ...actual, default: { ...actual, spawnSync }, spawnSync };
+});
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualServer = await importOriginal<typeof ServerConfig>();
   const SkillManagerMock = vi.fn();

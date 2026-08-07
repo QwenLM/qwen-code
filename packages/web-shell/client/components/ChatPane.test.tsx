@@ -144,6 +144,21 @@ vi.mock('./MessageList', () => ({
       data-approval={props.pendingApproval ? 'yes' : 'no'}
     >
       {props.messages.length}
+      <button
+        data-testid="pane-open-turn-output"
+        type="button"
+        onClick={() =>
+          props.onTurnOutputOpen?.({
+            id: 'artifact:turn-artifact',
+            kind: 'artifact',
+            title: 'Turn artifact',
+            turnId: 'turn-1',
+            artifactId: 'turn-artifact',
+            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+            workspaceCwd: '/w',
+          })
+        }
+      />
     </div>
   ),
 }));
@@ -706,11 +721,29 @@ describe('ChatPane', () => {
       await Promise.resolve();
     });
 
-    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
-      'sess-1',
-      [artifact],
-      expect.any(Object),
-    );
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith('sess-1', [
+      artifact,
+    ]);
+  });
+
+  it('stamps its session identity on turn-output open requests', () => {
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+
+    act(() => {
+      testid('pane-open-turn-output')?.click();
+    });
+
+    expect(onRightPanelOpen).toHaveBeenCalledWith({
+      id: 'artifact:turn-artifact',
+      kind: 'artifact',
+      title: 'Turn artifact',
+      turnId: 'turn-1',
+      artifactId: 'turn-artifact',
+      artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+      workspaceCwd: '/w',
+      sourceSessionId: 'sess-1',
+    });
   });
 
   it('suppresses the rotating loading phrase in its compact status', () => {

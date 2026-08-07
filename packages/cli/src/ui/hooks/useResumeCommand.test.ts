@@ -240,6 +240,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const clearPendingState = vi.fn();
     const geminiClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
@@ -287,6 +288,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
+        clearPendingState,
       }),
     );
 
@@ -325,6 +327,10 @@ describe('useResumeCommand', () => {
     expect(geminiClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
+    expect(clearPendingState).toHaveBeenCalledTimes(1);
+    expect(clearPendingState.mock.invocationCallOrder[0]).toBeLessThan(
+      historyManager.loadHistory.mock.invocationCallOrder[0]!,
+    );
     expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
     expect(config.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
   });
