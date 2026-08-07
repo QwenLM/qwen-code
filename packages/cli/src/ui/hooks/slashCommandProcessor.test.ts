@@ -863,6 +863,37 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('reveals a picker-shaped invocation when argument validation fails', async () => {
+      const input = '/model --project --global';
+      const command = createTestCommand({
+        name: 'model',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'Cannot use both --project and --global',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(input);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.USER, text: input, sentToModel: false },
+        expect.any(Number),
+      );
+      expect(
+        mockConfig.getChatRecordingService()?.recordSlashCommand,
+      ).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: input,
+        sentToModel: false,
+        hiddenInvocation: false,
+      });
+    });
+
     it('hides the invocation for the /usage alias', async () => {
       const command = createTestCommand({
         name: 'stats',

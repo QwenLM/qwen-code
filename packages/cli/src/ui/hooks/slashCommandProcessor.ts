@@ -76,6 +76,7 @@ import {
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
+import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -157,9 +158,7 @@ function shouldHideSlashCommandInvocation(
   const path = canonicalPath.join(' ');
   if (BARE_SLASH_COMMANDS_HIDE_INVOCATION.has(path)) {
     if (path === 'model') {
-      return /^(\s*--(?:fast|voice|vision|compaction|image|project|global)\s*)*$/.test(
-        args,
-      );
+      return isPickerOnlyModelInvocation(args);
     }
     return args.trim() === '';
   }
@@ -914,7 +913,7 @@ export const useSlashCommandProcessor = (
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
       let invocationSentToModel = false;
-      const hideInvocation =
+      let hideInvocation =
         isBtwCommand(trimmed) ||
         shouldHideSlashCommandInvocation(
           commandToExecute,
@@ -927,6 +926,21 @@ export const useSlashCommandProcessor = (
           userMessageTimestamp,
         );
       }
+
+      const revealHiddenInvocation = () => {
+        if (
+          resolvedCommandPath.join(' ') !== 'model' ||
+          !hideInvocation ||
+          invocationItemId !== undefined
+        ) {
+          return;
+        }
+        hideInvocation = false;
+        invocationItemId = addItemWithRecording(
+          { type: MessageType.USER, text: trimmed, sentToModel: false },
+          userMessageTimestamp,
+        );
+      };
 
       let hasError = false;
       let delegatedToRecursiveInvocation = false;
@@ -1110,6 +1124,10 @@ export const useSlashCommandProcessor = (
                     toolArgs: result.toolArgs,
                   };
                 case 'message':
+                  // Picker-shaped commands can still reject their arguments
+                  // before opening a dialog. Keep those failures paired with
+                  // the invocation in both live and reconstructed history.
+                  revealHiddenInvocation();
                   if (result.messageType === 'info') {
                     addMessage({
                       type: MessageType.INFO,

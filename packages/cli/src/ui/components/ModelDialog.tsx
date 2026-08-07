@@ -17,6 +17,7 @@ import {
   parseVisionModelSetting,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
+  type Config,
   type ContentGeneratorConfig,
   type InputModalities,
 } from '@qwen-code/qwen-code-core';
@@ -204,6 +205,7 @@ function hydrateApiKeyEnvFromSettings(
 }
 
 interface HandleModelSwitchSuccessParams {
+  config: Config;
   settings: ReturnType<typeof useSettings>;
   uiState: UIState | null;
   after: ContentGeneratorConfig | undefined;
@@ -215,6 +217,7 @@ interface HandleModelSwitchSuccessParams {
 }
 
 function handleModelSwitchSuccess({
+  config,
   settings,
   uiState,
   after,
@@ -242,20 +245,23 @@ function handleModelSwitchSuccess({
       : persistScope === 'user'
         ? t(' (global)')
         : '';
-  uiState?.historyManager.addItem(
-    {
-      type: 'info',
-      text:
-        `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-        `\n` +
-        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-        `\n` +
-        `Base URL: ${baseUrl}` +
-        `\n` +
-        `API key: ${maskedKey}`,
-    },
-    Date.now(),
-  );
+  const feedbackItem = {
+    type: 'info' as const,
+    text:
+      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+      `\n` +
+      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+      `\n` +
+      `Base URL: ${baseUrl}` +
+      `\n` +
+      `API key: ${maskedKey}`,
+  };
+  uiState?.historyManager.addItem(feedbackItem, Date.now());
+  config.getChatRecordingService?.()?.recordSlashCommand({
+    phase: 'result',
+    rawCommand: '/model',
+    outputHistoryItems: [feedbackItem],
+  });
 }
 
 function formatContextWindow(size?: number): string {
@@ -1013,6 +1019,7 @@ export function ModelDialog({
       }
 
       handleModelSwitchSuccess({
+        config,
         settings,
         uiState,
         after,
@@ -1030,6 +1037,7 @@ export function ModelDialog({
         isRuntime,
         persistScope,
       });
+      closeLatchRef.current = true;
       onClose();
     },
     [

@@ -207,6 +207,7 @@ type HistoryCollector = {
 type SlashCommandInvocation = {
   rawCommand: string;
   timestamp: number;
+  hidden: boolean;
 };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
@@ -3426,7 +3427,8 @@ export class QwenAgent extends BaseAgent {
     if (record.type === 'user') return true;
     if (record.type !== 'system' || record.subtype !== 'slash_command')
       return false;
-    return toRecord(record.systemPayload).phase === 'invocation';
+    const payload = toRecord(record.systemPayload);
+    return payload.phase === 'invocation' && payload.hiddenInvocation !== true;
   }
 
   private async persistQwenTranscriptTextElements(
@@ -4576,7 +4578,13 @@ export class QwenAgent extends BaseAgent {
         const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
         if (phase === 'invocation') {
           const uuid = asString(record.uuid);
-          if (uuid) invocations.set(uuid, { rawCommand, timestamp });
+          if (uuid) {
+            invocations.set(uuid, {
+              rawCommand,
+              timestamp,
+              hidden: payload.hiddenInvocation === true,
+            });
+          }
           continue;
         }
 
@@ -4597,13 +4605,15 @@ export class QwenAgent extends BaseAgent {
         seenResults.add(resultKey);
 
         const invocation = parentUuid ? invocations.get(parentUuid) : undefined;
-        const userContent = invocation?.rawCommand || rawCommand;
-        messages.push({
-          id: `qwen-${sessionId}-slash-${++idCounter}`,
-          role: 'user',
-          content: userContent,
-          timestamp: invocation?.timestamp ?? timestamp,
-        });
+        if (!invocation?.hidden) {
+          const userContent = invocation?.rawCommand || rawCommand;
+          messages.push({
+            id: `qwen-${sessionId}-slash-${++idCounter}`,
+            role: 'user',
+            content: userContent,
+            timestamp: invocation?.timestamp ?? timestamp,
+          });
+        }
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,
           role: 'assistant',
