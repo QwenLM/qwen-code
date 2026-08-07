@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
   isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
@@ -28,6 +29,16 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'NODE_TLS_REJECT_UNAUTHORIZED',
     );
+  });
+
+  it('excludes attribution markers so a project .env cannot spoof channel', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_SERVE');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
+  });
+
+  it('does not bootstrap attribution markers from a home .env', () => {
+    expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_SERVE');
+    expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_DESKTOP');
   });
 });
 

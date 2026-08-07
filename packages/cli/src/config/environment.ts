@@ -118,7 +118,7 @@ function readHomeEnvInto(file: string): void {
   }
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
-    for (const key of PROJECT_ENV_HARDCODED_EXCLUSIONS) {
+    for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
       if (parsed[key] && !Object.hasOwn(process.env, key)) {
         process.env[key] = parsed[key];
       }

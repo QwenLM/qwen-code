@@ -72,6 +72,7 @@ export type NonInteractiveSlashCommandResult =
       outputHistoryItems?: HistoryItemWithoutId[];
       /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
       modelOverride?: string;
+      refreshContextFilesOnWrite?: boolean;
     }
   | {
       type: 'message';
@@ -126,6 +127,9 @@ function handleCommandResult(
         content: result.content,
         ...(result.modelOverride
           ? { modelOverride: result.modelOverride }
+          : {}),
+        ...(result.refreshContextFilesOnWrite
+          ? { refreshContextFilesOnWrite: true }
           : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
@@ -424,6 +428,7 @@ export const handleSlashCommand = async (
   if (stackedResult.skills.length >= 2) {
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
+    let refreshContextFilesOnWrite = false;
     const onCompleteCallbacks: Array<() => Promise<void>> = [];
     const successfulSkillCommands: SlashCommand[] = [];
 
@@ -443,6 +448,9 @@ export const handleSlashCommand = async (
       if (skillResult?.type === 'submit_prompt') {
         combinedContent.push(skillResult.content);
         firstModelOverride ??= skillResult.modelOverride;
+        refreshContextFilesOnWrite ||= Boolean(
+          skillResult.refreshContextFilesOnWrite,
+        );
         if (skillResult.onComplete) {
           onCompleteCallbacks.push(skillResult.onComplete);
         }
@@ -482,6 +490,9 @@ export const handleSlashCommand = async (
       type: 'submit_prompt',
       content: hookResult.content,
       ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+      ...(refreshContextFilesOnWrite
+        ? { refreshContextFilesOnWrite: true }
+        : {}),
       ...(onCompleteCallbacks.length
         ? {
             onComplete: async () => {
