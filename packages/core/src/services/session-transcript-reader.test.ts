@@ -16,13 +16,27 @@ const { mockDebugLogger } = vi.hoisted(() => ({
   },
 }));
 
+const { statFault } = vi.hoisted(() => ({
+  statFault: { zeroInode: false },
+}));
+
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, open: vi.fn(actual.open) };
+  return {
+    ...actual,
+    open: vi.fn(actual.open),
+    stat: async (...args: Parameters<typeof actual.stat>) => {
+      const result = await actual.stat(...args);
+      if (statFault.zeroInode) {
+        Object.defineProperty(result, 'ino', { value: 0 });
+      }
+      return result;
+    },
+  };
 });
 
 import { Storage } from '../config/storage.js';
@@ -56,6 +70,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   afterEach(async () => {
+    statFault.zeroInode = false;
     resetSessionTranscriptIndexCacheForTest();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
@@ -1006,6 +1021,49 @@ describe('SessionTranscriptReader', () => {
         cursor: encodeCursor({
           ...first.nextCursorState!,
           fileIdentity: { dev: 999_999, ino: 999_999 },
+        }),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('paginates when the filesystem reports inode zero', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+      record('u2', 'a1', 'second'),
+    ]);
+    statFault.zeroInode = true;
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    expect(first.records.map((item) => item.uuid)).toEqual(['u1']);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursorState!.fileIdentity.ino).toBe(0);
+
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+    });
+    expect(second.records.map((item) => item.uuid)).toEqual(['a1', 'u2']);
+  });
+
+  it('rejects a cursor whose frozen inode no longer matches the file', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+      record('u2', 'a1', 'second'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          fileIdentity: {
+            ...first.nextCursorState!.fileIdentity,
+            ino: 0,
+          },
         }),
       }),
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);

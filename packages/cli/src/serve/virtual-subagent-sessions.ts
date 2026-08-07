@@ -17,7 +17,11 @@ import {
   type SessionTranscriptCursorState,
   type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
-import { EventBus, type BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  EventBus,
+  type BridgeEvent,
+  type EventBusSubscriberDiagnostic,
+} from '@qwen-code/acp-bridge/eventBus';
 import { createTranscriptMessageUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
 import { replayTranscriptRecordPage } from '../acp-integration/session/history-replay-page.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
@@ -29,6 +33,15 @@ const TARGET_RETENTION_MS = 60_000;
 interface VirtualSubagentSessionKey {
   parentSessionId: string;
   agentId: string;
+}
+
+interface VirtualSubagentSubscribeOptions {
+  signal: AbortSignal;
+  lastEventId?: number;
+  maxQueued?: number;
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
 }
 
 interface ResolvedAgentTask {
@@ -649,11 +662,9 @@ class VirtualSubagentTarget {
     };
   }
 
-  private async *iterate(opts: {
-    signal: AbortSignal;
-    lastEventId?: number;
-    maxQueued?: number;
-  }): AsyncIterableIterator<BridgeEvent> {
+  private async *iterate(
+    opts: VirtualSubagentSubscribeOptions,
+  ): AsyncIterableIterator<BridgeEvent> {
     if (this.retentionTimer) {
       clearTimeout(this.retentionTimer);
       this.retentionTimer = undefined;
@@ -682,11 +693,7 @@ class VirtualSubagentTarget {
     }
   }
 
-  subscribe(opts: {
-    signal: AbortSignal;
-    lastEventId?: number;
-    maxQueued?: number;
-  }): AsyncIterable<BridgeEvent> {
+  subscribe(opts: VirtualSubagentSubscribeOptions): AsyncIterable<BridgeEvent> {
     return {
       [Symbol.asyncIterator]: () => this.iterate(opts),
     };
@@ -970,7 +977,7 @@ export class VirtualSubagentSessions {
   async subscribe(
     runtime: WorkspaceRuntime,
     sessionId: string,
-    opts: { signal: AbortSignal; lastEventId?: number; maxQueued?: number },
+    opts: VirtualSubagentSubscribeOptions,
   ): Promise<AsyncIterable<BridgeEvent> | undefined> {
     return (await this.getTarget(runtime, sessionId))?.subscribe(opts);
   }
