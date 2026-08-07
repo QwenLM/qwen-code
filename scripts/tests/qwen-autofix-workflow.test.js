@@ -1916,7 +1916,11 @@ describe('qwen-autofix workflow', () => {
     // Per-TARGET keys: cron ticks coalesce with each other; review events
     // coalesce per PR (near-simultaneous reviews on one PR route once, without
     // events on OTHER PRs cancelling this one); issue events per issue;
-    // dispatches unique and never cancelled.
+    // dispatches unique and never cancelled — fork-bridge dispatches
+    // included: `source` is a public workflow_dispatch input, so no dispatch
+    // may claim trusted per-PR coalescing by asserting an origin; fork-review
+    // bursts coalesce upstream instead (the signal per PR, the bridge per
+    // conclusion+head).
     expect(routeJob).toContain("'qwen-autofix-route-cron'");
     expect(routeJob).toContain(
       "format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
@@ -1927,6 +1931,12 @@ describe('qwen-autofix workflow', () => {
     expect(routeJob).toContain(
       "format('qwen-autofix-route-{0}', github.run_id)",
     );
+    // The public `source` marker must not buy any dispatch a shared group or
+    // cancellation rights: pin the forkbridge branch OUT (order-blind
+    // substring pins cannot see a re-added disjunct before the run-id
+    // fallback, but an absent one cannot hide).
+    expect(routeJob).not.toContain('forkbridge');
+    expect(routeJob).not.toContain("inputs.source == 'fork-bridge'");
     expect(routeJob).toContain(
       "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
     );
@@ -2854,9 +2864,27 @@ describe('qwen-autofix workflow', () => {
     // spammed 7 refusals on #7836 — those stay covered by the
     // once-per-window pause notice. No dedup on the dispatch itself: the
     // shepherd sends at most one per head, and a human asking twice
-    // deserves two answers.
+    // deserves two answers. fork-bridge dispatches are the one
+    // dispatch-shaped exception — they are fork-PR reviews laundered into
+    // dispatch form, so answering each one loudly would post one refusal
+    // per review on a capped fork PR (the exact #7836 spam this gate
+    // prevents). But `source` is a public workflow_dispatch input a manual
+    // dispatch can set, so the silence is honored ONLY on positive proof of
+    // origin: a recent SUCCESSFUL fork-bridge run whose title names this
+    // exact PR. Unverified markers are answered like explicit dispatches.
     expect(reviewScanJob).toContain(
-      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+      "DISPATCH_SOURCE: \"${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}\"",
+    );
+    expect(reviewScanJob).toContain('FORK_BRIDGE_VERIFIED=false');
+    expect(reviewScanJob).toContain(
+      '--workflow qwen-autofix-fork-bridge.yml --limit 20 --json conclusion,createdAt,displayTitle',
+    );
+    expect(reviewScanJob).toContain(
+      'startswith("fork-bridge: fork-signal: PR \\($pr) reviewed by ")',
+    );
+    expect(reviewScanJob).toContain('fork-bridge provenance unverified');
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' && "${FORK_BRIDGE_VERIFIED}" != \'true\' ]]; then',
     );
     expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
     expect(reviewScanJob).toContain('Dispatch refused');
@@ -2864,25 +2892,76 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'cap-refused notice skipped: PAT authenticates as',
     );
+    // Provenance is a GitHub-records check: success conclusion, a title
+    // naming the exact PR (no prefix collisions), and a recent createdAt.
+    // Replay the extracted jq program VERBATIM so a dropped predicate fails
+    // the test, not just a substring.
+    const provenanceJq = reviewScanJob.match(
+      /jq -e --arg pr "\$\{PR\}" --arg cutoff "\$\{BRIDGE_CUTOFF\}" '([\s\S]*?)' <<< "\$\{BRIDGE_RUNS\}"/,
+    )?.[1];
+    expect(provenanceJq).toBeTruthy();
+    const verifies = (runs, pr = '7836', cutoff = '2026-08-07T04:00:00Z') =>
+      spawnSync(
+        'jq',
+        ['-e', '--arg', 'pr', pr, '--arg', 'cutoff', cutoff, provenanceJq],
+        {
+          input: JSON.stringify(runs),
+          encoding: 'utf8',
+        },
+      ).status === 0;
+    const bridgeRun = (displayTitle, over = {}) => ({
+      conclusion: 'success',
+      createdAt: '2026-08-07T10:00:00Z',
+      displayTitle,
+      ...over,
+    });
+    const MATCHING = 'fork-bridge: fork-signal: PR 7836 reviewed by wenshao';
+    expect(verifies([bridgeRun(MATCHING)])).toBe(true);
+    // A different PR's bridge run proves nothing.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 999 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // No prefix collision: PR 78366 is not PR 7836.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 78366 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // Only SUCCESSFUL bridge runs count, and only recent ones.
+    expect(verifies([bridgeRun(MATCHING, { conclusion: 'failure' })])).toBe(
+      false,
+    );
+    expect(
+      verifies([bridgeRun(MATCHING, { createdAt: '2026-08-07T03:00:00Z' })]),
+    ).toBe(false);
+    expect(verifies([])).toBe(false);
     // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
-    // for trusted review submissions). Replay the guard VERBATIM so a
-    // dropped EVENT_NAME condition fails the test, not just a substring: a
-    // dispatch is answered, a review submission is left to the pause notice.
+    // for trusted review submissions) and EXCLUDES only PROVENANCE-VERIFIED
+    // fork-bridge dispatches. Replay the guard VERBATIM so a dropped
+    // condition fails the test, not just a substring: an explicit dispatch
+    // is answered, a verified fork-bridge dispatch stays silent, and a
+    // fork-bridge MARKER without verification is answered like an explicit
+    // dispatch (the replay cannot call the API — verification state rides
+    // FORK_BRIDGE_VERIFIED, set by the jq program replayed above).
     const refusedGuard = reviewScanJob.match(
-      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' && "\$\{FORK_BRIDGE_VERIFIED\}" != 'true' \]\]; then)/,
     )?.[1];
     expect(refusedGuard).toBeTruthy();
-    const refuses = (eventName) =>
+    const refuses = (eventName, forkBridgeVerified = 'false') =>
       execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
         env: {
           ...process.env,
           FORCED_PR: '7836',
           PR: '7836',
           EVENT_NAME: eventName,
+          FORK_BRIDGE_VERIFIED: forkBridgeVerified,
         },
         encoding: 'utf8',
       }).trim();
     expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('workflow_dispatch', 'true')).not.toContain('REFUSED');
     expect(refuses('pull_request_review')).not.toContain('REFUSED');
     // The standard-mode pause and the refusal both point at the actual
     // recovery command as a printf ARG (the takeover variant keeps its
