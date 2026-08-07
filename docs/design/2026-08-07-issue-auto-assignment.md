@@ -35,9 +35,9 @@ issues: labeled ──► assign-issue-owner.mjs ──► labels → area → o
   community.
 - `areas` — ordered label→owners entries. First match wins.
 
-Owners are sourced from `.github/CODEOWNERS`, and a test asserts every login in
-the map appears there. That is a review aid, not the security boundary: before
-each write the script calls
+The initial `core` owners were seeded from `.github/CODEOWNERS`, but the map is
+not constrained to it — see "Adding owners" below. The security boundary is the
+live permission check: before each write the script calls
 `GET /repos/{repo}/collaborators/{login}/permission` and keeps only
 `admin`/`maintain`/`write`. Editing the map therefore cannot assign someone who
 does not already have push access.
@@ -45,6 +45,31 @@ does not already have push access.
 Among eligible owners it picks the one with the fewest open assigned issues,
 rotating by issue number to break ties so a set of equally loaded owners spreads
 round-robin rather than always landing on the first entry.
+
+## Adding owners
+
+Edit `.github/issue-owners.json` and open a PR. No code change is required, and
+nothing else in the repository needs updating.
+
+An owner does **not** need a `.github/CODEOWNERS` entry. CODEOWNERS answers "who
+owns this code path", which is narrower than "who may be assigned an issue in
+this area" — the repository has roughly 44 collaborators with push access and 7
+CODEOWNERS entries, so requiring one would reject legitimate additions. The
+permission check enforces the property that actually matters.
+
+To add a new area, append an entry with its labels and owners. Areas are matched
+in file order and the first match wins, so put specific areas above general ones.
+Area labels must already exist in the repository; the assignment workflow never
+creates labels. `.github/CODEOWNERS` currently maps `packages/cua-driver/` and
+`packages/mobile-mcp/` to an owner, but no corresponding issue label exists, so
+those areas cannot be added until the labels are created.
+
+Validation on the map is deliberately thin — shape, login syntax, duplicate
+owners, duplicate area names. Everything else is caught at runtime: a login that
+is not a collaborator, or has lost push access, fails the permission lookup and
+is skipped with a `::warning::` in the step summary rather than failing the run.
+Removing an owner is likewise just a file edit; in-flight assignments are not
+revisited.
 
 ## Why no plan/apply split
 

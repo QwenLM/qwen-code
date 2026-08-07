@@ -34,22 +34,34 @@ export function loadPolicy(raw) {
   if (!Array.isArray(policy.areas) || policy.areas.length === 0) {
     throw new Error(`${OWNERS_FILE}: areas must be a non-empty array`);
   }
+  const areaNames = new Set();
   for (const area of policy.areas) {
     if (typeof area?.name !== 'string' || area.name.length === 0) {
       throw new Error(`${OWNERS_FILE}: every area needs a name`);
     }
+    // First match wins, so two areas sharing a name silently shadow one another.
+    if (areaNames.has(area.name)) {
+      throw new Error(`${OWNERS_FILE}: duplicate area ${area.name}`);
+    }
+    areaNames.add(area.name);
     if (!isStringArray(area.labels) || area.labels.length === 0) {
       throw new Error(`${OWNERS_FILE}: area ${area.name} needs labels`);
     }
     if (!Array.isArray(area.owners) || area.owners.length === 0) {
       throw new Error(`${OWNERS_FILE}: area ${area.name} needs owners`);
     }
+    const seen = new Set();
     for (const owner of area.owners) {
       // Rejected here rather than at the gh call so a typo fails the config,
       // not a single assignment attempt.
       if (typeof owner !== 'string' || !LOGIN.test(owner)) {
         throw new Error(`${OWNERS_FILE}: invalid login in ${area.name}`);
       }
+      // A repeated login would be counted twice and win ties unfairly.
+      if (seen.has(owner)) {
+        throw new Error(`${OWNERS_FILE}: duplicate owner ${owner}`);
+      }
+      seen.add(owner);
     }
   }
   return policy;
