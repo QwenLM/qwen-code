@@ -4,8 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from 'vitest';
 import yargs from 'yargs';
+import { join } from 'node:path';
 import {
   parseArgsCommand,
   parseReviewArgs,
@@ -13,7 +22,16 @@ import {
   type ParsedReviewArgs,
 } from './parse-args.js';
 import { reviewCommand } from '../review.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { reviewSourceRoots, reviewSourcesDigest } from './lib/stale-bundle.js';
+import {
+  FOREIGN_DIGEST,
+  makeStaleBundleFixture,
+  stampDigest,
+} from './lib/test-utils.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 // The handler reads the raw string from fd 0 (`--stdin`) and writes the
 // verdict to `--out`; both are intercepted so the wiring tests below can run
@@ -42,6 +60,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
 
 describe('tokenizeArgs', () => {
@@ -561,5 +580,278 @@ describe('parseArgsCommand wiring', () => {
         runNested(['review', 'parse-args', '--', '--effort low']),
       ).rejects.toThrow(/--stdin/);
     });
+  });
+});
+
+describe('parse-args warns when the bundle is not built from these sources', () => {
+  // A real tree, not a mocked one: what is under test is the derivation from
+  // `process.argv[1]` to the stamp and the roots, and mocking those reads
+  // would test the mock. `node:fs` is mocked for this file, so the real
+  // functions are pulled in explicitly.
+  let fsReal: typeof import('node:fs');
+  let repo: string;
+  let argv1: string;
+
+  beforeAll(async () => {
+    fsReal = (await vi.importActual('node:fs')) as typeof import('node:fs');
+  });
+
+  beforeEach(() => {
+    // `node:fs` is mocked for this file, so the fixture builder must write
+    // through the real bindings pulled in above.
+    ({ repo, argv1 } = makeStaleBundleFixture(fsReal, 'parse-args-stale-'));
+    vi.mocked(writeStderrLineSafe).mockClear();
+    vi.mocked(writeStdoutLine).mockClear();
+  });
+  afterEach(() => fsReal.rmSync(repo, { recursive: true, force: true }));
+
+  const stamp = (digest: string) => stampDigest(fsReal, repo, digest);
+  const run = () => {
+    const original = process.argv[1];
+    process.argv[1] = argv1;
+    try {
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '8368',
+        _: ['review', 'parse-args'],
+      });
+    } finally {
+      process.argv[1] = original;
+    }
+  };
+
+  it('warns when the stamp does not match the sources', () => {
+    stamp(FOREIGN_DIGEST);
+    run();
+    // The full paragraph: this is the first command of the review, and the
+    // one-line form belongs to `drive`, which repeats the check.
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'NOT built from the review sources',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'runs the BUILT bundle, not the working tree',
+    );
+    // …and BEFORE the first result: relocating the loop below the
+    // `writeStdoutLine(json)` keeps every substring assertion green while the
+    // warning lands only once the reviewer has already consumed the parse.
+    expect(
+      vi.mocked(writeStderrLineSafe).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(writeStdoutLine).mock.invocationCallOrder[0]);
+  });
+
+  it('says nothing when the stamp matches', () => {
+    stamp(reviewSourcesDigest(repo, reviewSourceRoots(repo))!);
+    run();
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('warns through a symlinked alias of the bundle', () => {
+    // node hands `argv[1]` over unresolved, so a dogfooding alias like
+    // `ln -s dist/cli.js ~/bin/qwen` must resolve back to the bundle before
+    // the layout guard derives `dist/` from it — otherwise the check is
+    // silently off for every symlinked entry.
+    stamp(FOREIGN_DIGEST);
+    const alias = join(repo, 'qwen-alias');
+    fsReal.symlinkSync(argv1, alias);
+    const original = process.argv[1];
+    process.argv[1] = alias;
+    try {
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '8368',
+        _: ['review', 'parse-args'],
+      });
+    } finally {
+      process.argv[1] = original;
+    }
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'NOT built from the review sources',
+    );
+  });
+
+  it('says it could not check when sources exist but the stamp does not', () => {
+    // A checkout whose dist predates the stamp is genuinely stale and
+    // unmeasurable — the state of every existing tree the moment this ships.
+    // Silence there is the failure this whole check exists to end.
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not check whether the bundle is current',
+    );
+    // The remediation tail — the only actionable content of a notice whose
+    // whole purpose is telling a pre-stamp checkout how to fix its state.
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'npm run bundle',
+    );
+  });
+
+  it('treats a malformed stamp as no stamp instead of accusing the build', () => {
+    // A bundle step killed mid-write leaves a truncated or non-hex digest
+    // beside a current build; compared as-is it would report stale on every
+    // review until the next one. The shape check routes it to the same
+    // 'could not check' as a missing stamp.
+    stamp('abc123');
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not check whether the bundle is current',
+    );
+  });
+
+  // chmod is the only lever this case has: on Windows it is a no-op, and a
+  // root user reads through it, so the branch under test is unreachable
+  // there. The case skips rather than running into the OTHER branch — a
+  // readable tree, whose digest merely differs — and failing red against
+  // assertions that match only the unmeasured message.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'says it could not check when a source cannot be read',
+    () => {
+      // Distinct from an installed package: the roots are on disk, so the
+      // check has switched itself off for someone about to read a verdict,
+      // and the docstring promises every unmeasurable case names itself.
+      stamp(FOREIGN_DIGEST);
+      const src = join(
+        repo,
+        'packages',
+        'cli',
+        'src',
+        'commands',
+        'review',
+        'drive.ts',
+      );
+      fsReal.rmSync(src);
+      fsReal.mkdirSync(src, { recursive: true });
+      fsReal.writeFileSync(join(src, 'nested.ts'), 'x');
+      fsReal.chmodSync(src, 0o000);
+      try {
+        run();
+        // The branch the test names, not merely that something was printed.
+        expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+          'could not check whether the bundle is current',
+        );
+        expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+          'a review source could not be read',
+        );
+      } finally {
+        fsReal.chmodSync(src, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'says it could not check when the roots cannot even be statted',
+    () => {
+      // An archive extracted with the wrong ownership, or a cache restored
+      // without modes: the roots are on disk but every stat fails EACCES,
+      // which `existsSync` reports as absence. That is a tree whose sources
+      // cannot be measured, not a tree with none — and the notice must say
+      // so instead of passing silently.
+      stamp(FOREIGN_DIGEST);
+      const packages = join(repo, 'packages');
+      fsReal.chmodSync(packages, 0o000);
+      try {
+        run();
+        expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+          'could not check whether the bundle is current',
+        );
+        expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+          'a review source could not be read',
+        );
+      } finally {
+        fsReal.chmodSync(packages, 0o755);
+      }
+    },
+  );
+
+  it('names the cause when the roots hold nothing the digest admits', () => {
+    // A root that exists but holds only test files measures zero digested
+    // files. That is "nothing found", not "something unreadable", and the
+    // docstring promises each unmeasurable case names itself. The other three
+    // roots come out of the fixture too, so the zero is complete, not the
+    // partial-checkout case.
+    stamp(FOREIGN_DIGEST);
+    const reviewDir = join(
+      repo,
+      'packages',
+      'cli',
+      'src',
+      'commands',
+      'review',
+    );
+    fsReal.rmSync(join(reviewDir, 'drive.ts'));
+    fsReal.writeFileSync(join(reviewDir, 'only.test.ts'), 'a test');
+    fsReal.rmSync(
+      join(repo, 'packages', 'cli', 'src', 'commands', 'review.ts'),
+    );
+    fsReal.rmSync(
+      join(
+        repo,
+        'packages',
+        'cli',
+        'src',
+        'services',
+        'review-worktree-lease.ts',
+      ),
+    );
+    fsReal.rmSync(join(repo, 'packages', 'core'), {
+      recursive: true,
+      force: true,
+    });
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'no review sources were found to compare',
+    );
+  });
+
+  it('stays silent for a layout that has nowhere to keep a stamp', () => {
+    // `npm start` runs `node <root>/packages/cli`, and node sets argv[1] to
+    // that DIRECTORY — so the derivation would find sources under <root> and
+    // no stamp beside them, and print "could not check" on every review
+    // forever, with advice that can never make it stop.
+    const original = process.argv[1];
+    process.argv[1] = join(repo, 'packages', 'cli');
+    try {
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '8368',
+        _: ['review', 'parse-args'],
+      });
+    } finally {
+      process.argv[1] = original;
+    }
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('says it could not check when only some of the roots are materialized', () => {
+    // A sparse checkout narrows a full tree without touching `dist/`: the
+    // stamp was made from every root, the tree now holds the rest of them,
+    // and comparing the survivors would accuse a bundle that may be
+    // byte-for-byte correct. The silence of an installed package is the
+    // other end of the same spectrum — zero roots present — and stays.
+    stamp(reviewSourcesDigest(repo, reviewSourceRoots(repo))!);
+    fsReal.rmSync(join(repo, 'packages', 'core'), {
+      recursive: true,
+      force: true,
+    });
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not check whether the bundle is current',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'only some of the review sources are present',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).not.toContain(
+      'NOT built from the review sources',
+    );
+  });
+
+  it('stays silent for an installed package, which has no sources either', () => {
+    // No `packages/` beside the bundle: nothing to compare, nothing the user
+    // could do about it, and no reason to put a line in their terminal.
+    fsReal.rmSync(join(repo, 'packages'), { recursive: true, force: true });
+    run();
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('still parses the arguments', () => {
+    // The warning is a diagnostic; the parse is unaffected by it.
+    stamp(FOREIGN_DIGEST);
+    run();
+    expect(writeStdoutLine).toHaveBeenCalled();
   });
 });
