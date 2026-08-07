@@ -26,6 +26,26 @@ type QoderPluginConfig = Omit<ClaudePluginConfig, 'version'> & {
   contextFileName?: string | string[];
 };
 
+function normalizeMcpServers(
+  servers: Record<string, MCPServerConfig>,
+  configPath: string,
+): Record<string, MCPServerConfig> {
+  return Object.fromEntries(
+    Object.entries(servers).map(([name, server]) => {
+      if (
+        typeof server !== 'object' ||
+        server === null ||
+        Array.isArray(server)
+      ) {
+        throw new Error(
+          `Invalid Qoder MCP configuration at ${configPath}: server entries must be JSON objects`,
+        );
+      }
+      return [name, normalizeClaudeMcpServer(server)];
+    }),
+  );
+}
+
 function loadQoderConfig(extensionDir: string): QoderPluginConfig {
   const configPath = path.join(extensionDir, QODER_PLUGIN_MANIFEST);
   if (!fs.existsSync(configPath)) {
@@ -107,11 +127,9 @@ function loadMcpServersFile(
     );
   }
 
-  return Object.fromEntries(
-    Object.entries(servers).map(([name, server]) => [
-      name,
-      normalizeClaudeMcpServer(server as MCPServerConfig),
-    ]),
+  return normalizeMcpServers(
+    servers as Record<string, MCPServerConfig>,
+    mcpPath,
   );
 }
 
@@ -122,8 +140,18 @@ function resolveMcpServers(
   if (typeof configured === 'string') {
     return loadMcpServersFile(extensionDir, configured, false);
   }
-  if (configured) {
-    return configured;
+  if (configured !== undefined) {
+    if (
+      typeof configured !== 'object' ||
+      configured === null ||
+      Array.isArray(configured)
+    ) {
+      throw new Error('Qoder plugin mcpServers must be an object or file path');
+    }
+    return normalizeMcpServers(
+      configured,
+      path.join(extensionDir, QODER_PLUGIN_MANIFEST),
+    );
   }
   return loadMcpServersFile(extensionDir, '.mcp.json', true);
 }
@@ -139,13 +167,19 @@ function resolveContextFiles(
     : [];
   const contextFiles: string[] = [];
   const seen = new Set<string>();
-  const addContextFile = (relativePath: string): void => {
+  const addContextFile = (relativePath: string, prepend = false): void => {
     const resolved = resolvePluginRelativeFile(extensionDir, relativePath);
-    if (!resolved || !fs.existsSync(resolved)) return;
+    if (!resolved) return;
+    try {
+      if (!fs.statSync(resolved).isFile()) return;
+    } catch {
+      return;
+    }
     const normalized = path.relative(path.resolve(extensionDir), resolved);
     if (normalized && !seen.has(normalized)) {
       seen.add(normalized);
-      contextFiles.push(normalized);
+      if (prepend) contextFiles.unshift(normalized);
+      else contextFiles.push(normalized);
     }
   };
 
@@ -154,13 +188,7 @@ function resolveContextFiles(
   }
   addContextFile('system-prompt.md');
   if (contextFiles.length > 0) {
-    const qwenPath = resolvePluginRelativeFile(extensionDir, 'QWEN.md');
-    if (qwenPath && fs.existsSync(qwenPath)) {
-      const normalized = path.relative(path.resolve(extensionDir), qwenPath);
-      if (normalized && !seen.has(normalized)) {
-        contextFiles.unshift(normalized);
-      }
-    }
+    addContextFile('QWEN.md', true);
   }
   return contextFiles.length > 0 ? contextFiles : undefined;
 }
@@ -170,23 +198,28 @@ export async function convertQoderPlugin(
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   const config = loadQoderConfig(extensionDir);
   config.mcpServers = resolveMcpServers(extensionDir, config.mcpServers);
-  const contextFileName = resolveContextFiles(
-    extensionDir,
-    config.contextFileName,
-  );
   const converted = await buildQwenExtensionFromPlugin(
     extensionDir,
     config as ClaudePluginConfig,
+  );
+  const contextFileName = resolveContextFiles(
+    converted.convertedDir,
+    config.contextFileName,
   );
   const qwenConfig: ExtensionConfig = {
     ...converted.config,
     displayName: config.displayName,
     contextFileName,
   };
-  fs.writeFileSync(
-    path.join(converted.convertedDir, EXTENSIONS_CONFIG_FILENAME),
-    JSON.stringify(qwenConfig, null, 2),
-    'utf-8',
-  );
+  try {
+    fs.writeFileSync(
+      path.join(converted.convertedDir, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify(qwenConfig, null, 2),
+      'utf-8',
+    );
+  } catch (error) {
+    fs.rmSync(converted.convertedDir, { recursive: true, force: true });
+    throw error;
+  }
   return { ...converted, config: qwenConfig };
 }

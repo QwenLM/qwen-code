@@ -69,6 +69,11 @@ test('installs a local Qoder plugin', async () => {
   );
 
   try {
+    await rig.runCommand(['extensions', 'uninstall', 'sample-qoder-plugin']);
+  } catch {
+    // The extension is not installed yet.
+  }
+  try {
     const result = await rig.runCommand(
       ['extensions', 'install', rig.testDir!],
       { stdin: 'y\n' },
@@ -77,9 +82,12 @@ test('installs a local Qoder plugin', async () => {
 
     const listResult = await rig.runCommand(['extensions', 'list']);
     expect(listResult).toContain('sample-qoder-plugin');
-
-    await rig.runCommand(['extensions', 'uninstall', 'sample-qoder-plugin']);
   } finally {
+    try {
+      await rig.runCommand(['extensions', 'uninstall', 'sample-qoder-plugin']);
+    } catch {
+      // Installation may have failed before the extension was registered.
+    }
     await rig.cleanup();
   }
 });

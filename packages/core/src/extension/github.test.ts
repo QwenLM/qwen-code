@@ -61,7 +61,12 @@ vi.mock('node:https', async (importOriginal) => {
 vi.mock('simple-git');
 
 describe('git extension helpers', () => {
+  beforeEach(() => {
+    vi.stubEnv('GITHUB_TOKEN', '');
+  });
+
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     mockHttpsGet.mockReset();
   });
