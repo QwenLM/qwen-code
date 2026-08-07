@@ -798,7 +798,12 @@ describe('workspace skill settings persistence', () => {
     );
     fs.writeFileSync(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ skills: { disabled: ['locked-skill'] } }),
+      JSON.stringify({
+        skills: {
+          disabled: ['locked-skill'],
+          defaultDisabled: ['opt-in'],
+        },
+      }),
     );
 
     const originalCreateServeApp = serverModule.createServeApp;
@@ -854,6 +859,48 @@ describe('workspace skill settings persistence', () => {
       },
     ]);
     expect(setValues).toHaveBeenCalledOnce();
+
+    const savedAfterDisable = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled?: string[] } };
+    expect(savedAfterDisable.skills.disabled).toEqual([
+      'orphan',
+      'review',
+      'alpha',
+    ]);
+    expect(savedAfterDisable.skills.enabled).toBeUndefined();
+    const savedUser = JSON.parse(
+      fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled?: string[] } };
+    expect(savedUser.skills.disabled).toEqual(['locked-skill']);
+    expect(savedUser.skills.enabled).toBeUndefined();
+
+    const enableResult = await persistDisabledSkillsBatch!(
+      workspace,
+      ['opt-in'],
+      true,
+    );
+
+    expect(enableResult.outcomes).toEqual([
+      { skillName: 'opt-in', changed: true },
+    ]);
+    expect(enableResult.settingsChanges).toEqual([
+      {
+        key: 'skills.enabled',
+        value: ['opt-in'],
+      },
+    ]);
+    expect(setValues).toHaveBeenCalledTimes(2);
+
+    const savedAfterEnable = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled: string[] } };
+    expect(savedAfterEnable.skills.disabled).toEqual([
+      'orphan',
+      'review',
+      'alpha',
+    ]);
+    expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
   });
 });
 

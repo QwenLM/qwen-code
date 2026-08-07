@@ -1058,6 +1058,9 @@ export function createDaemonWorkspaceService(
               );
             assertActiveGeneration();
             sessionsRefreshed = refreshed.sessionsRefreshed;
+            // `reason: 'settings'` never touches skill caches, so
+            // `configsFailed` is structurally 0 here — folding it in would only
+            // conflate two different failures behind one count.
             sessionsFailed = refreshed.sessionsFailed;
             if (sessionsFailed > 0) activation = 'partial';
           } catch (err) {

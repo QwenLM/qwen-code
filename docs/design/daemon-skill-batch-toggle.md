@@ -17,7 +17,7 @@ The request body is:
 
 ```json
 {
-  "skillNames": ["review", "deploy"],
+  "skillNames": ["review", "deploy", "missing"],
   "enabled": false
 }
 ```
@@ -34,11 +34,16 @@ persistence and runtime-generation failures fail the whole request.
 {
   "enabled": false,
   "activation": "applied",
-  "sessionsRefreshed": 1,
+  "sessionsRefreshed": 2,
   "sessionsFailed": 0,
   "results": [
     {
       "skillName": "review",
+      "enabled": false,
+      "changed": true
+    },
+    {
+      "skillName": "deploy",
       "enabled": false,
       "changed": true
     }

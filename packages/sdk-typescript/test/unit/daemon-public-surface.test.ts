@@ -77,6 +77,10 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionRecapResult,
+  DaemonSkillBatchToggleError,
+  DaemonSkillBatchToggleErrorCode,
+  DaemonSkillBatchToggleItem,
+  DaemonSkillBatchToggleResult,
   DaemonSessionRecordingDegradedData,
   DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
@@ -291,6 +295,12 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    // Batch Skill toggle surface: clients type the result of
+    // `client.setWorkspaceSkillsEnabled(...)` through the published entry.
+    expectTypeOf<DaemonSkillBatchToggleResult>().not.toBeNever();
+    expectTypeOf<DaemonSkillBatchToggleItem>().not.toBeNever();
+    expectTypeOf<DaemonSkillBatchToggleError>().not.toBeNever();
+    expectTypeOf<DaemonSkillBatchToggleErrorCode>().not.toBeNever();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();

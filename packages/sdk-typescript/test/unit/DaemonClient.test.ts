@@ -4075,6 +4075,7 @@ describe('DaemonClient', () => {
           enabled: false,
         }),
       });
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 

@@ -2686,7 +2686,7 @@ Request:
 
 ```json
 {
-  "skillNames": ["review", "deploy"],
+  "skillNames": ["review", "deploy", "missing"],
   "enabled": false
 }
 ```
@@ -2702,6 +2702,11 @@ Response (200):
   "results": [
     {
       "skillName": "review",
+      "enabled": false,
+      "changed": true
+    },
+    {
+      "skillName": "deploy",
       "enabled": false,
       "changed": true
     }
