@@ -122,14 +122,16 @@ Based on the parsed `target.type`:
     **Where `<owner>/<repo>` and `<remote>` come from — do not guess either.** For a `pr-url` target both are already decided: the URL carries the owner/repo, and the remote is the one matched against it above. For a bare **`pr-number`** there is no URL, and a PR number alone says nothing about which repository it belongs to. Derive it:
 
     ```bash
-    gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'
+    gh repo view --json owner,name,url \
+      --jq '"\(.owner.login)/\(.name) \(.url | sub("^[a-z]+://"; "") | split("/")[0])"'
     ```
 
-    That is the same command Step 7 already uses to decide where to post, and it resolves through `gh`'s default-repo — which in a fork clone is the **upstream**, where the PR actually lives. Then resolve the remote with the same matcher Step 1's pr-url path uses — same rule, same exit codes (`--host` is omitted: the matcher then inherits an operator-exported `GH_HOST` — the same env the `gh repo view` above resolved through — else github.com):
+    That is the same `gh repo view` resolution Step 7 already uses to decide where to post — it resolves through `gh`'s default-repo, which in a fork clone is the **upstream**, where the PR actually lives — and the second token is the host `gh` resolved that repo at (the URL's authority; an explicit port survives, and the matcher strips it). Pass that host to the matcher: `gh` also resolves a host through its own auth config (`gh auth login --hostname …`, no GH_HOST exported), which the matcher cannot see, so omitting `--host` would compare such a GHE repo against the github.com default and stop at exit 6 even though every later `gh` call routes at the GHE host. Then resolve the remote with the same matcher Step 1's pr-url path uses — same rule, same exit codes:
 
     ```bash
     "${QWEN_CODE_CLI:-qwen}" review match-remote \
-      --owner <owner from gh repo view> --repo <repo from gh repo view>
+      --owner <owner from gh repo view> --repo <repo from gh repo view> \
+      --host <host from gh repo view>
     ```
 
     Do not default to `origin`: in the standard fork layout `origin` is the _fork_, which has no `pull/<n>/head` ref for an upstream PR, and `fetch-pr` fails. In an upstream-as-`origin` clone the matcher lands on `origin` anyway, so one procedure is correct for both.

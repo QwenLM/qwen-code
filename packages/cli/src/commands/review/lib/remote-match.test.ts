@@ -95,6 +95,9 @@ describe('normalizeSegment', () => {
   it('lowercases and strips one trailing .git', () => {
     expect(normalizeSegment('QwenLM')).toBe('qwenlm');
     expect(normalizeSegment('qwen-code.git')).toBe('qwen-code');
+    // Uppercase .GIT pins the lowercase-THEN-strip order: strip-before-
+    // lowercase would leave the suffix behind and fail every comparison.
+    expect(normalizeSegment('QWEN-CODE.GIT')).toBe('qwen-code');
     expect(normalizeSegment('qwen-code.git.git')).toBe('qwen-code.git');
   });
 });

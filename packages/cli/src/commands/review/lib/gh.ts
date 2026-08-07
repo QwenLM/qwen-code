@@ -107,9 +107,11 @@ export function getGhHost(): string | undefined {
  * The effective GitHub host for a command invocation: an explicit `--host`
  * flag wins, else an operator-exported GH_HOST, else `undefined` — the
  * caller applies its own default (`gh`'s github.com, or the matcher's
- * comparison host). Every host-routing call site resolves through this one
- * helper so the matcher and the write-side authorisation gates cannot
- * disagree about which host a run targets.
+ * comparison host). Every call site that needs the effective host as a
+ * value — the matcher and the two write-side authorisation gates —
+ * resolves through this one helper so they cannot disagree; routing
+ * sites go through `setGhHost` and inherit an operator-exported GH_HOST
+ * via the child env.
  *
  * `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
  * `??`, being non-nullish) must read as "no host", not as a host named ""

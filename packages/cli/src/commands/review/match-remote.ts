@@ -125,7 +125,7 @@ export const matchRemoteCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          "The PR URL's host (GitHub Enterprise passes its own; bare PR numbers inherit GH_HOST, else github.com)",
+          "The PR's host — from its URL, or from `gh repo view` for a bare number (omitted: inherit an operator-exported GH_HOST, else github.com)",
       }),
   handler: (argv) => {
     runMatchRemote({

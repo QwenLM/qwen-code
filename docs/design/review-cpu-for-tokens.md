@@ -169,7 +169,7 @@ qwen review match-remote --owner <owner> --repo <repo> [--host <host>]
 **SKILL.md delta:** Step 1's two prose paragraphs (exact-segment parse, fork
 layout, guessing prohibition) collapse to "run `match-remote`; a printed
 name means worktree flow, exit 6 means lightweight mode". Net prompt size
-is roughly neutral (measured from this PR's SKILL.md hunks: ~230 chars
+is roughly neutral (measured from this PR's SKILL.md hunks: ~720 chars
 added net) — the bash invocation and exit-code prose offset the removed
 rule text; the win is determinism and tests, not size. `fetch-pr`'s
 interface is unchanged (still takes `--remote`), and the lightweight-mode
@@ -181,14 +181,18 @@ shapes, `.git` suffix, case-insensitivity, the `shao/qwen-code` vs
 target), GHE host mismatch, multiple-match, zero-match, malformed remote
 URLs. The bug history supplies the first rows.
 
-**Host resolution for bare PR numbers:** the matcher resolves `--host` the
-same way its siblings do — an explicit flag wins, else an operator-exported
-`GH_HOST`, else github.com (pr-context, comment-status, and fetch-pr all
-declare `--host` with no default and inherit `GH_HOST` when it is omitted).
-A bare number on a GitHub Enterprise clone therefore matches the GHE remote
-exactly when the rest of the pipeline is already routed there by `GH_HOST`
-— the matcher and the `gh` calls cannot disagree about which site the
-number belongs to.
+**Host resolution for bare PR numbers:** a bare number has no URL to take
+a host from, so Step 1 asks `gh repo view` for the repo's URL as well and
+passes its authority as `--host`. `gh` resolves that URL through its own
+default-host resolution — an operator-exported `GH_HOST` or, without one,
+its auth config — so the matcher compares against exactly the host the
+rest of the pipeline routes at. (The first cut omitted `--host` and let
+the matcher inherit `GH_HOST` itself, assuming `gh`'s routing always came
+from that env; `gh` also resolves a GHE host from its auth config alone,
+and an operator using only that was compared against github.com and
+hard-stopped at exit 6 — caught by this PR's own review.) With `--host`
+omitted, the matcher's fallback is unchanged: an explicit flag wins, else
+an operator-exported `GH_HOST`, else github.com.
 
 ### Files affected
 
