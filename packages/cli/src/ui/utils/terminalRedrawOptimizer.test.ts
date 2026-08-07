@@ -57,6 +57,7 @@ describe('optimizeMultilineEraseLines', () => {
 
 describe('installTerminalRedrawOptimizer', () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     resetTerminalRedrawStats();
   });
 
@@ -157,7 +158,8 @@ describe('installTerminalRedrawOptimizer', () => {
   it('reads process.env at call time by default (#7634)', () => {
     // Pins the production default-parameter seam: the sole caller omits the
     // env argument and the optimizer must honor the WSL marker from
-    // process.env, not a hardcoded empty set.
+    // process.env, not a hardcoded empty set. The stub is cleaned up in the
+    // describe-level afterEach so it cannot leak into later tests.
     vi.stubEnv('WSL_DISTRO_NAME', 'Ubuntu');
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
@@ -165,7 +167,6 @@ describe('installTerminalRedrawOptimizer', () => {
 
     expect(stdout.write).toBe(write);
     restore();
-    vi.unstubAllEnvs();
   });
 
   it('can be force-enabled on WSL via QWEN_CODE_LEGACY_ERASE_LINES=0 (#7634)', () => {
