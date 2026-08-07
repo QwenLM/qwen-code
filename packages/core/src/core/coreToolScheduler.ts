@@ -61,12 +61,11 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './geminiChat.js';
 import * as fsSync from 'node:fs';
 import {
-  canonicalToolName,
   formatPermissionToolIdentity,
   normalizeDeferredToolCallRequest,
   providerToolName,

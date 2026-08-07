@@ -5,7 +5,7 @@
  */
 
 import type { ToolRegistry } from '../tools/tool-registry.js';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import type { ToolCallRequestInfo } from './turn.js';
@@ -24,10 +24,6 @@ export type DeferredToolCallNormalizationResult =
       targetName?: string;
       errorType: ToolErrorType;
     };
-
-export function canonicalToolName(toolName: string): string {
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
-}
 
 export function providerToolName(request: ToolCallRequestInfo): string {
   return request.providerName ?? request.name;

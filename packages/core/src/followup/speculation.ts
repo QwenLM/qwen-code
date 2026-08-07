@@ -23,7 +23,7 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
-import { canonicalToolName } from '../core/deferred-tool-call-normalization.js';
+import { canonicalToolName } from '../tools/tool-names.js';
 import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';

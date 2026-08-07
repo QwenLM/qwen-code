@@ -20,6 +20,7 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
@@ -230,6 +231,8 @@ export interface ChannelBaseOptions {
       channelName: string,
       observation: ObservedChannelContactObservation,
     ): void | Promise<void>;
+    /** Read persisted observations so adapters can hydrate label caches. */
+    list?(): ObservedChannelContactGraph;
   };
 }
 
@@ -1424,6 +1427,7 @@ export abstract class ChannelBase {
       text: coalesced,
       alreadyPrefixed: true,
       referencedText: undefined,
+      mentionedMemberIds: undefined,
       attachments: undefined,
       metadata: undefined,
       imageBase64: undefined,
@@ -4926,7 +4930,7 @@ export abstract class ChannelBase {
     await this.processInbound(envelope);
   }
 
-  private async recordObservedContact(envelope: Envelope): Promise<void> {
+  protected async recordObservedContact(envelope: Envelope): Promise<void> {
     if (!this.observedContacts) return;
     const sanitizedSenderName = envelope.senderName
       ? sanitizeSenderName(envelope.senderName)
@@ -4967,6 +4971,29 @@ export abstract class ChannelBase {
     }
   }
 
+  protected onObservedContact(_envelope: Envelope): void {}
+
+  /**
+   * Observations persisted for this channel, when a read path is configured.
+   * Adapters hydrate label caches from it after a restart so known labels are
+   * not reverted to raw IDs by the next initial write.
+   */
+  protected persistedObservedContacts():
+    | ObservedChannelContactGraph
+    | undefined {
+    const list = this.observedContacts?.list;
+    if (!list) return undefined;
+    try {
+      const graph = list();
+      return {
+        users: graph.users.filter((user) => user.channelName === this.name),
+        groups: graph.groups.filter((group) => group.channelName === this.name),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
   }
@@ -4999,6 +5026,7 @@ export abstract class ChannelBase {
     if (this.observedContacts && !this.observedContactEnvelopes.has(envelope)) {
       this.observedContactEnvelopes.add(envelope);
       await this.recordObservedContact(envelope);
+      this.onObservedContact(envelope);
     }
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
@@ -5169,6 +5197,24 @@ export abstract class ChannelBase {
         envelope.senderName || envelope.senderId || 'unknown',
       );
       promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+      // Render the non-bot mention marker AFTER sanitization (like the
+      // [Replying to:] wrapper below). Inside `text` it would pass through
+      // sanitizePromptText, which strips brackets only on content <=64 chars
+      // and folds its newline — so with IDs included, the delivered format
+      // would depend on the ID list's length. IDs are platform-controlled, so
+      // neutralize them like quoted text before they bypass the sanitizer here.
+      if (envelope.mentionedMemberIds?.length) {
+        const ids = envelope.mentionedMemberIds
+          .map((id) => sanitizeQuotedText(id, 64).trim())
+          // A junk-only ID over the cap truncates to a bare '…' (not
+          // whitespace), which would advertise a phantom member — drop it
+          // like an empty ID.
+          .filter((id) => id.length > 0 && id !== '…');
+        if (ids.length > 0) {
+          const memberLabel = ids.length === 1 ? 'member' : 'members';
+          promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
+        }
+      }
     }
 
     if (envelope.referencedText) {
@@ -5744,6 +5790,7 @@ export abstract class ChannelBase {
             alreadyPrefixed: true,
             // Clear attachments/references — already resolved in original text
             referencedText: undefined,
+            mentionedMemberIds: undefined,
             attachments: undefined,
             metadata: undefined,
             imageBase64: undefined,

@@ -55,7 +55,7 @@ import {
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -197,14 +197,13 @@ function syncFunctionCallsField(
 }
 
 /**
- * Local mirror of the scheduler's `canonicalToolName` (kept here to avoid a
- * geminiChat -> coreToolScheduler import cycle): resolves legacy tool-name
- * aliases so the load-side plan redaction keeps matching sessions recorded
- * under a pre-migration name, in lockstep with the write-side scheduler.
+ * Resolves legacy tool-name aliases via the shared `canonicalToolName` so
+ * the load-side plan redaction keeps matching sessions recorded under a
+ * pre-migration name, in lockstep with the write-side scheduler.
  */
 function canonicalPlanToolName(toolName: string | undefined): string {
   if (!toolName) return '';
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+  return canonicalToolName(toolName);
 }
 
 /**
