@@ -3476,6 +3476,30 @@ describe('GithubChannel', () => {
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
     });
 
+    it('recovers an envelope carrying a valid mentionedMemberIds array', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord();
+      writeInboundTasks([
+        {
+          ...task,
+          envelope: { ...task.envelope, mentionedMemberIds: ['member-x'] },
+        },
+      ]);
+      const privateChannel = channel as unknown as {
+        inboundRecoveryPending: boolean;
+      };
+      privateChannel.inboundRecoveryPending = true;
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.mentionedMemberIds).toEqual([
+        'member-x',
+      ]);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
     it('persists cancellation as a terminal task state', async () => {
       await initWithoutLoop();
       writeInboundTasks([makeInboundTaskRecord({ state: 'running' })]);
