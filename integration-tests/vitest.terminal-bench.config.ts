@@ -6,7 +6,7 @@
 
 import { defineConfig } from 'vitest/config';
 
-const timeoutMinutes = Number(process.env['TB_TIMEOUT_MINUTES'] || '30');
+const timeoutMinutes = Number(process.env.TB_TIMEOUT_MINUTES || '30');
 const testTimeoutMs = timeoutMinutes * 60 * 1000;
 
 export default defineConfig({

@@ -21,8 +21,8 @@ describe('sleep-interception', () => {
   });
 
   // Mirrors the optionality of the parsed telemetry these come from: a
-  // malformed record yields `undefined` rather than a crash, and the
-  // predicates below already treat that as "does not match".
+  // malformed record yields `undefined` rather than a crash. The predicates
+  // below only match an explicit `success` boolean.
   type ShellCall = {
     args?: string;
     success?: boolean;
@@ -70,7 +70,7 @@ describe('sleep-interception', () => {
     );
 
     const foundBlockedCall = await waitForShellCall(
-      (call) => !!call.args?.includes('sleep 5') && !call.success,
+      (call) => !!call.args?.includes('sleep 5') && call.success === false,
     );
 
     if (!foundBlockedCall) {
@@ -88,7 +88,7 @@ describe('sleep-interception', () => {
     // error attribute is only available from file-based telemetry; the
     // podman stdout fallback leaves it undefined.
     const blockedCall = shellCalls().find(
-      (call) => !!call.args?.includes('sleep 5') && !call.success,
+      (call) => !!call.args?.includes('sleep 5') && call.success === false,
     );
     if (blockedCall?.error !== undefined) {
       expect(blockedCall.error).toContain('Monitor');
@@ -179,7 +179,7 @@ describe('sleep-interception', () => {
     );
 
     const foundBlockedCall = await waitForShellCall(
-      (call) => !!call.args?.includes('sleep 5') && !call.success,
+      (call) => !!call.args?.includes('sleep 5') && call.success === false,
     );
 
     if (!foundBlockedCall) {

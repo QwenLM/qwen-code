@@ -46,7 +46,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
-import type { NonBlockingPromptAccepted } from '@qwen-code/sdk/daemon';
+import {
+  isNonBlockingAccepted,
+  type NonBlockingPromptAccepted,
+} from '@qwen-code/sdk/daemon';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -136,16 +139,10 @@ function findExternalReadBase(): string | undefined {
 
 const externalReadBase = findExternalReadBase();
 
-// `promptNonBlocking` returns `NonBlockingPromptAccepted | PromptResult`, and
-// `PromptResult` carries an index signature — so `'promptId' in accepted` does
-// not narrow the union, and every field read after that check comes back as
-// `unknown`. Narrow once, here.
 function asAccepted(
   result: Awaited<ReturnType<DaemonClient['promptNonBlocking']>>,
 ): NonBlockingPromptAccepted | undefined {
-  return 'promptId' in result
-    ? (result as NonBlockingPromptAccepted)
-    : undefined;
+  return isNonBlockingAccepted(result) ? result : undefined;
 }
 
 let daemon: ChildProcess;

@@ -235,7 +235,7 @@ export class TestRig {
         otlpEndpoint: '',
         outfile: telemetryPath,
       },
-      sandbox: env['QWEN_SANDBOX'] !== 'false' ? env['QWEN_SANDBOX'] : false,
+      sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
     };
     writeFileSync(
@@ -264,7 +264,7 @@ export class TestRig {
     initialArgs: string[];
   } {
     const isNpmReleaseTest =
-      process.env['INTEGRATION_TEST_USE_INSTALLED_GEMINI'] === 'true';
+      process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
     const command = isNpmReleaseTest ? 'qwen' : 'node';
     const initialArgs = isNpmReleaseTest
       ? ['--no-chat-recording', ...extraInitialArgs]
@@ -445,14 +445,14 @@ export class TestRig {
 
     child.stdout!.on('data', (data: Buffer) => {
       stdout += data;
-      if (env['KEEP_OUTPUT'] === 'true' || env['VERBOSE'] === 'true') {
+      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
         process.stdout.write(data);
       }
     });
 
     child.stderr!.on('data', (data: Buffer) => {
       stderr += data;
-      if (env['KEEP_OUTPUT'] === 'true' || env['VERBOSE'] === 'true') {
+      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
         process.stderr.write(data);
       }
     });
@@ -780,7 +780,7 @@ export class TestRig {
         logs.push(logData);
       } catch (e) {
         // Skip objects that aren't valid JSON
-        if (env['VERBOSE'] === 'true') {
+        if (env.VERBOSE === 'true') {
           console.error('Failed to parse telemetry object:', e);
         }
       }
@@ -919,7 +919,7 @@ export class TestRig {
 
     ptyProcess.onData((data) => {
       this._interactiveOutput += data;
-      if (env['KEEP_OUTPUT'] === 'true' || env['VERBOSE'] === 'true') {
+      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
         process.stdout.write(data);
       }
     });

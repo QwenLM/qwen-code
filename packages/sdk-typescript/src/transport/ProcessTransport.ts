@@ -61,14 +61,14 @@ export class ProcessTransport implements Transport {
         this.options.debug || this.options.stderr ? 'pipe' : 'ignore';
 
       // Check if we should use fork for Electron integration
-      const useFork = env['FORK_MODE'] === '1';
+      const useFork = env.FORK_MODE === '1';
 
       if (useFork) {
         // Detect Electron environment
         const isElectron =
           typeof process !== 'undefined' &&
           process.versions &&
-          !!process.versions['electron'];
+          !!process.versions.electron;
 
         // In Electron, process.execPath points to Electron, not Node.js
         // When spawnInfo uses process.execPath to run a JS file, we need to handle it specially

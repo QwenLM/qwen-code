@@ -309,8 +309,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
         return {
           sessionId: segs[0],
           artifactId: segs[1],
-          ...(typeof record['clientId'] === 'string'
-            ? { clientId: record['clientId'] }
+          ...(typeof record.clientId === 'string'
+            ? { clientId: record.clientId }
             : {}),
         };
       },

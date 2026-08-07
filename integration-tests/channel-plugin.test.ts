@@ -34,7 +34,7 @@ import { mkdirSync } from 'node:fs';
 import {
   AcpBridge,
   SessionRouter,
-} from '../packages/channels/base/dist/index.js';
+} from '../packages/channels/base/src/index.js';
 import {
   MockPluginChannel,
   createMockServer,

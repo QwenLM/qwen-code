@@ -411,7 +411,7 @@ async function initSession(
           const cronUserMsg = await waitForSessionUpdate(
             (u) =>
               u.update?.sessionUpdate === 'user_message_chunk' &&
-              u.update?._meta?.['source'] === 'cron',
+              u.update?._meta?.source === 'cron',
             "cron-sourced user_message_chunk (_meta.source === 'cron')",
             75_000,
           );

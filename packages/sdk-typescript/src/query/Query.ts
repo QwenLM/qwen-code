@@ -1000,7 +1000,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       ControlRequestType.SET_EFFORT,
       { effort },
     );
-    return Boolean((response as Record<string, unknown> | null)?.['applied']);
+    return Boolean((response as Record<string, unknown> | null)?.applied);
   }
 
   /**
