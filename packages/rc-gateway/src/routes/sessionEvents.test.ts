@@ -47,6 +47,7 @@ async function mountGateway(
   daemon: DaemonClient,
   audit?: AuditRecorder,
   walDir?: string,
+  idleAttachMs?: number,
 ): Promise<string> {
   const app = express();
   app.get(
@@ -57,6 +58,8 @@ async function mountGateway(
       audit,
       undefined,
       walDir,
+      undefined,
+      idleAttachMs,
     ),
   );
   const server: Server = await new Promise((resolve) => {
@@ -241,6 +244,29 @@ describe('session-events proxy', () => {
     const url = await mountGateway(daemon);
     const res = await fetch(`${url}/session/${SESS}/events`);
     expect(res.status).toBe(502);
+  });
+
+  it('sends headers + client_joined promptly for a reachable-but-idle session', async () => {
+    // Regression: a freshly-created session (e.g. via "New conversation") emits
+    // no frame — the daemon holds the stream open with only `retry:`. The
+    // watcher must NOT hang at "connecting"; headers arrive after the idle
+    // grace, so the composer opens. (Old code gated 200 on the first frame and
+    // hung until the daemon stream ended.)
+    stub = await startStubDaemon({ frames: [], holdOpenMs: 2000 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon, undefined, undefined, 100);
+
+    const started = Date.now();
+    const res = await fetch(`${url}/session/${SESS}/events`);
+    expect(res.status).toBe(200);
+    // Arrived on the idle grace (~100ms), NOT after the 2s hold-open.
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    // First frame out is the synthetic client_joined, so the UI has something.
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    expect(new TextDecoder().decode(value!)).toContain('client_joined');
+    await reader.cancel();
   });
 
   it('aborts the upstream subscription when the client disconnects', async () => {

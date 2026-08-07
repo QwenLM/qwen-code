@@ -40,6 +40,41 @@ function getWal(sessionId: string, walDir: string): SessionWal {
  * the daemon. When a client reconnects with Last-Event-ID older than the WAL
  * horizon, the gateway responds 412 with a `replay_truncated` JSON body.
  */
+/** Default grace period before an idle-but-reachable session gets its 200. */
+const DEFAULT_IDLE_ATTACH_MS = 2000;
+
+type FirstFrame<T> =
+  | { first: IteratorResult<T> }
+  | { pending: Promise<IteratorResult<T>> };
+
+/**
+ * Await the first daemon frame, but never hang on a reachable-but-idle session.
+ *
+ * The daemon sends SSE headers + `retry:` on connect but no *frame* until the
+ * session has activity — so a freshly-created idle session yields nothing, and
+ * gating `res.writeHead(200)` on the first frame leaves a watcher stuck at
+ * "connecting" forever (the composer never opens). This resolves:
+ *  - `{ first }` when a frame (or `{done:true}`) arrives first — normal path;
+ *  - `{ pending }` (the still-live `next()`) when neither a frame nor an error
+ *    arrives within `idleMs` — the caller sends headers now and writes that
+ *    frame if/when it lands, dropping nothing;
+ * and REJECTS (rethrows) on a real connection error, so the caller still sends
+ * a pre-header `502` when the daemon is genuinely unreachable.
+ */
+function firstFrameOrIdle<T>(
+  next: Promise<IteratorResult<T>>,
+  idleMs: number,
+): Promise<FirstFrame<T>> {
+  const idle = Symbol('idle');
+  return Promise.race([
+    next.then((first): FirstFrame<T> => ({ first })),
+    new Promise<never>((_, reject) => setTimeout(() => reject(idle), idleMs)),
+  ]).catch((e): FirstFrame<T> => {
+    if (e === idle) return { pending: next };
+    throw e;
+  });
+}
+
 export function createSessionEventsRoute(
   daemon: DaemonClient,
   registry: ConnectionRegistry,
@@ -47,6 +82,7 @@ export function createSessionEventsRoute(
   usageBroadcaster?: UsageTickBroadcaster,
   walDir?: string,
   promptEventBroadcaster?: PromptEventBroadcaster,
+  idleAttachMs: number = DEFAULT_IDLE_ATTACH_MS,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -115,9 +151,9 @@ export function createSessionEventsRoute(
             lastEventId: latestReplayed,
             signal: abort.signal,
           });
-          // Peek at the first live event to confirm the daemon is reachable
-          // before sending 200.
-          const first = await iterator.next();
+          // Confirm reachability without hanging on an idle session (see
+          // firstFrameOrIdle); a real error rejects → outer catch 502s.
+          const attach = await firstFrameOrIdle(iterator.next(), idleAttachMs);
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -147,7 +183,9 @@ export function createSessionEventsRoute(
           for (const ev of replay.events) {
             writeFrame(res, ev);
           }
-          // Then stream live events from the daemon.
+          // Then the first live frame (peeked, or awaited on idle attach) and
+          // the rest of the live stream.
+          const first = 'first' in attach ? attach.first : await attach.pending;
           if (!first.done) writeFrame(res, first.value);
           for await (const ev of iterator) {
             writeFrame(res, ev);
@@ -202,7 +240,10 @@ export function createSessionEventsRoute(
         lastEventId: Number.isFinite(lastEventId) ? lastEventId : undefined,
         signal: abort.signal,
       });
-      const first = await iterator.next();
+      // Confirm the daemon is reachable, but don't hang on a reachable-but-idle
+      // session (a freshly-created session emits no frame). A real connection
+      // error rejects here → the outer catch sends a pre-header 502.
+      const attach = await firstFrameOrIdle(iterator.next(), idleAttachMs);
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -234,6 +275,10 @@ export function createSessionEventsRoute(
       // Emit synthetic client_joined as the first SSE frame on this stream.
       // No id: line — synthetic frames must not advance the Last-Event-ID cursor.
       writePresenceJoined(res, actorTokenId, req.rcClient?.scopes ?? []);
+      // The first live frame: the one already peeked, or — on an idle attach —
+      // the one that eventually arrives on the still-pending next() (headers are
+      // already out, so the watcher's composer opens immediately either way).
+      const first = 'first' in attach ? attach.first : await attach.pending;
       if (!first.done) {
         appendToWal(wal, first.value);
         writeFrame(res, first.value);
