@@ -1921,6 +1921,103 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
+  it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
+    const contextPlan = {
+      ...PR_PLAN,
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['compiler', 'runtime'],
+        relatedPaths: ['src/compiler.ts', 'src/runtime.ts'],
+        recommendedTests: ['test:compiler'],
+        requiredConfigurations: ['debug', 'linux-x64'],
+        requiredAgents: ['test-matrix'],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: ['Use the repository native test runner'],
+      },
+    };
+
+    // Negative pins: roles outside the code-reviewing set and outside the
+    // manifest's required agents get nothing. A `brief.reviewsCode ||` →
+    // `true ||` regression would hand Agent 0 (issue fidelity, not code
+    // review) the full block on every context-bearing plan, and would give
+    // it to a role the manifest did not require, with the suite green.
+    expect(buildRoleBrief(contextPlan, '0')).not.toContain(
+      'Example project repository context',
+    );
+    expect(
+      buildRoleBrief(
+        {
+          ...contextPlan,
+          repositoryContext: {
+            ...contextPlan.repositoryContext,
+            requiredAgents: [],
+          },
+        },
+        'test-matrix',
+      ),
+    ).not.toContain('Example project repository context');
+
+    const reviewerBrief = buildRoleBrief(contextPlan, '1a');
+    expect(reviewerBrief).toContain('Example project repository context');
+    expect(reviewerBrief).toContain('compiler, runtime');
+    expect(reviewerBrief).toContain('src/compiler.ts');
+    expect(reviewerBrief).toContain('test:compiler');
+    expect(reviewerBrief).toContain('debug, linux-x64');
+    expect(reviewerBrief).toContain('Alternate runtime was not exercised');
+    expect(reviewerBrief).toContain('Use the repository native test runner');
+    // Section adjacency: each field is pinned under ITS OWN label, or a
+    // rendering swap between two same-shaped arrays ships green while
+    // reviewers are told the repository's proof boundaries are its
+    // verification instructions — and vice versa.
+    expect(reviewerBrief).toContain(
+      'Related paths:\n- src/compiler.ts\n- src/runtime.ts',
+    );
+    expect(reviewerBrief).toContain(
+      'Unverified dimensions:\n- Alternate runtime was not exercised',
+    );
+    expect(reviewerBrief).toContain(
+      'Verification notes:\n- Use the repository native test runner',
+    );
+
+    const territoryBrief = buildChunkAgentPrompt(contextPlan, 13);
+    expect(territoryBrief).toContain('Example project repository context');
+    expect(territoryBrief).toContain('src/compiler.ts');
+
+    const requiredAgentBrief = buildRoleBrief(contextPlan, 'test-matrix');
+    expect(requiredAgentBrief).toContain('Example project repository context');
+    expect(requiredAgentBrief).toContain('src/compiler.ts');
+    expect(requiredAgentBrief).toContain('test:compiler');
+
+    // Positive pins for code-reviewing roles OUTSIDE the manifest
+    // allow-list that reach the block solely through `brief.reviewsCode`:
+    // a narrowing mutant that keeps every pinned role strips exactly these
+    // and ships green.
+    for (const role of ['verify', 'reverse-audit'] as const) {
+      expect(buildRoleBrief(contextPlan, role)).toContain(
+        'Example project repository context',
+      );
+    }
+
+    const buildBrief = buildRoleBrief(contextPlan, '7');
+    expect(buildBrief).not.toContain('Example project repository context');
+    expect(buildBrief).not.toContain('compiler, runtime');
+    expect(buildBrief).not.toContain('src/compiler.ts');
+    expect(buildBrief).not.toContain('Alternate runtime was not exercised');
+    expect(buildBrief).toContain('Repository-specific verification boundary');
+    expect(buildBrief).toContain('test:compiler');
+    expect(buildBrief).toContain('debug, linux-x64');
+    expect(buildBrief).toContain('Use the repository native test runner');
+
+    // The --whole-diff path builds Agent 8's briefs; it carries the same
+    // block, or the one finder launched for a dominant domain is the one
+    // reviewer denied that domain's guidance.
+    const wholeDiff = buildWholeDiffBlock(contextPlan);
+    expect(wholeDiff).toContain('Example project repository context');
+    expect(wholeDiff).toContain('src/compiler.ts');
+  });
+
   it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {
     // The all-role test above proves every brief gets the diff and the format; it
     // cannot see whether a *specific* lens reached its role. If prompt assembly
