@@ -165,7 +165,7 @@ await client
   .setWorkspaceSkillsEnabled(['review', 'deploy'], true);
 ```
 
-`DaemonSkillBatchToggleResult` contains ordered successful `results` and per-target `errors`; one invalid target does not stop later targets.
+`DaemonSkillBatchToggleResult` contains ordered successful `results`, per-target `errors`, and batch-level activation/session-refresh counts. The daemon persists valid targets together and refreshes active sessions once; one expected target error does not block other valid targets.
 
 Workspace display names are optional presentation metadata. Pre-flight `capabilities.features.includes('workspace_display_name')`; workspace ids and canonical paths remain the only selectors, and duplicate display names are valid.
 

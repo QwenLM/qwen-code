@@ -2500,8 +2500,7 @@ export interface DaemonSkillToggleResult {
 export type DaemonSkillBatchToggleErrorCode =
   | 'skill_not_found'
   | 'skill_not_toggleable'
-  | 'skill_inactive_extension'
-  | 'skill_toggle_failed';
+  | 'skill_inactive_extension';
 
 export interface DaemonSkillBatchToggleError {
   skillName: string;
@@ -2513,8 +2512,17 @@ export interface DaemonSkillBatchToggleError {
 
 export interface DaemonSkillBatchToggleResult {
   enabled: boolean;
-  results: DaemonSkillToggleResult[];
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  results: DaemonSkillBatchToggleItem[];
   errors: DaemonSkillBatchToggleError[];
+}
+
+export interface DaemonSkillBatchToggleItem {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
 }
 
 export type DaemonSkillScope = 'workspace' | 'global';

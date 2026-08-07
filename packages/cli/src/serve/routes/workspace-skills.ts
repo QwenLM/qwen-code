@@ -11,7 +11,6 @@ import {
   parseAndValidateWorkspaceClientId,
 } from '../server/request-helpers.js';
 import {
-  isGenerationClosedError,
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
@@ -26,13 +25,6 @@ import {
   type WorkspaceSkillInstallRequest,
   type WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
-import {
-  WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
-  type DaemonWorkspaceService,
-  type WorkspaceRequestContext,
-} from '../workspace-service/types.js';
-
 const MAX_WORKSPACE_SKILL_BATCH_SIZE = 100;
 
 interface RegisterWorkspaceSkillsRoutesDeps {
@@ -44,6 +36,28 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+}
+
+function rejectSkillNameTooLong(skillName: string, res: Response): boolean {
+  if (skillName.length <= MAX_WORKSPACE_SKILL_NAME_LENGTH) return false;
+  res.status(400).json({
+    error: `Skill name exceeds ${MAX_WORKSPACE_SKILL_NAME_LENGTH}-character limit`,
+    code: 'invalid_skill_name',
+  });
+  return true;
+}
+
+function parseEnabledFlag(
+  body: Record<string, unknown>,
+  res: Response,
+): { enabled: boolean } | undefined {
+  const enabled = body['enabled'];
+  if (typeof enabled === 'boolean') return { enabled };
+  res.status(400).json({
+    error: '`enabled` is required and must be a boolean',
+    code: 'invalid_enabled_flag',
+  });
+  return undefined;
 }
 
 function parseSkillToggleRequest(
@@ -67,22 +81,9 @@ function parseSkillToggleRequest(
     });
     return undefined;
   }
-  if (skillName.length > MAX_WORKSPACE_SKILL_NAME_LENGTH) {
-    res.status(400).json({
-      error: `Skill name exceeds ${MAX_WORKSPACE_SKILL_NAME_LENGTH}-character limit`,
-      code: 'invalid_skill_name',
-    });
-    return undefined;
-  }
-  const enabled = safeBody(req)['enabled'];
-  if (typeof enabled !== 'boolean') {
-    res.status(400).json({
-      error: '`enabled` is required and must be a boolean',
-      code: 'invalid_enabled_flag',
-    });
-    return undefined;
-  }
-  return { skillName, enabled };
+  if (rejectSkillNameTooLong(skillName, res)) return undefined;
+  const flag = parseEnabledFlag(safeBody(req), res);
+  return flag ? { skillName, enabled: flag.enabled } : undefined;
 }
 
 function parseSkillBatchToggleRequest(
@@ -116,74 +117,15 @@ function parseSkillBatchToggleRequest(
       });
       return undefined;
     }
-    if (skillName.length > MAX_WORKSPACE_SKILL_NAME_LENGTH) {
-      res.status(400).json({
-        error: `Skill name exceeds ${MAX_WORKSPACE_SKILL_NAME_LENGTH}-character limit`,
-        code: 'invalid_skill_name',
-      });
-      return undefined;
-    }
+    if (rejectSkillNameTooLong(skillName, res)) return undefined;
     const normalizedName = skillName.toLowerCase();
     if (seen.has(normalizedName)) continue;
     seen.add(normalizedName);
     skillNames.push(skillName);
   }
 
-  const enabled = body['enabled'];
-  if (typeof enabled !== 'boolean') {
-    res.status(400).json({
-      error: '`enabled` is required and must be a boolean',
-      code: 'invalid_enabled_flag',
-    });
-    return undefined;
-  }
-  return { skillNames, enabled };
-}
-
-async function setWorkspaceSkillsEnabled(
-  service: DaemonWorkspaceService,
-  ctx: WorkspaceRequestContext,
-  skillNames: readonly string[],
-  enabled: boolean,
-) {
-  const results = [];
-  const errors = [];
-  for (const skillName of skillNames) {
-    try {
-      results.push(
-        await service.setWorkspaceSkillEnabled(ctx, skillName, enabled),
-      );
-    } catch (error) {
-      if (isGenerationClosedError(error)) throw error;
-      if (error instanceof WorkspaceSkillNotFoundError) {
-        errors.push({
-          skillName: error.skillName,
-          code: 'skill_not_found' as const,
-          error: error.message,
-        });
-        continue;
-      }
-      if (error instanceof WorkspaceSkillNotToggleableError) {
-        errors.push({
-          skillName: error.skillName,
-          code:
-            error.reason === 'inactive_extension'
-              ? ('skill_inactive_extension' as const)
-              : ('skill_not_toggleable' as const),
-          error: error.message,
-          reason: error.reason,
-          ...(error.lockedScope ? { lockedScope: error.lockedScope } : {}),
-        });
-        continue;
-      }
-      errors.push({
-        skillName,
-        code: 'skill_toggle_failed' as const,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return { enabled, results, errors };
+  const flag = parseEnabledFlag(body, res);
+  return flag ? { skillNames, enabled: flag.enabled } : undefined;
 }
 
 function parseSkillScope(
@@ -212,13 +154,7 @@ function parseSkillInstallRequest(
     });
     return undefined;
   }
-  if (name.trim().length > MAX_WORKSPACE_SKILL_NAME_LENGTH) {
-    res.status(400).json({
-      error: `Skill name exceeds ${MAX_WORKSPACE_SKILL_NAME_LENGTH}-character limit`,
-      code: 'invalid_skill_name',
-    });
-    return undefined;
-  }
+  if (rejectSkillNameTooLong(name.trim(), res)) return undefined;
   const scope = parseSkillScope(body['scope'], res);
   if (!scope) return undefined;
   const rawSource = body['source'];
@@ -341,12 +277,12 @@ export function registerWorkspaceSkillsRoutes(
       const clientId = deps.parseAndValidateClientId(req, res);
       if (clientId === null) return;
       try {
-        const result = await setWorkspaceSkillsEnabled(
-          deps.workspaceRuntime.workspaceService,
-          buildWorkspaceCtx(batchRoute, clientId),
-          input.skillNames,
-          input.enabled,
-        );
+        const result =
+          await deps.workspaceRuntime.workspaceService.setWorkspaceSkillsEnabled(
+            buildWorkspaceCtx(batchRoute, clientId),
+            input.skillNames,
+            input.enabled,
+          );
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route: batchRoute });
@@ -476,8 +412,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       );
       if (clientId === null) return;
       try {
-        const result = await setWorkspaceSkillsEnabled(
-          runtime.workspaceService,
+        const result = await runtime.workspaceService.setWorkspaceSkillsEnabled(
           createBuildWorkspaceCtx(runtime.workspaceCwd)(batchRoute, clientId),
           input.skillNames,
           input.enabled,

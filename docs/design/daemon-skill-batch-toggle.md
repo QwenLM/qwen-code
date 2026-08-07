@@ -24,21 +24,23 @@ The request body is:
 
 `skillNames` is a non-empty string array with at most 100 entries. Names are
 trimmed and deduplicated case-insensitively while preserving first-seen order.
-The response is best-effort: valid targets are toggled in order, and failures
-for individual targets are returned without preventing later targets from
-being attempted.
+The response is best-effort for expected target errors: valid targets are
+validated against one status snapshot, persisted in one locked write, and
+applied with one live-session refresh. Unknown, hidden, inactive-extension,
+and locked targets are returned without blocking the valid targets. Unexpected
+persistence and runtime-generation failures fail the whole request.
 
 ```json
 {
   "enabled": false,
+  "activation": "applied",
+  "sessionsRefreshed": 1,
+  "sessionsFailed": 0,
   "results": [
     {
       "skillName": "review",
       "enabled": false,
-      "changed": true,
-      "activation": "applied",
-      "sessionsRefreshed": 1,
-      "sessionsFailed": 0
+      "changed": true
     }
   ],
   "errors": [

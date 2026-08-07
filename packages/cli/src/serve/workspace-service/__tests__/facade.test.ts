@@ -111,6 +111,7 @@ import { WorkspaceVoiceError } from '../../../services/voice-service.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
+  WorkspaceSkillNotToggleableError,
   WorkspaceSettingsPartialPersistError,
 } from '../types.js';
 import type {
@@ -135,6 +136,10 @@ function makeDeps(
     persistDisabledSkills: vi.fn().mockResolvedValue({
       changed: true,
       disabled: [],
+    }),
+    persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+      outcomes: [],
+      settingsChanges: [],
     }),
     queryWorkspaceStatus: vi
       .fn()
@@ -2032,6 +2037,204 @@ describe('createDaemonWorkspaceService', () => {
       ).rejects.toThrow('disk full');
       expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setWorkspaceSkillsEnabled', () => {
+    const skills = [
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'review',
+        description: 'Review changed code',
+        level: 'bundled' as const,
+        modelInvocable: true,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'deploy',
+        description: 'Deploy code',
+        level: 'bundled' as const,
+        modelInvocable: true,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'hidden',
+        description: 'Hidden skill',
+        level: 'bundled' as const,
+        modelInvocable: true,
+        userInvocable: false,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'disabled' as const,
+        name: 'inactive',
+        description: 'Inactive extension skill',
+        level: 'extension' as const,
+        extensionName: 'demo',
+        modelInvocable: true,
+        disabledReason: 'inactive_extension' as const,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'disabled' as const,
+        name: 'locked',
+        description: 'Locked skill',
+        level: 'bundled' as const,
+        modelInvocable: true,
+        disabledReason: 'hard' as const,
+        lockedScope: 'user' as const,
+      },
+    ];
+
+    it('persists and refreshes once while preserving ordered target outcomes', async () => {
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills,
+      });
+      const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+        outcomes: [
+          { skillName: 'review', changed: true },
+          {
+            skillName: 'locked',
+            error: new WorkspaceSkillNotToggleableError(
+              'locked',
+              'locked',
+              'user',
+            ),
+          },
+          { skillName: 'deploy', changed: true },
+        ],
+        settingsChanges: [
+          { key: 'skills.disabled', value: ['review', 'deploy'] },
+        ],
+      });
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        sessionsRefreshed: 2,
+        sessionsFailed: 0,
+      });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkillsBatch,
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const result = await svc.setWorkspaceSkillsEnabled(
+        makeCtx({ originatorClientId: 'client-1' }),
+        ['Review', 'missing', 'hidden', 'inactive', 'locked', 'deploy'],
+        false,
+      );
+
+      expect(queryWorkspaceStatus).toHaveBeenCalledOnce();
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledOnce();
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+        '/workspace',
+        ['review', 'locked', 'deploy'],
+        false,
+        undefined,
+      );
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+      expect(result).toEqual({
+        enabled: false,
+        activation: 'applied',
+        sessionsRefreshed: 2,
+        sessionsFailed: 0,
+        results: [
+          { skillName: 'review', enabled: false, changed: true },
+          { skillName: 'deploy', enabled: false, changed: true },
+        ],
+        errors: [
+          {
+            skillName: 'missing',
+            code: 'skill_not_found',
+            error: 'Skill not found: missing',
+          },
+          {
+            skillName: 'hidden',
+            code: 'skill_not_toggleable',
+            error: 'Skill hidden is not toggleable: not_user_invocable',
+            reason: 'not_user_invocable',
+          },
+          {
+            skillName: 'inactive',
+            code: 'skill_inactive_extension',
+            error: 'Skill inactive is not toggleable: inactive_extension',
+            reason: 'inactive_extension',
+          },
+          {
+            skillName: 'locked',
+            code: 'skill_not_toggleable',
+            error: 'Skill locked is locked by user settings',
+            reason: 'locked',
+            lockedScope: 'user',
+          },
+        ],
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+    });
+
+    it('fails the whole batch when persistence fails unexpectedly', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi
+            .fn()
+            .mockRejectedValue(new Error('disk full')),
+          invokeWorkspaceCommand,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false),
+      ).rejects.toThrow('disk full');
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    });
+
+    it('returns validation errors without persisting when no target is valid', async () => {
+      const persistDisabledSkillsBatch = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(
+          makeCtx(),
+          ['missing', 'hidden', 'inactive'],
+          false,
+        ),
+      ).resolves.toMatchObject({
+        results: [],
+        errors: [
+          { skillName: 'missing', code: 'skill_not_found' },
+          { skillName: 'hidden', code: 'skill_not_toggleable' },
+          { skillName: 'inactive', code: 'skill_inactive_extension' },
+        ],
+      });
+      expect(persistDisabledSkillsBatch).not.toHaveBeenCalled();
     });
   });
 

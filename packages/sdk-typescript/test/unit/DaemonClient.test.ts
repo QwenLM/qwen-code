@@ -4043,14 +4043,14 @@ describe('DaemonClient', () => {
   describe('setWorkspaceSkillsEnabled', () => {
     const response = {
       enabled: false,
+      activation: 'applied',
+      sessionsRefreshed: 2,
+      sessionsFailed: 0,
       results: [
         {
           skillName: 'review',
           enabled: false,
           changed: true,
-          activation: 'applied',
-          sessionsRefreshed: 2,
-          sessionsFailed: 0,
         },
       ],
       errors: [],

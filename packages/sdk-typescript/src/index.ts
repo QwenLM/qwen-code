@@ -96,6 +96,7 @@ export {
   type DaemonToolToggleResult,
   type DaemonSkillBatchToggleError,
   type DaemonSkillBatchToggleErrorCode,
+  type DaemonSkillBatchToggleItem,
   type DaemonSkillBatchToggleResult,
   type DaemonSkillToggleActivation,
   type DaemonSkillToggleResult,

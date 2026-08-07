@@ -5,12 +5,10 @@ import express, {
 } from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { sendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
-import {
-  WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
-} from '../workspace-service/types.js';
+import type { WorkspaceSkillBatchToggleResult } from '../workspace-service/types.js';
 import { registerWorkspaceSkillsRoutes } from './workspace-skills.js';
 
 function createHarness() {
@@ -34,6 +32,24 @@ function createHarness() {
       sessionsFailed: 0,
     }),
   );
+  const setWorkspaceSkillsEnabled = vi.fn(
+    async (
+      _ctx: unknown,
+      skillNames: readonly string[],
+      enabled: boolean,
+    ): Promise<WorkspaceSkillBatchToggleResult> => ({
+      enabled,
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      results: skillNames.map((skillName) => ({
+        skillName: skillName.toLowerCase(),
+        enabled,
+        changed: true,
+      })),
+      errors: [],
+    }),
+  );
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   registerWorkspaceSkillsRoutes(app, {
@@ -44,11 +60,12 @@ function createHarness() {
         installWorkspaceSkill,
         deleteWorkspaceSkill,
         setWorkspaceSkillEnabled,
+        setWorkspaceSkillsEnabled,
       },
     } as unknown as WorkspaceRuntime,
     mutate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
     safeBody: (req) => req.body as Record<string, unknown>,
-    sendBridgeError: vi.fn(),
+    sendBridgeError,
     parseAndValidateClientId: () => 'client-1',
   });
   return {
@@ -56,6 +73,7 @@ function createHarness() {
     installWorkspaceSkill,
     deleteWorkspaceSkill,
     setWorkspaceSkillEnabled,
+    setWorkspaceSkillsEnabled,
   };
 }
 
@@ -157,28 +175,27 @@ describe('workspace Skill management routes', () => {
 
   it('toggles a deduplicated Skill batch and returns per-target errors', async () => {
     const harness = createHarness();
-    harness.setWorkspaceSkillEnabled.mockImplementation(
-      async (_ctx: unknown, skillName: string, enabled: boolean) => {
-        if (skillName === 'missing') {
-          throw new WorkspaceSkillNotFoundError(skillName);
-        }
-        if (skillName === 'locked') {
-          throw new WorkspaceSkillNotToggleableError(
-            skillName,
-            'locked',
-            'user',
-          );
-        }
-        return {
-          skillName: skillName.toLowerCase(),
-          enabled,
-          changed: true,
-          activation: 'applied' as const,
-          sessionsRefreshed: 1,
-          sessionsFailed: 0,
-        };
-      },
-    );
+    harness.setWorkspaceSkillsEnabled.mockResolvedValueOnce({
+      enabled: false,
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      results: [{ skillName: 'review', enabled: false, changed: true }],
+      errors: [
+        {
+          skillName: 'missing',
+          code: 'skill_not_found',
+          error: 'Skill not found: missing',
+        },
+        {
+          skillName: 'locked',
+          code: 'skill_not_toggleable',
+          error: 'Skill locked is locked by user settings',
+          reason: 'locked',
+          lockedScope: 'user',
+        },
+      ],
+    });
 
     const response = await request(harness.app)
       .post('/workspace/skills/enable')
@@ -190,14 +207,14 @@ describe('workspace Skill management routes', () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
       enabled: false,
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
       results: [
         {
           skillName: 'review',
           enabled: false,
           changed: true,
-          activation: 'applied',
-          sessionsRefreshed: 1,
-          sessionsFailed: 0,
         },
       ],
       errors: [
@@ -215,14 +232,12 @@ describe('workspace Skill management routes', () => {
         },
       ],
     });
-    expect(harness.setWorkspaceSkillEnabled).toHaveBeenCalledTimes(3);
-    expect(harness.setWorkspaceSkillEnabled).toHaveBeenNthCalledWith(
-      1,
+    expect(harness.setWorkspaceSkillsEnabled).toHaveBeenCalledWith(
       expect.objectContaining({
         route: 'POST /workspace/skills/enable',
         originatorClientId: 'client-1',
       }),
-      'Review',
+      ['Review', 'missing', 'locked'],
       false,
     );
   });
@@ -245,6 +260,18 @@ describe('workspace Skill management routes', () => {
     const invalidFlag = await request(harness.app)
       .post('/workspace/skills/enable')
       .send({ skillNames: ['review'], enabled: 'no' });
+    const nonString = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ skillNames: ['review', 42], enabled: false });
+    const tooLong = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ skillNames: ['x'.repeat(257)], enabled: false });
+    const exactLimit = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({
+        skillNames: Array.from({ length: 100 }, (_, i) => `s${i}`),
+        enabled: false,
+      });
 
     expect(empty.status).toBe(400);
     expect(empty.body.code).toBe('invalid_skill_names');
@@ -254,6 +281,28 @@ describe('workspace Skill management routes', () => {
     expect(blank.body.code).toBe('invalid_skill_name');
     expect(invalidFlag.status).toBe(400);
     expect(invalidFlag.body.code).toBe('invalid_enabled_flag');
-    expect(harness.setWorkspaceSkillEnabled).not.toHaveBeenCalled();
+    expect(nonString.status).toBe(400);
+    expect(nonString.body.code).toBe('invalid_skill_names');
+    expect(tooLong.status).toBe(400);
+    expect(tooLong.body.code).toBe('invalid_skill_name');
+    expect(exactLimit.status).toBe(200);
+    expect(harness.setWorkspaceSkillsEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails the whole batch when the workspace generation closes', async () => {
+    const harness = createHarness();
+    harness.setWorkspaceSkillsEnabled.mockRejectedValueOnce(
+      Object.assign(new Error('closed'), {
+        code: 'workspace_generation_closed',
+      }),
+    );
+
+    const response = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ skillNames: ['review', 'deploy'], enabled: false });
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+    expect(harness.setWorkspaceSkillsEnabled).toHaveBeenCalledOnce();
   });
 });

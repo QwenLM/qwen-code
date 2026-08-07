@@ -17617,6 +17617,22 @@ describe('createServeApp', () => {
       expect(res.body.code).toBe('token_required');
     });
 
+    it('requires the strict bearer-auth mutation gate for Skill batches', async () => {
+      const bridge = fakeBridge();
+      const persistDisabledSkillsBatch = vi.fn();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        persistDisabledSkillsBatch,
+      });
+      const res = await request(app)
+        .post('/workspace/skills/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ skillNames: ['review'], enabled: false });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(persistDisabledSkillsBatch).not.toHaveBeenCalled();
+    });
+
     it('validates skill names and the enabled body', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, {

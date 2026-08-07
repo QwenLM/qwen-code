@@ -394,6 +394,7 @@ export type {
   DaemonToolToggleResult,
   DaemonSkillBatchToggleError,
   DaemonSkillBatchToggleErrorCode,
+  DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
   DaemonSkillToggleActivation,
   DaemonSkillToggleResult,

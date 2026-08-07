@@ -2676,7 +2676,7 @@ The mutation reuses the workspace-scoped `settings_changed` event for each chang
 
 Capability tag: `workspace_skill_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
-Toggle up to 100 loaded Skills in one request. The route applies the same validation, persistence, and live-session refresh semantics as the single-Skill route. Names are trimmed and deduplicated case-insensitively while preserving first-seen order. Processing is best-effort and ordered: a target failure is recorded in `errors` and does not prevent later targets from being attempted.
+Toggle up to 100 loaded Skills in one request. Names are trimmed and deduplicated case-insensitively while preserving first-seen order. The daemon validates against one Skill status snapshot, persists all valid changes in one locked settings write, and refreshes active sessions once. Processing is best-effort for expected target errors: an unknown, hidden, inactive-extension, or locked target is recorded in `errors` without preventing other valid targets from being applied. Unexpected persistence or runtime-generation failures still fail the whole request.
 
 Request:
 
@@ -2692,14 +2692,14 @@ Response (200):
 ```json
 {
   "enabled": false,
+  "activation": "applied",
+  "sessionsRefreshed": 2,
+  "sessionsFailed": 0,
   "results": [
     {
       "skillName": "review",
       "enabled": false,
-      "changed": true,
-      "activation": "applied",
-      "sessionsRefreshed": 2,
-      "sessionsFailed": 0
+      "changed": true
     }
   ],
   "errors": [
@@ -2712,7 +2712,7 @@ Response (200):
 }
 ```
 
-Target errors use `skill_not_found`, `skill_not_toggleable`, `skill_inactive_extension`, or `skill_toggle_failed`. Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, and runtime-generation failures still fail the whole request through the standard route gates.
+Target errors use `skill_not_found`, `skill_not_toggleable`, or `skill_inactive_extension`. Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe the single live-session refresh shared by all changed results.
 
 #### `POST /workspace/init`
 
