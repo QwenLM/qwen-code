@@ -2579,7 +2579,7 @@ const EN: Messages = {
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
-    'Must be "Open" for notifications to flow',
+    'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
   'channels.editor.field.github.senderPolicy': 'Sender Policy',
   'channels.editor.field.github.senderPolicy.description':
     'Use "Allowlist" with allowed users on public repos',
@@ -2598,7 +2598,7 @@ const EN: Messages = {
     'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
   'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
   'channels.editor.field.gitlab.groupPolicy.description':
-    'Must be "Open" or "Allowlist" for todos to be processed',
+    'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
   'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
   'channels.editor.field.gitlab.senderPolicy.description':
     'Use "Allowlist" with allowed users on public projects',
@@ -2640,7 +2640,11 @@ const EN: Messages = {
     'People receive a pairing code and can chat after you approve them.',
   'channels.editor.pairing.title': 'Pending requests',
   'channels.editor.pairing.description':
-    'Match the code shared by the person before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+    'Match the shared code before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+  'channels.editor.pairing.subject.group': (v) =>
+    `Group: ${v?.name ?? 'Unknown'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `Requested by ${v?.sender ?? 'Unknown'}`,
   'channels.editor.pairing.refresh': 'Refresh pairing requests',
   'channels.editor.pairing.approve': 'Approve',
   'channels.editor.pairing.approveFor': (v) =>
@@ -2659,7 +2663,7 @@ const EN: Messages = {
     'Pending requests will appear here after this Channel is saved in pairing mode.',
   'channels.editor.pairing.approvals.title': 'Pairing approvals',
   'channels.editor.pairing.approvals.description':
-    'Sender IDs approved through pairing for this Channel.',
+    'User and group IDs approved through pairing for this Channel.',
   'channels.editor.pairing.approvals.refresh': 'Refresh pairing approvals',
   'channels.editor.pairing.approvals.revoke': 'Revoke',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
@@ -2672,7 +2676,7 @@ const EN: Messages = {
     'Pairing approvals are temporarily unavailable. Try again.',
   'channels.editor.pairing.approvals.empty.title': 'No pairing approvals',
   'channels.editor.pairing.approvals.empty.description':
-    'Approved sender IDs will appear here.',
+    'Approved user and group IDs will appear here.',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -5222,7 +5226,7 @@ const ZH: Messages = {
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
-    '必须设为 "Open" 才能接收通知',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
   'channels.editor.field.github.senderPolicy': '发送者策略',
   'channels.editor.field.github.senderPolicy.description':
     '公开仓库建议使用 "Allowlist" 并指定允许的用户',
@@ -5240,7 +5244,7 @@ const ZH: Messages = {
     '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
   'channels.editor.field.gitlab.groupPolicy': '群组策略',
   'channels.editor.field.gitlab.groupPolicy.description':
-    '必须设为 "Open" 或 "Allowlist" 才能处理 Todo',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能处理 Todo',
   'channels.editor.field.gitlab.senderPolicy': '发送者策略',
   'channels.editor.field.gitlab.senderPolicy.description':
     '公开项目建议使用 "Allowlist" 并指定允许的用户',
@@ -5280,7 +5284,11 @@ const ZH: Messages = {
     '用户会收到配对码，经您批准后才能开始对话。',
   'channels.editor.pairing.title': '待处理的配对请求',
   'channels.editor.pairing.description':
-    '批准前，请核对用户提供的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+    '批准前，请核对收到的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+  'channels.editor.pairing.subject.group': (v) =>
+    `群聊：${v?.name ?? '未知群聊'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `由 ${v?.sender ?? '未知用户'} 发起`,
   'channels.editor.pairing.refresh': '刷新配对请求',
   'channels.editor.pairing.approve': '批准',
   'channels.editor.pairing.approveFor': (v) =>
@@ -5296,21 +5304,21 @@ const ZH: Messages = {
   'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
   'channels.editor.pairing.saveFirst.description':
     '频道以配对模式保存后，待处理请求会显示在这里。',
-  'channels.editor.pairing.approvals.title': '已配对用户',
+  'channels.editor.pairing.approvals.title': '已配对对象',
   'channels.editor.pairing.approvals.description':
-    '通过配对获得此频道访问权限的用户 ID。',
-  'channels.editor.pairing.approvals.refresh': '刷新已配对用户',
+    '通过配对获得此频道访问权限的用户和群聊 ID。',
+  'channels.editor.pairing.approvals.refresh': '刷新已配对对象',
   'channels.editor.pairing.approvals.revoke': '撤销',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
     `撤销 ${v?.senderId ?? '该用户'} 的配对授权`,
   'channels.editor.pairing.approvals.revoked': (v) =>
     `已撤销 ${v?.senderId ?? '该用户'} 的配对授权。`,
-  'channels.editor.pairing.approvals.error': '未能更新已配对用户',
+  'channels.editor.pairing.approvals.error': '未能更新已配对对象',
   'channels.editor.pairing.approvals.unavailable':
-    '暂时无法获取已配对用户，请重试。',
-  'channels.editor.pairing.approvals.empty.title': '暂无已配对用户',
+    '暂时无法获取已配对对象，请重试。',
+  'channels.editor.pairing.approvals.empty.title': '暂无已配对对象',
   'channels.editor.pairing.approvals.empty.description':
-    '批准配对请求后，用户 ID 会显示在这里。',
+    '批准配对请求后，用户或群聊 ID 会显示在这里。',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
   'channels.editor.pairing.approvals.confirm.description':
