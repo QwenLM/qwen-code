@@ -360,8 +360,9 @@ export async function processMediaForOmniDelivery(
   );
   // Lazy one-time hygiene scan (expired .part files, promotion orphans,
   // quarantine retention/size sweeps, sampled object verification). MUST
-  // run before the orchestrator: the scan deletes staging/ wholesale,
-  // which would race live invocations.
+  // run before the orchestrator: the scan deletes stale staging entries,
+  // which would race this process's own live invocations. (Other
+  // processes' live entries are protected by the staging grace window.)
   await runStartupRecoveryOnce(store, uploadCache, {
     quarantineRetentionDays: config.getOmniQuarantineRetentionDays?.(),
     quarantineMaxBytes: config.getOmniQuarantineMaxBytes?.(),

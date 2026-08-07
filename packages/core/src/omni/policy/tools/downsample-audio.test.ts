@@ -94,6 +94,11 @@ describe('OmniDownsampleAudioTool', () => {
     });
   });
 
+  it("defaults to 'ask' permission: a model-origin call writes files and must confirm outside yolo", async () => {
+    const invocation = tool.build({ inputPath, outputDir } as never);
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+  });
+
   it('downsamples with the fixed-call defaults and disclosure (D8)', async () => {
     probe({ bitRate: 320_000, sampleRateHz: 48_000, channels: 2 });
     const { result, signal } = await run();

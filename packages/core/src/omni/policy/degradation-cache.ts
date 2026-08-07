@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { OmniJsonCacheFile } from '../json-cache-file.js';
+import { OBJECT_EXTENSION_RE } from '../storage.js';
 
 /**
  * Identity of one degradation result (decision D2): everything the
@@ -104,9 +105,33 @@ export class OmniDegradationCache {
     originalSha256: string,
     policyFingerprint: string,
   ): Promise<DegradationCacheEntry | null> {
-    return this.file.access<DegradationCacheEntry | null>(null, (entries) => ({
-      result: entries[this.key(originalSha256, policyFingerprint)] ?? null,
-    }));
+    return this.file.access<DegradationCacheEntry | null>(null, (entries) => {
+      const key = this.key(originalSha256, policyFingerprint);
+      const entry = entries[key];
+      if (!entry) return { result: null };
+      // The cache file sits inside the workspace (`.qwen/omni/`), so a
+      // hostile repository can ship a crafted one. Entries are only
+      // trusted when every field that later becomes a filesystem path or
+      // a model-visible text is well-formed: the hash must be exactly
+      // 64-hex (it addresses the object store), the extension a single
+      // dotted component (no traversal segments), and the disclosure
+      // non-empty (lossy reuse without disclosure would silently break
+      // the D8 invariant). Malformed entries are dropped, not served —
+      // the orchestrator then re-derives and overwrites them.
+      if (
+        !/^[0-9a-f]{64}$/.test(entry.degradedSha256) ||
+        typeof entry.extension !== 'string' ||
+        !OBJECT_EXTENSION_RE.test(entry.extension) ||
+        typeof entry.disclosure !== 'string' ||
+        entry.disclosure.length === 0 ||
+        typeof entry.mimeType !== 'string' ||
+        entry.mimeType.length === 0
+      ) {
+        delete entries[key];
+        return { result: null, changed: true };
+      }
+      return { result: entry };
+    });
   }
 
   async put(

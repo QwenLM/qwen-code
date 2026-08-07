@@ -10,11 +10,12 @@ import type {
   ToolInvocation,
   ToolResult,
 } from '../../../tools/tools.js';
-import { BaseToolInvocation, Kind } from '../../../tools/tools.js';
+import { Kind } from '../../../tools/tools.js';
 import { probeMediaMetadata } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
@@ -107,10 +108,7 @@ async function loadSharp(): Promise<SharpModule> {
     .default;
 }
 
-class DownsampleImageInvocation extends BaseToolInvocation<
-  DownsampleImageParams,
-  ToolResult
-> {
+class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<DownsampleImageParams> {
   getDescription(): string {
     const maxDimension =
       this.params.maxDimension ?? DOWNSAMPLE_IMAGE_DEFAULTS.maxDimension;

@@ -104,6 +104,11 @@ describe('OmniDownsampleImageTool', () => {
     });
   });
 
+  it("defaults to 'ask' permission: a model-origin call writes files and must confirm outside yolo", async () => {
+    const invocation = tool.build({ inputPath, outputDir } as never);
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+  });
+
   it('downsamples with the fixed-call defaults and disclosure (D8)', async () => {
     probe({ width: 4096, height: 3072, frameCount: 1 });
     const { result, signal } = await run();

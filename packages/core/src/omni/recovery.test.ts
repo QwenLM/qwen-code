@@ -242,7 +242,13 @@ describe('runStartupRecoveryOnce', () => {
   });
 
   describe('staging sweep (storage design §6.1: uncommitted work is deleted)', () => {
-    it('deletes every staging entry, including nested artifact trees and stray files', async () => {
+    /** Age a staging entry past the multi-process grace window (1h). */
+    async function ageEntry(p: string): Promise<void> {
+      const when = new Date(Date.now() - 2 * 3600_000);
+      await fs.utimes(p, when, when);
+    }
+
+    it('deletes every stale staging entry, including nested artifact trees and stray files', async () => {
       const stagingDir = store.getStagingDir();
       const invocationDir = path.join(stagingDir, '0123456789abcdef');
       await fs.mkdir(path.join(invocationDir, 'nested'), { recursive: true });
@@ -250,11 +256,45 @@ describe('runStartupRecoveryOnce', () => {
         path.join(invocationDir, 'nested', 'artifact.webp'),
         'half-written',
       );
-      await fs.writeFile(path.join(stagingDir, 'stray.tmp'), 'stray');
+      const stray = path.join(stagingDir, 'stray.tmp');
+      await fs.writeFile(stray, 'stray');
+      await ageEntry(invocationDir);
+      await ageEntry(stray);
 
       await runStartupRecoveryOnce(store);
 
       await expect(fs.readdir(stagingDir)).resolves.toEqual([]);
+    });
+
+    it('keeps entries younger than the grace window (a concurrent process may still be transcoding into them)', async () => {
+      const stagingDir = store.getStagingDir();
+      const liveDir = path.join(stagingDir, 'fedcba9876543210');
+      await fs.mkdir(liveDir, { recursive: true });
+      await fs.writeFile(path.join(liveDir, 'artifact.mp4'), 'in-flight');
+
+      await runStartupRecoveryOnce(store);
+
+      await expect(
+        fs.readFile(path.join(liveDir, 'artifact.mp4'), 'utf8'),
+      ).resolves.toBe('in-flight');
+    });
+
+    it('removes a symlink ENTRY regardless of age without following it', async () => {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-stage-'));
+      const victim = path.join(outside, 'victim.bin');
+      await fs.writeFile(victim, 'external');
+      try {
+        const stagingDir = store.getStagingDir();
+        const link = path.join(stagingDir, 'planted-link');
+        await fs.symlink(outside, link);
+
+        await runStartupRecoveryOnce(store);
+
+        await expect(fs.lstat(link)).rejects.toThrow();
+        await expect(fs.readFile(victim, 'utf8')).resolves.toBe('external');
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
     });
 
     it('a symlinked staging ROOT is never swept', async () => {

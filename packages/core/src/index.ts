@@ -675,6 +675,8 @@ export {
   downloadMediaUrl,
   effectiveMaxDownloadFileBytes,
   recognizeMediaFile,
+  formatDisclosureText,
+  formatOmissionText,
   OmniObjectStore,
   OmniDeliveryError,
   OmniDownloadError,

@@ -11,11 +11,12 @@ import type {
   ToolInvocation,
   ToolResult,
 } from '../../../tools/tools.js';
-import { BaseToolInvocation, Kind } from '../../../tools/tools.js';
+import { Kind } from '../../../tools/tools.js';
 import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
@@ -92,10 +93,7 @@ function describeChannels(channels: number | undefined): string {
   return ` ${channels}声道`;
 }
 
-class DownsampleAudioInvocation extends BaseToolInvocation<
-  DownsampleAudioParams,
-  ToolResult
-> {
+class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<DownsampleAudioParams> {
   constructor(
     params: DownsampleAudioParams,
     private readonly timeoutMs: number,

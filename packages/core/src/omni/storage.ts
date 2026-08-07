@@ -35,6 +35,12 @@ export interface QuarantineReason {
  * filesystem so staging/quarantine paths can never escape their area. */
 const INVOCATION_ID_RE = /^[0-9a-f]{16}$/;
 
+/** Object-store extensions are a single dotted alphanumeric component
+ * (".jpg", ".m4a", ".bin" — see extensionForMime). Anything else — path
+ * separators, dots beyond the leading one — is rejected so an extension
+ * can never smuggle traversal segments into an object path. */
+export const OBJECT_EXTENSION_RE = /^\.[A-Za-z0-9]{1,8}$/;
+
 function assertInvocationId(invocationId: string): void {
   if (!INVOCATION_ID_RE.test(invocationId)) {
     throw new Error(`Invalid omni policy invocation id: ${invocationId}`);
@@ -92,8 +98,9 @@ export class OmniObjectStore {
     return path.join(this.omniRoot, 'objects', 'sha256');
   }
 
-  /** Root of the policy-invocation work area (deleted wholesale by
-   * startup recovery — anything here belongs to an uncommitted run). */
+  /** Root of the policy-invocation work area (stale entries deleted by
+   * startup recovery — anything past the grace window belongs to an
+   * uncommitted, crashed run). */
   getStagingDir(): string {
     return path.join(this.omniRoot, 'staging');
   }
@@ -104,8 +111,21 @@ export class OmniObjectStore {
     return path.join(this.omniRoot, 'quarantine');
   }
 
-  /** Compute the final object path for a content hash + extension. */
+  /**
+   * Compute the final object path for a content hash + extension.
+   *
+   * Both components are validated here, not just at putFile: callers may
+   * feed values read back from on-disk cache files (policy-cache.json),
+   * and a crafted hash or extension ("/../../…") would otherwise turn
+   * this join into a path-traversal primitive pointing outside the store.
+   */
   objectPathFor(sha256: string, extension: string): string {
+    if (!/^[0-9a-f]{64}$/.test(sha256)) {
+      throw new Error(`invalid object hash: ${JSON.stringify(sha256)}`);
+    }
+    if (!OBJECT_EXTENSION_RE.test(extension)) {
+      throw new Error(`invalid object extension: ${JSON.stringify(extension)}`);
+    }
     return path.join(
       this.getObjectsDir(),
       sha256.slice(0, 2),
@@ -182,7 +202,7 @@ export class OmniObjectStore {
    * a `reason.json` (storage design §4.4). The reason file is written into
    * the staging directory BEFORE the rename so the quarantine entry appears
    * complete in one atomic step; a crash in between leaves it in staging,
-   * which startup recovery deletes wholesale.
+   * which startup recovery deletes once past the grace window.
    */
   async quarantineInvocation(
     invocationId: string,

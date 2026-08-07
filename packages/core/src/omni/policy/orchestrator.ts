@@ -186,6 +186,56 @@ function sortPolicies(
   );
 }
 
+/** Per-omni-root counting semaphore bounding how many resources are
+ * inside fixed-policy processing at once (`maxConcurrentResources`,
+ * decision D11). Keyed by omni root so distinct stores in one process
+ * (multi-project setups, tests) never throttle each other. Callers of
+ * one root share a config, so the per-call limit is stable per key. */
+const resourceGates = new Map<
+  string,
+  { active: number; waiters: Array<() => void> }
+>();
+
+/**
+ * Take one processing slot for `rootDir`, waiting FIFO when `limit` are
+ * already taken. Returns an idempotent release function. On release the
+ * slot transfers directly to the next waiter (no decrement/re-increment
+ * gap another caller could slip through), so at most `limit` holders
+ * ever run concurrently.
+ */
+async function acquireResourceSlot(
+  rootDir: string,
+  limit: number,
+): Promise<() => void> {
+  const effectiveLimit = Math.max(1, Math.floor(limit));
+  let gate = resourceGates.get(rootDir);
+  if (!gate) {
+    gate = { active: 0, waiters: [] };
+    resourceGates.set(rootDir, gate);
+  }
+  const heldGate = gate;
+  if (heldGate.active >= effectiveLimit) {
+    await new Promise<void>((resolve) => heldGate.waiters.push(resolve));
+    // Slot transferred by the releaser — `active` already counts us.
+  } else {
+    heldGate.active++;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = heldGate.waiters.shift();
+    if (next) {
+      next();
+      return;
+    }
+    heldGate.active--;
+    if (heldGate.active === 0 && heldGate.waiters.length === 0) {
+      resourceGates.delete(rootDir);
+    }
+  };
+}
+
 /**
  * Run the fixed-policy pipeline over one recognized media resource
  * (decisions D1/D3/D5): match each policy in priority order, execute the
@@ -222,6 +272,38 @@ export async function runFixedPolicies(
 }> {
   const policies = sortPolicies(options.policies);
   const limits = options.limits ?? DEFAULT_OMNI_PROCESSING_LIMITS;
+  // `maxConcurrentResources` (decision D11): each call processes one
+  // root, so bounding concurrent calls per omni root bounds simultaneous
+  // transcode work (ffmpeg/sharp processes, staging disk churn).
+  const releaseSlot = await acquireResourceSlot(
+    options.store.getOmniRootDir(),
+    limits.maxConcurrentResources,
+  );
+  try {
+    return await runFixedPoliciesUnbounded(config, source, options, {
+      policies,
+      limits,
+    });
+  } finally {
+    releaseSlot();
+  }
+}
+
+/** Body of {@link runFixedPolicies}, after the per-root concurrency slot
+ * has been taken. */
+async function runFixedPoliciesUnbounded(
+  config: Config,
+  source: PolicySourceResource,
+  options: RunFixedPoliciesOptions,
+  normalized: {
+    policies: NormalizedFixedPolicy[];
+    limits: NormalizedOmniProcessingLimits;
+  },
+): Promise<{
+  deliveries: PolicyDeliveryResource[];
+  records: PolicyRunRecord[];
+}> {
+  const { policies, limits } = normalized;
   const cache =
     options.degradationCache ??
     new OmniDegradationCache(options.store.getOmniRootDir());
@@ -411,6 +493,25 @@ interface ValidatedArtifact {
 }
 
 /**
+ * Tool-level tunable defaults from
+ * `omni.processing.policyTools.<tool>.settings`. The map is raw settings
+ * input (values may be null tombstones or malformed — see
+ * `OmniPolicyToolsSettings` in types.ts), so anything non-conforming
+ * reads as "no defaults" rather than throwing mid-run.
+ */
+function resolveToolSettingsDefaults(
+  config: Config,
+  toolName: string,
+): Record<string, unknown> {
+  const entry = config.getOmniPolicyToolsSettings?.()?.[toolName];
+  const settings = entry?.settings;
+  if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+    return settings;
+  }
+  return {};
+}
+
+/**
  * Execute one policy against one work item: degradation-cache lookup,
  * otherwise a real tool invocation in a fresh staging directory followed
  * by artifact validation and promotion (staging lifecycle §5, order D12:
@@ -435,34 +536,51 @@ async function executePolicy(
   // The source hash keys the degradation cache; computed lazily so runs
   // without matching policies never pay it.
   item.sha256 ??= await hashFileSha256(item.filePath, signal);
+  // Effective tunables: tool-level defaults from
+  // `omni.processing.policyTools.<tool>.settings` (validated against the
+  // descriptor's settingsSchema at startup) underneath the policy's own
+  // arguments. Merged HERE — the single point feeding both the tool call
+  // and the cache fingerprint — so a settings change also invalidates
+  // cached derivatives produced under the old values.
+  const settingsDefaults = resolveToolSettingsDefaults(config, policy.toolName);
+  const effectiveArguments = { ...settingsDefaults, ...policy.arguments };
   const fingerprint = computePolicyFingerprint(
     policy.toolName,
-    policy.arguments,
+    effectiveArguments,
   );
   const hit = await cache.get(item.sha256, fingerprint);
   if (hit) {
     const objectPath = store.objectPathFor(hit.degradedSha256, hit.extension);
     const stat = await fs.lstat(objectPath).catch(() => undefined);
     if (stat?.isFile() && !stat.isSymbolicLink()) {
-      const recognized = await recognizeMediaFile(objectPath, { signal });
-      debugLogger.debug(
-        `degradation cache hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}…`,
-      );
-      return {
-        outcome: 'cache_hit',
-        derived: [
-          {
-            filePath: objectPath,
-            recognized,
-            sha256: hit.degradedSha256,
-            disclosure: hit.disclosure,
-            degraded: true,
-          },
-        ],
-      };
+      // Content verification before reuse: the cache file lives in the
+      // workspace and is only shape-validated on load, so the bytes at
+      // the addressed path must actually hash to the entry's identity —
+      // otherwise a poisoned cache (or a corrupted store) would silently
+      // substitute foreign media as "the degraded derivative".
+      const actualSha256 = await hashFileSha256(objectPath, signal);
+      if (actualSha256 === hit.degradedSha256) {
+        const recognized = await recognizeMediaFile(objectPath, { signal });
+        debugLogger.debug(
+          `degradation cache hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}…`,
+        );
+        return {
+          outcome: 'cache_hit',
+          derived: [
+            {
+              filePath: objectPath,
+              recognized,
+              sha256: hit.degradedSha256,
+              disclosure: hit.disclosure,
+              degraded: true,
+            },
+          ],
+        };
+      }
     }
-    // Stale: the derivative left the store (GC, manual deletion). Drop
-    // every entry pointing at it and re-transcode.
+    // Stale or mismatching: the derivative left the store (GC, manual
+    // deletion) or its bytes no longer match the entry. Drop every entry
+    // pointing at it and re-transcode.
     await cache.removeByDegradedSha256(hit.degradedSha256);
   }
 
@@ -474,7 +592,7 @@ async function executePolicy(
       callId: invocationId,
       name: policy.toolName,
       args: {
-        ...policy.arguments,
+        ...effectiveArguments,
         inputPath: item.filePath,
         outputDir: stagingDir,
       },

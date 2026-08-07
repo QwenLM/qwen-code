@@ -11,11 +11,12 @@ import type {
   ToolInvocation,
   ToolResult,
 } from '../../../tools/tools.js';
-import { BaseToolInvocation, Kind } from '../../../tools/tools.js';
+import { Kind } from '../../../tools/tools.js';
 import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
@@ -107,10 +108,7 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
   },
 };
 
-class DownscaleVideoInvocation extends BaseToolInvocation<
-  DownscaleVideoParams,
-  ToolResult
-> {
+class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVideoParams> {
   constructor(
     params: DownscaleVideoParams,
     private readonly timeoutMs: number,

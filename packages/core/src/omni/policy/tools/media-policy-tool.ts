@@ -14,7 +14,11 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import type { Kind } from '../../../tools/tools.js';
-import { BaseDeclarativeTool } from '../../../tools/tools.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+} from '../../../tools/tools.js';
+import type { PermissionDecision } from '../../../permissions/types.js';
 import { ToolErrorType } from '../../../tools/tool-error.js';
 import { SchemaValidator } from '../../../utils/schemaValidator.js';
 import { projectMediaPolicyToolDeclaration } from '../model-access.js';
@@ -73,6 +77,23 @@ export function resolvePolicyToolTimeoutMs(
     timeoutMs > 0
     ? timeoutMs
     : DEFAULT_POLICY_TOOL_TIMEOUT_MS;
+}
+
+/**
+ * Base invocation for media-policy tools. These invocations spawn
+ * ffmpeg/sharp and WRITE files (with overwrite) at the caller-chosen
+ * `outputDir`, so they are side-effecting: a model-origin call must be
+ * confirmation-gated like Write/Edit rather than inherit the read-only
+ * `'allow'` default. The fixed-policy path is unaffected — the scheduler
+ * skips the permission flow entirely for `fixed_policy` origin, and the
+ * orchestrator pins `outputDir` to the invocation's staging directory.
+ */
+export abstract class BaseMediaPolicyToolInvocation<
+  TParams extends object,
+> extends BaseToolInvocation<TParams, ToolResult> {
+  override getDefaultPermission(): Promise<PermissionDecision> {
+    return Promise.resolve('ask');
+  }
 }
 
 /**

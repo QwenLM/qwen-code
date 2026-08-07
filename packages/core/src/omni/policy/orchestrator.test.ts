@@ -99,6 +99,7 @@ function makePolicy(
 
 function makeConfig(
   descriptorByTool: Record<string, MediaPolicyToolDescriptor>,
+  policyToolsSettings?: unknown,
 ) {
   return {
     getToolRegistry: () => ({
@@ -107,6 +108,7 @@ function makeConfig(
           ? { mediaPolicyDescriptor: descriptorByTool[name] }
           : undefined,
     }),
+    getOmniPolicyToolsSettings: () => policyToolsSettings,
   } as unknown as Config;
 }
 
@@ -853,5 +855,269 @@ describe('runFixedPolicies', () => {
     });
     // The failed invocation still never leaves live staging state behind.
     await expect(fs.readdir(store.getStagingDir())).resolves.toEqual([]);
+  });
+
+  describe('tool-level settings defaults (omni.processing.policyTools.<tool>.settings)', () => {
+    it('merges settings under policy arguments in BOTH the tool call and the cache fingerprint', async () => {
+      mockToolSuccess();
+      const configured = makeConfig(
+        { omni_downsample_image: DESCRIPTOR },
+        { omni_downsample_image: { settings: { quality: 60 } } },
+      );
+      await runFixedPolicies(configured, source, {
+        store,
+        policies: [makePolicy()],
+      });
+
+      const req = executeToolCallMock.mock.calls[0][1] as ToolCallRequestInfo;
+      expect(req.args).toMatchObject({ maxDimension: 1568, quality: 60 });
+
+      // Fingerprint must include the merged tunables — otherwise editing
+      // settings would keep serving derivatives made under the old values.
+      const cache = new OmniDegradationCache(store.getOmniRootDir());
+      await expect(
+        cache.get(
+          sha256Of(SOURCE_BYTES),
+          computePolicyFingerprint('omni_downsample_image', {
+            maxDimension: 1568,
+            quality: 60,
+          }),
+        ),
+      ).resolves.not.toBeNull();
+      await expect(
+        cache.get(
+          sha256Of(SOURCE_BYTES),
+          computePolicyFingerprint('omni_downsample_image', {
+            maxDimension: 1568,
+          }),
+        ),
+      ).resolves.toBeNull();
+    });
+
+    it('policy arguments override colliding settings keys', async () => {
+      mockToolSuccess();
+      const configured = makeConfig(
+        { omni_downsample_image: DESCRIPTOR },
+        { omni_downsample_image: { settings: { maxDimension: 99 } } },
+      );
+      await runFixedPolicies(configured, source, {
+        store,
+        policies: [makePolicy()], // arguments: { maxDimension: 1568 }
+      });
+      const req = executeToolCallMock.mock.calls[0][1] as ToolCallRequestInfo;
+      expect(req.args['maxDimension']).toBe(1568);
+    });
+
+    it.each([
+      ['null tombstone', { omni_downsample_image: null }],
+      ['non-object settings', { omni_downsample_image: { settings: 'evil' } }],
+      ['array settings', { omni_downsample_image: { settings: [1, 2] } }],
+      ['absent map', undefined],
+    ])('ignores malformed settings entries: %s', async (_label, settings) => {
+      mockToolSuccess();
+      const configured = makeConfig(
+        { omni_downsample_image: DESCRIPTOR },
+        settings,
+      );
+      await runFixedPolicies(configured, source, {
+        store,
+        policies: [makePolicy()],
+      });
+      const req = executeToolCallMock.mock.calls[0][1] as ToolCallRequestInfo;
+      expect(req.args).toEqual({
+        maxDimension: 1568,
+        inputPath: sourcePath,
+        outputDir: expect.stringContaining(store.getStagingDir()),
+      });
+    });
+  });
+
+  it('re-hashes a cache hit before reuse: poisoned object bytes trigger re-transcode (D2 integrity)', async () => {
+    const degradedSha = sha256Of(DEGRADED_BYTES);
+    const objectPath = store.objectPathFor(degradedSha, '.jpg');
+    await fs.mkdir(path.dirname(objectPath), { recursive: true });
+    // A file EXISTS at the addressed path but its bytes do not hash to the
+    // entry's identity — planted via a crafted policy-cache.json plus a
+    // foreign object (or plain store corruption).
+    await fs.writeFile(objectPath, 'not-the-degraded-bytes');
+    const cache = new OmniDegradationCache(store.getOmniRootDir());
+    const fingerprint = computePolicyFingerprint('omni_downsample_image', {
+      maxDimension: 1568,
+    });
+    await cache.put(sha256Of(SOURCE_BYTES), fingerprint, {
+      degradedSha256: degradedSha,
+      extension: '.jpg',
+      disclosure: 'poisoned disclosure',
+      mimeType: 'image/jpeg',
+    });
+    mockToolSuccess();
+
+    const { deliveries, records } = await runFixedPolicies(config, source, {
+      store,
+      policies: [makePolicy()],
+    });
+
+    // The mismatching object was never served: the tool re-ran and the
+    // store now holds verified bytes under the hash.
+    expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+    expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+    expect(deliveries[0].sha256).toBe(degradedSha);
+    expect(deliveries[0].disclosure).toBe(
+      'Downsampled from 4000x3000 to 1568x1176.',
+    );
+    await expect(fs.readFile(objectPath, 'utf8')).resolves.toBe(DEGRADED_BYTES);
+  });
+
+  describe('maxConcurrentResources gates concurrent runs per omni root', () => {
+    /** Tool mock that parks each invocation on a caller-released latch,
+     * recording how many invocations are in flight simultaneously. */
+    function mockGatedTool() {
+      let inFlight = 0;
+      let peak = 0;
+      const releases: Array<() => void> = [];
+      executeToolCallMock.mockImplementation(
+        async (_config: Config, request: ToolCallRequestInfo) => {
+          inFlight++;
+          peak = Math.max(peak, inFlight);
+          await new Promise<void>((resolve) => releases.push(resolve));
+          inFlight--;
+          const outputDir = request.args['outputDir'] as string;
+          const bytes = `degraded-${request.callId}`;
+          await fs.writeFile(path.join(outputDir, 'out.jpg'), bytes);
+          return {
+            callId: request.callId,
+            responseParts: [],
+            resultDisplay: undefined,
+            error: undefined,
+            errorType: undefined,
+            policyArtifacts: {
+              toolName: request.name,
+              invocationId: request.callId,
+              executionOrigin: request.executionOrigin,
+              artifacts: [
+                {
+                  kind: 'image',
+                  storage: 'workspace',
+                  title: 'out.jpg',
+                  workspacePath: 'out.jpg',
+                  mimeType: 'image/jpeg',
+                  metadata: { omniDisclosure: 'gated' },
+                },
+              ],
+            },
+          };
+        },
+      );
+      return {
+        peak: () => peak,
+        started: () => releases.length,
+        releaseAll: () => {
+          for (const release of releases.splice(0)) release();
+        },
+      };
+    }
+
+    async function makeSecondSource(): Promise<PolicySourceResource> {
+      const secondPath = path.join(tmpDir, 'photo-2.png');
+      await fs.writeFile(secondPath, 'second-image-bytes');
+      return {
+        filePath: secondPath,
+        recognized: recognizedImage({ sizeBytes: 18 }),
+        displayName: 'photo-2.png',
+        origin: 'user',
+      };
+    }
+
+    it('limit 1: the second resource waits until the first fully finishes', async () => {
+      const gate = mockGatedTool();
+      const second = await makeSecondSource();
+      const options = {
+        store,
+        policies: [makePolicy()],
+        limits: limitsWith({ maxConcurrentResources: 1 }),
+      };
+
+      const run1 = runFixedPolicies(config, source, options);
+      const run2 = runFixedPolicies(config, second, options);
+      // Give both runs every chance to start their tool call.
+      await vi.waitFor(() => expect(gate.started()).toBe(1));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(gate.started()).toBe(1); // run2 is parked on the gate
+
+      gate.releaseAll(); // finish run1 → slot transfers to run2
+      await vi.waitFor(() => expect(gate.started()).toBe(1)); // fresh latch
+      gate.releaseAll();
+      await Promise.all([run1, run2]);
+      expect(gate.peak()).toBe(1);
+      expect(executeToolCallMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('limit 2: both resources transcode simultaneously', async () => {
+      const gate = mockGatedTool();
+      const second = await makeSecondSource();
+      const options = {
+        store,
+        policies: [makePolicy()],
+        limits: limitsWith({ maxConcurrentResources: 2 }),
+      };
+
+      const run1 = runFixedPolicies(config, source, options);
+      const run2 = runFixedPolicies(config, second, options);
+      await vi.waitFor(() => expect(gate.started()).toBe(2));
+      expect(gate.peak()).toBe(2);
+      gate.releaseAll();
+      await Promise.all([run1, run2]);
+    });
+
+    it('a failed run releases its slot (no deadlock for the waiter)', async () => {
+      const second = await makeSecondSource();
+      executeToolCallMock
+        .mockResolvedValueOnce({
+          callId: 'x',
+          responseParts: [],
+          resultDisplay: undefined,
+          error: new Error('ffmpeg exploded'),
+          errorType: undefined,
+        })
+        .mockImplementation(
+          async (_c: Config, request: ToolCallRequestInfo) => {
+            const outputDir = request.args['outputDir'] as string;
+            await fs.writeFile(path.join(outputDir, 'out.jpg'), DEGRADED_BYTES);
+            return {
+              callId: request.callId,
+              responseParts: [],
+              resultDisplay: undefined,
+              error: undefined,
+              errorType: undefined,
+              policyArtifacts: {
+                toolName: request.name,
+                invocationId: request.callId,
+                executionOrigin: request.executionOrigin,
+                artifacts: [
+                  {
+                    kind: 'image',
+                    storage: 'workspace',
+                    title: 'out.jpg',
+                    workspacePath: 'out.jpg',
+                    mimeType: 'image/jpeg',
+                    metadata: { omniDisclosure: 'ok' },
+                  },
+                ],
+              },
+            };
+          },
+        );
+      const options = {
+        store,
+        policies: [makePolicy({ onFailure: 'abort' as const })],
+        limits: limitsWith({ maxConcurrentResources: 1 }),
+      };
+      await expect(runFixedPolicies(config, source, options)).rejects.toThrow(
+        OmniPolicyExecutionError,
+      );
+      // The waiter (or any later run) must still get the slot.
+      const { records } = await runFixedPolicies(config, second, options);
+      expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+    });
   });
 });

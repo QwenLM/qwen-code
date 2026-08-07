@@ -99,6 +99,47 @@ describe('OmniObjectStore', () => {
     );
   });
 
+  describe('objectPathFor validates cache-sourced components (path traversal)', () => {
+    const sha256 = 'a'.repeat(64);
+
+    it.each([
+      [
+        'traversal hash',
+        '../../../../etc/passwd',
+        '.mp4',
+        /invalid object hash/,
+      ],
+      ['uppercase hash', 'A'.repeat(64), '.mp4', /invalid object hash/],
+      ['short hash', 'abc123', '.mp4', /invalid object hash/],
+      [
+        'traversal extension',
+        sha256,
+        '/../../../../tmp/evil',
+        /invalid object extension/,
+      ],
+      [
+        'multi-segment extension',
+        sha256,
+        '.jpg/../x',
+        /invalid object extension/,
+      ],
+      ['dotless extension', sha256, 'jpg', /invalid object extension/],
+      ['double-dot extension', sha256, '..', /invalid object extension/],
+      ['overlong extension', sha256, '.abcdefghi', /invalid object extension/],
+    ])('throws on %s', (_label, hash, ext, message) => {
+      expect(() => store.objectPathFor(hash, ext)).toThrow(message);
+    });
+
+    it('accepts every extension recognition can emit', () => {
+      for (const ext of ['.mp4', '.webp', '.m4a', '.bin', '.jpg']) {
+        const p = store.objectPathFor(sha256, ext);
+        expect(p).toBe(
+          path.join(store.getObjectsDir(), 'aa', `${sha256}${ext}`),
+        );
+      }
+    });
+  });
+
   it('propagates copy failures without leaving temp files', async () => {
     const missing = path.join(qwenDir, 'does-not-exist.mp4');
     const sha256 = createHash('sha256').update('missing').digest('hex');

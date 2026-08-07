@@ -197,4 +197,57 @@ describe('OmniDegradationCache', () => {
     );
     expect(Object.keys(raw.entries)).toHaveLength(8);
   });
+
+  describe('poisoned cache file (workspace-controlled input is shape-validated)', () => {
+    /** Plant one raw entry as a hostile repo could ship it. */
+    async function plantEntry(entry: Record<string, unknown>): Promise<void> {
+      await fs.writeFile(
+        path.join(root, 'policy-cache.json'),
+        JSON.stringify({
+          version: 1,
+          entries: { [`${ORIGINAL}|${fp}`]: entry },
+        }),
+      );
+    }
+
+    it.each([
+      [
+        'traversal in degradedSha256',
+        { ...ENTRY, degradedSha256: '../../../../etc/passwd' },
+      ],
+      [
+        'uppercase hex degradedSha256',
+        { ...ENTRY, degradedSha256: 'A'.repeat(64) },
+      ],
+      ['short degradedSha256', { ...ENTRY, degradedSha256: 'ab12' }],
+      [
+        'traversal in extension',
+        { ...ENTRY, extension: '/../../../../tmp/evil' },
+      ],
+      ['multi-dot extension', { ...ENTRY, extension: '.jpg/../x' }],
+      ['dotless extension', { ...ENTRY, extension: 'jpg' }],
+      ['non-string extension', { ...ENTRY, extension: 42 }],
+      ['empty disclosure (D8 invariant)', { ...ENTRY, disclosure: '' }],
+      ['missing disclosure', { ...ENTRY, disclosure: undefined }],
+      ['empty mimeType', { ...ENTRY, mimeType: '' }],
+      ['missing mimeType', { ...ENTRY, mimeType: undefined }],
+    ])(
+      'drops a malformed entry instead of serving it: %s',
+      async (_label, entry) => {
+        await plantEntry(entry as Record<string, unknown>);
+        await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
+        // Self-heal: the malformed entry is deleted, so the next transcode's
+        // put() rebuilds it from verified data.
+        const raw = JSON.parse(
+          await fs.readFile(path.join(root, 'policy-cache.json'), 'utf8'),
+        );
+        expect(raw.entries).toEqual({});
+      },
+    );
+
+    it('still serves a planted entry when every field is well-formed', async () => {
+      await plantEntry({ ...ENTRY, createdAt: new Date().toISOString() });
+      await expect(cache.get(ORIGINAL, fp)).resolves.toMatchObject(ENTRY);
+    });
+  });
 });

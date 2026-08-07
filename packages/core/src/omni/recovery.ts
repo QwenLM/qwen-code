@@ -31,6 +31,13 @@ const SAMPLE_VERIFY_MAX_BYTES = 64 * 1024 * 1024;
  * belong to a promotion in flight in ANOTHER process — deleting it would
  * fail that process's rename. Older survivors are crash leftovers. */
 const TMP_GRACE_MS = 3600_000;
+/** Grace window for staging entries, for the same multi-process reason:
+ * a second CLI process starting while another is mid-transcode must not
+ * delete the live invocation's work directory out from under its tool.
+ * One hour comfortably exceeds the 10-minute default policy-tool timeout
+ * (a directory's mtime is set at creation), so anything older is a crash
+ * leftover, not an in-flight run. */
+const STAGING_GRACE_MS = 3600_000;
 /** Default retention for quarantined invocations (storage design §7). */
 const QUARANTINE_RETENTION_DAYS = 7;
 /** Default size budget for the quarantine area (storage design §7). */
@@ -101,12 +108,14 @@ async function sweepDownloads(downloadsDir: string): Promise<void> {
 }
 
 /**
- * Delete EVERYTHING under `staging/`. Staging entries belong to policy
- * invocations that never committed (a successful commit deletes its own
- * staging directory first), so at startup there is nothing to keep
- * (storage design §6.1). The staging root itself must be a real directory
- * — a symlinked root would redirect the recursive deletes outside the
- * omni root.
+ * Delete crash-orphaned entries under `staging/`. Staging entries belong
+ * to policy invocations that never committed (a successful commit deletes
+ * its own staging directory first), so anything past the grace window is
+ * garbage (storage design §6.1). Entries YOUNGER than the grace window
+ * are kept: they may be a concurrent process's live invocation, and its
+ * own commit/quarantine path cleans them up. The staging root itself must
+ * be a real directory — a symlinked root would redirect the recursive
+ * deletes outside the omni root.
  */
 async function sweepStaging(stagingDir: string): Promise<void> {
   if (!(await isRealDirectory(stagingDir))) return;
@@ -117,13 +126,18 @@ async function sweepStaging(stagingDir: string): Promise<void> {
     return;
   }
   for (const name of names) {
+    const p = path.join(stagingDir, name);
     try {
-      // rm on a symlink entry removes the link itself without following
-      // it, so no containment check is needed per entry.
-      await fs.rm(path.join(stagingDir, name), {
-        recursive: true,
-        force: true,
-      });
+      const st = await fs.lstat(p);
+      // A young REAL entry may belong to an in-flight invocation in
+      // another process; symlinks are never live invocations (staging
+      // dirs are created with mkdir) and are removed regardless of age
+      // (rm on a symlink removes the link itself without following it,
+      // so no containment check is needed per entry).
+      if (!st.isSymbolicLink() && Date.now() - st.mtimeMs < STAGING_GRACE_MS) {
+        continue;
+      }
+      await fs.rm(p, { recursive: true, force: true });
       debugLogger.debug(`recovery: removed uncommitted staging ${name}`);
     } catch {
       // Best-effort sweep.
@@ -328,8 +342,10 @@ async function sampleVerifyObjects(
  * lazily the first time the omni pipeline is touched — zero cost when
  * omni is unused.
  *
- * 1. everything under `staging/` is deleted — staging entries belong to
- *    policy invocations that never committed (storage design §6.1);
+ * 1. staging entries older than the multi-process grace window are
+ *    deleted — they belong to policy invocations that never committed;
+ *    younger entries may be another process's live run (storage design
+ *    §6.1);
  * 2. crash-orphaned `downloads/*.part` older than the 48h debugging
  *    retention window are removed;
  * 3. `quarantine/` is trimmed to its retention window and size budget

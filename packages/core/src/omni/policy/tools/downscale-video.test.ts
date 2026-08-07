@@ -100,6 +100,11 @@ describe('OmniDownscaleVideoTool', () => {
     });
   });
 
+  it("defaults to 'ask' permission: a model-origin call writes files and must confirm outside yolo", async () => {
+    const invocation = tool.build({ inputPath, outputDir } as never);
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+  });
+
   it('downscales with the fixed-call defaults, audio stream-copied', async () => {
     probe({ height: 1080, frameRate: 30 });
     const { result, signal } = await run();
