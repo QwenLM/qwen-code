@@ -15,7 +15,7 @@
  * path keeps using `useGeminiStream` unchanged.
  */
 
-import type { ServerGeminiStreamEvent } from '../../../core/src/core/turn.js';
+import type { ServerGeminiStreamEvent } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streamingModel.js';
 
 /**
@@ -88,7 +88,10 @@ export function createEventMapper(): (
       }
       case 'error': {
         const v = ev.value as { error?: { message?: string } };
-        out.push({ type: 'text', delta: `\n[error] ${v.error?.message ?? ''}` });
+        out.push({
+          type: 'text',
+          delta: `\n[error] ${v.error?.message ?? ''}`,
+        });
         break;
       }
       case 'finished':

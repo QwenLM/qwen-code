@@ -24,7 +24,7 @@ import {
   isExperimentalRenderer,
   pickRenderer,
   type RendererId,
-} from './dispatch.ts';
+} from './dispatch.js';
 
 type Case = readonly [string, NodeJS.ProcessEnv, RendererId];
 
@@ -51,7 +51,7 @@ function runAssertions(): void {
 
 if (typeof describe === 'function' && typeof it === 'function') {
   describe('renderer dispatch', () => {
-    it('picks opentui by default and ink only on explicit request', () => {
+    it('picks ink by default and opentui only on explicit request', () => {
       runAssertions();
     });
   });

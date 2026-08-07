@@ -1,3 +1,4 @@
+/* eslint-disable react/no-unknown-property, default-case, import/no-duplicates */
 /** @jsxImportSource @opentui/react */
 /**
  * qwen-code × OpenTUI POC — chat app demonstrating:
@@ -7,29 +8,30 @@
  *     drag-select + auto copy (native-terminal-like)
  *  4. flicker-free rendering (cell diff + DEC 2026, handled by the renderer)
  */
-import { MouseButton } from "@opentui/core";
-import { C, SYNTAX, applyThemeMode } from "./theme";
+import { MouseButton } from '@opentui/core';
+import { C, SYNTAX, applyThemeMode } from './theme.js';
 import {
   useKeyboard,
   useRenderer,
   useSelectionHandler,
   useTerminalDimensions,
-} from "@opentui/react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { EditBufferRenderable } from "@opentui/core";
-import { copyText } from "./clipboard";
-import { buildScenario, TOKEN_INTERVAL_MS, type StreamEvent } from "./stream-script";
+} from '@opentui/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { EditBufferRenderable } from '@opentui/core';
+import { copyText } from './clipboard.js';
+import { buildScenario, TOKEN_INTERVAL_MS } from './stream-script.js';
+import type { StreamEvent } from '../model/streamingModel.js';
 
 // ---------------------------------------------------------------------------
 // state model
 // ---------------------------------------------------------------------------
 
 // Data shapes come from the framework-neutral model (single source of truth).
-import type { HistoryItem as ChatItem } from "../model/streamingModel";
-import type { Config } from "../../../core/src/config/config.js";
-import { livePromptEvents } from "./liveSession.js";
+import type { HistoryItem as ChatItem } from '../model/streamingModel.js';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { livePromptEvents } from './live-session.js';
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 let spinnerTick = 0;
 const nextSpinner = () => SPINNER[spinnerTick++ % SPINNER.length];
@@ -42,7 +44,7 @@ const nid = (p: string) => `${p}${++uid}`;
 // ---------------------------------------------------------------------------
 
 function ThinkingBlock(props: {
-  item: Extract<ChatItem, { kind: "thinking" }>;
+  item: Extract<ChatItem, { kind: 'thinking' }>;
   expanded: boolean;
   onToggle: (id: string) => void;
 }) {
@@ -82,7 +84,7 @@ function ThinkingBlock(props: {
 }
 
 function ToolCard(props: {
-  item: Extract<ChatItem, { kind: "tool" }>;
+  item: Extract<ChatItem, { kind: 'tool' }>;
   expanded: boolean;
   onToggle: (id: string) => void;
 }) {
@@ -90,10 +92,14 @@ function ToolCard(props: {
   const [hover, setHover] = useState(false);
   const renderer = useRenderer();
 
-  const icon = !item.done ? nextSpinner() : item.success ? "✓" : "✗";
+  const icon = !item.done ? nextSpinner() : item.success ? '✓' : '✗';
   const iconColor = !item.done ? C.accent : item.success ? C.green : C.red;
-  const suffix = item.done && item.summary ? ` · ${item.summary}` : "";
-  const hint = item.done ? (expanded ? " · click to collapse" : " · click to expand") : "";
+  const suffix = item.done && item.summary ? ` · ${item.summary}` : '';
+  const hint = item.done
+    ? expanded
+      ? ' · click to collapse'
+      : ' · click to expand'
+    : '';
 
   return (
     <box flexDirection="column">
@@ -118,7 +124,12 @@ function ToolCard(props: {
       </box>
       {expanded && item.output.length > 0 && (
         <box paddingLeft={3} marginTop={0}>
-          <code content={item.output} filetype="txt" syntaxStyle={SYNTAX} fg={C.dim} />
+          <code
+            content={item.output}
+            filetype="txt"
+            syntaxStyle={SYNTAX}
+            fg={C.dim}
+          />
         </box>
       )}
     </box>
@@ -126,17 +137,20 @@ function ToolCard(props: {
 }
 
 function TaskCard(props: {
-  item: Extract<ChatItem, { kind: "task" }>;
+  item: Extract<ChatItem, { kind: 'task' }>;
   expanded: boolean;
   onToggle: (id: string) => void;
 }) {
   const { item, expanded, onToggle } = props;
   const [hover, setHover] = useState(false);
   const renderer = useRenderer();
-  const icon = !item.done ? nextSpinner() : "✓";
+  const icon = !item.done ? nextSpinner() : '✓';
   const iconColor = !item.done ? C.accent : C.green;
-  const suffix = item.done && item.stats ? ` · ${item.stats}` : "";
-  const live = !item.done && item.progress.length > 0 ? item.progress[item.progress.length - 1] : undefined;
+  const suffix = item.done && item.stats ? ` · ${item.stats}` : '';
+  const live =
+    !item.done && item.progress.length > 0
+      ? item.progress[item.progress.length - 1]
+      : undefined;
 
   return (
     <box flexDirection="column">
@@ -156,7 +170,11 @@ function TaskCard(props: {
         <text fg={C.text}>Task — {item.description}</text>
         <text fg={C.dim}>
           {suffix}
-          {item.done ? (expanded ? " · click to collapse" : " · click to expand") : ""}
+          {item.done
+            ? expanded
+              ? ' · click to collapse'
+              : ' · click to expand'
+            : ''}
         </text>
       </box>
       {!item.done && live && (
@@ -177,11 +195,18 @@ function TaskCard(props: {
   );
 }
 
-function AssistantMessage(props: { item: Extract<ChatItem, { kind: "assistant" }> }) {
+function AssistantMessage(props: {
+  item: Extract<ChatItem, { kind: 'assistant' }>;
+}) {
   const { item } = props;
   return (
     <box paddingLeft={1} marginTop={0}>
-      <markdown content={item.text} streaming={item.streaming} syntaxStyle={SYNTAX} fg={C.text} />
+      <markdown
+        content={item.text}
+        streaming={item.streaming}
+        syntaxStyle={SYNTAX}
+        fg={C.text}
+      />
     </box>
   );
 }
@@ -190,7 +215,13 @@ function AssistantMessage(props: { item: Extract<ChatItem, { kind: "assistant" }
 // app
 // ---------------------------------------------------------------------------
 
-function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?: Config }) {
+function App({
+  events,
+  config,
+}: {
+  events?: AsyncIterable<StreamEvent>;
+  config?: Config;
+}) {
   const renderer = useRenderer();
   const { width } = useTerminalDimensions();
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -201,13 +232,13 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
 
   // Live light/dark theme switching (OSC 10/11 + mode 2031 updates).
   useEffect(() => {
-    const onMode = (mode: "dark" | "light") => {
+    const onMode = (mode: 'dark' | 'light') => {
       applyThemeMode(mode);
       setThemeTick((t) => t + 1);
     };
-    renderer.on("theme_mode", onMode);
+    renderer.on('theme_mode', onMode);
     return () => {
-      renderer.off("theme_mode", onMode);
+      renderer.off('theme_mode', onMode);
     };
   }, [renderer]);
 
@@ -229,7 +260,11 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
     const text = selection.getSelectedText();
     if (!text) return;
     const ok = await copyText(text);
-    setToast(ok ? `✓ Copied ${text.length} chars to clipboard` : "⚠ Clipboard write failed");
+    setToast(
+      ok
+        ? `✓ Copied ${text.length} chars to clipboard`
+        : '⚠ Clipboard write failed',
+    );
     setTimeout(() => setToast(null), 1500);
     renderer.clearSelection();
   });
@@ -239,76 +274,121 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
       const items = [...prev];
       const last = items[items.length - 1];
       switch (ev.type) {
-        case "thinking": {
-          if (last?.kind === "thinking" && !last.done) {
+        case 'thinking': {
+          if (last?.kind === 'thinking' && !last.done) {
             items[items.length - 1] = { ...last, text: last.text + ev.delta };
           } else {
-            items.push({ kind: "thinking", id: nid("th"), text: ev.delta, done: false });
+            items.push({
+              kind: 'thinking',
+              id: nid('th'),
+              text: ev.delta,
+              done: false,
+            });
           }
           return items;
         }
-        case "thinking-end": {
-          if (last?.kind === "thinking") items[items.length - 1] = { ...last, done: true };
+        case 'thinking-end': {
+          if (last?.kind === 'thinking')
+            items[items.length - 1] = { ...last, done: true };
           return items;
         }
-        case "text": {
-          if (last?.kind === "assistant" && last.streaming) {
+        case 'text': {
+          if (last?.kind === 'assistant' && last.streaming) {
             items[items.length - 1] = { ...last, text: last.text + ev.delta };
           } else {
-            items.push({ kind: "assistant", id: nid("as"), text: ev.delta, streaming: true });
+            items.push({
+              kind: 'assistant',
+              id: nid('as'),
+              text: ev.delta,
+              streaming: true,
+            });
           }
           return items;
         }
-        case "tool-start":
-          if (last?.kind === "assistant" && last.streaming)
+        case 'tool-start':
+          if (last?.kind === 'assistant' && last.streaming)
             items[items.length - 1] = { ...last, streaming: false };
-          items.push({ kind: "tool", id: ev.id, tool: ev.tool, title: ev.title, output: "", done: false });
+          items.push({
+            kind: 'tool',
+            id: ev.id,
+            tool: ev.tool,
+            title: ev.title,
+            output: '',
+            done: false,
+          });
           return items;
-        case "tool-output": {
-          const i = items.findIndex((it) => it.kind === "tool" && it.id === ev.id);
-          if (i >= 0 && items[i].kind === "tool") {
-            const t = items[i] as Extract<ChatItem, { kind: "tool" }>;
+        case 'tool-output': {
+          const i = items.findIndex(
+            (it) => it.kind === 'tool' && it.id === ev.id,
+          );
+          if (i >= 0 && items[i].kind === 'tool') {
+            const t = items[i] as Extract<ChatItem, { kind: 'tool' }>;
             items[i] = { ...t, output: t.output + ev.delta };
           }
           return items;
         }
-        case "tool-end": {
-          const i = items.findIndex((it) => it.kind === "tool" && it.id === ev.id);
-          if (i >= 0 && items[i].kind === "tool") {
-            const t = items[i] as Extract<ChatItem, { kind: "tool" }>;
-            items[i] = { ...t, done: true, success: ev.success, summary: ev.summary };
+        case 'tool-end': {
+          const i = items.findIndex(
+            (it) => it.kind === 'tool' && it.id === ev.id,
+          );
+          if (i >= 0 && items[i].kind === 'tool') {
+            const t = items[i] as Extract<ChatItem, { kind: 'tool' }>;
+            items[i] = {
+              ...t,
+              done: true,
+              success: ev.success,
+              summary: ev.summary,
+            };
           }
           return items;
         }
-        case "task-start":
-          if (last?.kind === "assistant" && last.streaming)
+        case 'task-start':
+          if (last?.kind === 'assistant' && last.streaming)
             items[items.length - 1] = { ...last, streaming: false };
-          items.push({ kind: "task", id: ev.id, name: ev.name, description: ev.description, progress: [], done: false });
+          items.push({
+            kind: 'task',
+            id: ev.id,
+            name: ev.name,
+            description: ev.description,
+            progress: [],
+            done: false,
+          });
           return items;
-        case "task-progress": {
-          const i = items.findIndex((it) => it.kind === "task" && it.id === ev.id);
-          if (i >= 0 && items[i].kind === "task") {
-            const t = items[i] as Extract<ChatItem, { kind: "task" }>;
+        case 'task-progress': {
+          const i = items.findIndex(
+            (it) => it.kind === 'task' && it.id === ev.id,
+          );
+          if (i >= 0 && items[i].kind === 'task') {
+            const t = items[i] as Extract<ChatItem, { kind: 'task' }>;
             items[i] = { ...t, progress: [...t.progress.slice(-2), ev.line] };
           }
           return items;
         }
-        case "task-end": {
-          const i = items.findIndex((it) => it.kind === "task" && it.id === ev.id);
-          if (i >= 0 && items[i].kind === "task") {
-            const t = items[i] as Extract<ChatItem, { kind: "task" }>;
-            items[i] = { ...t, done: true, stats: `${ev.tools} tools · ${ev.seconds}s · ${ev.tokens} tokens` };
+        case 'task-end': {
+          const i = items.findIndex(
+            (it) => it.kind === 'task' && it.id === ev.id,
+          );
+          if (i >= 0 && items[i].kind === 'task') {
+            const t = items[i] as Extract<ChatItem, { kind: 'task' }>;
+            items[i] = {
+              ...t,
+              done: true,
+              stats: `${ev.tools} tools · ${ev.seconds}s · ${ev.tokens} tokens`,
+            };
           }
           return items;
         }
-        case "done": {
-          if (last?.kind === "assistant" && last.streaming)
+        case 'done': {
+          if (last?.kind === 'assistant' && last.streaming)
             items[items.length - 1] = { ...last, streaming: false };
           return items;
         }
+        default:
+          return items;
       }
+      return items;
     });
-    if (ev.type === "done") {
+    if (ev.type === 'done') {
       setStreaming(false);
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -330,7 +410,13 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
 
   // Real event source (P1d seam) if provided; otherwise the scripted demo.
   useEffect(() => {
-    setItems([{ kind: "user", id: nid("u"), text: "分析 VP 模式的渲染性能问题，给出优化建议" }]);
+    setItems([
+      {
+        kind: 'user',
+        id: nid('u'),
+        text: '分析 VP 模式的渲染性能问题，给出优化建议',
+      },
+    ]);
     if (events) {
       let cancelled = false;
       (async () => {
@@ -351,12 +437,12 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
   }, [events, startStream, applyEvent]);
 
   useKeyboard((key) => {
-    if (key.name === "c" && key.ctrl) {
+    if (key.name === 'c' && key.ctrl) {
       renderer.destroy();
       setTimeout(() => process.exit(0), 100);
       return;
     }
-    if (key.name === "escape" && streaming) {
+    if (key.name === 'escape' && streaming) {
       // interrupt the stream
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -364,25 +450,25 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
       }
       queueRef.current = [];
       setStreaming(false);
-      setToast("✗ Interrupted");
+      setToast('✗ Interrupted');
       setTimeout(() => setToast(null), 1200);
     }
   });
 
   const onSubmit = useCallback(() => {
     const el = promptRef.current;
-    const text = (el?.plainText ?? "").trim();
+    const text = (el?.plainText ?? '').trim();
     el?.clear();
     el?.requestRender();
     if (!text) return;
-    setItems((prev) => [...prev, { kind: "user", id: nid("u"), text }]);
+    setItems((prev) => [...prev, { kind: 'user', id: nid('u'), text }]);
     if (config) {
       // Live client wiring: submit to the real agent loop.
       (async () => {
         try {
           for await (const ev of livePromptEvents(config, text)) applyEvent(ev);
         } catch (err) {
-          applyEvent({ type: "text", delta: `\n[live error] ${String(err)}` });
+          applyEvent({ type: 'text', delta: `\n[live error] ${String(err)}` });
         }
       })();
       return;
@@ -404,18 +490,23 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
         <box height={1} />
         {items.map((item) => {
           switch (item.kind) {
-            case "user":
+            case 'user':
               return (
-                <box key={item.id} flexDirection="row" paddingLeft={1} marginTop={1}>
+                <box
+                  key={item.id}
+                  flexDirection="row"
+                  paddingLeft={1}
+                  marginTop={1}
+                >
                   <text fg={C.green} attributes={1}>
-                    ❯{" "}
+                    ❯{' '}
                   </text>
                   <text fg={C.text} attributes={1}>
                     {item.text}
                   </text>
                 </box>
               );
-            case "thinking":
+            case 'thinking':
               return (
                 <ThinkingBlock
                   key={item.id}
@@ -424,9 +515,9 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
                   onToggle={toggle}
                 />
               );
-            case "assistant":
+            case 'assistant':
               return <AssistantMessage key={item.id} item={item} />;
-            case "tool":
+            case 'tool':
               return (
                 <ToolCard
                   key={item.id}
@@ -435,7 +526,7 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
                   onToggle={toggle}
                 />
               );
-            case "task":
+            case 'task':
               return (
                 <TaskCard
                   key={item.id}
@@ -455,12 +546,17 @@ function App({ events, config }: { events?: AsyncIterable<StreamEvent>; config?:
           {streaming
             ? `${nextSpinner()} streaming… (Esc interrupt · Ctrl+C quit)`
             : `ready · click cards to expand · drag text to copy · wheel to scroll (Ctrl+C quit)`}
-          {toast ? `   ${toast}` : ""}
+          {toast ? `   ${toast}` : ''}
         </text>
       </box>
 
       {/* prompt */}
-      <box borderStyle="single" borderColor={streaming ? C.yellow : C.accent} marginLeft={1} marginRight={1}>
+      <box
+        borderStyle="single"
+        borderColor={streaming ? C.yellow : C.accent}
+        marginLeft={1}
+        marginRight={1}
+      >
         <textarea
           ref={(el: EditBufferRenderable | null) => {
             promptRef.current = el;

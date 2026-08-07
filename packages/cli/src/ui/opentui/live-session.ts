@@ -16,8 +16,8 @@
  * feature parity + regression are complete.
  */
 
-import type { Config } from '../../../core/src/config/config.js';
-import { createEventMapper } from './eventAdapter.js';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { createEventMapper } from './event-adapter.js';
 import type { StreamEvent } from '../model/streamingModel.js';
 
 /**

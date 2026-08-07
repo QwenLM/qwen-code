@@ -1,3 +1,4 @@
+ 
 /** @jsxImportSource @opentui/react */
 /**
  * @license
@@ -22,7 +23,7 @@ import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { App } from '../opentui/backend.js';
 import type { StreamEvent } from '../model/streamingModel.js';
-import type { Config } from '../../../core/src/config/config.js';
+import type { Config } from '@qwen-code/qwen-code-core';
 
 /**
  * @param events optional pre-adapted neutral stream (resume mode).
@@ -41,5 +42,7 @@ export async function startOpenTuiUI(opts?: {
     externalOutputMode: 'passthrough',
     autoFocus: true,
   });
-  createRoot(renderer).render(<App events={opts?.events} config={opts?.config} />);
+  createRoot(renderer).render(
+    <App events={opts?.events} config={opts?.config} />,
+  );
 }
