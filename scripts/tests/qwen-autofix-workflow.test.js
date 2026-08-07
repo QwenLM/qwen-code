@@ -223,6 +223,11 @@ function evalGhaExpression(expression, facts) {
     }
     pos += 2;
     const right = parsePrimary();
+    if (typeof left === 'string' && typeof right === 'string') {
+      const l = left.toLowerCase();
+      const r = right.toLowerCase();
+      return op === '==' ? l === r : l !== r;
+    }
     return op === '==' ? left === right : left !== right;
   };
   const parseAnd = () => {
@@ -6211,11 +6216,12 @@ exit 1
     // a substring only forbids the `runner` context by accident: this same
     // test requires `RUNNER_ENVIRONMENT: '${{ runner.environment }}'` below,
     // and the npm-cache choice reads the same fact. Guard the shape that was
-    // actually reverted — an `if:` that tests that fact — in every spelling:
-    // single-line or block scalar, wrapped `${{ }}`, extra conjuncts, either
+    // actually reverted — an `if:` that tests that fact — in its common
+    // spellings: bare, quoted, or `${{ }}`-wrapped, single-line or a block
+    // scalar whose first line carries the test, extra conjuncts, either
     // operand order, arbitrary spacing.
     expect(workflow).not.toMatch(
-      /if:\s*(?:\|-\s*)?\$\{\{[^}]*(?:runner\.environment\s*==\s*'self-hosted'|'self-hosted'\s*==\s*runner\.environment)/,
+      /if:\s*(?:[|>]-?\s*)?["']?\s*(?:\$\{\{)?[^}\n]*(?:runner\.environment\s*==\s*'self-hosted'|'self-hosted'\s*==\s*runner\.environment)/,
     );
     expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
     expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
@@ -6235,6 +6241,7 @@ exit 1
     for (const step of envCheckSteps) {
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
+      expect(step).toContain('du -sh "${HOME}/.npm"');
     }
     const installTmuxSteps =
       workflow.match(/- name: 'Install tmux'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
@@ -6357,10 +6364,10 @@ exit 1
       // 'does not restore the remote npm cache on the persistent pool'. The
       // inputs are still identical across the three steps, which is what
       // this test is for.
-      expect(step).toContain(
-        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      expect(step).toMatch(
+        /^\s*cache: "\$\{\{ runner\.environment != 'self-hosted' && 'npm' \|\| '' \}\}"/m,
       );
-      expect(step).toContain('package-manager-cache: false');
+      expect(step).toMatch(/^\s*package-manager-cache: false/m);
       expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
@@ -7122,11 +7129,15 @@ exit 1
     // up to ten per scan, plus build-cli and issue-autofix.
     // All three consumers, so a fourth job with a hardcoded cache fails
     // here rather than quietly paying 2.65 GB per run — counted by step
-    // name, so no choice of inputs can dodge the capture.
+    // name, so no choice of inputs can dodge the capture; the action-ref
+    // count below also closes the renamed-step dodge.
     expect(nodeSetupSteps).toHaveLength(3);
+    expect(workflow.match(/uses: 'actions\/setup-node@/g) ?? []).toHaveLength(
+      3,
+    );
     for (const step of nodeSetupSteps) {
-      expect(step).toContain(
-        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      expect(step).toMatch(
+        /^\s*cache: "\$\{\{ runner\.environment != 'self-hosted' && 'npm' \|\| '' \}\}"/m,
       );
     }
     // Text pins cannot tell a ternary that works from one that GHA's
@@ -7135,7 +7146,7 @@ exit 1
     // pinned expression the way Actions does: '' on the persistent pool,
     // 'npm' on the ephemeral hosted fallback.
     const cacheExpression =
-      nodeSetupSteps[0].match(/cache: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
+      nodeSetupSteps[0].match(/^\s*cache: "\$\{\{ ([^}]+) \}\}"/m)?.[1] ?? '';
     for (const [environment, expected] of [
       ['self-hosted', ''],
       ['github-hosted', 'npm'],
