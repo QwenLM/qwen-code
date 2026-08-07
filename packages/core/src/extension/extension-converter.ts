@@ -56,10 +56,11 @@ export async function convertCompatibleExtension(
     newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
       .convertedDir;
     originSource = 'Gemini';
-  } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
-    newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
-    originSource = 'Qoder';
   } else if (pluginName) {
+    // An explicit marketplace selection must win over root-manifest
+    // detection: a repo can carry both a marketplace and a root plugin
+    // manifest, and silently substituting the latter installs different
+    // content than the one selected.
     const converted = await convertClaudePluginPackage(
       extensionDir,
       pluginName,
@@ -69,6 +70,9 @@ export async function convertCompatibleExtension(
     newExtensionDir = converted.convertedDir;
     originSource = 'Claude';
     externalContent = converted.externalContent;
+  } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
+    newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
+    originSource = 'Qoder';
   } else if (
     fs.existsSync(path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]))
   ) {

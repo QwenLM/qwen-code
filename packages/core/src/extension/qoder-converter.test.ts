@@ -121,10 +121,7 @@ describe('convertQoderPlugin', () => {
       'utf-8',
     );
 
-    const result = await convertCompatibleExtension(
-      root,
-      'ignored-plugin-name',
-    );
+    const result = await convertCompatibleExtension(root);
 
     expect(result.originSource).toBe('Qoder');
     const converted = JSON.parse(
@@ -137,6 +134,59 @@ describe('convertQoderPlugin', () => {
     expect(converted['contextFileName']).toEqual(['system-prompt.md']);
 
     fs.rmSync(result.extensionDir, { recursive: true, force: true });
+  });
+
+  it('honors an explicit marketplace selection over a root Qoder manifest', async () => {
+    writeManifest({ name: 'sample-qoder-plugin', version: '9.9.9' });
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'sample-marketplace',
+        owner: { name: 'Test Owner', email: 'owner@example.com' },
+        plugins: [
+          {
+            name: 'requested-plugin',
+            version: '2.0.0',
+            source: './plugin-src',
+          },
+        ],
+      }),
+      'utf-8',
+    );
+    const pluginSourceDir = path.join(root, 'plugin-src');
+    fs.mkdirSync(path.join(pluginSourceDir, '.claude-plugin'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(pluginSourceDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'requested-plugin', version: '2.0.0' }),
+      'utf-8',
+    );
+
+    const selected = await convertCompatibleExtension(root, 'requested-plugin');
+    expect(selected.originSource).toBe('Claude');
+    const selectedConfig = JSON.parse(
+      fs.readFileSync(
+        path.join(selected.extensionDir, 'qwen-extension.json'),
+        'utf-8',
+      ),
+    ) as Record<string, unknown>;
+    expect(selectedConfig['name']).toBe('requested-plugin');
+    expect(selectedConfig['version']).toBe('2.0.0');
+    fs.rmSync(selected.extensionDir, { recursive: true, force: true });
+
+    const unselected = await convertCompatibleExtension(root);
+    expect(unselected.originSource).toBe('Qoder');
+    const unselectedConfig = JSON.parse(
+      fs.readFileSync(
+        path.join(unselected.extensionDir, 'qwen-extension.json'),
+        'utf-8',
+      ),
+    ) as Record<string, unknown>;
+    expect(unselectedConfig['name']).toBe('sample-qoder-plugin');
+    expect(unselectedConfig['version']).toBe('9.9.9');
+    fs.rmSync(unselected.extensionDir, { recursive: true, force: true });
   });
 
   it('omits null optional metadata from the generated config', async () => {
