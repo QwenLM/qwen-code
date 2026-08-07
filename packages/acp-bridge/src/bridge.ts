@@ -1760,6 +1760,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (isClosingOrAuthorizingClose(entry)) return false;
     if (entry.events.subscriberCount > 0) return false;
     if (entryHasLocalWork(entry)) return false;
+    // A restore in flight looks exactly like an abandoned Session and is the
+    // opposite of one. `session/load` registers the entry before it awaits
+    // `artifacts.restore()` and `seedSessionUpdates()`, and its first client
+    // is registered only after those resolve — so for that whole window there
+    // are no clients, no subscribers, and nothing held, and the child answers
+    // the conditional close truthfully. Excluded here rather than at the
+    // snapshot trigger so every automatic path is covered: the reaper's TTL
+    // can elapse inside a slow restore too.
+    const owner = channelInfoForEntry(entry);
+    if (owner?.pendingRestoreIds.has(entry.sessionId)) return false;
     return !childReportsHeldWork(entry);
   }
 
@@ -1827,6 +1837,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry.activeWorkCloseInFlight = true;
     try {
       if (!(await confirmChildUnheld(entry))) return;
+      // Re-check identity, not just liveness. `closeSessionImpl` re-resolves
+      // the target by raw id, and the id can be re-registered to a *different*
+      // entry during the round trip — an explicit kill removes this one (kill
+      // deliberately ignores the in-flight flag, keeping its force semantics)
+      // and a `session/load` for the same persisted id registers a fresh one.
+      // Without this, the stale continuation tears down the newly restored
+      // Session under its just-attached client.
+      if (byId.get(entry.sessionId) !== entry) return;
       await closeSessionImpl(entry.sessionId, undefined, {
         reason: opts.closeReason,
       }).catch((err) => {
@@ -4849,7 +4867,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const existing = byId.get(req.sessionId);
     if (existing) {
-      if (existing.closing) {
+      // `isClosingOrAuthorizingClose`, not bare `closing`: this is an admission
+      // path like attach/prompt/rewind, so a conditional close being confirmed
+      // must refuse it too. Otherwise a client attaches inside the round trip
+      // and the teardown it raced destroys the Session under it.
+      if (isClosingOrAuthorizingClose(existing)) {
         throw new SessionNotFoundError(
           req.sessionId,
           'The session is closing; retry after close completes',
@@ -4867,7 +4889,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
-      if (byId.get(req.sessionId) !== existing || existing.closing) {
+      if (
+        byId.get(req.sessionId) !== existing ||
+        isClosingOrAuthorizingClose(existing)
+      ) {
         throw new SessionNotFoundError(req.sessionId);
       }
       existing.attachCount++;
@@ -5135,6 +5160,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const racedEntry = byId.get(req.sessionId);
       if (racedEntry) {
         restoreEvents.close();
+        // Same admission rule as the two checks above. This branch had no
+        // closing guard at all, so it could also attach to a Session already
+        // tearing down — narrower than the conditional-close window this PR
+        // introduced, but the same defect, and the fix is the same predicate.
+        if (isClosingOrAuthorizingClose(racedEntry)) {
+          throw new SessionNotFoundError(
+            req.sessionId,
+            'The session is closing; retry after close completes',
+          );
+        }
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
