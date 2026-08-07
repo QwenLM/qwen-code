@@ -2532,6 +2532,12 @@ export class GeminiChat {
           : effectiveTokens;
       if (this.promptCountIsEstimateDerived()) {
         promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
+        debugLogger.debug(
+          `[clamp] estimate-derived prompt count; padded by ` +
+            `${ESTIMATE_CLAMP_OVERHEAD_PAD}: ` +
+            `promptTokensForClamp=${promptTokensForClamp}, ` +
+            `count=${this.lastPromptTokenCount}`,
+        );
       }
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,

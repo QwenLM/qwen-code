@@ -2200,6 +2200,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     enableCacheControl?: boolean;
     contextWindowSize?: number | null;
     lastPromptTokenCount?: number;
+    lastPromptTokenCountIsEstimated?: boolean;
     lastOutputTokenCount?: number;
   }): {
     chat: GeminiChat;
@@ -2230,6 +2231,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
       getLastPromptTokenCount: vi
         .fn()
         .mockReturnValue(options?.lastPromptTokenCount ?? 180_000),
+      isLastPromptTokenCountEstimated: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCountIsEstimated ?? false),
       getLastOutputTokenCount: vi
         .fn()
         .mockReturnValue(options?.lastOutputTokenCount ?? 0),
@@ -2839,6 +2843,34 @@ describe('ChatCompressionService.compress cache sharing', () => {
       consecutiveFailures: 0,
       originalTokenCount: 0,
       precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips cache sharing when the token-count anchor is estimate-derived', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 180_000,
+      lastPromptTokenCountIsEstimated: true,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
     });
 
     expect(generateText).not.toHaveBeenCalled();

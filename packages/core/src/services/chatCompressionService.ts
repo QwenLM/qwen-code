@@ -673,7 +673,14 @@ export class ChatCompressionService {
     const usesMainModel = effectiveCompactionModel === config.getModel();
     const providerSupportsCacheSharing =
       supportsCompressionCacheSharing(config);
-    const hasProviderTokenCount = (chat.getLastPromptTokenCount?.() ?? 0) > 0;
+    // The anchor must be provider-reported, not merely non-zero: an
+    // estimate-derived count misses the ~15-20K system/tools overhead the
+    // shared request actually carries, so `sharedRequestFits` could approve
+    // a request that overflows the window. Estimate-only sessions stay on
+    // the cold path until provider usage arrives.
+    const hasProviderTokenCount =
+      (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
+      chat.isLastPromptTokenCountEstimated?.() !== true;
     const sharedRequestFits =
       sharedPromptTokenCount +
         sharedDirectiveTokenCount +
@@ -690,7 +697,7 @@ export class ChatCompressionService {
         : !providerSupportsCacheSharing
           ? 'provider does not support cache sharing'
           : !hasProviderTokenCount
-            ? 'no provider token-count anchor'
+            ? 'no provider-reported token-count anchor'
             : `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
               `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
               `window=${contextLimit}`;

@@ -3279,11 +3279,11 @@ describe('GeminiChat', async () => {
 
     it('triggers cache-sharing compaction end-to-end when a provider token count is available (R3.4)', async () => {
       // Reviewer R3.4: the "forwards the pending user message" test above
-      // mocks the service entirely, so the real cheap-gate (the actual
-      // estimatePromptTokens gate never runs. Exercise the full chain here
-      // with the provider token-count anchor required for cache sharing:
+      // mocks the service entirely, so the real cheap-gate never runs there.
+      // Exercise the full chain here with the provider token-count anchor
+      // required for cache sharing:
       //   sendMessageStream → tryCompress → service.compress (REAL) →
-      //   cheap-gate (real estimate via getHistory + userMessage) →
+      //   cheap-gate (count-based estimate from the 172K anchor) →
       //   splitter (real) → cache-sharing request (mocked at baseLlmClient) →
       //   persistence.
       const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
@@ -3338,6 +3338,76 @@ describe('GeminiChat', async () => {
       // query, while still exercising the real splitter and accounting path.
       expect(generateText).toHaveBeenCalled();
       expect(coldSpy).not.toHaveBeenCalled();
+    });
+
+    it('routes zero-baseline compression through the cold side query end-to-end (R5-3)', async () => {
+      // Companion to the R3.4 test above without a provider token-count
+      // anchor: an inherited history with lastPromptTokenCount === 0 must
+      // derive a non-zero compression baseline locally, and the service must
+      // skip cache sharing (no provider-reported anchor) and run the cold
+      // side query. Pins the tryCompress-baseline → service-anchor-gate
+      // composition; a gate re-sourced from opts.originalTokenCount would
+      // mis-route this to the shared path, and a dropped derivation would
+      // zero the baseline.
+      const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
+      const inheritedHistory: Content[] = [
+        { role: 'user', parts: [{ text: largeChars }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+        { role: 'user', parts: [{ text: 'follow up' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      chat.setHistory(inheritedHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>compressed</state_snapshot>',
+          usage: {
+            promptTokenCount: 99_000,
+            candidatesTokenCount: 1500,
+            totalTokenCount: 100_500,
+          },
+        } as never);
+      const generateText = vi.fn();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('done'),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'follow-up after restore' },
+        'prompt-r5-3',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const compressed = events.find(
+        (e) => e.type === StreamEventType.COMPRESSED,
+      );
+      expect(compressed).toBeDefined();
+      expect(
+        (compressed as { type: StreamEventType; info: ChatCompressionInfo })
+          .info.compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      // The derived non-zero baseline (not the zero counter) reached the
+      // service...
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBeGreaterThan(
+        0,
+      );
+      // ...and the missing provider anchor kept the request on the cold
+      // path.
+      expect(generateText).not.toHaveBeenCalled();
+      expect(coldSpy).toHaveBeenCalledTimes(1);
     });
 
     it('clears consecutiveFailures after a forced successful compression', async () => {
