@@ -28,6 +28,7 @@ import {
   waitForServeRuntimeOrExit,
 } from './fast-path.js';
 import {
+  consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathEnvironment,
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
@@ -1671,6 +1672,7 @@ describe('serve fast path environment bootstrap', () => {
     const trackedKeys = [
       'NODE_OPTIONS',
       'npm_config_node_options',
+      'npm_config_node-options',
       'NPM_CONFIG_NODE_OPTIONS',
       'NODE_PATH',
       'LD_PRELOAD',
@@ -1690,9 +1692,11 @@ describe('serve fast path environment bootstrap', () => {
         [
           'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
           'npm_config_node_options=--import file:///workspace-a/hook.mjs',
-          // npm applies npm_config_* case-insensitively, so the gate must
-          // reject case variants too.
+          // npm applies npm_config_* case-insensitively and maps
+          // non-leading underscores onto hyphens, so the gate must reject
+          // case variants and the hyphen spelling too.
           'NPM_CONFIG_NODE_OPTIONS=--import file:///workspace-a/upper.mjs',
+          'npm_config_node-options=--import file:///workspace-a/hyphen.mjs',
           'FASTPATH_DOTENV_ALLOWED=allowed',
           '',
         ].join('\n'),
@@ -1700,6 +1704,7 @@ describe('serve fast path environment bootstrap', () => {
       loadServeFastPathEnvironment({}, tempWorkspace);
       expect(process.env['NODE_OPTIONS']).toBeUndefined();
       expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['npm_config_node-options']).toBeUndefined();
       expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
       expect(process.env['FASTPATH_DOTENV_ALLOWED']).toBe('allowed');
       rmSync(tempWorkspace, { recursive: true, force: true });
@@ -1727,6 +1732,8 @@ describe('serve fast path environment bootstrap', () => {
           env: {
             LD_PRELOAD: '/workspace-a/hijack.so',
             NPM_CONFIG_NODE_OPTIONS: '--import file:///workspace-a/upper.mjs',
+            'npm_config_node-options':
+              '--import file:///workspace-a/hyphen.mjs',
             FASTPATH_SETTINGS_ALLOWED: 'allowed',
           },
         },
@@ -1734,6 +1741,7 @@ describe('serve fast path environment bootstrap', () => {
       );
       expect(process.env['LD_PRELOAD']).toBeUndefined();
       expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node-options']).toBeUndefined();
       expect(process.env['FASTPATH_SETTINGS_ALLOWED']).toBe('allowed');
     } finally {
       for (const key of trackedKeys) {
@@ -1843,6 +1851,42 @@ describe('serve fast path environment bootstrap', () => {
     expect(combined).toContain('NODE_OPTIONS');
     expect(combined).toContain('settings.env');
     expect(combined).toContain('LD_PRELOAD');
+  });
+
+  // The daemon consumes the stashed fast-path rejections once at boot to
+  // persist them; the reset keeps a later consume (a second consumer or a
+  // re-entered boot path in one process) from re-logging the same keys.
+  it('resets the rejected-loader-key stash after one consume', () => {
+    const trackedKeys = ['NODE_OPTIONS'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-consume-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'NODE_OPTIONS=--max-old-space-size=8192\n',
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(consumeServeFastPathRejectedLoaderKeys()).toContain(
+        'NODE_OPTIONS',
+      );
+      expect(consumeServeFastPathRejectedLoaderKeys()).toEqual([]);
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
   });
 
   it('prioritizes trusted parent folders over nested distrust rules', async () => {

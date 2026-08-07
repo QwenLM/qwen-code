@@ -63,18 +63,25 @@ export const INHERITED_LOADER_ENV_KEYS = [
   'ENV',
 ] as const;
 
-// Loader-key matching is case-insensitive: npm applies npm_config_* env vars
-// regardless of case (it matches the prefix case-insensitively and lowercases
-// the rest), and Windows env lookup is case-insensitive outright. Exact-case
-// gates would leave variants like NPM_CONFIG_NODE_OPTIONS loader-effective
-// while slipping past the denylist and the scrubs. Every gate and scrub must
-// go through this predicate instead of re-deriving set membership.
+// Loader-key matching is case-insensitive and treats npm config-key
+// underscore/hyphen spellings as equivalent: npm applies npm_config_* env
+// vars regardless of case (it matches the prefix case-insensitively and
+// lowercases the rest) and maps non-leading underscores onto hyphens, so
+// npm_config_node-options injects NODE_OPTIONS into `npm run` lifecycle
+// scripts exactly like npm_config_node_options. Windows env lookup is
+// case-insensitive outright. Exact-case or exact-spelling gates would leave
+// such variants loader-effective while slipping past the denylist and the
+// scrubs. Every gate and scrub must go through this predicate instead of
+// re-deriving set membership.
+const canonicalLoaderKey = (key: string): string =>
+  key.toLowerCase().replace(/_/gu, '-');
+
 const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(
-  INHERITED_LOADER_ENV_KEYS.map((key) => key.toLowerCase()),
+  INHERITED_LOADER_ENV_KEYS.map(canonicalLoaderKey),
 );
 
 export function isLoaderEnvKey(key: string): boolean {
-  return LOADER_ENV_KEYS.has(key.toLowerCase());
+  return LOADER_ENV_KEYS.has(canonicalLoaderKey(key));
 }
 
 export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): string[] {

@@ -457,7 +457,10 @@ export function buildRuntimeEnvironment(
       if (typeof value !== 'string') continue;
       setRuntimeEnvIfUnset(effectiveEnv, key, value);
     }
-    reportRejectedLoaderKeys('settings.env', Object.keys(settings.env));
+    reportRejectedLoaderKeys(
+      `settings.env (${startDir})`,
+      Object.keys(settings.env),
+    );
   }
 
   const overlayKeys = Object.keys(effectiveEnv)
@@ -559,7 +562,10 @@ export function loadEnvironment(
         lastReloadSnapshot.set(key, value);
       }
     }
-    reportRejectedLoaderKeys('settings.env', Object.keys(settings.env));
+    reportRejectedLoaderKeys(
+      `settings.env (${startDir})`,
+      Object.keys(settings.env),
+    );
   }
   lastReloadSnapshotSeeded = true;
   publishPendingCompileCache();
@@ -629,7 +635,10 @@ export function reloadEnvironment(
       if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
       newSettingsEnvKeys.set(key, value);
     }
-    reportRejectedLoaderKeys('settings.env', Object.keys(settings.env));
+    reportRejectedLoaderKeys(
+      `settings.env (${workspaceCwd})`,
+      Object.keys(settings.env),
+    );
   }
 
   // Union of all new keys

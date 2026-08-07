@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   INHERITED_LOADER_ENV_KEYS,
+  isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   scrubAndReportInheritedLoaderEnv,
   scrubInheritedLoaderEnv,
@@ -27,6 +28,24 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'NODE_TLS_REJECT_UNAUTHORIZED',
     );
+  });
+});
+
+describe('isLoaderEnvKey', () => {
+  // npm's config reader matches /^npm_config_/i and then replaces
+  // non-leading underscores with hyphens, so the hyphen spelling
+  // npm_config_node-options maps onto the same node-options config and is
+  // injected as NODE_OPTIONS into every `npm run` lifecycle script. Both
+  // spellings (in every case variant) must count as the same loader key.
+  it('matches npm underscore/hyphen spelling variants case-insensitively', () => {
+    expect(isLoaderEnvKey('npm_config_node_options')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_node-options')).toBe(true);
+    expect(isLoaderEnvKey('NPM_CONFIG_NODE-OPTIONS')).toBe(true);
+    expect(isLoaderEnvKey('Node_Options')).toBe(true);
+    expect(isLoaderEnvKey('ld_preload')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_registry')).toBe(false);
+    expect(isLoaderEnvKey('PATH')).toBe(false);
+    expect(isLoaderEnvKey('NODE_OPTIONS_EXTRA')).toBe(false);
   });
 });
 
@@ -94,6 +113,23 @@ describe('scrubInheritedLoaderEnv', () => {
       'NPM_CONFIG_NODE_OPTIONS',
       'Node_Options',
       'ld_preload',
+    ]);
+    expect(env['PATH']).toBe('/usr/bin');
+  });
+
+  // npm treats npm_config_node-options (hyphen) and npm_config_node_options
+  // (underscore) as the same config key, so the scrub must remove both
+  // spellings or the hyphen variant survives into session subprocesses.
+  it('removes npm underscore/hyphen spelling variants', () => {
+    const env: NodeJS.ProcessEnv = {
+      'npm_config_node-options': '--import file:///other-checkout/hook.mjs',
+      'NPM_CONFIG_NODE-OPTIONS': '--import file:///other-checkout/hook.mjs',
+      PATH: '/usr/bin',
+    };
+
+    expect(scrubInheritedLoaderEnv(env)).toEqual([
+      'npm_config_node-options',
+      'NPM_CONFIG_NODE-OPTIONS',
     ]);
     expect(env['PATH']).toBe('/usr/bin');
   });

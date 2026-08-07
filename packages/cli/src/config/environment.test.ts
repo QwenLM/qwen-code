@@ -31,6 +31,7 @@ const TRACKED_ENV = [
   'NODE_OPTIONS',
   'NODE_PATH',
   'npm_config_node_options',
+  'npm_config_node-options',
   'NPM_CONFIG_NODE_OPTIONS',
   'Node_Options',
   'NODE_COMPILE_CACHE',
@@ -112,6 +113,9 @@ describe('buildRuntimeEnvironment', () => {
           RUNTIME_SETTINGS_ONLY: 'from-settings',
           RUNTIME_SETTINGS_EXCLUDED: 'settings-excluded',
           BASH_ENV: '/tmp/bad-profile',
+          // Case variant: only the isLoaderEnvKey gate rejects it, so this
+          // line pins the settings.env gate in buildRuntimeEnvironment.
+          NPM_CONFIG_NODE_OPTIONS: '--require ./bad.js',
           QWEN_RUNTIME_DIR: '/tmp/ignored-runtime-dir',
         },
       }),
@@ -454,6 +458,7 @@ describe('loadEnvironment', () => {
         NODE_OPTIONS: '--import file:///workspace-a/harness.mjs',
         npm_config_node_options: '--import file:///workspace-a/hook.mjs',
         NPM_CONFIG_NODE_OPTIONS: '--import file:///workspace-a/upper.mjs',
+        'npm_config_node-options': '--import file:///workspace-a/hyphen.mjs',
         RUNTIME_SETTINGS_ONLY: 'from-settings',
       },
     });
@@ -469,6 +474,7 @@ describe('loadEnvironment', () => {
       loadEnvironment(settings, workspace);
       expect(process.env['NODE_OPTIONS']).toBeUndefined();
       expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['npm_config_node-options']).toBeUndefined();
       expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
       expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
 
@@ -477,6 +483,7 @@ describe('loadEnvironment', () => {
       reloadEnvironment(settings, workspace);
       expect(process.env['NODE_OPTIONS']).toBeUndefined();
       expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['npm_config_node-options']).toBeUndefined();
       expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
       expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
     } finally {
@@ -491,6 +498,7 @@ describe('loadEnvironment', () => {
     expect(warnings[0]).toContain('settings.env');
     expect(warnings[0]).toContain('NODE_OPTIONS');
     expect(warnings[0]).toContain('npm_config_node_options');
+    expect(warnings[0]).toContain('npm_config_node-options');
     expect(warnings[0]).toContain('NPM_CONFIG_NODE_OPTIONS');
   });
 
@@ -504,6 +512,7 @@ describe('loadEnvironment', () => {
       [
         'NPM_CONFIG_NODE_OPTIONS=--import file:///workspace-a/hook.mjs',
         'Node_Options=--import file:///workspace-a/harness.mjs',
+        'npm_config_node-options=--import file:///workspace-a/hyphen.mjs',
         'RUNTIME_DOTENV=allowed',
         '',
       ].join('\n'),
@@ -512,11 +521,13 @@ describe('loadEnvironment', () => {
     loadEnvironment(testSettings({}), workspace);
     expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
     expect(process.env['Node_Options']).toBeUndefined();
+    expect(process.env['npm_config_node-options']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
 
     reloadEnvironment(testSettings({}), workspace);
     expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
     expect(process.env['Node_Options']).toBeUndefined();
+    expect(process.env['npm_config_node-options']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 });

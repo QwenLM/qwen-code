@@ -12,6 +12,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
   ChannelLoopScheduler,
   ChannelLoopStore,
@@ -895,6 +896,15 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     try {
       assertInternalDaemonWorkerInvocation();
       const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
+      // Mirror the ACP-child self-scrub: the supervisor spawns this worker
+      // with the daemon's pre-scrub base env (loader vars stay so dev-mode
+      // workers can boot under the harness loader), but nothing the worker
+      // spawns may inherit them into another workspace.
+      scrubAndReportInheritedLoaderEnv(
+        process.env,
+        'qwen channel daemon-worker',
+        'channel daemon worker',
+      );
       const send = process.send!;
       channelLoopMcpHost = new ChannelLoopMcpWorkerHost((message, callback) =>
         send.call(process, message, callback ?? (() => {})),

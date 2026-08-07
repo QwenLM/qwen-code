@@ -247,12 +247,12 @@ function setUpCloudShellEnvironmentFromFilesFastPath(
 // runs before runQwenServeImpl freezes daemonRuntimeBaseEnv, so anything it
 // writes is baked into the base env distributed to every workspace's session
 // subprocesses — the exact #8653 vector the daemon-side scrub closes.
-// Returns every rejected loader key (all case variants) so the daemon can
-// persist the decision once its durable log exists.
+// Rejected keys are stashed for the daemon to persist via
+// consumeServeFastPathRejectedLoaderKeys() once its durable log exists.
 export function loadServeFastPathEnvironment(
   settings: ServeFastPathSettings,
   startDir: string = process.cwd(),
-): readonly string[] {
+): void {
   const userLevelPaths = getUserLevelEnvPathsFastPath();
   const envFilePaths = findEnvFilesFastPath(settings, startDir, userLevelPaths);
   const rejectedLoaderKeys: string[] = [];
@@ -312,11 +312,13 @@ export function loadServeFastPathEnvironment(
         process.env[key] = value;
       }
     }
-    reportRejectedLoaderKeys('settings.env', settingsRejectedKeys);
+    reportRejectedLoaderKeys(
+      `settings.env (${startDir})`,
+      settingsRejectedKeys,
+    );
   }
   publishPendingCompileCache();
   serveFastPathRejectedLoaderKeys = rejectedLoaderKeys;
-  return rejectedLoaderKeys;
 }
 
 // The fast path rejects loader keys before initDaemonLogger exists, and the

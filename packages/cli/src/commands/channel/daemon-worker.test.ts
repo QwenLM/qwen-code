@@ -1996,6 +1996,34 @@ describe('daemonWorkerCommand', () => {
     );
   });
 
+  // Regression for #8653: the supervisor spawns the worker with the
+  // daemon's pre-scrub base env (loader vars stay so dev-mode workers can
+  // boot under the harness loader). The worker must self-scrub like the ACP
+  // child so nothing it spawns inherits them into another workspace.
+  it('scrubs inherited loader env vars before starting channels', async () => {
+    mockProcessExit();
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
+    vi.stubEnv(
+      'npm_config_node-options',
+      '--import file:///other-checkout/hook.mjs',
+    );
+
+    try {
+      await expect(
+        daemonWorkerCommand.handler({ channel: [' '], _: [], $0: 'qwen' }),
+      ).rejects.toThrow('process.exit 1');
+    } finally {
+      restoreSend();
+    }
+
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['npm_config_node-options']).toBeUndefined();
+  });
+
   it('scrubs daemon connection env when required env validation fails', async () => {
     mockProcessExit();
     const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
