@@ -4610,21 +4610,28 @@ export class QwenAgent extends BaseAgent {
         let ancestorUuid = parentUuid;
         const visited = new Set<string>();
         let invocation: SlashCommandInvocation | undefined;
+        const resultCommandName = rawCommand.split(/\s+/, 1)[0];
         while (ancestorUuid && !visited.has(ancestorUuid)) {
           visited.add(ancestorUuid);
-          invocation = invocations.get(ancestorUuid);
-          if (invocation) break;
+          const candidate = invocations.get(ancestorUuid);
+          if (candidate) {
+            if (
+              candidate.rawCommand.split(/\s+/, 1)[0] === resultCommandName
+            ) {
+              invocation = candidate;
+            }
+            break;
+          }
           ancestorUuid = asString(
             recordsByUuid.get(ancestorUuid)?.parentUuid,
           );
         }
-        if (!invocation?.hidden) {
-          const userContent = invocation?.rawCommand || rawCommand;
+        if (invocation && !invocation.hidden) {
           messages.push({
             id: `qwen-${sessionId}-slash-${++idCounter}`,
             role: 'user',
-            content: userContent,
-            timestamp: invocation?.timestamp ?? timestamp,
+            content: invocation.rawCommand,
+            timestamp: invocation.timestamp,
           });
         }
         messages.push({

@@ -693,7 +693,7 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
   });
 
-  it('adds slash command invocations when their result produced output', () => {
+  it('adds only matched slash command invocations when results produce output', () => {
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(runtimeRoot, cwd);
@@ -769,6 +769,39 @@ describe('QwenAgent slash command history', () => {
           ],
         },
       },
+      {
+        uuid: 'theme-result',
+        parentUuid: 'insight-result',
+        sessionId,
+        timestamp: '2026-03-25T07:36:54.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/theme',
+          outputHistoryItems: [
+            {
+              type: 'error',
+              text: 'Theme changes are disabled when NO_COLOR is set.',
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'auth-result',
+        parentUuid: 'startup-record',
+        sessionId,
+        timestamp: '2026-03-25T07:36:55.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/auth',
+          outputHistoryItems: [
+            { type: 'info', text: 'Authenticated successfully.' },
+          ],
+        },
+      },
     ]);
 
     const agent = createAgent(cwd);
@@ -803,6 +836,16 @@ describe('QwenAgent slash command history', () => {
         'assistant',
         'This may take a couple minutes. Sit tight!',
         Date.parse(insightResult),
+      ],
+      [
+        'assistant',
+        'Theme changes are disabled when NO_COLOR is set.',
+        Date.parse('2026-03-25T07:36:54.000Z'),
+      ],
+      [
+        'assistant',
+        'Authenticated successfully.',
+        Date.parse('2026-03-25T07:36:55.000Z'),
       ],
     ]);
     expect(messages[0]?.textElements).toBeUndefined();
