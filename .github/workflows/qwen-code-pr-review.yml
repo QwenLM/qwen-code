@@ -391,6 +391,18 @@ jobs:
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           rm -rf "$QWEN_HOME" 2>/dev/null || true
           mkdir -p "$QWEN_HOME"
+          # Raise the SDK request timeout (connect + time-to-first-byte) from
+          # the 120s default: a large-PR review turn carries a million-token
+          # (mostly cached) context plus a long thinking phase, and under
+          # upstream load the first byte alone can exceed 120s — measured on
+          # PR 8507 (2026-08-07): the SDK's internal retries turned three
+          # ~120s TTFB timeouts into a 483s visible abort on an early, small
+          # turn. `model.generationConfig.timeout` is the settings path into
+          # ContentGeneratorConfig.timeout; there is no env knob for it, which
+          # is why this file exists. A higher ceiling costs nothing when the
+          # upstream is fast — it is a timeout, not a delay.
+          printf '%s\n' '{ "model": { "generationConfig": { "timeout": 600000 } } }' \
+            > "$QWEN_HOME/settings.json"
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a
@@ -686,6 +698,19 @@ jobs:
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
           TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
+          # Stream-guard headroom for CI reviews, measured against the PR 8507
+          # double-abort (2026-08-07): the 17-agent fan-out generation on a
+          # ~1.27M-token context stalled chunk delivery past the 240s idle
+          # default while the upstream was degraded, and the pipeline-level
+          # retry doubled the loss (~16 minutes) before aborting the run.
+          # Idle at 10 minutes tolerates a long thinking phase between chunks;
+          # the lifetime cap at 30 minutes stays the hard bound for drip-fed
+          # streams and MUST exceed the idle window (a single legitimate gap
+          # is charged against both). The outer GNU timeout and the review
+          # deadline still bound the job — these knobs trade hang-detection
+          # latency for survival on slow-but-alive upstreams.
+          QWEN_STREAM_IDLE_TIMEOUT_MS: '600000'
+          QWEN_STREAM_MAX_LIFETIME_MS: '1800000'
           # Evidence-image destination for `qwen review publish-assets` —
           # OPT-IN by design: the command refuses to push images anywhere the
           # user did not designate, so with the repository variable unset the

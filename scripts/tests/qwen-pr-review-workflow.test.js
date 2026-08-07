@@ -1232,3 +1232,31 @@ describe('capture-tools step wiring', () => {
     ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
   });
 });
+
+describe('upstream-timeout headroom (PR 8507 incident)', () => {
+  // Three knobs, three failure modes: the SDK request timeout covers
+  // connect+TTFB (three ~120s internal retries produced the 483s visible
+  // abort on a small turn), the idle window covers a stalled generation
+  // (the 17-agent fan-out on a ~1.27M-token context), and the lifetime cap
+  // must exceed the idle window or a single legitimate gap trips the
+  // drip-feed guard first.
+  const doc = parse(workflow);
+  const steps = doc.jobs['review-pr'].steps;
+
+  it('writes the SDK request timeout into the per-run settings.json', () => {
+    const setup = steps.find((s) =>
+      (s.run ?? '').includes('Fresh per-run agent home'),
+    );
+    expect(setup.run).toContain('"generationConfig": { "timeout": 600000 }');
+    expect(setup.run).toContain('> "$QWEN_HOME/settings.json"');
+  });
+
+  it('raises the stream guards with lifetime strictly above idle', () => {
+    const env = steps.find((s) => s.name === 'Run review').env;
+    const idle = Number(env.QWEN_STREAM_IDLE_TIMEOUT_MS);
+    const lifetime = Number(env.QWEN_STREAM_MAX_LIFETIME_MS);
+    expect(idle).toBe(600000);
+    expect(lifetime).toBe(1800000);
+    expect(lifetime).toBeGreaterThan(idle);
+  });
+});
