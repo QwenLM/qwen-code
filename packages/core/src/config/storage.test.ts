@@ -720,8 +720,12 @@ describe('Storage – getAuditFallbackDir', () => {
 
   it('creates the landing 0700 so quoted module content stays private', () => {
     const mode = actualFs.statSync(Storage.getAuditFallbackDir('/p')).mode;
-    expect(mode & 0o077).toBe(0);
-    expect(mode & 0o700).toBe(0o700);
+    // On Windows mkdirSync's mode is a no-op and libuv emulates permission
+    // bits by duplicating owner bits to group/other.
+    if (process.platform !== 'win32') {
+      expect(mode & 0o077).toBe(0);
+      expect(mode & 0o700).toBe(0o700);
+    }
   });
 
   it('separates projects and is idempotent', () => {

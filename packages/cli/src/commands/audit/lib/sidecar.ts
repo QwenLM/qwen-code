@@ -38,8 +38,8 @@ function git(root: string, args: string[]): string | null {
   }
 }
 
-function sha256(content: string): string {
-  return createHash('sha256').update(content, 'utf8').digest('hex');
+function sha256(content: Buffer): string {
+  return createHash('sha256').update(content).digest('hex');
 }
 
 /** `HEAD:<path>` needs the path relative to the toplevel, POSIX separators;
@@ -79,6 +79,27 @@ export interface Sidecar {
   uncoverableNames: string[];
 }
 
+/** Hash-and-copy one registered caller. Callers arrive absolute and
+ *  platform-native; the copy is keyed by the path with its drive-letter or
+ *  root prefix stripped, so the join below the sidecar is valid on every
+ *  platform. Returns the hash, or undefined when the caller vanished or was
+ *  unreadable — the name is still recorded by the caller. */
+function recordCaller(sidecarDir: string, caller: string): string | undefined {
+  try {
+    const hash = sha256(readFileSync(caller));
+    const dest = join(
+      sidecarDir,
+      'callers',
+      caller.replace(/^([A-Za-z]:)?[\\/]/, ''),
+    );
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(caller, dest);
+    return hash;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Capture the run-start sidecar: the path-scoped diff, the untracked
  *  content copies, and the per-file content hashes. Unconditional — never
  *  gated on a dirty/clean determination, because `git status` never shows
@@ -100,18 +121,9 @@ export function captureSidecar(
     for (const caller of callerPaths) {
       if (existing.callerNames.includes(caller)) continue;
       existing.callerNames.push(caller);
-      try {
-        existing.callerHashes[caller] = sha256(readFileSync(caller, 'utf8'));
-        const dest = join(
-          sidecarDir,
-          'callers',
-          caller.replace(/^([A-Za-z]:)?\//, ''),
-        );
-        mkdirSync(dirname(dest), { recursive: true });
-        copyFileSync(caller, dest);
-      } catch {
-        // An unreadable caller is recorded by name only.
-      }
+      // An unreadable caller is recorded by name only.
+      const hash = recordCaller(sidecarDir, caller);
+      if (hash !== undefined) existing.callerHashes[caller] = hash;
     }
     writeFileSync(existingPath, JSON.stringify(existing, null, 2), 'utf8');
     return existing;
@@ -162,8 +174,13 @@ export function captureSidecar(
         if (!enumerated.has(rel)) continue;
         const src = join(rootAbs, rel);
         const dest = join(sidecarDir, 'untracked', rel);
-        mkdirSync(dirname(dest), { recursive: true });
-        copyFileSync(src, dest);
+        try {
+          mkdirSync(dirname(dest), { recursive: true });
+          copyFileSync(src, dest);
+        } catch {
+          // A file that vanishes between the listing and its copy is
+          // skipped; the capture degrades instead of aborting.
+        }
       }
     }
   }
@@ -171,9 +188,7 @@ export function captureSidecar(
   const hashes: Record<string, string> = {};
   for (const file of [...plan.subjectFiles, ...plan.testCorpus]) {
     try {
-      hashes[file.path] = sha256(
-        readFileSync(join(rootAbs, file.path), 'utf8'),
-      );
+      hashes[file.path] = sha256(readFileSync(join(rootAbs, file.path)));
     } catch {
       // A file that vanishes between plan and capture is drift the first
       // checkpoint reports; the missing key is the signal.
@@ -182,18 +197,9 @@ export function captureSidecar(
 
   const callerHashes: Record<string, string> = {};
   for (const caller of callerPaths) {
-    try {
-      callerHashes[caller] = sha256(readFileSync(caller, 'utf8'));
-      const dest = join(
-        sidecarDir,
-        'callers',
-        caller.replace(/^([A-Za-z]:)?\//, ''),
-      );
-      mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(caller, dest);
-    } catch {
-      // An unreadable caller is recorded by name only.
-    }
+    // An unreadable caller is recorded by name only.
+    const hash = recordCaller(sidecarDir, caller);
+    if (hash !== undefined) callerHashes[caller] = hash;
   }
 
   const sidecar: Sidecar = {
@@ -247,7 +253,15 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
       if (baseline !== undefined) deletedFiles.push(file.path);
       continue;
     }
-    const current = sha256(readFileSync(abs, 'utf8'));
+    let current: string;
+    try {
+      current = sha256(readFileSync(abs));
+    } catch {
+      // Unreadable or replaced by a directory since the capture: content
+      // that can no longer be aligned against the baseline is drift.
+      driftedFiles.push(file.path);
+      continue;
+    }
     if (baseline === undefined) {
       newFiles.push(file.path);
     } else if (current !== baseline) {
@@ -264,10 +278,15 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
     }
     // A name without a baseline was unreadable at capture — content that
     // (re)appears there cannot be aligned against anything, so it drifts.
-    if (
-      baseline === undefined ||
-      sha256(readFileSync(caller, 'utf8')) !== baseline
-    ) {
+    if (baseline === undefined) {
+      driftedCallers.push(caller);
+      continue;
+    }
+    try {
+      if (sha256(readFileSync(caller)) !== baseline) {
+        driftedCallers.push(caller);
+      }
+    } catch {
       driftedCallers.push(caller);
     }
   }

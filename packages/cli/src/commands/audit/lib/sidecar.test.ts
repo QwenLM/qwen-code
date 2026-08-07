@@ -67,6 +67,25 @@ describe('captureSidecar outside any worktree', () => {
     expect(deleted.deletedFiles).toEqual(['src/a.test.ts']);
   });
 
+  it('hashes raw bytes: an edit invisible to utf8 decoding still drifts', () => {
+    // 0xE9 and 0xFC both decode to U+FFFD — a utf8-keyed hash cannot see
+    // this edit.
+    const latin1 = join(dir, 'src', 'latin1.ts');
+    writeFileSync(latin1, Buffer.from([0x61, 0xe9, 0x0a]));
+    const p = plan();
+    captureSidecar(p, sidecarDir);
+    writeFileSync(latin1, Buffer.from([0x61, 0xfc, 0x0a]));
+    expect(driftCheck(p, sidecarDir).driftedFiles).toEqual(['src/latin1.ts']);
+  });
+
+  it('drift-check classifies a directory-replaced file as drift, not a crash', () => {
+    const p = plan();
+    captureSidecar(p, sidecarDir);
+    rmSync(join(dir, 'src', 'a.ts'));
+    mkdirSync(join(dir, 'src', 'a.ts'));
+    expect(driftCheck(p, sidecarDir).driftedFiles).toEqual(['src/a.ts']);
+  });
+
   it('never hashes uncoverable files', () => {
     writeFileSync(join(dir, 'logo.png'), 'not-a-png');
     const sidecar = captureSidecar(plan(), sidecarDir);
@@ -92,7 +111,9 @@ describe('caller registration', () => {
     expect(extended.callerNames).toEqual([caller]);
     // Caller copies are keyed by their full path under callers/.
     expect(
-      existsSync(join(sidecarDir, 'callers', caller.replace(/^\//, ''))),
+      existsSync(
+        join(sidecarDir, 'callers', caller.replace(/^([A-Za-z]:)?[\\/]/, '')),
+      ),
     ).toBe(true);
 
     const drift = driftCheck(p, sidecarDir);
@@ -175,6 +196,30 @@ describe('captureSidecar inside a worktree', () => {
       true,
     );
     expect(existsSync(join(sidecarDir, 'untracked', 'elsewhere.ts'))).toBe(
+      false,
+    );
+  });
+
+  it('degrades, not aborts, when an untracked copy cannot land', () => {
+    const repo = join(dir, 'repo3');
+    mkdirSync(repo, { recursive: true });
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'tracked.ts'), 'const t = 1;\n');
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    writeFileSync(join(repo, 'untracked.ts'), 'const u = 1;\n');
+    const repoPlan = buildFilesPlan(
+      repo,
+      repo,
+      'medium',
+      collectAuditFiles(repo),
+    );
+    // A squatter where the untracked copies land makes every copy fail.
+    mkdirSync(sidecarDir, { recursive: true });
+    writeFileSync(join(sidecarDir, 'untracked'), 'squatter');
+    const sidecar = captureSidecar(repoPlan, sidecarDir);
+    expect(sidecar.hashes['untracked.ts']).toBeDefined();
+    expect(existsSync(join(sidecarDir, 'untracked', 'untracked.ts'))).toBe(
       false,
     );
   });

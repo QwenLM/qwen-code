@@ -7,9 +7,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -132,6 +134,19 @@ describe('walkAuditTree', () => {
     expect(excludedDirs).toContain('vendor/bundle');
   });
 
+  it('applies the vendor rules when the audited path itself is named vendor', () => {
+    const vendorRoot = join(dir, 'vendor');
+    mkdirSync(join(vendorRoot, 'bundle'), { recursive: true });
+    writeFileSync(join(vendorRoot, 'bundle', 'gem.rb'), 'x');
+    mkdirSync(join(vendorRoot, 'dist'), { recursive: true });
+    writeFileSync(join(vendorRoot, 'dist', 'index.js'), 'module.exports = {};');
+    const { files, excludedDirs } = walkAuditTree(vendorRoot);
+    // Vendored build output is a subject; the dependency-install dir is not.
+    expect(files).toContain('dist/index.js');
+    expect(files).not.toContain('bundle/gem.rb');
+    expect(excludedDirs).toContain('bundle');
+  });
+
   it('treats an excluded name at the path root as excluding everything', () => {
     const distRoot = join(dir, 'dist');
     mkdirSync(distRoot, { recursive: true });
@@ -140,6 +155,26 @@ describe('walkAuditTree', () => {
     expect(files).toEqual([]);
     expect(excludedDirs).toEqual(['.']);
   });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'records an unreadable directory and keeps enumerating',
+    () => {
+      mkdirSync(join(dir, 'locked'), { recursive: true });
+      writeFileSync(join(dir, 'locked', 'x.ts'), 'const x = 1;\n');
+      writeFileSync(join(dir, 'after.ts'), 'const after = 1;\n');
+      chmodSync(join(dir, 'locked'), 0o000);
+      try {
+        const { files, structuralUncoverable } = walkAuditTree(dir);
+        expect(files).toContain('after.ts');
+        expect(structuralUncoverable).toContainEqual({
+          path: 'locked',
+          reason: 'unreadable',
+        });
+      } finally {
+        chmodSync(join(dir, 'locked'), 0o755);
+      }
+    },
+  );
 
   it('records symlinks and never follows them', () => {
     symlinkSync(join(dir, 'src', 'a.ts'), join(dir, 'src', 'link.ts'));
@@ -243,6 +278,17 @@ describe('buildFilesPlan gates', () => {
         planFor(collect({ subjects: [], uncoverable: [] }), effort),
       ).toThrow(/no subject files/);
     }
+  });
+
+  it('blames test routing, not exclusions, when only tests remain', () => {
+    const pkg = join(dir, 'pkg');
+    mkdirSync(join(pkg, 'node_modules', 'dep'), { recursive: true });
+    writeFileSync(join(pkg, 'node_modules', 'dep', 'index.js'), 'x');
+    mkdirSync(join(pkg, '__tests__'), { recursive: true });
+    writeFileSync(join(pkg, '__tests__', 'foo.test.ts'), 'test();');
+    expect(() =>
+      buildFilesPlan(pkg, pkg, 'medium', collectAuditFiles(pkg)),
+    ).toThrow(/Tests route out of the subject set/);
   });
 
   it('names the exclusion when it empties the subject set', () => {
@@ -447,6 +493,19 @@ describe('tileFileGroups', () => {
 });
 
 describe('resolveAuditRoot', () => {
+  it('rejects an empty target instead of auditing the cwd', () => {
+    expect(() => resolveAuditRoot('')).toThrow(/no directory path/);
+    expect(() => resolveAuditRoot('   ')).toThrow(/no directory path/);
+  });
+
+  it('resolves a symlinked target to its real path', () => {
+    const real = join(dir, 'real-root');
+    mkdirSync(real, { recursive: true });
+    const link = join(dir, 'link-root');
+    symlinkSync(real, link);
+    expect(resolveAuditRoot(link)).toBe(realpathSync(real));
+  });
+
   it('rejects files with a /review delegation message', () => {
     expect(() => resolveAuditRoot(join(dir, 'src', 'a.ts'))).toThrow(
       /\/review <file-path>/,
@@ -508,6 +567,25 @@ describe('git-backed checks', () => {
     ).toThrow(/submodule/);
   });
 
+  it('refuses a gitlink whose path git C-quotes (non-ASCII)', () => {
+    const repo = initRepo();
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    const sha = git(['rev-parse', 'HEAD'], repo).trim();
+    git(
+      ['update-index', '--add', '--cacheinfo', `160000,${sha},mod/vendör`],
+      repo,
+    );
+    expect(() =>
+      buildFilesPlan(
+        join(repo, 'mod'),
+        join(repo, 'mod'),
+        'medium',
+        collectAuditFiles(join(repo, 'mod')),
+      ),
+    ).toThrow(/submodule/);
+  });
+
   it('guard: unprotected without ignore rules, ok with them, tracked with force-added files', () => {
     const repo = initRepo();
     const unprotected = checkLocalOnlyGuard(repo, 'x.md');
@@ -539,6 +617,17 @@ describe('git-backed checks', () => {
     expect(tracked.dirs[1].trackedFiles).toContain('.qwen/tmp/forced.json');
   });
 
+  it('catches a name-selective re-include of the dated report shape', () => {
+    const repo = initRepo();
+    writeFileSync(
+      join(repo, '.gitignore'),
+      '.qwen/*\n!.qwen/audits/\n.qwen/audits/*\n!.qwen/audits/[0-9]*.md\n',
+    );
+    const guard = checkLocalOnlyGuard(repo, 'x.md');
+    expect(guard.dirs[0].status).toBe('unprotected');
+    expect(guard.dirs[1].status).toBe('ok');
+  });
+
   it('the exclude remedy makes the probe answer ignored on re-check', () => {
     const repo = initRepo();
     expect(
@@ -554,6 +643,17 @@ describe('git-backed checks', () => {
     expect(
       readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'),
     ).toContain('/.qwen/audits/');
+  });
+
+  it('appends root-anchored rules even when a subdirectory rule exists', () => {
+    const repo = initRepo();
+    const sub = join(repo, 'pkg', 'sub');
+    mkdirSync(sub, { recursive: true });
+    applyExcludeRemedy(sub);
+    applyExcludeRemedy(repo);
+    const exclude = readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8');
+    expect(exclude).toContain('/pkg/sub/.qwen/audits/');
+    expect(exclude.split('\n')).toContain('/.qwen/audits/');
   });
 
   it('probes toplevel-relative when the cwd is a subdirectory', () => {

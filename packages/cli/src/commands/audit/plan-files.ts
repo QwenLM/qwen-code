@@ -89,14 +89,23 @@ function runPlanFiles(args: PlanFilesArgs): void {
   writeFileSync(args.out, JSON.stringify(result, null, 2), 'utf8');
   writeStdoutLine(`Wrote audit plan to ${args.out}`);
 
-  const unprotected = guard.dirs.filter(
+  const exposed = guard.dirs.filter(
     (d) => d.status !== 'ok' && d.status !== 'no-worktree',
   );
-  if (unprotected.length > 0) {
+  const remediable = exposed.filter((d) => d.status === 'unprotected');
+  const tracked = exposed.filter((d) => d.status === 'tracked');
+  if (remediable.length > 0) {
     writeStderrLine(
-      `WARNING: ${unprotected.map((d) => `${d.dir} (${d.status})`).join(', ')} ` +
-        `can land in version control. Add the exclude remedy (--apply-exclude-remedy) ` +
-        `or land artifacts outside the repo (${guard.fallbackRoot}).`,
+      `WARNING: ${remediable.map((d) => d.dir).join(', ')} can land in version control. ` +
+        `Add the exclude remedy (--apply-exclude-remedy) or land artifacts ` +
+        `outside the repo (${guard.fallbackRoot}).`,
+    );
+  }
+  if (tracked.length > 0) {
+    writeStderrLine(
+      `WARNING: ${tracked.map((d) => d.dir).join(', ')} contain tracked files — ignore rules ` +
+        `cannot untrack committed artifacts. Land artifacts outside the repo ` +
+        `(${guard.fallbackRoot}) or \`git rm --cached\` the tracked files.`,
     );
   }
   writeStderrLine(

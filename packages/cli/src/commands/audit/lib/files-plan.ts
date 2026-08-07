@@ -196,7 +196,7 @@ interface WalkResult {
   excludedDirs: string[];
   structuralUncoverable: Array<{
     path: string;
-    reason: 'symlink' | 'non-regular';
+    reason: 'symlink' | 'non-regular' | 'unreadable';
   }>;
 }
 
@@ -208,15 +208,26 @@ export function walkAuditTree(rootAbs: string): WalkResult {
   const files: string[] = [];
   const excludedDirs: string[] = [];
   const structuralUncoverable: WalkResult['structuralUncoverable'] = [];
-  const rootUnderVendor = toPosix(rootAbs)
-    .split('/')
-    .slice(0, -1)
-    .includes('vendor');
+  // Includes the root's own name: auditing `vendor/` itself is auditing
+  // vendored code, so the vendor rules apply from the first level down.
+  const rootUnderVendor = toPosix(rootAbs).split('/').includes('vendor');
   if (isExcludedDirName(basename(rootAbs), rootUnderVendor)) {
     return { files, excludedDirs: ['.'], structuralUncoverable };
   }
   const walk = (dirAbs: string, rel: string, underVendor: boolean): void => {
-    for (const entry of readdirSync(dirAbs)) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dirAbs);
+    } catch {
+      // One unreadable directory must not abort the whole enumeration:
+      // record it and continue with the rest of the tree.
+      structuralUncoverable.push({
+        path: rel === '' ? '.' : rel,
+        reason: 'unreadable',
+      });
+      return;
+    }
+    for (const entry of entries) {
       const entryAbs = join(dirAbs, entry);
       const childRel = rel === '' ? entry : `${rel}/${entry}`;
       const stat = lstatSync(entryAbs);
@@ -350,6 +361,7 @@ function git(root: string, args: string[]): string | null {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: GIT_TIMEOUT_MS,
+      maxBuffer: 64 * 1024 * 1024,
     });
   } catch {
     return null;
@@ -386,10 +398,10 @@ export function submoduleRefusal(rootAbs: string): string | null {
     return 'the audited path resolves inside a submodule — no drift coverage inside submodules in v1';
   }
   const rel = toPosix(relative(toplevel, realRoot));
-  const listing = git(toplevel, ['ls-files', '-s']);
+  const listing = git(toplevel, ['ls-files', '-s', '-z']);
   if (listing === null) return null;
   const gitlinks = listing
-    .split('\n')
+    .split('\0')
     .filter((line) => line.startsWith('160000 '))
     .map((line) => line.split('\t')[1])
     .filter((p) => p !== undefined && p.length > 0);
@@ -430,13 +442,12 @@ function guardDir(
   projectRoot: string,
   gitRoot: string | null,
   dir: string,
-  representativeFile: string,
+  representativeFiles: string[],
 ): GuardDirReport {
-  const representative = join(dir, representativeFile);
   if (!gitRoot) {
     return {
       dir,
-      representative,
+      representative: join(dir, representativeFiles[0]),
       ignored: false,
       trackedFiles: [],
       status: 'no-worktree',
@@ -449,10 +460,19 @@ function guardDir(
     relative(realpathSync(gitRoot), realpathSync(projectRoot)),
   );
   const prefixDir = prefix === '' ? '' : `${prefix}/`;
-  const ignored = isGitIgnored(
-    gitRoot,
-    `${prefixDir}${toPosix(representative)}`,
-  );
+  // Probe every artifact name shape actually written and take the worst
+  // verdict: re-includes can be name-selective, so one exposed shape is an
+  // exposed directory.
+  let ignored = true;
+  let representative = join(dir, representativeFiles[0]);
+  for (const file of representativeFiles) {
+    const probe = `${prefixDir}${toPosix(join(dir, file))}`;
+    if (!isGitIgnored(gitRoot, probe)) {
+      ignored = false;
+      representative = join(dir, file);
+      break;
+    }
+  }
   const trackedOut = git(gitRoot, [
     'ls-files',
     '--',
@@ -469,8 +489,11 @@ function guardDir(
 
 /** Probe both module-derived directories (.qwen/audits, .qwen/tmp) so the
  *  report, plan, and prompt records can never land in version control.
- *  Fresh answers by construction: the shared helper carries no memo, so a
- *  remedy re-check observes the flip. */
+ *  Probes use the name shapes actually written — the dated report form and
+ *  one representative per tmp artifact class — because check-ignore answers
+ *  per path name and re-includes can be name-selective. Fresh answers by
+ *  construction: the shared helper carries no memo, so a remedy re-check
+ *  observes the flip. */
 export function checkLocalOnlyGuard(
   projectRoot: string,
   reportFileName: string,
@@ -478,13 +501,15 @@ export function checkLocalOnlyGuard(
   const geometry = gitGeometry(projectRoot);
   return {
     dirs: [
-      guardDir(projectRoot, geometry.root ?? null, AUDITS_DIR, reportFileName),
-      guardDir(
-        projectRoot,
-        geometry.root ?? null,
-        AUDIT_TMP_DIR,
-        'qwen-audit-plan.json',
-      ),
+      guardDir(projectRoot, geometry.root ?? null, AUDITS_DIR, [
+        `2026-01-01-000000-${reportFileName}`,
+      ]),
+      guardDir(projectRoot, geometry.root ?? null, AUDIT_TMP_DIR, [
+        'audit-args-0.json',
+        'audit-plan-0.json',
+        'audit-callers-0.json',
+        'audit-findings-0.md',
+      ]),
     ],
     fallbackRoot: Storage.getAuditFallbackDir(projectRoot),
   };
@@ -519,7 +544,13 @@ export function applyExcludeRemedy(projectRoot: string): string {
     : '';
   const anchor = prefix === '' ? '' : `/${prefix}`;
   const rules = [`${anchor}/.qwen/audits/`, `${anchor}/.qwen/tmp/`];
-  const missing = rules.filter((r) => !existing.includes(r));
+  const existingRules = new Set(
+    existing
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#')),
+  );
+  const missing = rules.filter((r) => !existingRules.has(r));
   if (missing.length > 0) {
     mkdirSync(dirname(excludeFile), { recursive: true });
     writeFileSync(
@@ -726,7 +757,11 @@ export function buildFilesPlan(
     subjects.length === 0 &&
     uncoverable.filter((u) => u.kind !== 'test').length === 0
   ) {
-    if (excludedDirs.length > 0) {
+    if (
+      excludedDirs.length > 0 &&
+      testCorpus.length === 0 &&
+      uncoverable.length === 0
+    ) {
       refuse(
         'empty-subjects',
         `audit: only excluded directories under ${targetPath} (${excludedDirs.join(', ')}) — no subject files. Excluded by name: ${[...ALWAYS_EXCLUDED_DIRS].join(', ')}, plus dist/build outside vendor/.`,
@@ -803,6 +838,9 @@ export function buildFilesPlan(
 }
 
 export function resolveAuditRoot(targetPath: string): string {
+  if (targetPath.trim() === '') {
+    throw new Error('audit: no directory path given.');
+  }
   const abs = resolve(targetPath);
   const stat = statSync(abs, { throwIfNoEntry: false });
   if (!stat) {
@@ -814,5 +852,7 @@ export function resolveAuditRoot(targetPath: string): string {
         `already covered by /review <file-path> — use that instead.`,
     );
   }
-  return abs;
+  // Realpath the root: the path-scoped git calls in sidecar.ts must see the
+  // resolved path, or a symlinked target silently drops the captures.
+  return realpathSync(abs);
 }

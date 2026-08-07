@@ -47,7 +47,7 @@ If the args file is absent, ask the user for the directory — do not audit a gu
   --out .qwen/tmp/audit-plan-<ts>.json
 ```
 
-The fixed args-report path, not the user's path, crosses the shell boundary. **Exit 3 means a plan-time refusal** — read the refusal JSON from the same `--out` path, relay its message verbatim, and stop. The refusal reasons: `empty-subjects` (nothing to audit, or only name-excluded directories), `all-uncoverable`, `subject-gate` (>9,000 subject lines), `test-gate` (>18,000 test lines, medium/high), `low-gate` (>2,000 subject lines at low — suggest medium), `token-cap` (priced estimate over 60M), `submodule` (no drift coverage inside submodules in v1). The remedy for the size refusals is auditing coherent sub-paths as separate bounded runs — never a tier change (the priced cost is a function of line counts alone).
+The fixed args-report path, not the user's path, crosses the shell boundary. **Exit 3 means a plan-time refusal** — read the refusal JSON from the same `--out` path, relay its message verbatim, and stop. The refusal reasons: `empty-subjects` (nothing to audit, or only name-excluded directories), `all-uncoverable`, `subject-gate` (>9,000 subject lines), `test-gate` (>18,000 test lines, medium/high), `low-gate` (>2,000 subject lines at low — suggest medium), `token-cap` (priced estimate over 60M), `submodule` (no drift coverage inside submodules in v1). The remedy for `subject-gate`, `test-gate`, and `token-cap` refusals is auditing coherent sub-paths as separate bounded runs — never a tier change (the priced cost is a function of line counts alone); `low-gate`'s remedy is the tier change its message names.
 
 Read the plan JSON. It fixes **what will be audited**: the walked subjects, the test corpus, the uncoverable set, the excluded directories, the event-module detection outcome, the token estimate, and the **roster** — computed by code from the effort tier. Do not shrink the roster: an omitted agent is invisible precisely because it is an omission. You may only launch **more** than the roster when a finding justifies a specialist.
 
@@ -58,7 +58,7 @@ Read the plan JSON. It fixes **what will be audited**: the walked subjects, the 
   --out .qwen/tmp/audit-plan-<ts>.json --apply-exclude-remedy
 ```
 
-Re-read the plan: the remedy is verified by re-probe. A directory still exposed after the exclude entry (a full `.qwen/*` + `!**` re-include matches the report file itself) or with status `tracked` (force-added history) refuses the in-repo landing: artifacts go to the `guard.fallbackRoot` printed in the plan (outside the repo, 0700), and the terminal summary echoes that path. Outside any git worktree the guard passes vacuously.
+Re-read the plan: the remedy is verified by re-probe. A directory still exposed after the exclude entry (a full `.qwen/*` + `!**` re-include matches the report file itself) or with status `tracked` (force-added history) refuses the in-repo landing: the sidecar and the report go to the `guard.fallbackRoot` printed in the plan (outside the repo, 0700), and the args/plan/findings/callers files in `.qwen/tmp/` move there with them — every subsequent command references the relocated paths, so nothing that quotes the module stays in a directory the guard proved committable. The terminal summary echoes that path. Outside any git worktree the guard passes vacuously.
 
 **Residue.** A `residue` entry is a file matching the reserved scratch prefix — possible residue from a killed prior run, which the plan cannot prove. Keep-as-subject is the default. Offer deletion only when the mtime is consistent with a recorded prior audit run on this path, and only behind an explicit user confirmation at Step 2. Record the outcome either way in the report header's walks record.
 
@@ -102,17 +102,20 @@ Launch with the printed prompt **verbatim**, plus the output path: `Write your f
 Read `roster` from the plan. Launch one agent per role, in waves sized to keep the machine responsive; within each wave, issue all Agent tool calls in one response so they run concurrently. Set `subagent_type: "general-purpose"` and `run_in_background: false`. For each role:
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" audit agent-prompt --plan .qwen/tmp/audit-plan-<ts>.json --role <role>
+"${QWEN_CODE_CLI:-qwen}" audit agent-prompt --plan .qwen/tmp/audit-plan-<ts>.json --role <role> \
+  --probes <opted-in|declined>
 ```
 
-Launch with the printed prompt **verbatim**, plus the output path: `Write your findings to .qwen/tmp/audit-findings-<role>-<ts>.md`.
+Pass the Step-2 probe opt-in as `--probes`: `opted-in` carries the probe discipline, `declined` strips every execution instruction from the brief. Launch with the printed prompt **verbatim**, plus the output path: `Write your findings to .qwen/tmp/audit-findings-<role>-<ts>.md`.
 
 **1c's caller registration.** 1c deep-reads callers outside the audited path and registers each. When 1c returns, collect its registered caller absolute paths into `.qwen/tmp/audit-callers-<ts>.json` and extend the sidecar:
 
 ```bash
 "${QWEN_CODE_CLI:-qwen}" audit snapshot --plan .qwen/tmp/audit-plan-<ts>.json \
-  --out .qwen/audits/audit-<ts>.sidecar --callers .qwen/tmp/audit-callers-<ts>.json
+  --out <the Step 3 sidecar path> --callers .qwen/tmp/audit-callers-<ts>.json
 ```
+
+(The Step 3 sidecar path is `.qwen/audits/audit-<ts>.sidecar` — or `<fallbackRoot>/audit-<ts>.sidecar` under a fallback landing.)
 
 **The whiff check.** Every fan-out agent — and the low reader, and every reverse-audit round auditor — owes a substantive return: the evidence of what it examined (files opened, greps run), not only its findings. A bare "no issues found" with no evidence is a whiff: relaunch the agent once; a second whiff records that dimension **not audited** in the walks record. Never ship "walks completed: security, 0 findings" for a whiffed agent — a reader takes it as "safe".
 
@@ -133,9 +136,11 @@ Cluster all returned findings by **root cause**, not by location — the same de
 
 ```bash
 "${QWEN_CODE_CLI:-qwen}" audit drift-check --plan .qwen/tmp/audit-plan-<ts>.json \
-  --sidecar .qwen/audits/audit-<ts>.sidecar
+  --sidecar <the Step 3 sidecar path>
 "${QWEN_CODE_CLI:-qwen}" audit guard-check --report-slug <plan artifacts.reportSlug>
 ```
+
+(The Step 3 sidecar path is `.qwen/audits/audit-<ts>.sidecar` — or `<fallbackRoot>/audit-<ts>.sidecar` under a fallback landing.)
 
 - The predicate is per file and keys on **content**, not git state: a file whose content is unchanged is not drifted, whatever HEAD did (a mid-run commit of the run-start dirty state fires the git-state arms and stops nothing). Drift in a file already walked **and carrying anchored findings** — walked subjects, test corpus, and registered callers alike — **stops the run**: write the partial report with the drift, the phase, and a verification-not-completed mark in the header. Drift in any other file: mark it drifted/uncoverable in the walks record and continue.
 - `guard-check` exits 5 when a module-derived directory became committable mid-run: relocate the intermediates and the sidecar to the plan's `guard.fallbackRoot` immediately, and land the report beside them.
@@ -211,7 +216,7 @@ estimate: <floor>–<top> tokens (priced core) · actual: <n> (priced core <n>, 
 <finding, rejecting reason>
 ```
 
-Delete the intermediates (findings files, the draft) when the run ends; the report and its sidecar are the only durable artifacts. Then the terminal summary — short: counts by severity and theme, the top clusters, the report path (and the fallback path when relocated), and suggested follow-ups (fix a cluster, file issues, re-audit after) **listed, not performed**. There is no verdict.
+Delete the intermediates (the findings files, the draft, and the `.qwen/tmp/` args/plan/callers files) when the run ends; the report and its sidecar are the only durable artifacts. Then the terminal summary — short: counts by severity and theme, the top clusters, the report path (and the fallback path when relocated), and suggested follow-ups (fix a cluster, file issues, re-audit after) **listed, not performed**. There is no verdict.
 
 ## Language
 

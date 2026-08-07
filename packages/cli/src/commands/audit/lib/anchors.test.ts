@@ -69,10 +69,61 @@ const y = x;
     expect(findings[0].anchor).toBe('const x = 1;\nconst y = x;');
   });
 
-  it('skips blocks without a resolvable location or anchor', () => {
-    expect(
-      parseReportFindings('### [Critical] no fields\n- Issue: x\n'),
-    ).toEqual([]);
+  it('fails closed on a block whose location or anchor field is missing', () => {
+    const findings = parseReportFindings(
+      '### [Critical] no fields\n- Issue: x\n',
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      title: 'no fields',
+      location: '',
+      anchor: '',
+    });
+    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
+  });
+
+  it('parses deviated headers: indentation, hash count, severity case', () => {
+    const deviated = [
+      '  #### [critical] indented and lowercase',
+      '  - Location: unique.ts:1',
+      '  - Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(deviated);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      title: 'indented and lowercase',
+      severity: 'Critical',
+      location: 'unique.ts',
+    });
+  });
+
+  it('fails closed on a header-shaped line that does not parse', () => {
+    const findings = parseReportFindings('##### [Bug] stray severity\n');
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      title: '##### [Bug] stray severity',
+      severity: '',
+      location: '',
+      anchor: '',
+    });
+    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
+  });
+
+  it('keeps collecting an anchor across snippet list items', () => {
+    const yaml = [
+      '### [Critical] yaml anchor',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1;',
+      '- const y = x;',
+      '- Issue: a',
+    ].join('\n');
+    // "- const y = x;" is snippet content, not a finding field: collection
+    // ends only on a recognized field name.
+    expect(parseReportFindings(yaml)[0].anchor).toBe(
+      'const x = 1;\n- const y = x;',
+    );
   });
 });
 
@@ -124,6 +175,23 @@ describe('resolveAnchors', () => {
       plan,
     );
     expect(results[0].verdict).toBe('out-of-scope');
+  });
+
+  it('resolves a multi-line anchor against a CRLF file', () => {
+    writeFileSync(join(dir, 'crlf.ts'), 'line one\r\nline two\r\n');
+    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [
+        {
+          title: 'crlf',
+          severity: 'Critical',
+          location: 'crlf.ts',
+          anchor: 'line one\nline two',
+        },
+      ],
+      plan,
+    );
+    expect(results[0].verdict).toBe('resolved');
   });
 
   it('resolves against registered deep-read callers outside the path', () => {
