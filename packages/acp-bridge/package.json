@@ -63,6 +63,10 @@
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
     },
+    "./sessionRestoreTimeout": {
+      "types": "./dist/session-restore-timeout.d.ts",
+      "import": "./dist/session-restore-timeout.js"
+    },
     "./replayWindowLimits": {
       "types": "./dist/replayWindowLimits.d.ts",
       "import": "./dist/replayWindowLimits.js"

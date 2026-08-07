@@ -112,7 +112,7 @@ Attaches to existing sessions are NOT counted toward the cap, so an idle daemon'
 }
 ```
 
-Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa). Wait at least `Retry-After` seconds and retry — the underlying restore completes within `initTimeoutMs` (default 10s). Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring.
+Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa). Wait at least `Retry-After` seconds and retry. The public restore request is governed by `limits.sessionRestoreTimeoutMs` (default 60s); after a `504`, the session id remains fenced until the late ACP request and cleanup settle. Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring while the restore is active.
 
 `SessionWorkspaceConflictError` — emitted by `POST /session/:id/load` and `POST /session/:id/resume` when the requested `cwd` targets one registered workspace but the same session id is already live or being restored by another runtime — returns `409` with:
 
@@ -210,6 +210,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `workspace_runtime_removal` advertises synchronous hot removal through `DELETE /workspaces/:workspace`. Capability workspace entries add optional `removable`; only rows with `removable: true` may be removed. Removal also forgets every persistent registration alias for the runtime, but never deletes files, settings, transcripts, or archives.
 
 `session_load` and `session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. `unstable_session_resume` is still advertised as a deprecated alias for compatibility with SDKs that shipped while the underlying ACP method was named `connection.unstable_resumeSession`; new clients should gate on `session_resume`.
+
+`limits.sessionRestoreTimeoutMs`, when present, is the daemon's wall-clock budget for the underlying ACP `loadSession` / `unstable_resumeSession` request. It is an additive v1 field. The TypeScript SDK gives the daemon 10 seconds of client headroom, and the WebUI watchdog gives it 15 seconds; clients talking to an older daemon should use 70 seconds and 75 seconds respectively.
 
 `session_transcript` advertises `GET /session/:id/transcript`, a read-only paged replay view over the persisted active-session JSONL. It is separate from `/load`: it does not attach a client, seed the live EventBus, create a live session, or change the live replay window. Clients should use it when they need the complete on-disk transcript for a long session, and continue using `/load` only for bounded live replay during cold UI restore.
 
@@ -927,7 +929,8 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
   "limits": {
     "maxPendingPromptsPerSession": 5,
     "maxSessionsPerWorkspace": 32,
-    "maxTotalSessions": 64
+    "maxTotalSessions": 64,
+    "sessionRestoreTimeoutMs": 60000
   },
   "modelServices": [],
   "workspaceCwd": "/canonical/path/to/primary-workspace",
@@ -1148,6 +1151,7 @@ type DaemonErrorKind =
   | 'blocked_egress'
   | 'auth_env_error'
   | 'init_timeout'
+  | 'restore_timeout'
   | 'protocol_error'
   | 'missing_file'
   | 'parse_error';
@@ -1163,9 +1167,10 @@ interface DaemonStatusCell {
 
 `errorKind` is a closed enum shared by `/workspace/preflight`,
 `/workspace/env`, and (eventually) MCP guardrails so SDK clients can render
-remediation per category instead of parsing free-form messages. PR 13
-(#4175) introduced the seven literals listed above; PR 14 will populate
-`blocked_egress` once the egress probe lands.
+remediation per category instead of parsing free-form messages. The original
+seven status literals came from #4175; `restore_timeout` was added separately
+for session restore requests. `blocked_egress` remains reserved until the
+egress probe lands.
 
 Status payloads never expose MCP env values, headers, OAuth/service-account
 details, provider API keys, provider `baseUrl` / `envKey`, skill body, skill
@@ -1563,6 +1568,9 @@ interface DaemonPreflightCell extends DaemonStatusCell {
   `BridgeTimeoutError` typed class. Note: a transient `mcp_discovery`
   `warning` cell with `connecting > 0` does NOT carry this kind — that's
   a normal handshake-in-progress state, distinct from a real timeout.
+- `restore_timeout` — a session load or resume exceeded the dedicated restore
+  budget. The REST response is `504` and is retryable; it is distinct from
+  child initialization and from the bounded replay-window limits.
 - `protocol_error` — ACP `extMethod` rejected because the channel closed
   mid-request, or because tool registry was unexpectedly absent.
 - `blocked_egress` — reserved for PR 14 (#4175). PR 13 leaves the
@@ -2009,12 +2017,16 @@ Response:
 
 **History replay over SSE.** While `loadSession` is in flight on the agent side, the agent may emit `session_update` notifications for persisted turns, or return bulk replay updates in the response metadata. The daemon seeds those events into the session's bounded replay snapshot window before the route response returns. For live sessions, `POST /session/:id/load` only promises that bounded window (`compactedReplay`, `liveJournal`, `lastEventId`), not the full transcript. The window is byte-capped by `--compacted-replay-max-bytes` (default 4 MiB, maximum 256 MiB); if older replay entries were dropped, `compactedReplay[0]` is an id-less `history_truncated` marker. The in-flight `liveJournal` is separately capped by `--max-journal-events` (default 10 000) and `--max-journal-bytes` (default 8 MiB); when exceeded, the oldest journal entries are dropped and a `history_truncated` marker with `scope: 'live_journal'` is prepended. Clients should render that marker as status and continue applying retained events. Full persisted transcript access is exposed separately through `GET /session/:id/transcript`.
 
+The replay-window byte caps apply after the child has reconstructed the persisted transcript; they do not cap the on-disk JSONL read. A restore that exceeds the daemon budget returns `504` with `Retry-After: 5` and `{code: "session_restore_timeout", errorKind: "restore_timeout", retryable: true, sessionId, action, timeoutMs}`. The daemon fences the still-running ACP request and cleans up any late session instead of registering it. A retry for the same id returns `409 restore_in_progress` until that cleanup settles. If late cleanup is uncertain, new sessions on that workspace return `503 acp_channel_unavailable` with `reason: "restore_cleanup_failed"`; already-live sessions remain usable while the channel drains.
+
 **Errors:**
 
 - `404` — persisted session id doesn't exist (`SessionNotFoundError`).
 - `400` — `workspace_mismatch` (same shape as `POST /session`).
 - `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
+- `504` — `session_restore_timeout`; retryable with `Retry-After: 5`. The same session id remains fenced until late cleanup settles.
+- `503` — `acp_channel_unavailable` with `reason: restore_cleanup_failed` when an abandoned restore could not be cleaned up conclusively. Existing sessions remain available; new session work may be retried after the workspace channel drains.
 - `409` — `restore_in_progress` (a `session/resume` for the same id is already in flight). `Retry-After: 5`. Same-action races (two concurrent `session/load` for the same id) coalesce — exactly one returns `attached: false`, the rest return `attached: true` with the same `state`.
 - `409` — `session_workspace_conflict` when the same session id is already live or being restored by another workspace runtime.
 - `409` — `session_archived` when the id exists only under `chats/archive/`; call `POST /sessions/unarchive` before `load` or `resume`.

@@ -836,6 +836,9 @@ export class BridgeClient implements Client {
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
+    if (this.abandonedRestoreIds.has(params.sessionId)) {
+      return;
+    }
     if (
       !this.ownsSession(params.sessionId) &&
       !this.inFlightRestoreIds.has(params.sessionId)
@@ -1086,6 +1089,12 @@ export class BridgeClient implements Client {
    * call and exits on settle (success or failure).
    */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Restore ids whose caller timed out while the non-cancellable ACP request
+   * continues.
+   */
+  private readonly abandonedRestoreIds = new Set<string>();
 
   /**
    * Handle child->bridge ACP `extMethod` requests (calls that expect a
@@ -1726,6 +1735,13 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    const notificationSessionId = params['sessionId'];
+    if (
+      typeof notificationSessionId === 'string' &&
+      this.abandonedRestoreIds.has(notificationSessionId)
+    ) {
+      return;
+    }
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
       const reason = params['reason'];
@@ -2088,6 +2104,9 @@ export class BridgeClient implements Client {
     data: Record<string, unknown>,
     turnScoped = false,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
@@ -2303,6 +2322,9 @@ export class BridgeClient implements Client {
     sessionId: string,
     frame: Omit<BridgeEvent, 'id' | 'v'>,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const now = Date.now();
     // Drop frames for ids the bridge has already marked closed/killed.
     // Sweep + check before any other work so a malicious / buggy child
@@ -2398,6 +2420,10 @@ export class BridgeClient implements Client {
    * failed restore doesn't leave a dangling allow-list entry.
    */
   markRestoreInFlight(sessionId: string): void {
+    // A new explicit restore supersedes an older abandoned attempt for the
+    // same persisted id. Until this point, keep the abandoned fence for the
+    // lifetime of the channel rather than falling back to the short tombstone.
+    this.abandonedRestoreIds.delete(sessionId);
     this.inFlightRestoreIds.add(sessionId);
   }
 
@@ -2409,6 +2435,12 @@ export class BridgeClient implements Client {
    */
   clearRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
+  }
+
+  markRestoreAbandoned(sessionId: string): void {
+    this.inFlightRestoreIds.delete(sessionId);
+    this.abandonedRestoreIds.add(sessionId);
+    this.earlyEvents.delete(sessionId);
   }
 
   /**

@@ -195,6 +195,11 @@ export interface BridgeOptions {
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
+   * How long to wait for `session/load` and `session/resume`. Falls back to an
+   * explicitly configured `initializeTimeoutMs`, then 60 seconds.
+   */
+  sessionRestoreTimeoutMs?: number;
+  /**
    * Cap on concurrent live sessions. `spawnOrAttach` calls that would
    * cross this throw `SessionLimitExceededError`; attaches to an
    * existing session (same workspace under `single` scope) are not

@@ -6,6 +6,7 @@ import {
 import {
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
+  resolveSessionRestoreTimeouts,
 } from './actions';
 import type {
   ActivePrompt,
@@ -121,6 +122,34 @@ describe('getConnectionAfterSessionClear', () => {
       catchingUp: undefined,
       error: undefined,
     });
+  });
+});
+
+describe('resolveSessionRestoreTimeouts', () => {
+  it('uses 70s request and 75s watchdog defaults for old daemons', () => {
+    expect(resolveSessionRestoreTimeouts(undefined)).toEqual({
+      requestTimeoutMs: 70_000,
+      watchdogTimeoutMs: 75_000,
+    });
+  });
+
+  it('derives both client budgets from the advertised server timeout', () => {
+    expect(
+      resolveSessionRestoreTimeouts({
+        limits: { sessionRestoreTimeoutMs: 90_000 },
+      } as never),
+    ).toEqual({
+      requestTimeoutMs: 100_000,
+      watchdogTimeoutMs: 105_000,
+    });
+  });
+
+  it('disables derived timers that exceed the JavaScript timer ceiling', () => {
+    expect(
+      resolveSessionRestoreTimeouts({
+        limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
+      } as never),
+    ).toEqual({ requestTimeoutMs: 0, watchdogTimeoutMs: undefined });
   });
 });
 
@@ -303,7 +332,10 @@ describe('createDaemonSessionActions', () => {
       loadingTranscript: true,
       catchingUp: undefined,
     });
-    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      requestTimeoutMs: 70_000,
+    });
   });
 
   it('detaches the old same-session attachment after its replacement loads', async () => {
@@ -459,7 +491,7 @@ describe('createDaemonSessionActions', () => {
         loadingTranscript: true,
       });
 
-      vi.advanceTimersByTime(30_000);
+      vi.advanceTimersByTime(75_000);
 
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
@@ -503,6 +535,7 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-a',
       mode: 'attach',
     });
+    expect(pendingSessionLoadRef.current?.requestTimeoutMs).toBeUndefined();
     expect(setAttachSessionNonce).toHaveBeenCalledOnce();
     const nonceUpdater = setAttachSessionNonce.mock.calls[0]?.[0];
     expect(typeof nonceUpdater).toBe('function');

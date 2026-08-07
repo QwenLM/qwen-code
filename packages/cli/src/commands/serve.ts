@@ -139,6 +139,7 @@ interface ServeArgs {
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
   'initialize-timeout-ms'?: number;
+  'session-restore-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
   'permission-response-timeout-ms'?: number;
@@ -425,6 +426,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'ACP child request timeout, including the initialize handshake (ms). ' +
           'Default: 10000 (10 s).',
+      })
+      .option('session-restore-timeout-ms', {
+        type: 'number',
+        description:
+          'ACP session load/resume timeout (ms). Defaults to 60000, or the ' +
+          'explicit --initialize-timeout-ms value for compatibility.',
       })
       .option('session-reap-interval-ms', {
         type: 'number',
@@ -717,6 +724,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['initialize-timeout-ms'] !== undefined
           ? { initializeTimeoutMs: argv['initialize-timeout-ms'] }
+          : {}),
+        ...(argv['session-restore-timeout-ms'] !== undefined
+          ? {
+              sessionRestoreTimeoutMs: argv['session-restore-timeout-ms'],
+            }
           : {}),
         ...(argv['session-reap-interval-ms'] !== undefined
           ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }

@@ -570,6 +570,17 @@ export class WorkspaceDrainingError extends Error {
   }
 }
 
+export class BridgeChannelQuarantinedError extends Error {
+  readonly reason = 'restore_cleanup_failed';
+
+  constructor() {
+    super(
+      'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
+    );
+    this.name = 'BridgeChannelQuarantinedError';
+  }
+}
+
 export class InvalidRewindTargetError extends Error {
   readonly sessionId: string;
   constructor(sessionId: string, message?: string) {

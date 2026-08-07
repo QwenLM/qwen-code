@@ -27,6 +27,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   InvalidClientIdError,
+  BridgeChannelQuarantinedError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
@@ -51,6 +52,7 @@ import {
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  SessionRestoreTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
@@ -107,6 +109,11 @@ function deferred<T>(): {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+async function advanceRestoreDeadline(timeoutMs: number): Promise<void> {
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(timeoutMs);
 }
 
 describe('createAcpSessionBridge', () => {
@@ -2577,6 +2584,7 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       {
+        _meta: {},
         sessionId: 'persisted-1',
         cwd: WS_A,
         mcpServers: [],
@@ -4254,7 +4262,7 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
-      { sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
+      { _meta: {}, sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
     ]);
 
     await bridge.shutdown();
@@ -4819,6 +4827,594 @@ describe('createAcpSessionBridge', () => {
     expect(winner).toBe('restore');
     // Both must have settled cleanly by the end.
     await Promise.all([restoreFirst, shutdownFirst]);
+  });
+
+  it('times out an empty restore channel without stopping the bridge', async () => {
+    vi.useFakeTimers();
+    const first = makeChannel({
+      loadSessionImpl: () => new Promise<LoadSessionResponse>(() => {}),
+    });
+    const second = makeChannel();
+    const handles = [first, second];
+    const bridge = makeBridge({
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handles.shift()!.channel,
+    });
+
+    try {
+      const restore = bridge.loadSession({
+        sessionId: 'restore-timeout-empty',
+        workspaceCwd: WS_A,
+      });
+      const outcome = restore.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toMatchObject({
+        name: 'SessionRestoreTimeoutError',
+        sessionId: 'restore-timeout-empty',
+        action: 'load',
+        timeoutMs: 20,
+      } satisfies Partial<SessionRestoreTimeoutError>);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.killed).toBe(true);
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: SESS_A });
+      expect(second.agent.newSessionCalls).toHaveLength(1);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['load', 'resume'] as const)(
+    'traces and injects context into session/%s',
+    async (action) => {
+      const handle = makeChannel();
+      const spans: Array<{
+        operation: string;
+        attributes: Record<string, string | number | boolean>;
+      }> = [];
+      const timeline: string[] = [];
+      const injectPromptContext = vi.fn(<T extends object>(request: T): T => {
+        const meta =
+          (request as { _meta?: Record<string, unknown> })._meta ?? {};
+        return {
+          ...request,
+          _meta: { ...meta, 'qwen.telemetry.traceparent': 'restore-parent' },
+        };
+      });
+      const telemetry: BridgeTelemetry = {
+        captureContext: () => undefined,
+        runWithContext: async (_captured, fn) => await fn(),
+        withSpan: async (operation, attributes, fn) => {
+          spans.push({ operation, attributes });
+          return await fn();
+        },
+        event: (name, attributes) => {
+          if (name === 'session.restore.public_result') {
+            timeline.push(
+              `public:${String(attributes['qwen-code.daemon.session_restore.result'])}`,
+            );
+          }
+        },
+        injectPromptContext,
+      };
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        telemetry,
+        sessionLifecycle: (event) => {
+          if (event.type === 'registered') timeline.push('registered');
+        },
+      });
+
+      try {
+        const request = {
+          sessionId: `restore-trace-${action}`,
+          workspaceCwd: WS_A,
+        };
+        if (action === 'load') {
+          await bridge.loadSession(request);
+          expect(handle.agent.loadSessionCalls[0]).toMatchObject({
+            _meta: { 'qwen.telemetry.traceparent': 'restore-parent' },
+          });
+        } else {
+          await bridge.resumeSession(request);
+          expect(handle.agent.resumeSessionCalls[0]).toMatchObject({
+            _meta: { 'qwen.telemetry.traceparent': 'restore-parent' },
+          });
+        }
+        expect(injectPromptContext).toHaveBeenCalledOnce();
+        expect(spans).toContainEqual({
+          operation: 'session.restore',
+          attributes: expect.objectContaining({
+            'qwen-code.daemon.bridge.operation': `session.${action}`,
+            'qwen-code.daemon.session_restore.action': action,
+            'qwen-code.daemon.session_restore.timeout_ms': 60_000,
+            'session.id': `restore-trace-${action}`,
+          }),
+        });
+        expect(timeline).toEqual(['registered', 'public:success']);
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
+  it('lets transport close win when it settles before the restore deadline', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => new Promise<LoadSessionResponse>(() => {}),
+    });
+    const bridge = makeBridge({
+      sessionRestoreTimeoutMs: 1_000,
+      channelFactory: async () => handle.channel,
+    });
+    const restore = bridge.loadSession({
+      sessionId: 'restore-transport-closes-first',
+      workspaceCwd: WS_A,
+    });
+    await vi.waitFor(() =>
+      expect(handle.agent.loadSessionCalls).toHaveLength(1),
+    );
+
+    handle.crash({ exitCode: 1, signalCode: null });
+
+    await expect(restore).rejects.toBeInstanceOf(BridgeChannelClosedError);
+    await bridge.shutdown();
+  });
+
+  it('does not reap a timed-out restore channel during workspace control', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const workspaceControl = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability
+          ? workspaceControl.promise
+          : {},
+    });
+    const bridge = makeBridge({
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const control = bridge.isWorkspaceMemoryRememberAvailable();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+        params: { cwd: WS_A },
+      });
+
+      const restore = bridge.loadSession({
+        sessionId: 'restore-timeout-workspace-control',
+        workspaceCwd: WS_A,
+      });
+      const outcome = restore.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(handle.killed).toBe(false);
+
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'restore-timeout-workspace-control',
+        ),
+      ).toHaveLength(1);
+      workspaceControl.resolve({ available: true });
+      await expect(control).resolves.toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fences a shared timed-out restore until one late close settles', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const releaseAdmission = vi.fn();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 2,
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+      freshSessionAdmission: (context) =>
+        context.operation === 'load'
+          ? { release: releaseAdmission }
+          : undefined,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge.loadSession({
+        sessionId: 'restore-timeout-shared',
+        workspaceCwd: WS_A,
+      });
+      const outcome = timedOut.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(handle.killed).toBe(false);
+      expect(releaseAdmission).not.toHaveBeenCalled();
+      await expect(
+        bridge.loadSession({
+          sessionId: 'restore-timeout-shared',
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toBeInstanceOf(RestoreInProgressError);
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        }),
+      ).rejects.toThrow(/session limit/i);
+      await expect(
+        bridge.sendPrompt(sibling.sessionId, {
+          sessionId: sibling.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(() => bridge.getSessionSummary('restore-timeout-shared')).toThrow(
+        SessionNotFoundError,
+      );
+
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'restore-timeout-shared',
+        ),
+      ).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(releaseAdmission).toHaveBeenCalledOnce();
+      await expect(
+        bridge.loadSession({
+          sessionId: 'restore-timeout-shared',
+          workspaceCwd: WS_A,
+        }),
+      ).resolves.toMatchObject({ sessionId: 'restore-timeout-shared' });
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans a late restore failure exactly once before releasing its fence', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    let loadAttempt = 0;
+    const handle = makeChannel({
+      loadSessionImpl: () =>
+        ++loadAttempt === 1 ? lateRestore.promise : Promise.resolve({}),
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          throw RequestError.resourceNotFound(
+            `session:${String(params['sessionId'])}`,
+          );
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const restore = bridge.loadSession({
+        sessionId: 'restore-late-failure',
+        workspaceCwd: WS_A,
+      });
+      const outcome = restore.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      lateRestore.reject(new Error('late restore failed'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'restore-late-failure',
+        ),
+      ).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(() => bridge.getSessionSummary('restore-late-failure')).toThrow(
+        SessionNotFoundError,
+      );
+      await expect(
+        bridge.loadSession({
+          sessionId: 'restore-late-failure',
+          workspaceCwd: WS_A,
+        }),
+      ).resolves.toMatchObject({ sessionId: 'restore-late-failure' });
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'restore-late-failure',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows a different restore id while an abandoned id remains fenced', async () => {
+    vi.useFakeTimers();
+    const abandonedRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: (params) =>
+        params.sessionId === 'restore-abandoned-id'
+          ? abandonedRestore.promise
+          : Promise.resolve({}),
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const restore = bridge.loadSession({
+        sessionId: 'restore-abandoned-id',
+        workspaceCwd: WS_A,
+      });
+      const outcome = restore.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+      await expect(
+        bridge.loadSession({
+          sessionId: 'restore-independent-id',
+          workspaceCwd: WS_A,
+        }),
+      ).resolves.toMatchObject({ sessionId: 'restore-independent-id' });
+      await expect(
+        bridge.loadSession({
+          sessionId: 'restore-abandoned-id',
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+      abandonedRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'restore-abandoned-id',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reap a timed-out restore while another restore is pending', async () => {
+    vi.useFakeTimers();
+    const firstRestore = deferred<LoadSessionResponse>();
+    const secondRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: (params) =>
+        params.sessionId === 'restore-first'
+          ? firstRestore.promise
+          : secondRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 1_000,
+      channelFactory: async () => handle.channel,
+    });
+
+    try {
+      const first = bridge.loadSession({
+        sessionId: 'restore-first',
+        workspaceCwd: WS_A,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(500);
+      const second = bridge.loadSession({
+        sessionId: 'restore-second',
+        workspaceCwd: WS_A,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.agent.loadSessionCalls).toHaveLength(2);
+
+      const firstOutcome = first.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await firstOutcome).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(handle.killed).toBe(false);
+
+      firstRestore.resolve({});
+      secondRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(second).resolves.toMatchObject({
+        sessionId: 'restore-second',
+      });
+      expect(handle.killed).toBe(false);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reap a timed-out restore while a session spawn is pending', async () => {
+    vi.useFakeTimers();
+    const pendingSpawn = deferred<NewSessionResponse>();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: () => pendingSpawn.promise,
+      loadSessionImpl: () => lateRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const spawn = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.agent.newSessionCalls).toHaveLength(1);
+
+      const restore = bridge.loadSession({
+        sessionId: 'restore-timeout-pending-spawn',
+        workspaceCwd: WS_A,
+      });
+      const outcome = restore.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(handle.killed).toBe(false);
+
+      pendingSpawn.resolve({ sessionId: 'spawn-after-restore-timeout' });
+      await expect(spawn).resolves.toMatchObject({
+        sessionId: 'spawn-after-restore-timeout',
+      });
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'restore-timeout-pending-spawn',
+        ),
+      ).toHaveLength(1);
+      expect(handle.killed).toBe(false);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('quarantines only fresh work when late restore cleanup fails', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const first = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: (method, params) => {
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+          params['sessionId'] === 'restore-cleanup-fails'
+        ) {
+          throw new Error('late close failed');
+        }
+        return {};
+      },
+    });
+    const second = makeChannel();
+    const channels = [first, second];
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => channels.shift()!.channel,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const restore = bridge.loadSession({
+        sessionId: 'restore-cleanup-fails',
+        workspaceCwd: WS_A,
+      });
+      const outcome = restore.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        params: {
+          sessionId: 'restore-cleanup-fails',
+          drainTimeoutMs: 8_000,
+        },
+      });
+      expect(() =>
+        bridge.recordHeartbeat(sibling.sessionId, {
+          clientId: sibling.clientId,
+        }),
+      ).not.toThrow();
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        }),
+      ).rejects.toBeInstanceOf(BridgeChannelQuarantinedError);
+      await expect(
+        bridge.loadSession({
+          sessionId: 'fresh-load-during-quarantine',
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toBeInstanceOf(BridgeChannelQuarantinedError);
+      await expect(
+        bridge.resumeSession({
+          sessionId: 'fresh-resume-during-quarantine',
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toBeInstanceOf(BridgeChannelQuarantinedError);
+      await expect(
+        bridge.branchSession(sibling.sessionId, {
+          name: 'quarantined branch',
+        }),
+      ).rejects.toBeInstanceOf(BridgeChannelQuarantinedError);
+      await expect(
+        bridge.sendPrompt(sibling.sessionId, {
+          sessionId: sibling.sessionId,
+          prompt: [{ type: 'text', text: 'still usable in quarantine' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await bridge.closeSession(sibling.sessionId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.killed).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        }),
+      ).resolves.toMatchObject({ sessionId: SESS_A });
+      expect(second.agent.newSessionCalls).toHaveLength(1);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets shutdown break a permanently hanging abandoned restore', async () => {
+    vi.useFakeTimers();
+    const handle = makeChannel({
+      loadSessionImpl: () => new Promise<LoadSessionResponse>(() => {}),
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const restore = bridge.loadSession({
+        sessionId: 'restore-hangs-through-timeout',
+        workspaceCwd: WS_A,
+      });
+      const outcome = restore.catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      await expect(bridge.shutdown()).resolves.toBeUndefined();
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
   });
 
   it('rejects cross-workspace requests with WorkspaceMismatchError (#3803 §02)', async () => {
