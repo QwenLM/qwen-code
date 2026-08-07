@@ -781,7 +781,15 @@ function mavenPlModules(command: string): string[] | null {
           const trimmed = module.trim();
           // Quoted and unquoted spellings compare equal.
           const quoted = /^(['"])(.*)\1$/.exec(trimmed);
-          return quoted ? quoted[2] : trimmed;
+          const unquoted = quoted ? quoted[2] : trimmed;
+          // Maven also accepts `[groupId]:artifactId` coordinate selectors;
+          // the review's own runs use directory selectors, so compare the
+          // artifactId — the coordinate's last `:` segment — or such
+          // claims could never settle or be contradicted. A reactor module
+          // dir can never carry `:` (the POM entry gate rejects it), so
+          // recorded selectors are untouched by this branch.
+          const colon = unquoted.lastIndexOf(':');
+          return colon === -1 ? unquoted : unquoted.slice(colon + 1);
         })
         .filter((module) => module.length > 0),
     ),
@@ -838,7 +846,34 @@ function ruleCommand(
     token === '--file' ||
     token.startsWith('--file=') ||
     token === '-amd' ||
-    token === '--also-make-dependents';
+    // commons-cli accepts attached values too; the exact-token match alone
+    // let `-amd=` claims bypass the conservative treatment.
+    token.startsWith('-amd=') ||
+    token === '--also-make-dependents' ||
+    token.startsWith('--also-make-dependents=') ||
+    // The other semantics-altering value flags MAVEN_VALUE_FLAGS models:
+    // a claim carrying one cannot settle on a run that never used it,
+    // exactly like the `-D`/`-P` claims of comparable weight above.
+    token === '-s' ||
+    token.startsWith('-s=') ||
+    token === '--settings' ||
+    token.startsWith('--settings=') ||
+    token === '-gs' ||
+    token.startsWith('-gs=') ||
+    token === '--global-settings' ||
+    token.startsWith('--global-settings=') ||
+    token === '-t' ||
+    token.startsWith('-t=') ||
+    token === '--toolchains' ||
+    token.startsWith('--toolchains=') ||
+    token === '-gt' ||
+    token.startsWith('-gt=') ||
+    token === '--global-toolchains' ||
+    token.startsWith('--global-toolchains=') ||
+    token === '-b' ||
+    token.startsWith('-b=') ||
+    token === '--builder' ||
+    token.startsWith('--builder=');
   const claimTokens = claimed.split(/\s+/);
   // Lifecycle phases the claim names, in order: a multi-phase claim
   // (`clean test`) runs phases the recorded single-phase run never did.
@@ -855,6 +890,15 @@ function ruleCommand(
       token.startsWith('--projects=') ||
       scopesNonPl(token),
   );
+  // The claim's final positional token names the last work it runs: a
+  // trailing goal outside the lifecycle vocabulary (`mvn test deploy`,
+  // `site`, a plugin goal) never ran here, and settling the recognized
+  // phase alone would read undisclosed — unlike `mvn clean test`, which
+  // discloses its phase reduction. Trailing flag tokens (`-B`, attached
+  // `-D…`) name no work of their own.
+  const claimFinalWork = mavenPositionalTokens(claimed)
+    .filter((token) => !token.startsWith('-'))
+    .at(-1);
   const claimPlModules = mavenPlModules(claimed);
   // A claim scoped by `-pl` ALONE can settle on a recorded run with the same
   // module set and final lifecycle — that is the SAME scope, and discarding
@@ -867,11 +911,13 @@ function ruleCommand(
     command !== claimed &&
     !(command.startsWith(claimed) && command[claimed.length] === ' ') &&
     claimedLifecycle !== null &&
+    claimFinalWork === claimedLifecycle &&
     !claimScopesItself &&
     mavenLifecycle(command) === claimedLifecycle;
   const settledBySameScope = (command: string): boolean =>
     claimOnlyPlScoped &&
     claimedLifecycle !== null &&
+    claimFinalWork === claimedLifecycle &&
     mavenLifecycle(command) === claimedLifecycle &&
     sameModuleSet(mavenPlModules(command), claimPlModules);
   // A run this review itself classified as infrastructure (a timeout, a
@@ -906,6 +952,36 @@ function ruleCommand(
         `[maven-test-failure] ${module === '.' ? '' : `${module}/`}target/`,
       ),
     );
+  };
+  // How a matched run relates to the claim — module-scoped and/or
+  // phase-reduced — in the wording the notes use. Shared by the
+  // finished-run ruling below and the interrupted/cascade notes, so the
+  // same evidence cannot read overstated in one branch merely because
+  // the run did (or did not) finish.
+  const runForm = (command: string): { howItRan: string; reduced: boolean } => {
+    // Reactor-wide recorded runs carry no `-pl`; calling those
+    // module-scoped would understate what the evidence verified.
+    const settledReduced = settledByLifecycle(command);
+    const scoped =
+      (settledReduced || settledBySameScope(command)) &&
+      /(?:^|\s)-pl(?:\s|=|$)/.test(command);
+    // A multi-phase claim (`clean test`) settles on its FINAL phase when
+    // it carries no scoping of its own — the adapter only ever runs
+    // `test` or `test-compile`, so the note must not read as if the
+    // earlier phases ran.
+    const phaseReduced =
+      (settledReduced || settledBySameScope(command)) && claimPhases.length > 1;
+    const howItRan =
+      scoped && phaseReduced
+        ? `this review ran a module-scoped form of its final phase (\`${claimedLifecycle}\`), ` +
+          `not the full \`${claimPhases.join(' ')}\` it claims`
+        : scoped
+          ? 'this review ran a module-scoped form of it'
+          : phaseReduced
+            ? `this review ran its final phase (\`${claimedLifecycle}\`), ` +
+              `not the full \`${claimPhases.join(' ')}\` it claims`
+            : 'this review ran it';
+    return { howItRan, reduced: scoped || phaseReduced };
   };
   const matches = [
     ...(buildTest?.build ?? []),
@@ -965,29 +1041,8 @@ function ruleCommand(
       : undefined) ??
     matches.find(finished);
   if (ran) {
-    // Reactor-wide recorded runs carry no `-pl`; calling those module-scoped
-    // would understate what the evidence verified.
-    const settledReduced = settledByLifecycle(ran.command.trim());
-    const scoped =
-      (settledReduced || settledBySameScope(ran.command.trim())) &&
-      /(?:^|\s)-pl(?:\s|=|$)/.test(ran.command);
-    // A multi-phase claim (`clean test`) settles on its FINAL phase when it
-    // carries no scoping of its own — the adapter only ever runs `test` or
-    // `test-compile`, so the note must not read as if the earlier phases
-    // ran.
-    const phaseReduced =
-      (settledReduced || settledBySameScope(ran.command.trim())) &&
-      claimPhases.length > 1;
-    const howItRan =
-      scoped && phaseReduced
-        ? `this review ran a module-scoped form of its final phase (\`${claimedLifecycle}\`), ` +
-          `not the full \`${claimPhases.join(' ')}\` it claims`
-        : scoped
-          ? 'this review ran a module-scoped form of it'
-          : phaseReduced
-            ? `this review ran its final phase (\`${claimedLifecycle}\`), ` +
-              `not the full \`${claimPhases.join(' ')}\` it claims`
-            : 'this review ran it';
+    const form = runForm(ran.command.trim());
+    const howItRan = form.howItRan;
     if (ran.exitCode === 0 && ranFailed(ran)) {
       return {
         kind: 'command',
@@ -1016,10 +1071,9 @@ function ruleCommand(
           text,
           verdict: 'contradicted',
           observed: `exit ${ran.exitCode}`,
-          note:
-            scoped || phaseReduced
-              ? `${howItRan}, and that failed`
-              : 'this review ran it and it failed',
+          note: form.reduced
+            ? `${howItRan}, and that failed`
+            : 'this review ran it and it failed',
         };
   }
 
@@ -1028,55 +1082,57 @@ function ruleCommand(
     // Surefire/Failsafe recorded before it: the adapter's own note says to
     // treat those as test failures, so the claim ruling cannot read the
     // interruption as neutral while the build-test side reports ok:false.
-    if (
-      matches.some(
-        (c) =>
-          (c.timedOut || c.exitCode === null) &&
-          freshTestFailures(c) &&
-          // The same scope asymmetry the `-am` guard above applies to
-          // finished runs: an interrupted `-am` run's fresh failures may
-          // live entirely in upstream modules the claim never tests, so it
-          // cannot contradict the claim either — unless the markers
-          // attribute a failure to a module inside the claimed set.
-          !(
-            settledBySameScope(c.command.trim()) &&
-            mavenHasAlsoMake(c.command) &&
-            !mavenHasAlsoMake(claimed) &&
-            !failureInsideClaim(c)
-          ),
-      )
-    ) {
+    const interruptedWithFailures = matches.find(
+      (c) =>
+        (c.timedOut || c.exitCode === null) &&
+        freshTestFailures(c) &&
+        // The same scope asymmetry the `-am` guard above applies to
+        // finished runs: an interrupted `-am` run's fresh failures may
+        // live entirely in upstream modules the claim never tests, so it
+        // cannot contradict the claim either — unless the markers
+        // attribute a failure to a module inside the claimed set.
+        !(
+          settledBySameScope(c.command.trim()) &&
+          mavenHasAlsoMake(c.command) &&
+          !mavenHasAlsoMake(claimed) &&
+          !failureInsideClaim(c)
+        ),
+    );
+    if (interruptedWithFailures) {
       return {
         kind: 'command',
         text,
         verdict: 'contradicted',
         observed:
           'interrupted, but fresh Surefire/Failsafe reports record failures',
-        note: 'this review ran it; it was interrupted, but fresh test reports record failures',
+        note: `${runForm(interruptedWithFailures.command.trim()).howItRan}; it was interrupted, but fresh test reports record failures`,
       };
     }
-    if (matches.some((c) => c.timedOut)) {
+    const timedOutRun = matches.find((c) => c.timedOut);
+    if (timedOutRun) {
       return {
         kind: 'command',
         text,
         verdict: 'unchecked',
-        note: 'this Maven command was run by this review but timed out',
+        note: `${runForm(timedOutRun.command.trim()).howItRan}; it timed out`,
       };
     }
-    if (matches.some((c) => c.exitCode === null)) {
+    const spawnDeath = matches.find((c) => c.exitCode === null);
+    if (spawnDeath) {
       return {
         kind: 'command',
         text,
         verdict: 'unchecked',
-        note: 'this Maven command was run by this review but ended without an exit code',
+        note: `${runForm(spawnDeath.command.trim()).howItRan}; it ended without an exit code`,
       };
     }
-    if (matches.some((c) => c.infrastructure)) {
+    const environmental = matches.find((c) => c.infrastructure);
+    if (environmental) {
       return {
         kind: 'command',
         text,
         verdict: 'unchecked',
-        note: 'this Maven command was run by this review but failed for environmental reasons',
+        note: `${runForm(environmental.command.trim()).howItRan}; it failed for environmental reasons`,
       };
     }
 

@@ -422,6 +422,22 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     }
   }
 
+  // The install exited non-zero but left a usable tree, so the run went
+  // ahead: frame the failure on EVERY return from here on — the disk
+  // preflight and build-failure returns below fire before the final one,
+  // and without the framing the agent can file the install failure as an
+  // additional Critical against the PR.
+  const frameInstallFailure = (): void => {
+    if (results.install && results.install.exitCode !== 0) {
+      results.note =
+        `\`${results.install.command}\` exited ${results.install.exitCode} but left a usable ` +
+        '`node_modules`, so the run went ahead. ' +
+        'The install failure is an environment/infrastructure result — report it as ' +
+        'informational, never as a Critical, and never against this PR. ' +
+        results.note;
+    }
+  };
+
   // The same preflight before the build phase, at a lower floor. A warm tree
   // skips the install (and its 3 GiB gate) entirely, but a compile that hits
   // ENOSPC mid-write fails with errors that read as defects in the diff — and
@@ -433,6 +449,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       `Insufficient disk space (${gib(freeForBuild)}G free, need ~${gib(BUILD_MIN_FREE_BYTES)}G): ` +
       'skipped the build and tests rather than fill the disk mid-compile. This ' +
       'is an environment issue, not a code finding — report it as informational.';
+    frameInstallFailure();
     return results;
   }
 
@@ -538,6 +555,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         rootBuildSkipped ? set.filter((d) => d !== '.') : set
       ).filter((d) => !notBuilt.includes(d));
       results.widenedWith = [...widened];
+      frameInstallFailure();
       return results;
     }
 
@@ -769,18 +787,11 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       : partialNote;
   }
 
-  // The install exited non-zero but left a usable tree, so the run went ahead. Say
-  // so — the build and test results below are real, and the install failure is not
-  // a finding about this PR. (A `prepare` script that builds the whole project,
-  // as this repo's does, fails on any pre-existing error anywhere in it.)
-  if (results.install && results.install.exitCode !== 0) {
-    results.note =
-      `\`${results.install.command}\` exited ${results.install.exitCode} but left a usable ` +
-      '`node_modules`, so the build and test below ran anyway and their results stand. ' +
-      'The install failure is an environment/infrastructure result — report it as ' +
-      'informational, never as a Critical, and never against this PR. ' +
-      results.note;
-  }
+  // The build and test results below are real, and the install failure is
+  // not a finding about this PR. (A `prepare` script that builds the whole
+  // project, as this repo's does, fails on any pre-existing error anywhere
+  // in it.)
+  frameInstallFailure();
   return results;
 }
 

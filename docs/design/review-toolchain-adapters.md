@@ -188,6 +188,10 @@ P1 changes:
     recorded runs.
 - `packages/cli/src/commands/review/lib/agent-briefs.ts`
   - Agent 7's Maven branch and the fail-closed fallback rules.
+- `packages/cli/src/commands/review/test-delta.ts`
+  - Keeps the base-side rerun grammar npm-only: Maven lifecycle commands
+    the Maven adapter records are skipped and disclosed, never re-executed
+    in the base worktree.
 
 ## Testing
 
@@ -222,8 +226,9 @@ the Maven branches of the `test-plan`, `base-tree`, and `build-test` suites:
 4. Fresh Surefire/Failsafe evidence: quote-aware, multi-suite parsing; stale
    XML ignored; a green exit over fresh failing reports — or over framed
    errors Maven did not fail on — is a failure, never a pass.
-5. Timeout, spawn death, and acquisition failures are infrastructure with the
-   diff-inputs exceptions, never a finding.
+5. Timeout and spawn death are always infrastructure, never a finding — no
+   input exception exists for them. Acquisition failures are infrastructure
+   with the diff-inputs exceptions, never a finding.
 6. Downstream consumers: `base-tree` skips Maven bases before checkout,
    `test-plan` settles Maven claims against recorded runs, and Agent 7's
    brief carries the Maven branch.
@@ -231,7 +236,7 @@ the Maven branches of the `test-plan`, `base-tree`, and `build-test` suites:
 Verification commands:
 
 ```bash
-cd packages/cli && npx vitest run src/commands/review/build-test.test.ts src/commands/review/lib/npm-toolchain.test.ts src/commands/review/lib/maven-toolchain.test.ts src/commands/review/test-plan.test.ts src/commands/review/base-tree.test.ts src/commands/review/agent-prompt.test.ts
+cd packages/cli && npx vitest run src/commands/review/build-test.test.ts src/commands/review/lib/npm-toolchain.test.ts src/commands/review/lib/maven-toolchain.test.ts src/commands/review/test-plan.test.ts src/commands/review/base-tree.test.ts src/commands/review/agent-prompt.test.ts src/commands/review/test-delta.test.ts
 npm run build
 npm run typecheck
 ```

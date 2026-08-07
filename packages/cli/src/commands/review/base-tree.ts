@@ -111,11 +111,15 @@ function git(cwd: string, ...args: string[]): void {
 }
 
 function gitHasPath(cwd: string, sha: string, path: string): boolean {
-  const r = spawnSync('git', ['cat-file', '-e', `${sha}:${path}`], {
+  // A BLOB, not mere existence: `cat-file -e` exits 0 for a DIRECTORY
+  // too, and a dir named `pom.xml` is not a Maven project — reading one
+  // as such misfires the gate into a false "Maven base" note that
+  // permanently disables A/B attribution for that base.
+  const r = spawnSync('git', ['cat-file', '-t', `${sha}:${path}`], {
     cwd,
     encoding: 'utf8',
   });
-  return !r.error && r.status === 0;
+  return !r.error && r.status === 0 && (r.stdout ?? '').trim() === 'blob';
 }
 
 function gitBlob(cwd: string, sha: string, path: string): string | null {

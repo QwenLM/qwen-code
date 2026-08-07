@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -215,6 +216,117 @@ describe('maven toolchain adapter', () => {
     expect(readMavenReactor(root).error).toContain('Cannot safely parse');
   });
 
+  it('fails closed on an XML entity in a captured id or relativePath', () => {
+    // Maven decodes entities before matching parent resolution, but this
+    // harness captures raw text: `my&#45;app` and `my-app` would compare
+    // unequal here and silently drop a real inheritance edge. The parse
+    // fails closed instead, like the `<module>` gate.
+    writeProject('.', ['core']);
+    writeProject('core');
+    writeFileSync(
+      join(root, 'core', 'pom.xml'),
+      childPomInheriting('../parent/pom.xml').replace(
+        '<artifactId>fixture</artifactId>',
+        '<artifactId>fix&#45;ture</artifactId>',
+      ),
+    );
+    writeProject('parent');
+
+    expect(readMavenReactor(root).error).toContain('Cannot safely parse');
+  });
+
+  it('fails closed on a tag whose quote never closes', () => {
+    // An unterminated QUOTE swallows the rest of the document into the
+    // phantom tag and used to return a successful-but-shrunken structure
+    // with every later `<module>` silently lost; it must fail closed like
+    // any other unparseable shape.
+    writeFileSync(
+      join(root, 'pom.xml'),
+      '<project attr="unterminated>\n' +
+        '  <modules><module>core</module></modules>\n' +
+        '</project>',
+    );
+    writeProject('core');
+
+    expect(readMavenReactor(root).error).toContain('Cannot safely parse');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'deduplicates symlink-aliased reactor dirs by real path',
+    () => {
+      // Each level lists two symlinks to the next level: 2^depth distinct
+      // LEXICAL paths at constant depth. A lexical dedup key walks every
+      // one of them; the realpath key walks one per real pom.
+      for (let level = 0; level < 30; level++) {
+        writeProject(`d${level}`, ['s1', 's2']);
+      }
+      writeProject('d30');
+      for (let level = 0; level < 30; level++) {
+        symlinkSync(join(root, `d${level + 1}`), join(root, `d${level}`, 's1'));
+        symlinkSync(join(root, `d${level + 1}`), join(root, `d${level}`, 's2'));
+      }
+      writeFileSync(join(root, 'pom.xml'), pom(['d0']));
+
+      const startedAt = Date.now();
+      const parsed = readMavenReactor(root);
+      expect(parsed.error).toBeUndefined();
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      // Linear in the number of REAL poms, not 2^depth.
+      expect(parsed.reactor?.modules.length).toBeLessThan(200);
+    },
+    20_000,
+  );
+
+  it('parses a shared named-parent chain once per file, not once per heir', () => {
+    // Every heir declares the same 30-file parent chain; the worklist
+    // memoizes each file's parse, so the walk costs O(files), not
+    // O(heirs x files) — probe-measured at seconds the other way.
+    writeProject(
+      '.',
+      Array.from({ length: 25 }, (_, i) => `heir${i}`),
+    );
+    for (let i = 0; i < 25; i++) {
+      writeProject(`heir${i}`);
+      writeFileSync(
+        join(root, `heir${i}`, 'pom.xml'),
+        childPomInheriting('../parents/p0.xml').replace(
+          '<artifactId>fixture</artifactId>',
+          '<artifactId>parent0</artifactId>',
+        ),
+      );
+    }
+    mkdirSync(join(root, 'parents'), { recursive: true });
+    // Pad each file so a parse costs milliseconds: without the memo the
+    // 750 pops re-read and re-parse each file once PER HEIR (~8s
+    // probe-measured at this size), with it each file parses once.
+    const padding = `<!-- ${'x'.repeat(1_000_000)} -->`;
+    for (let i = 0; i < 30; i++) {
+      const next = i + 1;
+      const base =
+        next < 30
+          ? childPomInheriting(`p${next}.xml`).replace(
+              '<artifactId>fixture</artifactId>',
+              `<artifactId>parent${next}</artifactId>`,
+            )
+          : pom();
+      writeFileSync(
+        join(root, 'parents', `p${i}.xml`),
+        base
+          .replace(
+            /<artifactId>fixture<\/artifactId>/,
+            `<artifactId>parent${i}</artifactId>`,
+          )
+          .replace('</project>', `${padding}\n</project>`),
+      );
+    }
+
+    const startedAt = Date.now();
+    const parsed = readMavenReactor(root);
+    expect(parsed.error).toBeUndefined();
+    expect(Date.now() - startedAt).toBeLessThan(4_000);
+    expect(parsed.reactor?.parentPomFiles).toContain('parents/p0.xml');
+  }, 30_000);
+
   it.each([
     ['${module.name}', 'property expressions'],
     ['../outside', 'paths escaping the reactor'],
@@ -233,6 +345,16 @@ describe('maven toolchain adapter', () => {
       const outside = join(root, '..', 'outside');
       mkdirSync(outside, { recursive: true });
       writeFileSync(join(outside, 'pom.xml'), pom());
+    } else if (module !== 'missing') {
+      // A real child POM under every other declared name, so the named
+      // gate — not the missing-child-POM gate — is the SOLE error source:
+      // with no child pom these cases passed even with their character
+      // gate removed (mutation-verified), masked by the existsSync check.
+      // ':' cannot appear in a Windows directory name, so that case keeps
+      // the missing-child fallback on win32.
+      if (!(process.platform === 'win32' && module.includes(':'))) {
+        writeProject(module);
+      }
     }
 
     const parsed = readMavenReactor(root);
@@ -360,6 +482,73 @@ describe('maven toolchain adapter', () => {
     expect(report.toolchain).toBe('unsupported');
     expect(report.note).toContain('outside the root reactor: standalone');
     expect(calls).toEqual([]);
+  });
+
+  it('scopes a named parent change to its heirs when its dir hosts no project', () => {
+    // The named parent lives in a directory that is NOT a reactor member:
+    // the inheritor closure already computed the exact scope, and the
+    // unowned catch-all must not widen it to the full reactor.
+    writeProject('.', ['app']);
+    writeProject('app');
+    mkdirSync(join(root, 'build-parent'), { recursive: true });
+    writeFileSync(join(root, 'build-parent', 'parent.xml'), pom());
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../build-parent/parent.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(root, ['build-parent/parent.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('does not over-scope closures through a named parent in an active module dir', () => {
+    // core hosts BOTH its own pom.xml (aggregating core/sub, inherited by
+    // ext) and the named file parent.xml (inherited by app). File-keyed
+    // edges keep the two closures apart in both directions.
+    writeProject('.', ['core', 'app', 'ext']);
+    writeProject('core', ['sub']);
+    writeProject('core/sub');
+    writeProject('app');
+    writeProject('ext');
+    writeFileSync(join(root, 'core', 'parent.xml'), pom());
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../core/parent.xml'),
+    );
+    for (const module of ['ext']) {
+      writeFileSync(
+        join(root, module, 'pom.xml'),
+        childPomInheriting('../core/pom.xml'),
+      );
+    }
+
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    // Changing core/pom.xml reaches core's aggregation and inheritance —
+    // but NOT app, which inherits the named file, not core/pom.xml.
+    expect(
+      detectMavenOwnership(root, ['core/pom.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['core', 'core/sub', 'ext'],
+      inactiveProjects: [],
+    });
+    // Changing core/parent.xml reaches app — but NOT core/sub or ext,
+    // which the named file does not touch.
+    expect(
+      detectMavenOwnership(root, ['core/parent.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'core'],
+      inactiveProjects: [],
+    });
   });
 
   it('fails closed for documentation in a project outside the root reactor', () => {
@@ -530,20 +719,29 @@ describe('maven toolchain adapter', () => {
       writeWrapper();
     }
     const calls: Array<[string, string, number]> = [];
+    // The deadline is wall clock from the top of the call: freeze it so
+    // the forwarded deadline asserts exactly.
+    const clock = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
 
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: [
-        'extension/src/main/java/example/Extension.java',
-        'core/src/main/java/example/Core.java',
-      ],
-      timeout: 17,
-      install: false,
-      exec: (command, cwd, timeout) => {
-        calls.push([command, cwd, timeout]);
-        return result(command);
-      },
-    });
+    let report: ReturnType<typeof mavenToolchainAdapter.run>;
+    try {
+      report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: [
+          'extension/src/main/java/example/Extension.java',
+          'core/src/main/java/example/Core.java',
+        ],
+        timeout: 17,
+        install: false,
+        exec: (command, cwd, timeout) => {
+          calls.push([command, cwd, timeout]);
+          return result(command);
+        },
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
 
     const executable = windows ? 'mvnw.cmd' : './mvnw';
     expect(calls).toEqual([
@@ -1695,6 +1893,37 @@ describe('maven toolchain adapter', () => {
     expect(report.note).toContain('Insufficient disk space');
   });
 
+  it('re-checks the disk floor after the warm-up, before the lifecycle', () => {
+    // The warm-up is the phase that fills the disk: a cold reactor's
+    // dependency:go-offline can consume the headroom the preflight
+    // passed, and the lifecycle must not run on the now-full disk.
+    statfsSyncMock
+      .mockReturnValueOnce({ bavail: 16 * 1024 ** 3, bsize: 1 })
+      .mockReturnValueOnce({ bavail: 0, bsize: 1 });
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    // Only the warm-up ran; the lifecycle was skipped and disclosed.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('dependency:go-offline');
+    expect(report.ok).toBe(false);
+    expect(report.build).toEqual([]);
+    expect(report.test).toEqual([]);
+    expect(report.note).toContain('Insufficient disk space');
+    expect(report.note).toContain('warm-up');
+  });
+
   it('attributes failures to the failing cases in declaration order', () => {
     // Surefire writes passing cases self-closing, in execution order: a
     // passing case must not absorb the following case's failure, and the
@@ -2110,6 +2339,54 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('infrastructure evidence');
   });
 
+  it('fails closed past the read cap for .mvn/maven.config', () => {
+    // The one PR-controlled read without a size cap: a config past the
+    // cap is treated like an unreadable one (its referenced locations
+    // unknown), while the config FILE itself stays a dependency input
+    // through the `.mvn/` prefix — so the suppression still stands.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      `-s settings.xml ${'x'.repeat(2 * 1024 * 1024)}\n`,
+    );
+    writeFileSync(join(root, 'settings.xml'), '<settings/>\n');
+
+    // Oversized: the settings reference is unknown, so a dependency
+    // outage over a changed settings.xml keeps the infrastructure
+    // carve-out...
+    const oversized = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['settings.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+    expect(oversized.note).toContain('infrastructure evidence');
+
+    // ...and under the cap the identical config suppresses it.
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-s settings.xml\n');
+    const undersized = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['settings.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+    expect(undersized.note).toContain('Correlate compiler or test errors');
+    expect(undersized.note).not.toContain('infrastructure evidence');
+  });
+
   it('treats a reactor-member POM under src/ as a dependency input', () => {
     // A reactor aggregating a project under another project's src/ models
     // it as a live member everywhere else, so changing its POM is a
@@ -2490,7 +2767,9 @@ describe('maven toolchain adapter', () => {
     );
 
     const parsed = readMavenReactor(root);
-    expect(parsed.reactor?.inheritors).toEqual({ base: ['app'] });
+    // Named-parent heirs are keyed on the FILE: keying them on `base`
+    // would conflate them with the inheritors of base/pom.xml itself.
+    expect(parsed.reactor?.inheritors).toEqual({ 'base/parent.xml': ['app'] });
     expect(parsed.reactor?.parentPomFiles).toEqual(['base/parent.xml']);
     if (!parsed.reactor) throw new Error('expected reactor');
     expect(
@@ -2591,6 +2870,79 @@ describe('maven toolchain adapter', () => {
     expect(report.ok).toBe(true);
   }, 20_000);
 
+  it('caps the fresh reports one run parses, and discloses the omission', () => {
+    // The mtime freshness filter accepts any writer, so the PR's own
+    // tests control how many reports exist at parse time. Past the cap
+    // the parse stops and the evidence block says so — nothing reads
+    // thousands of reports without a disclosure.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        for (let i = 0; i < 1005; i++) {
+          writeFileSync(
+            join(dir, `TEST-Case${String(i).padStart(4, '0')}.xml`),
+            '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+              `<testcase classname="example.Case${i}" name="passes"/>` +
+              '</testsuite>',
+          );
+        }
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.output).toContain(
+      '5 more fresh report(s) not parsed',
+    );
+    expect(report.test[0]?.output).toContain(
+      '1000-report evidence cap was reached',
+    );
+  }, 30_000);
+
+  it('caps the failing cases one report accumulates, and counts the drop', () => {
+    // One report can carry tens of thousands of failing `<testcase>`
+    // entries; the parse caps them while building, and the omission
+    // marker accounts for the drop instead of silently losing it.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        const cases = Array.from(
+          { length: 250 },
+          (_, i) =>
+            `<testcase classname="example.Bulk" name="case${i}"><failure/></testcase>`,
+        ).join('');
+        writeFileSync(
+          join(dir, 'TEST-Bulk.xml'),
+          `<testsuite tests="250" failures="250" errors="0" skipped="0">${cases}</testsuite>`,
+        );
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    const output = report.test[0]?.output ?? '';
+    expect(output).toContain('tests=250, failures=250');
+    expect(output).toContain('50 more failing case(s) omitted');
+    // The kept case lines stop at the display cap.
+    expect(output.match(/\[maven-test-failure\] core\/target/g)?.length).toBe(
+      200,
+    );
+  }, 30_000);
+
   it('parses a suite header of unpaired attribute-name runs in linear time', () => {
     // `xmlAttributes` backtracked quadratically on a long attribute-name
     // run with no `=` — the same denial-of-service class, entering through
@@ -2618,7 +2970,6 @@ describe('maven toolchain adapter', () => {
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(report.ok).toBe(true);
   }, 20_000);
-
   it('walks stacked openers-before-closers reports in linear time', () => {
     // Every opener preceding every closer used to re-find the same early
     // closing tag for each later opener — quadratic inside the 2 MiB cap,
@@ -2649,89 +3000,6 @@ describe('maven toolchain adapter', () => {
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(report.ok).toBe(true);
   }, 20_000);
-
-  it('reads a reactor of unclosed-tag module POMs in linear time', () => {
-    // The regex POM tokenizer backtracked quadratically on repeated `<`
-    // with no `>` anywhere, and POM reads carry no size cap — a hostile
-    // module POM must cost milliseconds, not the minutes the pre-fix
-    // extrapolation measured.
-    writeProject('.', ['core']);
-    writeProject('core');
-    writeFileSync(join(root, 'core', 'pom.xml'), '<a'.repeat(1_000_000));
-    const startedAt = Date.now();
-
-    const parsed = readMavenReactor(root);
-
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(parsed.error).toBeUndefined();
-  }, 20_000);
-
-  it('does not parse commented-out report content as markup', () => {
-    // The CDATA fix left comments scanned as real markup: aggregate
-    // writers (jest-junit, karma) emit comments, and a commented-out
-    // suite fabricated phantom failures for a passing run.
-    writeReactor();
-
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['core/src/Main.java'],
-      timeout: 5,
-      install: false,
-      exec: (command) => {
-        const dir = join(root, 'core', 'target', 'surefire-reports');
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(
-          join(dir, 'TEST-Core.xml'),
-          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
-            '<testcase classname="example.CoreTest" name="passes"/>' +
-            '<!-- <testsuite name="ghost" tests="3" failures="2" errors="1" skipped="0">' +
-            '<testcase classname="ghost.C" name="g"><failure/>' +
-            '</testcase></testsuite> -->' +
-            '</testsuite>',
-        );
-        return result(command);
-      },
-    });
-
-    expect(report.ok).toBe(true);
-    expect(report.test[0]?.output).toContain('tests=1, failures=0');
-    expect(report.test[0]?.output).not.toContain('[maven-test-failure]');
-  });
-
-  it('keeps case identity when lowercase mapping changes UTF-16 length', () => {
-    // `İ` (U+0130) lowercases to TWO code units; locating tag headers in a
-    // lowercased copy and indexing the original with those offsets shifted
-    // every later body window and dropped the failing case's evidence line.
-    writeReactor();
-
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['core/src/Main.java'],
-      timeout: 5,
-      install: false,
-      exec: (command) => {
-        const dir = join(root, 'core', 'target', 'surefire-reports');
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(
-          join(dir, 'TEST-Core.xml'),
-          '<testsuite tests="2" failures="1" errors="0" skipped="0">' +
-            '<testcase classname="\u0130.Pass" name="passes"/>' +
-            '<testcase classname="example.Fail" name="fails">' +
-            '<failure>boom</failure></testcase>' +
-            '</testsuite>',
-        );
-        return result(command, {
-          exitCode: 1,
-          output: '[ERROR] Tests failed',
-        });
-      },
-    });
-
-    expect(report.ok).toBe(false);
-    expect(report.test[0]?.output).toContain(
-      '[maven-test-failure] core/target/surefire-reports/TEST-Core.xml: example.Fail#fails',
-    );
-  });
 
   it('walks descendants of a module named after an Object.prototype key', () => {
     // children/inheritors are indexed by PR-controlled dir names; a plain
@@ -2877,8 +3145,8 @@ describe('maven toolchain adapter', () => {
 
     const parsed = readMavenReactor(root);
     expect(parsed.reactor?.inheritors).toEqual({
-      base: ['app'],
-      grand: ['app'],
+      'base/parent.xml': ['app'],
+      'grand/parent2.xml': ['app'],
     });
     expect(parsed.reactor?.parentPomFiles).toEqual([
       'base/parent.xml',
@@ -3002,7 +3270,7 @@ describe('maven toolchain adapter', () => {
 
     const parsed = readMavenReactor(root);
     expect(parsed.reactor?.inheritors).toEqual({
-      core: ['app'],
+      'core/parent.xml': ['app'],
       gp: ['app', 'core'],
     });
     expect(parsed.reactor?.parentPomFiles).toEqual(['core/parent.xml']);
@@ -3052,70 +3320,6 @@ describe('maven toolchain adapter', () => {
     expect(report.ok).toBe(true);
   }, 20_000);
 
-  it('treats a DELETED named parent file as a dependency input', () => {
-    // parentPomFiles only records edges that survive on disk: when the
-    // diff deletes the declared parent, the `Non-resolvable parent POM`
-    // death it causes must not be laundered into the infrastructure
-    // carve-out.
-    writeProject('.', ['app']);
-    writeProject('app');
-    writeFileSync(
-      join(root, 'app', 'pom.xml'),
-      childPomInheriting('../parent.xml'),
-    );
-
-    const parsed = readMavenReactor(root);
-    expect(parsed.reactor?.declaredParentFiles).toEqual(['parent.xml']);
-
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['parent.xml'],
-      timeout: 5,
-      install: false,
-      exec: (command) =>
-        result(command, {
-          exitCode: 1,
-          output: '[ERROR] Non-resolvable parent POM for example:app',
-        }),
-    });
-
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
-  });
-
-  it('adds the owning module of a changed named parent file to the scope', () => {
-    // The named parent lives in ANOTHER module's tree: changing it must
-    // build and test that module too, not only the inheritor closure.
-    writeProject('.', ['core', 'app']);
-    writeProject('core');
-    writeProject('app');
-    mkdirSync(join(root, 'core', 'src', 'test', 'resources'), {
-      recursive: true,
-    });
-    writeFileSync(
-      join(root, 'core', 'src', 'test', 'resources', 'parent.xml'),
-      pom(),
-    );
-    writeFileSync(
-      join(root, 'app', 'pom.xml'),
-      childPomInheriting('../core/src/test/resources/parent.xml'),
-    );
-
-    const parsed = readMavenReactor(root);
-    if (!parsed.reactor) throw new Error('expected reactor');
-    expect(
-      detectMavenOwnership(
-        root,
-        ['core/src/test/resources/parent.xml'],
-        parsed.reactor,
-      ),
-    ).toEqual({
-      reactorWide: false,
-      modules: ['app', 'core'],
-      inactiveProjects: [],
-    });
-  });
-
   it('keeps the inactive-project abort for an out-of-reactor named parent', () => {
     // standalone/parent.xml backs app's inheritance edge, but standalone
     // is not a reactor member: changing the named parent must fail closed
@@ -3144,132 +3348,6 @@ describe('maven toolchain adapter', () => {
     expect(report.toolchain).toBe('unsupported');
     expect(report.note).toContain('outside the root reactor: standalone');
     expect(calls).toEqual([]);
-  });
-
-  it('expands a descendant already in the scope through an earlier changed file', () => {
-    // parent aggregates app (a top-level sibling via ../app) and is its
-    // <parent>; app aggregates app/it. Path-sorted order puts the app
-    // source change first, so `app` is already in the result set when the
-    // parent POM change walks: the expansion guard must not conflate "in
-    // the set" with "expanded", or app/it silently drops out of the build
-    // scope.
-    writeProject('.', ['parent']);
-    writeProject('parent', ['../app']);
-    writeProject('app/it');
-    // app BOTH inherits parent AND aggregates app/it.
-    writeFileSync(
-      join(root, 'app', 'pom.xml'),
-      pom(['it']).replace(
-        '<project>',
-        `<project>
-  <parent>
-    <groupId>example</groupId>
-    <artifactId>fixture</artifactId>
-    <version>1</version>
-    <relativePath>../parent/pom.xml</relativePath>
-  </parent>`,
-      ),
-    );
-
-    const parsed = readMavenReactor(root);
-    if (!parsed.reactor) throw new Error('expected reactor');
-    expect(
-      detectMavenOwnership(
-        root,
-        ['app/src/main/java/Foo.java', 'parent/pom.xml'],
-        parsed.reactor,
-      ),
-    ).toEqual({
-      reactorWide: false,
-      modules: ['app', 'app/it', 'parent'],
-      inactiveProjects: [],
-    });
-  });
-
-  it('does not exempt subtrees of directories named after doc or metadata files', () => {
-    // The exemptions anchor on the final segment: a DIRECTORY named
-    // README*/LICENSE.*/NOTICE.* must not exempt files of any extension
-    // beneath it from verification.
-    writeReactor();
-    const parsed = readMavenReactor(root);
-    if (!parsed.reactor) throw new Error('expected reactor');
-
-    for (const changed of [
-      'README.md/checkstyle.xml',
-      'LICENSE.md/settings.xml',
-      'NOTICE.txt/build.sh',
-    ]) {
-      expect(detectMavenOwnership(root, [changed], parsed.reactor)).toEqual({
-        reactorWide: true,
-        modules: [],
-        inactiveProjects: [],
-      });
-    }
-    expect(
-      detectMavenOwnership(
-        root,
-        ['core/README.md/checkstyle.xml'],
-        parsed.reactor,
-      ),
-    ).toEqual({
-      reactorWide: false,
-      modules: ['core'],
-      inactiveProjects: [],
-    });
-  });
-
-  it('classifies a fail-never launch failure as infrastructure, not a pass', () => {
-    // `-fn` keeps Maven going after a mid-command ENOSPC and exits 0: the
-    // zero exit must not read as green, and the launch-class failure stays
-    // environmental like its exit-1 twin.
-    writeReactor();
-
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['core/src/Main.java'],
-      timeout: 5,
-      install: false,
-      exec: (command) =>
-        result(command, {
-          exitCode: 0,
-          output:
-            '[ERROR] Failed to write target/generated.txt: No space left on device',
-        }),
-    });
-
-    expect(report.ok).toBe(false);
-    expect(report.test[0]?.infrastructure).toBe(true);
-    expect(report.note).toContain('infrastructure evidence');
-    expect(report.note).toContain('fail-never');
-  });
-
-  it('treats chained local repositories from -Dmaven.repo.local.tail as dependency inputs', () => {
-    // Maven 3.9's chained local repositories: every entry is a local-
-    // repository location the PR can change.
-    writeReactor();
-    mkdirSync(join(root, '.mvn'));
-    mkdirSync(join(root, '.mvn-repo-cache'));
-    mkdirSync(join(root, '.mvn-repo-tail'));
-    writeFileSync(
-      join(root, '.mvn', 'maven.config'),
-      '-Dmaven.repo.local.tail=./.mvn-repo-cache,./.mvn-repo-tail\n',
-    );
-
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['.mvn-repo-tail/some/artifact.jar'],
-      timeout: 5,
-      install: false,
-      exec: (command) =>
-        result(command, {
-          exitCode: 1,
-          output:
-            '[ERROR] Could not resolve dependencies for project example:core',
-        }),
-    });
-
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
   });
 
   it('quotes the deadline the lifecycle actually ran under in its timeout note', () => {

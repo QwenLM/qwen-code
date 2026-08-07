@@ -1614,10 +1614,146 @@ describe('runTestPlan', () => {
         './mvnw -pl core -rf :core test',
         './mvnw -pl core -N test',
         './mvnw -pl core -f other/pom.xml test',
+        // The other semantics-altering value flags MAVEN_VALUE_FLAGS
+        // models: a claim carrying one cannot settle on a run that never
+        // used it — the adapter never injects any of these.
+        './mvnw -pl core -s ci-settings.xml test',
+        './mvnw -pl core -gs global-settings.xml test',
+        './mvnw -pl core -t jdk11-toolchains.xml test',
+        './mvnw -pl core -gt global-toolchains.xml test',
+        './mvnw -pl core -b smart test',
+        // The attached-value spelling the exact-token match missed.
+        './mvnw -pl core -amd=app test',
       ]) {
         const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
         expect(verdictOf(r.claims, command)).toBe('unchecked');
       }
+    });
+
+    it('does not settle a claim whose final positional token is not the claimed lifecycle', () => {
+      // `mvn test deploy` names deploy as its LAST work; settling the
+      // recognized `test` phase alone would read undisclosed. Trailing
+      // flag tokens (`-B`) still settle.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      const deploy = run('## Test Plan\n\nRan `mvn test deploy`', [], bt);
+      expect(verdictOf(deploy.claims, 'mvn test deploy')).toBe('unchecked');
+      expect(
+        deploy.claims.find((c) => c.text === 'mvn test deploy')?.note,
+      ).toContain('different scope or phase');
+
+      const site = run('## Test Plan\n\nRan `mvn test site`', [], bt);
+      expect(verdictOf(site.claims, 'mvn test site')).toBe('unchecked');
+
+      // Phase reduction still settles when the final token IS the phase.
+      const clean = run('## Test Plan\n\nRan `mvn clean test`', [], bt);
+      expect(verdictOf(clean.claims, 'mvn clean test')).toBe('reproduces');
+    });
+
+    it('settles a coordinate -pl claim on a directory-form run of the same artifact', () => {
+      // `-pl :core` selects by artifactId; the review's own runs select by
+      // directory, so the comparison normalizes the coordinate form — or
+      // such claims could never settle or be contradicted.
+      const green = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw -pl :core test`', [], green);
+      const claim = r.claims.find((c) => c.text === './mvnw -pl :core test');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain('module-scoped');
+    });
+
+    it('discloses the reduced form of an interrupted matching run too', () => {
+      // The interrupted-failure note must not read "this review ran it"
+      // when the run that recorded the failures was a module-scoped
+      // reduced form of the claim.
+      const output =
+        '[maven-test-report] core/target/surefire-reports/TEST-A.xml: tests=2, failures=1, errors=0, skipped=0\n' +
+        '[maven-test-failure] core/target/surefire-reports/TEST-A.xml: example.ATest#fails';
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: null,
+            seconds: 3,
+            timedOut: true,
+            output,
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.note).toContain('module-scoped');
+      expect(claim?.note).toContain('interrupted');
+    });
+
+    it('discloses the reduced form in the timeout and spawn-death notes', () => {
+      // The unchecked cascade phrased every matched run as "this Maven
+      // command was run by this review" — overstating a module-scoped
+      // reduced form of the claim exactly as the finished-run branches
+      // used to.
+      const timedOutBt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: null,
+            seconds: 120,
+            timedOut: true,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const timedOut = run('## Test Plan\n\nRan `./mvnw test`', [], timedOutBt);
+      const claim = timedOut.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('module-scoped');
+      expect(claim?.note).toContain('timed out');
+
+      const deathBt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: null,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const death = run('## Test Plan\n\nRan `./mvnw test`', [], deathBt);
+      const deathClaim = death.claims.find((c) => c.text === './mvnw test');
+      expect(deathClaim?.verdict).toBe('unchecked');
+      expect(deathClaim?.note).toContain('module-scoped');
+      expect(deathClaim?.note).toContain('ended without an exit code');
     });
 
     it('contradicts a claim when the interrupted run recorded fresh failures', () => {
@@ -2003,6 +2139,33 @@ describe('runTestPlan', () => {
       } as unknown as BuildTestReport;
       const r = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], failed);
       const claim = r.claims.find((c) => c.text === './mvnw -pl core test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit 1');
+    });
+
+    it('contradicts a root-module claim on failures in the root project', () => {
+      // The root twin of the guard above: `-pl .` claims the root module,
+      // and a failure marker rooted at `target/` (no module prefix) is
+      // INSIDE that claim even though the same marker sits outside every
+      // non-root module set.
+      const output =
+        '[maven-test-report] target/surefire-reports/TEST-Root.xml: tests=2, failures=1, errors=0, skipped=0\n' +
+        '[maven-test-failure] target/surefire-reports/TEST-Root.xml: example.RootTest#fails';
+      const failed = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl . -am test',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output,
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw -pl . test`', [], failed);
+      const claim = r.claims.find((c) => c.text === './mvnw -pl . test');
       expect(claim?.verdict).toBe('contradicted');
       expect(claim?.observed).toBe('exit 1');
     });

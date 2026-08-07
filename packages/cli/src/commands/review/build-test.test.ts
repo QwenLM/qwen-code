@@ -239,14 +239,20 @@ describe('runBuildTest', () => {
     writeFileSync(join(root, 'pom.xml'), '<project/>');
     writePlan(['src/Main.java']);
 
+    // 1.005s * 1000 = 1004.9999999999999 in IEEE-754: exactly the value
+    // spawnSync rejects. 0.1 rounds to an integer and would mask the
+    // regression; the explicit --budget keeps the wall-clock remainder
+    // above the fractional deadline so it is the binding term.
     const fractional = runBuildTest({
       plan: planPath,
       worktree: root,
-      timeout: 0.1,
+      timeout: 1.005,
+      budget: 600,
       install: false,
     });
     expect(fractional.toolchain).toBe('maven');
     expect(fractional.test).toHaveLength(1);
+    expect(fractional.test[0]?.deadlineMs).toBe(1005);
 
     const zero = runBuildTest({
       plan: planPath,
@@ -255,6 +261,32 @@ describe('runBuildTest', () => {
       install: false,
     });
     expect(zero.test[0]?.deadlineMs).toBe(1);
+  });
+
+  it('rejects non-finite --timeout and --budget with a descriptive error', () => {
+    // yargs `type: 'number'` hands over NaN for `--timeout abc`; NaN
+    // defeats every budget comparison and reaches spawnSync as an
+    // invalid deadline — ERR_OUT_OF_RANGE with no report at all.
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+
+    expect(() =>
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: Number.NaN,
+        install: false,
+      }),
+    ).toThrow(/--timeout must be a finite number/);
+    expect(() =>
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        budget: Number.POSITIVE_INFINITY,
+        install: false,
+      }),
+    ).toThrow(/--budget must be a finite number/);
   });
 
   it('leaves a Maven repo with a build-less package.json to the Maven adapter', () => {
@@ -943,6 +975,19 @@ describe('runBuildTest', () => {
         'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
       ),
     ).toContain(colored);
+  });
+
+  it('rescues Maven disk-failure lines from a trimmed middle', () => {
+    // The launch-failure classification runs on trimmed output; an ENOSPC
+    // line lost to the trim would file a disk failure against the PR (or,
+    // under fail-never, read the run green).
+    const line =
+      '[ERROR] Failed to write target/x.txt: No space left on device';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('disk failures');
   });
 
   it('caps the rescue so hostile prose cannot void the trim', () => {

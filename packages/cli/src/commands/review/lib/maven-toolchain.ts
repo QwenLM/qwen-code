@@ -10,6 +10,7 @@ import {
   existsSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import type { Dirent } from 'node:fs';
@@ -23,7 +24,12 @@ import {
   sep,
 } from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
-import { INSTALL_MIN_FREE_BYTES, freeDiskBytes, gib } from './disk.js';
+import {
+  BUILD_MIN_FREE_BYTES,
+  INSTALL_MIN_FREE_BYTES,
+  freeDiskBytes,
+  gib,
+} from './disk.js';
 import { shellQuotePath } from './shell-quote.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
@@ -41,6 +47,9 @@ export interface MavenReactor {
    * Inheritance edges: parent module dir -> the module dirs declaring it as
    * their `<parent>`. A changed parent POM is inherited by these modules
    * exactly as by aggregation children, so the POM-change closure walks both.
+   * Heirs of a NAMED parent file are keyed on the file path itself, not its
+   * directory, so they never conflate with the inheritors of that
+   * directory's own `pom.xml`.
    */
   inheritors: Record<string, string[]>;
   /**
@@ -127,6 +136,33 @@ const MAX_POM_BYTES = 2 * 1024 * 1024;
 const MAX_REACTOR_DEPTH = 512;
 
 /**
+ * The walk deduplicates by REAL PATH, so symlink-aliased dirs cannot
+ * multiply it; a project count past this cap is a hostile shape anyway.
+ * Fail closed with a reportable error instead of parsing without bound.
+ */
+const MAX_REACTOR_PROJECTS = 10_000;
+
+/**
+ * Cap how many fresh reports one run parses: the parse is synchronous,
+ * outside any deadline, on files the PR's own tests can write during the
+ * run (the mtime freshness filter accepts any writer). `MAX_REPORT_BYTES`
+ * bounds each file, but nothing else bounded the COUNT — thousands of
+ * 2 MiB reports are multi-GB of live strings and minutes of CPU past the
+ * outer tool timeout. Past the cap the evidence block discloses the
+ * omission like the other caps.
+ */
+const MAX_FRESH_REPORTS = 1_000;
+
+/**
+ * Cap the failing cases one report accumulates, while building it: the
+ * display caps in appendTestSummaries apply after every report was
+ * materialized, and one report can carry tens of thousands of failing
+ * `<testcase>` entries. The dropped count still joins the omission
+ * marker, so count adjudication sees the truncation.
+ */
+const MAX_FAILURE_CASES_PER_REPORT = 200;
+
+/**
  * Below this much remaining whole-call budget a Maven command is NOT
  * attempted — the same floor as the npm adapter, for the same reason: Maven
  * cannot boot and produce signal in a few hundred milliseconds, so an
@@ -206,14 +242,17 @@ interface PomStructure {
 /**
  * Split POM text into `<…>` tag tokens and text runs in one left-to-right
  * scan. A `>` inside a quoted attribute value stays inside the tag. An
- * unterminated tag ends the scan outright: no `>` remains after it, so no
- * valid tag can follow, and any text it would still emit can only reach an
- * active capture — which the missing closing tag then fails closed exactly
- * as the equivalent regex-tokenized garbage did. The regex tokenizer this
- * replaced backtracked quadratically on repeated `<` with no `>` anywhere,
- * on bytes a PR fully controls.
+ * unterminated QUOTE at EOF fails the POM closed: the scan would
+ * otherwise swallow the whole rest of the document into a phantom token
+ * and return a successful-but-shrunken structure (every later `<module>`
+ * silently lost) instead of the abort the parse promises. An unterminated
+ * tag with NO quote keeps the historical treatment: no `>` remains after
+ * it, so no complete tag can follow, and any capture it would still emit
+ * fails closed on its missing closing tag. The regex tokenizer this
+ * replaced backtracked quadratically on repeated `<` with no `>`
+ * anywhere, on bytes a PR fully controls.
  */
-function tokenizePom(pom: string): string[] {
+function tokenizePom(pom: string): string[] | null {
   const tokens: string[] = [];
   let i = 0;
   while (i < pom.length) {
@@ -236,7 +275,10 @@ function tokenizePom(pom: string): string[] {
         break;
       }
     }
-    if (end >= pom.length) break;
+    if (end >= pom.length) {
+      if (quote !== null) return null;
+      break;
+    }
     tokens.push(pom.slice(i, end + 1));
     i = end + 1;
   }
@@ -264,6 +306,7 @@ function parsePomStructure(pom: string): PomStructure | null {
   // Quote-aware: a `>` inside an attribute value is legal XML and occurs in
   // real plugin config; splitting the tag there fails the whole POM closed.
   const tokens = tokenizePom(stripped);
+  if (tokens === null) return null;
   for (const token of tokens) {
     if (!token.startsWith('<')) {
       if (capture) capture.text += token;
@@ -284,12 +327,20 @@ function parsePomStructure(pom: string): PomStructure | null {
           // the other shell-active characters.
           if (!text || /[<$>{}&%,:]/.test(text)) return null;
           entries.push(text);
-        } else if (capture.field === 'artifactId') {
-          artifactId = text;
-        } else if (capture.field === 'parentArtifactId') {
-          parentArtifactId = text;
         } else {
-          parentRelativePath = text;
+          // Maven decodes XML entities BEFORE matching parent resolution,
+          // but this harness captures raw text: an entity-spelled id
+          // (`my&#45;app`) and its decoded twin (`my-app`) would compare
+          // unequal here and silently delete a real inheritance edge. Fail
+          // closed on any entity, like the `<module>` gate above.
+          if (text.includes('&')) return null;
+          if (capture.field === 'artifactId') {
+            artifactId = text;
+          } else if (capture.field === 'parentArtifactId') {
+            parentArtifactId = text;
+          } else {
+            parentRelativePath = text;
+          }
         }
         capture = null;
       }
@@ -391,8 +442,21 @@ export function readMavenReactor(root: string): MavenReactorResult {
     if (depth > MAX_REACTOR_DEPTH) {
       return `Maven module nesting deeper than ${MAX_REACTOR_DEPTH} levels at ${toPosix(relative(reactorRoot, pomPath))}.`;
     }
-    if (visited.has(pomPath)) return null;
-    visited.add(pomPath);
+    // Deduplicate on the REAL path: symlink-aliased dirs produce
+    // exponentially many distinct lexical paths at constant depth, and a
+    // lexical key walks every one of them (2^depth visits) while the
+    // depth cap never engages.
+    let realPath: string;
+    try {
+      realPath = realpathSync(pomPath);
+    } catch (error) {
+      return `Cannot resolve ${toPosix(relative(reactorRoot, pomPath))}: ${(error as Error).message}`;
+    }
+    if (visited.has(realPath)) return null;
+    if (visited.size >= MAX_REACTOR_PROJECTS) {
+      return `Maven reactor lists more than ${MAX_REACTOR_PROJECTS} projects at ${toPosix(relative(reactorRoot, pomPath))}.`;
+    }
+    visited.add(realPath);
 
     let pom: string;
     try {
@@ -450,6 +514,11 @@ export function readMavenReactor(root: string): MavenReactorResult {
   // change to a higher parent away from the modules that inherit it.
   const inheritors = new Map<string, string[]>();
   const namedParentPoms = new Set<string>();
+  // Parsed structures of non-reactor parent files, memoized per absolute
+  // path: the worklist resolves each one once PER HEIR, and re-reading and
+  // re-parsing on every pop is O(#heirs x #parent files) on PR-controlled
+  // bytes, before any budget accounting exists.
+  const parentFileStructures = new Map<string, PomStructure>();
   // Named parent files some `<parent>` declaration names, including ones the
   // diff deleted: parentPomFiles below only records edges that survive on
   // disk, so a deleted file would otherwise stop being a dependency input
@@ -488,11 +557,15 @@ export function readMavenReactor(root: string): MavenReactorResult {
       };
     }
     let parentPom = resolve(reactorRoot, item.fromDir, relPath);
+    const namedParentFile = basename(parentPom) !== 'pom.xml';
     // Maven appends `pom.xml` only when the resolved path IS A DIRECTORY
     // (DefaultModelBuilder.getParentPomFile): a parent FILE may carry any
     // name. A path that is not an existing file keeps the historical append,
     // so an absent target never resolves onto its parent directory.
-    if (basename(parentPom) !== 'pom.xml') {
+    if (namedParentFile) {
+      // Record the declared path itself: git reports exactly it as the
+      // changed file even when the diff DELETED the file — precisely when
+      // the resolution failure it causes is the diff's own doing.
       if (isInside(reactorRoot, parentPom)) {
         declaredParentFiles.add(toPosix(relative(reactorRoot, parentPom)));
       }
@@ -507,6 +580,15 @@ export function readMavenReactor(root: string): MavenReactorResult {
     const parentDir = dirname(parentPom);
     if (!isInside(reactorRoot, parentDir)) continue;
     const parentPath = toPosix(relative(reactorRoot, parentDir)) || '.';
+    if (!namedParentFile && !structures.has(parentPath)) {
+      // A `pom.xml` the reactor does not aggregate is a declared parent
+      // too: record the FINAL resolved path, after the directory->pom.xml
+      // append. Deleting it dies as `Non-resolvable parent POM`, and
+      // without the entry that death launders into the infrastructure
+      // carve-out — git never reports the directory spelling as a changed
+      // file, only `<dir>/pom.xml`.
+      declaredParentFiles.add(toPosix(relative(reactorRoot, parentPom)));
+    }
     // Self-reference guard: only the heir's own `pom.xml` is a true
     // self-parent. A NAMED parent file inside the heir's own dir keeps its
     // full treatment below — registration and chain continuation — or the
@@ -524,29 +606,35 @@ export function readMavenReactor(root: string): MavenReactorResult {
     if (basename(parentPom) === 'pom.xml' && structures.has(parentPath)) {
       targetArtifactId = structures.get(parentPath)?.artifactId ?? null;
     } else {
-      let parentFile: string;
-      try {
-        if (statSync(parentPom).size > MAX_POM_BYTES) {
+      // A parse failure aborts the whole reactor read, so the cache only
+      // ever holds successful structures — null means "not parsed yet".
+      fileStructure = parentFileStructures.get(parentPom) ?? null;
+      if (fileStructure === null) {
+        let parentFile: string;
+        try {
+          if (statSync(parentPom).size > MAX_POM_BYTES) {
+            return {
+              error: `Maven POM ${toPosix(relative(reactorRoot, parentPom))} is larger than the ${MAX_POM_BYTES}-byte read cap.`,
+            };
+          }
+          parentFile = readFileSync(parentPom, 'utf8');
+        } catch (error) {
+          if (basename(parentPom) === 'pom.xml') {
+            // An absent `pom.xml` target: Maven falls back to repository
+            // resolution, so there is no local edge to model.
+            continue;
+          }
           return {
-            error: `Maven POM ${toPosix(relative(reactorRoot, parentPom))} is larger than the ${MAX_POM_BYTES}-byte read cap.`,
+            error: `Cannot read ${toPosix(relative(reactorRoot, parentPom))}: ${(error as Error).message}`,
           };
         }
-        parentFile = readFileSync(parentPom, 'utf8');
-      } catch (error) {
-        if (basename(parentPom) === 'pom.xml') {
-          // An absent `pom.xml` target: Maven falls back to repository
-          // resolution, so there is no local edge to model.
-          continue;
+        fileStructure = parsePomStructure(parentFile);
+        if (!fileStructure) {
+          return {
+            error: `Cannot safely parse literal Maven modules from ${toPosix(relative(reactorRoot, parentPom))}.`,
+          };
         }
-        return {
-          error: `Cannot read ${toPosix(relative(reactorRoot, parentPom))}: ${(error as Error).message}`,
-        };
-      }
-      fileStructure = parsePomStructure(parentFile);
-      if (!fileStructure) {
-        return {
-          error: `Cannot safely parse literal Maven modules from ${toPosix(relative(reactorRoot, parentPom))}.`,
-        };
+        parentFileStructures.set(parentPom, fileStructure);
       }
       targetArtifactId = fileStructure.artifactId;
     }
@@ -570,11 +658,14 @@ export function readMavenReactor(root: string): MavenReactorResult {
     // A named parent file inside the heir's own dir is parent config, not
     // an inheritor of itself.
     if (parentPath !== item.heir) {
-      const inherited = inheritors.get(parentPath);
+      const inheritorKey = namedParentFile
+        ? toPosix(relative(reactorRoot, parentPom))
+        : parentPath;
+      const inherited = inheritors.get(inheritorKey);
       if (inherited) {
         if (!inherited.includes(item.heir)) inherited.push(item.heir);
       } else {
-        inheritors.set(parentPath, [item.heir]);
+        inheritors.set(inheritorKey, [item.heir]);
       }
     }
   }
@@ -742,7 +833,11 @@ export function detectMavenOwnership(
         if (deepestFirst.includes(namedParentDir)) {
           modules.add(namedParentDir);
         }
-        addDescendantClosure(namedParentDir);
+        // Walk the closure from the FILE key: the heirs of a named parent
+        // file are recorded under the file itself, and walking the hosting
+        // directory would pull in that directory's own aggregation children
+        // and pom.xml inheritors, which the named file does not reach.
+        addDescendantClosure(path);
       }
       // Deliberately NO continue: the file still routes through the
       // ownership checks below, so the module whose tree holds it joins
@@ -811,7 +906,11 @@ export function detectMavenOwnership(
       modules.add('.');
       continue;
     }
-    reactorWide = true;
+    // A named parent file whose directory hosts no project of its own
+    // already scoped the run to its exact inheritor closure above: the
+    // catch-all would widen to the full reactor over a scope the closure
+    // has already computed.
+    if (namedParentDir === undefined) reactorWide = true;
   }
 
   return {
@@ -832,6 +931,8 @@ interface MavenTestSummary {
   errors: number;
   skipped: number;
   failedCases: string[];
+  /** Failing cases dropped by MAX_FAILURE_CASES_PER_REPORT while parsing. */
+  droppedCases: number;
 }
 
 function reportPaths(root: string, reactor: MavenReactor): string[] {
@@ -1060,6 +1161,7 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
   }
   if (suites === 0) return null;
   const failedCases: string[] = [];
+  let droppedCases = 0;
   let consumedUntil = 0;
   for (const header of xmlOpenTagHeaders(xml, 'testcase')) {
     const bodyStart = header.index + header.text.length;
@@ -1079,6 +1181,14 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
       consumedUntil = close.index + close[0].length;
     }
     if (!/<(?:failure|error)\b/i.test(body)) continue;
+    if (failedCases.length >= MAX_FAILURE_CASES_PER_REPORT) {
+      // Keep counting but stop materializing: one report can carry tens of
+      // thousands of failing cases, and the display cap in
+      // appendTestSummaries only ever shows a bounded prefix — the
+      // dropped count still joins the omission marker.
+      droppedCases += 1;
+      continue;
+    }
     const testcaseAttributes = xmlAttributes(header.attributes);
     const className = decodeXml(testcaseAttributes.get('classname') ?? '');
     const name = decodeXml(testcaseAttributes.get('name') ?? 'unknown');
@@ -1091,6 +1201,7 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
     errors,
     skipped,
     failedCases,
+    droppedCases,
   };
 }
 
@@ -1098,8 +1209,8 @@ function freshTestSummaries(
   root: string,
   reactor: MavenReactor,
   before: ReportSnapshot,
-): MavenTestSummary[] {
-  const summaries: MavenTestSummary[] = [];
+): { summaries: MavenTestSummary[]; unparsed: number } {
+  const fresh: string[] = [];
   for (const path of reportPaths(root, reactor)) {
     let mtime: number;
     try {
@@ -1109,14 +1220,19 @@ function freshTestSummaries(
     }
     const previous = before.mtimes.get(path);
     if (previous !== undefined && mtime <= previous) continue;
+    fresh.push(path);
+  }
+  // Byte-order, not localeCompare: evidence-line order must not depend on
+  // the host's ICU/locale settings. Sorting BEFORE the parse cap keeps the
+  // parsed subset deterministic (readdir order is not). All paths share
+  // the same root prefix, so absolute and relative order agree.
+  fresh.sort();
+  const summaries: MavenTestSummary[] = [];
+  for (const path of fresh.slice(0, MAX_FRESH_REPORTS)) {
     const summary = parseTestReport(root, path);
     if (summary) summaries.push(summary);
   }
-  // Byte-order, not localeCompare: evidence-line order must not depend on
-  // the host's ICU/locale settings.
-  return summaries.sort((a, b) =>
-    a.report < b.report ? -1 : a.report > b.report ? 1 : 0,
-  );
+  return { summaries, unparsed: Math.max(0, fresh.length - MAX_FRESH_REPORTS) };
 }
 
 /** Report paths are always `<projectDir>/target/<report-dir>/<file>` (see reportPaths). */
@@ -1134,8 +1250,9 @@ function projectDirOf(report: string): string {
 function appendTestSummaries(
   result: CommandResult,
   summaries: MavenTestSummary[],
+  unparsedReports: number,
 ): CommandResult {
-  if (summaries.length === 0) return result;
+  if (summaries.length === 0 && unparsedReports === 0) return result;
 
   const clean = new Map<string, MavenTestSummary[]>();
   const failing: MavenTestSummary[] = [];
@@ -1224,14 +1341,28 @@ function appendTestSummaries(
       (testcase) => `[maven-test-failure] ${summary.report}: ${testcase}`,
     ),
   );
-  if (caseLines.length > MAX_FAILURE_CASE_LINES) {
-    const omitted = caseLines.length - MAX_FAILURE_CASE_LINES;
-    caseLines.length = MAX_FAILURE_CASE_LINES;
+  // The per-report parse cap dropped cases BEFORE this point; their count
+  // joins the omission marker so count adjudication sees the truncation.
+  const droppedCases = failing.reduce(
+    (sum, summary) => sum + summary.droppedCases,
+    0,
+  );
+  const totalCaseLines = caseLines.length + droppedCases;
+  if (totalCaseLines > MAX_FAILURE_CASE_LINES) {
+    const omitted = totalCaseLines - MAX_FAILURE_CASE_LINES;
+    caseLines.length = Math.min(caseLines.length, MAX_FAILURE_CASE_LINES);
     caseLines.push(
       `[maven-test-failure] ${omitted} more failing case(s) omitted`,
     );
   }
   lines.push(...caseLines);
+
+  if (unparsedReports > 0) {
+    lines.push(
+      `[maven-test-report] ${unparsedReports} more fresh report(s) not parsed: ` +
+        `the ${MAX_FRESH_REPORTS}-report evidence cap was reached`,
+    );
+  }
 
   return { ...result, output: `${result.output}\n${lines.join('\n')}`.trim() };
 }
@@ -1277,6 +1408,19 @@ function mavenReport(
 }
 
 /**
+ * Maven-framed disk exhaustion. The line-level form is exported so
+ * `build-test`'s output trim rescues it from the omitted middle — the
+ * classification below runs on that trimmed output, and an ENOSPC line
+ * lost to the trim would file a disk failure against the PR (or, under
+ * fail-never, read the run green).
+ */
+const DISK_FAILURE_LINE_RE = /^\[(?:ERROR|FATAL)\].*No space left on device/i;
+
+export function isDiskFailureLine(line: string): boolean {
+  return DISK_FAILURE_LINE_RE.test(line);
+}
+
+/**
  * Shell and JVM launch diagnostics. The runner-missing and JAVA_HOME forms
  * are printed bare by the shell or the mvn launcher — never with Maven
  * framing — so requiring `[ERROR]` there would miss the real thing. The
@@ -1309,10 +1453,7 @@ function isLaunchFailure(output: string): boolean {
           line,
         ) ||
         /Unable to locate a Java Runtime/i.test(line),
-    ) ||
-    lines.some((line) =>
-      /^\[(?:ERROR|FATAL)\].*No space left on device/i.test(line),
-    )
+    ) || lines.some(isDiskFailureLine)
   );
 }
 
@@ -1436,9 +1577,17 @@ export function mavenExecutable(
  * location referenced there is a dependency input the PR can change.
  */
 function mavenConfigDependencyInputs(root: string): string[] {
+  const configPath = join(root, '.mvn', 'maven.config');
   let config: string;
   try {
-    config = readFileSync(join(root, '.mvn', 'maven.config'), 'utf8');
+    // The one PR-controlled read this adapter had without a size cap:
+    // measured at 37 MB the split cost seconds of synchronous CPU and
+    // hundreds of MB of transient heap, scaling linearly to GitHub's
+    // 100 MB per-file limit. Oversized configs fail closed like an
+    // unreadable one — the `.mvn/` prefix still marks the config file
+    // itself as a dependency input in the changed-files check.
+    if (statSync(configPath).size > MAX_POM_BYTES) return [];
+    config = readFileSync(configPath, 'utf8');
   } catch {
     return [];
   }
@@ -1448,8 +1597,9 @@ function mavenConfigDependencyInputs(root: string): string[] {
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     // Maven 3.9's chained local repositories: EVERY entry is a local-
-    // repository location. Checked before `-Dmaven.repo.local=` — the
-    // longer property merely starts with that prefix.
+    // repository location. The two prefixes are disjoint —
+    // `-Dmaven.repo.local.tail=` diverges from `-Dmaven.repo.local=` at
+    // `.tail`, not `=` — so the check ordering does not matter; keep both.
     if (token.startsWith('-Dmaven.repo.local.tail=')) {
       for (const part of token
         .slice('-Dmaven.repo.local.tail='.length)
@@ -1494,24 +1644,34 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // the warm-up and the lifecycle command SUM against the outer tool
   // timeout, and a cold reactor whose warm-up takes the whole sum leaves
   // the lifecycle command nothing — or the outer kill discards the report.
-  // It bounds what the COMMANDS spend: reactor parsing and scoping are
-  // linear and fast, and charging them would let millisecond overhead
-  // starve a call whose whole budget is one short deadline.
+  // It is wall clock from the TOP of the call, like the npm adapter's and
+  // the toolchain.ts contract: reactor parsing, ownership detection, and
+  // the report sweep are PR-controlled work too — a deep named-parent
+  // chain or a wide reactor costs real time before the first exec — and
+  // charging only exec time let that work run uncounted while the
+  // commands were still granted the full budget, summing past the outer
+  // tool timeout whose kill discards the report.
   const callBudgetMs =
     (args.budget ?? Math.max(args.timeout, args.timeout * 2 - 30)) * 1000;
-  let spentMs = 0;
-  /** Budget left for the whole call; every command spends from it. */
-  const remainingMs = (): number => callBudgetMs - spentMs;
-  const budgetedExec = (
-    command: string,
-    cwd: string,
-    timeoutMs: number,
-  ): CommandResult => {
-    const startedAt = Date.now();
-    const r = args.exec(command, cwd, timeoutMs);
-    spentMs += Date.now() - startedAt;
-    return r;
-  };
+  const callStartedAt = Date.now();
+  let ranACommand = false;
+  /** Budget left for the whole call; every phase spends from it. */
+  const remainingMs = (): number => callBudgetMs - (Date.now() - callStartedAt);
+  /**
+   * Whether a command may still be attempted. The floor never exceeds the
+   * caller's own per-command deadline: a run whose whole budget is one
+   * short deadline still gets that attempt, exactly as it did before
+   * budgeting existed — so the FIRST attempt keys on the granted budget,
+   * not the remainder (pre-command parsing spends a few milliseconds of
+   * wall clock, and comparing the floor to the remainder would starve a
+   * budget that equals one short deadline, including the zero-deadline
+   * edge the spawn boundary coerces to 1ms). Later attempts key on what
+   * remains.
+   */
+  const enoughForAttempt = (): boolean =>
+    ranACommand
+      ? remainingMs() >= attemptFloorMs
+      : callBudgetMs >= attemptFloorMs;
   const parsed = readMavenReactor(args.root);
   if (!parsed.reactor) {
     return unsupportedReport(
@@ -1677,19 +1837,19 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // install flag as `npm ci`: `--no-install` means "assume warm, fetch
   // nothing".
   let install: CommandResult | null = null;
-  if (args.install && remainingMs() >= attemptFloorMs) {
-    install = budgetedExec(
+  if (args.install && enoughForAttempt()) {
+    ranACommand = true;
+    install = args.exec(
       `${executable} --batch-mode --no-transfer-progress${narrowing} dependency:go-offline -q`,
       args.root,
-      Math.min(perCommandMs, remainingMs()),
+      Math.max(0, Math.min(perCommandMs, remainingMs())),
     );
   }
-  if (remainingMs() < attemptFloorMs) {
-    // spentMs === 0 means nothing ever ran: the budget was below the
-    // attempt floor from the start, so "was spent" would assert a
-    // consumption that has no consumer.
+  if (!enoughForAttempt()) {
+    // "Was spent" needs a consumer: name the floor instead when the
+    // grant itself was below it from the start.
     let note =
-      spentMs === 0
+      !ranACommand && callBudgetMs < attemptFloorMs
         ? `The granted budget (${Math.round(callBudgetMs / 1000)}s) is below the ` +
           `${Math.round(attemptFloorMs / 1000)}s minimum a Maven attempt needs, so nothing ` +
           'could be started, built, or tested. This is an infrastructure result, ' +
@@ -1714,21 +1874,46 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       note,
     });
   }
+  // The warm-up is the phase that fills the disk — re-check the floor
+  // before the lifecycle command, mirroring the npm adapter's SECOND
+  // preflight: a cold reactor's dependency:go-offline can consume the
+  // headroom the pre-warm-up check passed, and a lifecycle that dies on
+  // ENOSPC leaves a full disk that fails every agent scheduled after it.
+  const freeForLifecycle = freeDiskBytes(args.root);
+  if (freeForLifecycle !== null && freeForLifecycle < BUILD_MIN_FREE_BYTES) {
+    return mavenReport({
+      affected,
+      buildSet,
+      widenedWith: [],
+      install,
+      build: [],
+      test: [],
+      ok: false,
+      timedOut: [],
+      note:
+        `Insufficient disk space (${gib(freeForLifecycle)}G free, need ~${gib(BUILD_MIN_FREE_BYTES)}G): ` +
+        `skipped \`${command}\` — the dependency warm-up consumed the headroom the ` +
+        'preflight before it passed. This is an environment issue, not a code ' +
+        'finding — report it as informational.',
+    });
+  }
   // A build-only run never reads the evidence, so it skips the snapshot too
   // — on a large reactor that is a readdir + statSync sweep of every
   // reports dir for nothing.
   const before = args.buildOnly
     ? null
     : snapshotReports(args.root, parsed.reactor);
-  const executed = budgetedExec(
+  ranACommand = true;
+  const executed = args.exec(
     command,
     args.root,
-    Math.min(perCommandMs, remainingMs()),
+    Math.max(0, Math.min(perCommandMs, remainingMs())),
   );
-  const summaries = before
+  const fresh = before
     ? freshTestSummaries(args.root, parsed.reactor, before)
-    : [];
-  const result = appendTestSummaries(executed, summaries);
+    : { summaries: [], unparsed: 0 };
+  const summaries = fresh.summaries;
+  const result = appendTestSummaries(executed, summaries, fresh.unparsed);
   const timedOut = result.timedOut ? [result.command] : [];
   // A fresh report recording failures outranks a green exit: surefire's
   // `testFailureIgnore` (or `-Dmaven.test.failure.ignore`) lets `mvn test`

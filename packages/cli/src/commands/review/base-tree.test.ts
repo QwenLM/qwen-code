@@ -593,6 +593,51 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('does NOT treat a DIRECTORY named pom.xml as a Maven base', () => {
+    // `git cat-file -e` exits 0 for trees too; the probe must require a
+    // BLOB, or a directory named pom.xml beside an npm-buildable layout
+    // misfires the gate and permanently disables A/B for that base.
+    mkdirSync(join(repo, 'pom.xml'), { recursive: true });
+    writeFileSync(join(repo, 'pom.xml', 'inner.txt'), 'not a pom');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+    git(repo, 'add', 'pom.xml', 'package.json');
+    git(repo, 'commit', '-qam', 'pom.xml dir + npm base');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+    expect(r.note).not.toContain('Maven');
+  });
+
+  it('does NOT treat a nested DIRECTORY named pom.xml as a Maven base', () => {
+    // The nested variant of the same misfire: `app/pom.xml` as a tree
+    // entry must not fire the nested-pom probe.
+    mkdirSync(join(repo, 'app', 'pom.xml'), { recursive: true });
+    writeFileSync(join(repo, 'app', 'pom.xml', 'inner.txt'), 'not a pom');
+    git(repo, 'add', 'app');
+    git(repo, 'commit', '-qam', 'nested pom.xml dir base');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+    expect(r.note).not.toContain('Maven');
+  });
+
   it('treats a base carrying BOTH a root pom.xml and an npm package.json as Maven', () => {
     // The root-pom branch of the gate is unconditional: the npm half does
     // not rescue a Maven root. Symmetrizing the gate to condition the root

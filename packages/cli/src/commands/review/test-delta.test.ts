@@ -478,6 +478,25 @@ describe('runTestDelta', () => {
     expect(r.note).toContain('the whole-command budget shortened');
   });
 
+  it('coerces a fractional --timeout at the spawn boundary', () => {
+    // A decimal --timeout lands as a fractional deadline (60.123s * 1000
+    // = 60122.99999999999); spawnSync validates `timeout` as an unsigned
+    // integer and throws ERR_OUT_OF_RANGE on the raw value — with no
+    // report at all. Every other test injects the exec seam and bypasses
+    // the coercion, so this one drives the REAL spawn.
+    const r = runTestDelta({
+      report: writeReport([
+        cmd({ command: 'npm test', output: 'FAIL src/a.test.ts' }),
+      ]),
+      baseline,
+      timeout: 60.123,
+    });
+    // The rerun executed (npm fails fast in the empty base dir) instead
+    // of throwing out of the whole call.
+    expect(r.entries).toHaveLength(1);
+    expect(r.entries[0].base.timedOut).toBe(false);
+  });
+
   it('refuses an unreadable report and a missing base tree without throwing', () => {
     expect(
       runTestDelta({ report: join(dir, 'nope.json'), baseline, timeout: 60 })
