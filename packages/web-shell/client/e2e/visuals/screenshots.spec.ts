@@ -5,6 +5,7 @@
  */
 
 import { expect, test } from '@playwright/test';
+import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -95,6 +96,69 @@ for (const theme of THEMES) {
         page.getByRole('button', { name: 'Branch', exact: true }),
       ).toHaveCount(2);
       await captureScreenshot(page, `assistant-response-branch-${theme}`);
+    });
+
+    test(`parallel agents group`, async ({ page }, testInfo) => {
+      // The group renders only when a turn carries two or more background
+      // Agent tool calls; seed both as completed so the rows are static and
+      // leave no final answer, which keeps the turn expanded around them.
+      const agentToolCallEvent = (
+        id: number,
+        toolCallId: string,
+        description: string,
+      ): DaemonEvent => ({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId,
+            toolName: 'Agent',
+            title: 'Agent',
+            kind: 'other',
+            status: 'completed',
+            rawInput: { description, run_in_background: true },
+          },
+        },
+      });
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Split the migration across parallel agents.', {
+            id: 1,
+          }),
+          agentToolCallEvent(
+            2,
+            'call-agent-schema-audit',
+            'Audit the schema drift between services',
+          ),
+          agentToolCallEvent(
+            3,
+            'call-agent-backfill-plan',
+            'Draft the backfill plan for the users table',
+          ),
+          turnCompleteEvent('prompt-parallel-agents', { id: 4 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      const summary = messageList.getByRole('button', {
+        name: /Parallel agents/,
+      });
+      await expect(summary).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-collapsed-${theme}`);
+
+      await summary.click();
+      await expect(
+        messageList.getByText('Audit the schema drift between services'),
+      ).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-expanded-${theme}`);
     });
 
     test(`extensions manager`, async ({ page }, testInfo) => {

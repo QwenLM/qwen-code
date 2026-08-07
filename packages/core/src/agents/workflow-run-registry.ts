@@ -986,6 +986,7 @@ function restrictWorkflowConfirmationDetails(
         type: 'info',
         title: details.title,
         prompt: details.prompt,
+        renderPromptAsPlainText: details.renderPromptAsPlainText,
         urls: details.urls ? [...details.urls] : undefined,
         hideAlwaysAllow: true,
       };

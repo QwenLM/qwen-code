@@ -339,12 +339,15 @@ describe('manifest repository context provider', () => {
   it.each([
     '.git',
     '.next',
+    '.playwright',
     '.turbo',
     'coverage',
     'dist',
     'node_modules',
     'out',
+    'playwright-report',
     'target',
+    'test-results',
   ])(
     'never descends into %s',
     (name) => {

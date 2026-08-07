@@ -17,6 +17,13 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
+import {
+  emptyMobileComposerLayout,
+  emptyMobileComposerSelectors,
+  expectEmptyMobileComposerAnchored,
+  expectEmptyMobileWelcomeChromeVisible,
+  gotoEmptyMobileWelcomeHarness,
+} from './utils/emptyMobileComposer';
 
 const COMPOSER_VIEWPORT_HEIGHTS = [1000, 800, 600] as const;
 
@@ -552,6 +559,133 @@ test('loads Voice status from the active secondary workspace @smoke', async ({
         request.method === 'GET' && request.path === '/workspace/voice',
     ),
   ).toBe(false);
+});
+
+test('anchors the empty mobile composer to the chat pane across the breakpoint @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  const narrowLayout = await emptyMobileComposerLayout(page);
+  expectEmptyMobileComposerAnchored(narrowLayout);
+
+  await editor.click();
+  await page.keyboard.type('Composer remains interactive');
+  await expect(editor).toContainText('Composer remains interactive');
+
+  await page.setViewportSize({ width: 761, height: 900 });
+  await expect
+    .poll(() => emptyMobileComposerLayout(page))
+    .toMatchObject({
+      chatViewPosition: 'relative',
+      footerPosition: 'relative',
+    });
+  const wideLayout = await emptyMobileComposerLayout(page);
+  if (
+    wideLayout.welcomeFooterTop === null ||
+    wideLayout.welcomeFooterBottom === null
+  ) {
+    throw new Error('Expected a visible welcome footer above the breakpoint.');
+  }
+  expect(wideLayout.welcomeFooterBottom).toBeGreaterThan(
+    wideLayout.welcomeFooterTop,
+  );
+
+  await page.setViewportSize({ width: 760, height: 900 });
+  await expect
+    .poll(() => emptyMobileComposerLayout(page))
+    .toMatchObject({
+      chatViewPosition: 'static',
+      footerPosition: 'absolute',
+    });
+  const narrowLayoutAfterResize = await emptyMobileComposerLayout(page);
+  expectEmptyMobileComposerAnchored(narrowLayoutAfterResize);
+});
+
+test('anchors the empty mobile composer without a welcome footer @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, { welcomeFooter: false });
+  await expectEmptyMobileWelcomeChromeVisible(page, {
+    requireWelcomeFooter: false,
+  });
+
+  const layout = await emptyMobileComposerLayout(page, {
+    requireWelcomeFooter: false,
+  });
+  expectEmptyMobileComposerAnchored(layout, {
+    requireWelcomeFooter: false,
+  });
+});
+
+test('keeps the bottom status panel visible in the custom footer mobile welcome variant @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  const composer = page.locator(emptyMobileComposerSelectors.composerSurface);
+  const customFooter = page.locator('[data-e2e-custom-footer]');
+  const statusItem = page.getByText('Bottom status item');
+  const chatPane = page.getByTestId('chat-pane-container');
+
+  await expect(composer).toBeVisible();
+  await expect(customFooter).toBeVisible();
+  await expect(statusItem).toHaveCount(1);
+
+  const statusPanelBox = await statusItem.boundingBox();
+  const chatPaneBox = await chatPane.boundingBox();
+  if (!statusPanelBox || !chatPaneBox) {
+    throw new Error('Expected the status panel and chat pane to be measured.');
+  }
+  expect(statusPanelBox.height).toBeGreaterThan(0);
+  expect(statusPanelBox.y).toBeGreaterThanOrEqual(chatPaneBox.y);
+  expect(statusPanelBox.y + statusPanelBox.height).toBeLessThanOrEqual(
+    chatPaneBox.y + chatPaneBox.height,
+  );
+
+  // This variant renders the composer footer `display: contents`, so the
+  // anchored-layout helper has no footer box to measure and must reject
+  // instead of reporting a misleading zero rect.
+  await expect(emptyMobileComposerLayout(page)).rejects.toThrow(
+    /custom footer welcome variant/,
+  );
+});
+
+test('anchors the empty mobile composer with a custom footer but no welcome footer @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, {
+    customFooter: true,
+    welcomeFooter: false,
+  });
+  await expect(page.locator('[data-e2e-custom-footer]')).toBeVisible();
+  await expectEmptyMobileWelcomeChromeVisible(page, {
+    requireWelcomeFooter: false,
+  });
+
+  const layout = await emptyMobileComposerLayout(page, {
+    requireWelcomeFooter: false,
+  });
+  expectEmptyMobileComposerAnchored(layout, {
+    requireWelcomeFooter: false,
+  });
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

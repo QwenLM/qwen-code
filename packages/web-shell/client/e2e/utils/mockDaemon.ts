@@ -61,6 +61,7 @@ export interface WebShellDaemonScenario {
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals: Record<string, string[]>;
+  pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -123,6 +124,7 @@ type ScenarioOverrides = Partial<
     | 'channels'
     | 'pairingRequests'
     | 'pairingApprovals'
+    | 'pairingGroupApprovals'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -140,6 +142,7 @@ type ScenarioOverrides = Partial<
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals?: Record<string, string[]>;
+  pairingGroupApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -355,6 +358,7 @@ export function createWebShellDaemonScenario(
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
     pairingApprovals: overrides.pairingApprovals ?? {},
+    pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
@@ -921,15 +925,27 @@ async function handleDaemonRoute(
         ...scenario.pairingRequests,
         [name]: remaining,
       };
-      scenario.pairingApprovals = {
-        ...scenario.pairingApprovals,
-        [name]: Array.from(
-          new Set([
-            ...(scenario.pairingApprovals[name] ?? []),
-            approved.senderId,
-          ]),
-        ),
-      };
+      if (approved.subject?.type === 'group') {
+        scenario.pairingGroupApprovals = {
+          ...scenario.pairingGroupApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingGroupApprovals[name] ?? []),
+              approved.subject.id,
+            ]),
+          ),
+        };
+      } else {
+        scenario.pairingApprovals = {
+          ...scenario.pairingApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingApprovals[name] ?? []),
+              approved.senderId,
+            ]),
+          ),
+        };
+      }
       await json(route, { approved, requests: remaining });
       return;
     }
@@ -940,13 +956,18 @@ async function handleDaemonRoute(
   if (pairingApprovalsMatch) {
     const name = decodeURIComponent(pairingApprovalsMatch[1]);
     const senderIds = scenario.pairingApprovals[name] ?? [];
+    const groupIds = scenario.pairingGroupApprovals[name] ?? [];
     if (method === 'GET') {
-      await json(route, { senderIds });
+      await json(route, { senderIds, groupIds });
       return;
     }
     if (method === 'DELETE') {
       const senderId = String(getRecordValue(body, 'senderId') ?? '');
-      if (!senderIds.includes(senderId)) {
+      const groupId = String(getRecordValue(body, 'groupId') ?? '');
+      const known = senderId
+        ? senderIds.includes(senderId)
+        : groupIds.includes(groupId);
+      if (!known) {
         await json(
           route,
           {
@@ -957,12 +978,26 @@ async function handleDaemonRoute(
         );
         return;
       }
-      const remaining = senderIds.filter((item) => item !== senderId);
+      const remainingSenders = senderId
+        ? senderIds.filter((item) => item !== senderId)
+        : senderIds;
+      const remainingGroups =
+        groupId && !senderId
+          ? groupIds.filter((item) => item !== groupId)
+          : groupIds;
       scenario.pairingApprovals = {
         ...scenario.pairingApprovals,
-        [name]: remaining,
+        [name]: remainingSenders,
       };
-      await json(route, { revoked: senderId, senderIds: remaining });
+      scenario.pairingGroupApprovals = {
+        ...scenario.pairingGroupApprovals,
+        [name]: remainingGroups,
+      };
+      await json(route, {
+        revoked: senderId || groupId,
+        senderIds: remainingSenders,
+        groupIds: remainingGroups,
+      });
       return;
     }
   }

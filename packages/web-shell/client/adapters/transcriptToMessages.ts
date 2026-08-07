@@ -62,7 +62,7 @@ function collectBackgroundAgentTaskUpdates(
 ): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
   const updates = new Map<string, BackgroundAgentTaskUpdate>();
   for (const block of blocks) {
-    if (block.kind !== 'assistant') continue;
+    if (block.kind !== 'assistant' && block.kind !== 'user') continue;
     const meta = getRecord(block.meta);
     if (
       meta?.['source'] !== 'background_notification' ||
