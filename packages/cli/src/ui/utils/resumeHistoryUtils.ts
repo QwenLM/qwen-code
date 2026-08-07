@@ -27,6 +27,7 @@ import type {
   HistoryItemInfo,
   HistoryItemWithoutId,
   IndividualToolCallDisplay,
+  InlineImageData,
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
@@ -36,6 +37,10 @@ import {
   indexGapsByChild,
 } from './history-gap-notice.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
+import {
+  collectInlineImages,
+  extractInlineContentRuns,
+} from './inline-image-parts.js';
 
 /**
  * Projects a plain user record to its display text.
@@ -217,6 +222,8 @@ function convertToHistoryItems(
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
     detailedDisplay?: string;
+    images?: InlineImageData[];
+    omittedImageCount?: number;
     status: ToolCallStatus;
     confirmationDetails: undefined;
   }> = [];
@@ -439,8 +446,7 @@ function convertToHistoryItems(
         // verbatim because there is no live loading area in that view.
         const thoughtText = !config ? extractThoughtTextFromParts(parts) : '';
 
-        // Extract text content (non-function-call, non-thought)
-        const text = extractTextFromParts(parts);
+        const displayRuns = extractInlineContentRuns(parts, '\n');
 
         // Extract function calls
         const functionCalls = extractFunctionCalls(parts);
@@ -458,9 +464,8 @@ function convertToHistoryItems(
           items.push({ type: 'gemini_thought', text: thoughtText });
         }
 
-        // If there's text content, add it as a gemini message
-        if (text) {
-          // Flush any pending tool group before text
+        if (displayRuns.length > 0) {
+          // Flush any pending tool group before assistant output.
           if (currentToolGroup.length > 0) {
             items.push({
               type: 'tool_group',
@@ -468,11 +473,30 @@ function convertToHistoryItems(
             });
             currentToolGroup = [];
           }
-          items.push({
-            type: 'gemini',
-            text,
-            timestamp: new Date(record.timestamp).getTime(),
-          });
+          for (const [index, run] of displayRuns.entries()) {
+            const type = index === 0 ? 'gemini' : 'gemini_content';
+            const timestamp =
+              index === 0
+                ? { timestamp: new Date(record.timestamp).getTime() }
+                : {};
+            if (run.kind === 'text') {
+              items.push({ type, text: run.text, ...timestamp });
+            } else if (run.kind === 'image') {
+              items.push({
+                type,
+                text: '',
+                images: [run.image],
+                ...timestamp,
+              });
+            } else {
+              items.push({
+                type,
+                text: '',
+                omittedImageCount: run.count,
+                ...timestamp,
+              });
+            }
+          }
         }
 
         // Track function calls for pairing with results
@@ -500,6 +524,9 @@ function convertToHistoryItems(
           const callId = record.toolCallResult.callId;
           const toolCall = currentToolGroup.find((t) => t.callId === callId);
           if (toolCall) {
+            const responseParts =
+              (record.toolCallResult.responseParts as Part[] | undefined) ??
+              (record.message?.parts as Part[] | undefined);
             // Preserve the resultDisplay as-is - it can be a string or structured object
             const rawDisplay = record.toolCallResult.resultDisplay;
             toolCall.resultDisplay = rawDisplay;
@@ -515,6 +542,14 @@ function convertToHistoryItems(
               rawStatus === 'error'
                 ? ToolCallStatus.Error
                 : ToolCallStatus.Success;
+            const { images, omittedImageCount } =
+              collectInlineImages(responseParts);
+            if (images.length > 0) {
+              toolCall.images = images;
+            }
+            if (omittedImageCount > 0) {
+              toolCall.omittedImageCount = omittedImageCount;
+            }
             // Full detail for the Ctrl+O transcript (§4.9): the complete
             // functionResponse parts are persisted on the tool_result record
             // (only resultDisplay is sanitized), so resume yields full detail
@@ -529,10 +564,8 @@ function convertToHistoryItems(
               toolCall.status === ToolCallStatus.Success &&
               isCollapsibleTool(toolCall.name)
             ) {
-              toolCall.detailedDisplay = getToolResponseDisplayText(
-                (record.toolCallResult.responseParts as Part[] | undefined) ??
-                  (record.message?.parts as Part[] | undefined),
-              );
+              toolCall.detailedDisplay =
+                getToolResponseDisplayText(responseParts);
             }
           }
           pendingToolCalls.delete(callId || '');

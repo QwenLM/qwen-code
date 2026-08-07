@@ -55,7 +55,7 @@ The finalizer recomputes `contentLength` from the returned parts. Infinite or di
 - Core scheduler finalizes before `PostToolBatch` hooks to bound hook input and again after the hook to bound hook output.
 - Interactive mode merges executable, duplicate, and synthetic responses in original ordinal order, then performs the outer finalization before recording and submission.
 - Headless mode collects the whole turn, including duplicate, skipped, cancelled, and executed calls, then finalizes once before recording and submission.
-- ACP collects the complete tool-call turn, finalizes it before transcript recording, and returns the same parts for the next message. Immediate ACP display events remain unchanged.
+- ACP collects the complete tool-call turn, finalizes it before transcript recording, and returns the same parts for the next message. Canonical and model-facing parts remain unchanged, while eligible textual fields in immediate ACP display events may be projected to a fixed JSON UTF-8 byte budget at the transport boundary.
 - Agent runtime and speculative follow-up finalize their aggregate before emitting model-facing results or appending history.
 - The chat send boundary applies a no-I/O safety cap to tool-response fields only. It should normally be a no-op and protects future callers that miss an outer aggregation boundary.
 

@@ -936,7 +936,10 @@ export const AppContainer = (props: AppContainerProps) => {
         // Seed the prompt counter from the resumed conversation so new
         // promptIds don't collide with restored file history snapshots.
         const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) => m.type === 'user' && m.subtype !== 'mid_turn_user_message',
+          (m) =>
+            m.type === 'user' &&
+            m.subtype !== 'mid_turn_user_message' &&
+            m.subtype !== 'realtime_message',
         ).length;
         if (userTurnCount > 0) {
           seedPromptCount(userTurnCount);
@@ -1494,6 +1497,12 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, [addHistoryItem, config]);
 
+  const clearPendingStateRef = useRef<() => void>(() => {});
+  const clearPendingStateFromRef = useCallback(
+    () => clearPendingStateRef.current(),
+    [],
+  );
+
   const {
     isResumeDialogOpen,
     resumeMatchedSessions,
@@ -1505,6 +1514,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
   });
@@ -1514,6 +1524,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
   });
@@ -1732,6 +1743,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleBranch,
       openDeleteDialog,
       openHelpDialog,
+      clearPendingState: () => clearPendingStateRef.current(),
     }),
     [
       openAuthDialog,
@@ -2041,6 +2053,7 @@ export const AppContainer = (props: AppContainerProps) => {
     submitQuery,
     initError,
     pendingHistoryItems: pendingGeminiHistoryItems,
+    clearPendingState,
     thought,
     cancelOngoingRequest,
     preemptGoalTurn,
@@ -2079,6 +2092,7 @@ export const AppContainer = (props: AppContainerProps) => {
     goalQueueRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
+  clearPendingStateRef.current = clearPendingState;
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -2927,6 +2941,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const handleClearScreen = useCallback(() => {
+    clearPendingStateRef.current();
     historyManager.clearItems();
     clearScreen();
     remountStaticHistory();
@@ -3574,6 +3589,7 @@ export const AppContainer = (props: AppContainerProps) => {
           const truncatedUi = expandCollapsedHistory(
             originalHistory.filter((h) => h.id < userItem.id),
           );
+          clearPendingStateRef.current();
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();

@@ -15,6 +15,7 @@ import {
   SessionOrganizationError,
   SessionService,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptCursorCodec,
@@ -33,6 +34,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  isReservedLiveSessionSource,
+  readLoadableLiveConversationMetadata,
+} from '../live/session-source.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { loadSettingsCached } from '../../config/settings-cache.js';
@@ -167,9 +172,19 @@ interface RegisterSessionRoutesDeps {
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
+  materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
+  isLiveSessionActive?: (sessionId: string) => boolean;
 }
 
-const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+// Chosen cap for one serialized transcript response, kept proportional to
+// the core expanded-page ceiling so the two cannot drift arbitrarily. This
+// is not a derived guarantee: a single aggregated record can exceed any
+// page budget (the reader always takes at least one record so pagination
+// cannot dead-end), and replayed SessionUpdate objects are not a fixed
+// multiple of their source records. A page this route cannot serialize
+// returns transcript_page_too_large for that anchor.
+const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
+  2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
@@ -480,6 +495,23 @@ export function registerSessionRoutes(
         activeBranchSessions.delete(cwd);
       }
     }
+  };
+
+  const rejectActiveLiveSessionMutation = (
+    res: Response,
+    sessionIds: readonly string[],
+  ): boolean => {
+    const activeSessionId = sessionIds.find((sessionId) =>
+      deps.isLiveSessionActive?.(sessionId),
+    );
+    if (!activeSessionId) return false;
+    res.status(409).json({
+      error:
+        'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+      code: 'live_session_active',
+      sessionId: activeSessionId,
+    });
+    return true;
   };
 
   /** Roll back a branch creation: restore the base ref and delete the branch. */
@@ -1288,6 +1320,14 @@ export function registerSessionRoutes(
     const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
     if (resolvedRuntime === undefined) return;
     const { runtime, workspaceCwd } = resolvedRuntime;
+    if (runtime.provenance === 'live-conversation') {
+      res.status(400).json({
+        error:
+          'Sessions in the Conversations workspace can only be created by Live Voice.',
+        code: 'live_session_creation_reserved',
+      });
+      return;
+    }
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -1313,6 +1353,14 @@ export function registerSessionRoutes(
       res.status(400).json({
         error: source.error,
         code: 'invalid_session_source',
+      });
+      return;
+    }
+    if (isReservedLiveSessionSource(source)) {
+      res.status(400).json({
+        error:
+          'The requested session source is reserved for daemon-owned Live Voice sessions.',
+        code: 'reserved_session_source',
       });
       return;
     }
@@ -2107,28 +2155,106 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
+            const sessionService =
+              createWorkspaceRuntimeSessionService(runtime);
             const metadata =
-              await createWorkspaceRuntimeSessionService(
-                runtime,
-              ).readCreationMetadata(sessionId);
+              runtime.provenance === 'live-conversation'
+                ? await readLoadableLiveConversationMetadata(
+                    sessionId,
+                    (candidateId) =>
+                      sessionService.readCreationMetadata(candidateId),
+                  )
+                : await sessionService.readCreationMetadata(sessionId);
+            if (metadata === undefined) {
+              throw new SessionNotFoundError(sessionId);
+            }
+            let liveConversationCwd: string | undefined;
+            if (runtime.provenance === 'live-conversation') {
+              const materialize = deps.materializeLiveConversationDirectory;
+              if (!materialize) {
+                throw new Error('Live conversation workspace is unavailable.');
+              }
+              liveConversationCwd = await materialize(sessionId);
+            }
             runtime.generationGuard?.assertOpen();
-            return action === 'load'
-              ? await runtime.bridge.loadSession({
+            const restored =
+              action === 'load'
+                ? await runtime.bridge.loadSession({
+                    sessionId,
+                    workspaceCwd,
+                    historyReplay: 'response',
+                    ...(historyPageSize !== undefined
+                      ? { historyPageSize }
+                      : {}),
+                    ...(clientId !== undefined ? { clientId } : {}),
+                    ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...metadata,
+                  })
+                : await runtime.bridge.resumeSession({
+                    sessionId,
+                    workspaceCwd,
+                    ...(clientId !== undefined ? { clientId } : {}),
+                    ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...metadata,
+                  });
+            // Every path that can register a Live entry relocates it before a
+            // prompt can start. Re-queuing cd for an active entry would block
+            // this load behind the prompt it is meant to observe.
+            if (liveConversationCwd !== undefined) {
+              if (restored.hasActivePrompt) {
+                if (restored.currentCwd === liveConversationCwd) {
+                  return restored;
+                }
+                try {
+                  if (restored.clientId) {
+                    await runtime.bridge.detachClient(
+                      restored.sessionId,
+                      restored.clientId,
+                    );
+                  }
+                } catch {
+                  // Preserve the isolation error. Never kill an active owner.
+                }
+                throw new Error(
+                  'Active Live session is outside its isolated conversation directory.',
+                );
+              }
+              try {
+                const changed = await runtime.bridge.changeSessionCwd(
                   sessionId,
-                  workspaceCwd,
-                  historyReplay: 'response',
-                  ...(historyPageSize !== undefined ? { historyPageSize } : {}),
-                  ...(clientId !== undefined ? { clientId } : {}),
-                  ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...metadata,
-                })
-              : await runtime.bridge.resumeSession({
-                  sessionId,
-                  workspaceCwd,
-                  ...(clientId !== undefined ? { clientId } : {}),
-                  ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...metadata,
-                });
+                  {
+                    path: liveConversationCwd,
+                    allowedRoots: [runtime.workspaceCwd],
+                    managedRelocation: 'live-conversation',
+                  },
+                );
+                if (changed.newCwd !== liveConversationCwd) {
+                  throw new Error(
+                    'Live conversation directory relocation was rejected.',
+                  );
+                }
+                restored.currentCwd = changed.newCwd;
+              } catch (error) {
+                try {
+                  if (restored.attached) {
+                    if (restored.clientId) {
+                      await runtime.bridge.detachClient(
+                        restored.sessionId,
+                        restored.clientId,
+                      );
+                    }
+                  } else {
+                    await runtime.bridge.killSession(restored.sessionId, {
+                      requireZeroAttaches: true,
+                    });
+                  }
+                } catch {
+                  // Preserve the relocation error.
+                }
+                throw error;
+              }
+            }
+            return restored;
           },
         );
         try {
@@ -2183,7 +2309,7 @@ export function registerSessionRoutes(
         // Note: the !res.writable early-return above skips this restore;
         // a client that disconnects mid-load leaves the session parked in
         // the main workspace (pre-existing shape, low frequency).
-        if (!session.worktree) {
+        if (runtime.provenance !== 'live-conversation' && !session.worktree) {
           const sidecar = await readWorktreeSession(
             createWorkspaceRuntimeSessionService(
               runtime,
@@ -2764,6 +2890,16 @@ export function registerSessionRoutes(
               runtime.workspaceCwd,
               codec,
             );
+            const hasActivePrompt = (): boolean => {
+              try {
+                return runtime.bridge.getSessionSummary(sessionId)
+                  .hasActivePrompt;
+              } catch (error) {
+                if (error instanceof SessionNotFoundError) return false;
+                throw error;
+              }
+            };
+            const activePromptBeforeRead = hasActivePrompt();
             let page;
             try {
               page = await reader.readPage(sessionId, {
@@ -2791,9 +2927,12 @@ export function registerSessionRoutes(
             if (page.records.some((record) => record.sessionId !== sessionId)) {
               throw new SessionTranscriptSnapshotUnavailableError(sessionId);
             }
+            const activePromptAfterRead = hasActivePrompt();
             const replay = await replayTranscriptRecordPage({
               sessionId,
               page,
+              finalizeDangling:
+                !activePromptBeforeRead && !activePromptAfterRead,
               encodeCursor: (state) => codec.encode(state),
             });
             const cursorTooLarge =
@@ -3546,6 +3685,7 @@ export function registerSessionRoutes(
 
   app.delete('/session/:id', async (req, res) => {
     const sessionId = req.params['id'];
+    if (rejectActiveLiveSessionMutation(res, [sessionId])) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     const runtime = resolveLiveSessionRuntime(
@@ -3578,6 +3718,7 @@ export function registerSessionRoutes(
     if (clientId === null) return;
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
     try {
       const runtime = workspaceRegistry.primary;
       const service = createWorkspaceRuntimeSessionService(runtime);
@@ -3606,6 +3747,7 @@ export function registerSessionRoutes(
   app.post('/sessions/archive', mutate(), async (req, res) => {
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     const runtime = workspaceRegistry.primary;
     const service = createWorkspaceRuntimeSessionService(runtime, {
@@ -3671,6 +3813,7 @@ export function registerSessionRoutes(
       if (clientId === null) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const service = createWorkspaceRuntimeSessionService(runtime);
         const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
@@ -3705,6 +3848,7 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       const service = createWorkspaceRuntimeSessionService(runtime, {
         onWarning: logSessionArchiveWarning,
       });

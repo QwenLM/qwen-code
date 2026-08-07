@@ -225,6 +225,10 @@ A finding is skipped when its fix would change intended behavior, would need cha
 
 Confirmed findings are canonicalized into `.qwen/tmp/qwen-review-<target>-findings.json` before anything else consumes them — the terminal report, the saved Markdown report, and the PR review JSON all read that one artifact instead of re-typing the list. Each finding carries a unique `id` (what outcomes and resolved anchors join on), `severity`, `confidence`, `source`, `summary`, a `shortSummary` capped at 60 characters for list rendering, `failureScenario`, and one or more `locations` — a pattern-aggregated finding keeps **one location per occurrence**, so each still gets its own inline comment.
 
+**Before anything else, the review checks that it is running your code.** Every `qwen review …` step runs the built bundle, not the working tree, so a review command edited since the last build takes no effect and the run measures the old behaviour. The build records a digest of the review sources it bundled; `parse-args` re-derives it and compares, and `drive` checks again, because the verifier brief sends agents straight there without a step 1. On a mismatch it says on stderr that the bundle was not built from these sources, and what to rebuild. The check runs when the CLI resolves to the bundled `dist/cli.js` (the `qwen` binary, or `node dist/cli.js`); launchers that run unbundled output, such as `npm start` and `npm run dev`, skip it. Two cases it cannot compare are treated differently: a checkout whose build predates the recording is told the check could not run and why, and an installed package — which has no sources to differ from — is left silent. The digest covers the review commands, the file that registers them, the review-only lease they import from outside their directory, and the bundled review skill; it does not follow those into the shared helpers they import, so a quiet run means the review code matches the bundle rather than that the whole tree does.
+
+**A Critical the base tree already failed is held back, not filed.** When a test command failed and the merge base could be built, `test-delta` records which failing files also fail without the pull request. Canonicalization reads that measurement back (`qwen review findings --test-delta`, beside `--outcomes`): a Critical whose own text names one of those files is lowered to a Suggestion, keeps its evidence, gains the measurement that demoted it and a `heldByMeasurement` field, and the demotion is announced. A test that was already red is not a test this pull request turns red — and if it now fails for a _new_ reason, say which test, quote both sides, and file it at Critical again: a finding that already carries the measurement and is raised anyway is left where you put it.
+
 The command validates on write: a duplicate id, a finding with no failure scenario, an empty locations array, or an unknown severity is an error rather than a silently mangled entry.
 
 ## Evidence Images in PR Comments
@@ -237,6 +241,8 @@ export QWEN_REVIEW_ASSETS_REPO=your-org/your-repo   # a repo you can push to
 ```
 
 Maintainers typically point it at the repo under review; anyone else can use a fork or a scratch repo. Images land on the `pr-assets/<pr>-review` branch with content-hashed names, and comments reference them by **commit-pinned** URL — immutable even if the branch later moves, and working unchanged on GitHub Enterprise.
+
+For GitHub-triggered reviews (the PR-review workflow), the same variable is wired from a **repository variable** of the same name: with the variable unset the workflow passes an empty value and publishing refuses — nothing changes. A maintainer who sets `QWEN_REVIEW_ASSETS_REPO` in the repository's Actions variables (typically to the repository itself) enables review comments to embed capture PNGs; the branches it writes are cleaned up by the visuals cleanup workflow when the variable points at the same repository, while a fork or scratch destination manages its own retention.
 
 The publishing is gated exactly like posting: no designated repo means no publish, and an unauthorized run (no effective `--comment`) is refused the same way `submit` refuses. Only image types are accepted (SVG is excluded deliberately), with size caps, and each file's bytes must match the format its extension claims — mislabeled or unrecognized content is refused. A manifest records every file pushed. Without a designation, findings keep their evidence as local file paths in the terminal and saved report — nothing breaks, comments just stay text-only.
 
@@ -263,6 +269,33 @@ You can customize review criteria per project. `/review` reads rules from these 
 4. `QWEN.md` — `## Code Review` section
 
 Rules are injected into the LLM review agents (0-6) as additional criteria. For PR reviews, rules are read from the **base branch** to prevent a malicious PR from injecting bypass rules.
+
+## Repository Context
+
+Repositories can hand the reviewers bounded, repository-specific guidance by committing a strict JSON manifest to `.qwen/review-context.json`. At medium or high effort, `/review` reads the manifest after capturing the plan and attaches the matching guidance before any agent launches:
+
+```json
+{
+  "version": 1,
+  "label": "Example repository",
+  "rules": [
+    {
+      "paths": ["packages/*/src/**"],
+      "domains": ["runtime"],
+      "relatedPaths": ["packages/runtime/src/**"],
+      "recommendedTests": ["npm run test:runtime"],
+      "requiredConfigurations": ["debug"],
+      "requiredAgents": ["test-matrix"],
+      "unverifiedDimensions": ["Alternate runtime was not exercised"],
+      "verificationNotes": ["Use the repository native test runner"]
+    }
+  ]
+}
+```
+
+A rule applies when any changed file matches one of its `paths` globs (`*`, `?`, and `**` segments; case-sensitive). All matching rules merge their guidance: domains and related files for the review agents, recommended tests and required configurations for the build-and-test agent, extra reviewer roles (honoured only when the chosen effort and topology run them), and proof boundaries the final review discloses as unverified dimensions. Arrays may be written in any order; duplicate entries are rejected.
+
+For PR reviews the manifest is read from the merge base, so the PR under review cannot opt itself into or out of guidance; local reviews read it from the current worktree. Low-effort and cross-repository reviews skip repository context. The full contract and trust model live in the [design doc](../../design/review-repository-context.md).
 
 ## Issue Fidelity
 

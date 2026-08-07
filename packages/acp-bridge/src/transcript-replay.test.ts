@@ -193,6 +193,32 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it('preserves Live dialogue boundaries and source during replay', () => {
+    const machine = createTranscriptReplayMachine();
+    const projected = updates(
+      machine,
+      record('realtime-1', 'assistant', {
+        subtype: 'realtime_message',
+        message: {
+          role: 'model',
+          parts: [{ text: 'Realtime answer' }],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Realtime answer' },
+        _meta: {
+          source: 'realtime_voice',
+          qwenDiscreteMessage: true,
+          qwenTranscript: { sourceRecordIds: ['realtime-1'] },
+        },
+      },
+    ]);
+  });
+
   describe('UserPromptSubmit hook context provenance', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';

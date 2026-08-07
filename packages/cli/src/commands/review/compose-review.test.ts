@@ -24,6 +24,7 @@ import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
   buildLedger,
+  repositoryContextGate,
   scriptLintGate,
   testPlanGate,
   composeReviewCommand,
@@ -98,6 +99,7 @@ function plan(
     effort?: 'low' | 'medium' | 'high';
     /** Override the fixture's 5000 — the low-signal floor reads this. */
     srcDiffLines?: number;
+    repositoryContext?: unknown;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -111,6 +113,9 @@ function plan(
       // The effort the capturing command recorded — the roster and the
       // reverse-audit floor both read it from here.
       ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.repositoryContext === undefined
+        ? {}
+        : { repositoryContext: opts.repositoryContext }),
       srcDiffLines: opts.srcDiffLines ?? 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -329,6 +334,7 @@ function coveredPlan(
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
     srcDiffLines?: number;
+    repositoryContext?: unknown;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -455,6 +461,197 @@ describe('composeReview — the low-signal Approve disclosure', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.lowSignal).toBeNull();
     expect(verdictLine(r)).not.toContain('low signal');
+  });
+});
+
+describe('repository context proof boundary', () => {
+  it('derives unreviewed dimensions from the validated plan, not model input', () => {
+    const planPath = join(dir, 'repository-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: ['runtime'],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: ['linux-x64'],
+          requiredAgents: ['test-matrix'],
+          unverifiedDimensions: ['Alternate runtime was not exercised'],
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      '`Alternate runtime was not exercised` — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('renders manifest-controlled proof boundaries as inert Markdown', () => {
+    const planPath = join(dir, 'mention-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'manifest',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: ['@security-team'],
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      '`@security-team` — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('caps the unverified-dimension disclosure at five entries', () => {
+    // The schema admits 128 dimensions x 512 chars; joined into one
+    // disclosure that outruns the review body's own size budget — the same
+    // cap discipline testPlanGate applies to its notes.
+    const planPath = join(dir, 'capped-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: Array.from(
+            { length: 8 },
+            (_, index) => `dimension ${index}`,
+          ),
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      ...Array.from(
+        { length: 5 },
+        (_, index) =>
+          `\`dimension ${index}\` — the repository context marks this proof boundary as unverified`,
+      ),
+      'and 3 more',
+    ]);
+  });
+
+  it('returns no extra disclosure when the plan has no repository context', () => {
+    const planPath = join(dir, 'generic-plan.json');
+    writeFileSync(planPath, JSON.stringify({ files: [] }));
+    expect(repositoryContextGate(planPath)).toEqual([]);
+  });
+
+  it('returns nothing for an unreadable plan but fails closed on a malformed context', () => {
+    // Unreadable plan: the coverage gate owns plan validity; the disclosure
+    // has nothing to say. Present-but-INVALID context: every consumer of the
+    // field fails closed, so the gate throws instead of silently dropping the
+    // disclosure.
+    const missing = join(dir, 'missing-plan.json');
+    expect(repositoryContextGate(missing)).toEqual([]);
+
+    const malformed = join(dir, 'malformed-plan.json');
+    writeFileSync(
+      malformed,
+      JSON.stringify({ repositoryContext: { version: 1 } }),
+    );
+    expect(() => repositoryContextGate(malformed)).toThrow(
+      'unknown or missing fields',
+    );
+  });
+
+  it('keeps the disclosure on a REQUEST_CHANGES body', () => {
+    // The RC render site is a separate code path from APPROVE; deleting the
+    // block there must fail the suite, not ship green.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      bodyCriticals: ['whole-PR blocker X'],
+    });
+    expect(result.event).toBe('REQUEST_CHANGES');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
+  it('keeps the disclosure when a cap downgrades the verdict to COMMENT', () => {
+    // An APPROVE capped at COMMENT renders through the COMMENT clause
+    // composer — the third render site — and the disclosure must survive
+    // exactly the verdicts where the reader most needs the boundary.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      cannotTellCriticals: ['SKILL.md:35 — full text unfetchable'],
+    });
+    expect(result.event).toBe('COMMENT');
+    expect(result.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
+  it('discloses repository proof boundaries without permanently capping approval', () => {
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['runtime'],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: ['linux-x64'],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+
+    const result = composeReview({ planPath, env: ENV, modelId: MODEL });
+
+    expect(result.event).toBe('APPROVE');
+    expect(result.cappedBy).not.toContain('unreviewed-dimension');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
   });
 });
 
@@ -3602,5 +3799,117 @@ describe('the ledger marker reaches the POSTED body', () => {
       draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
     });
     expect(r.body).not.toContain('qwen-review-ledger');
+  });
+});
+
+describe('composeReview — the findings file tag check', () => {
+  // The pipelined loop's invariant, machine-read. Under the serial loop the
+  // last round's verification completing before Step 6 was structural; the
+  // pipelined loop replaced the structure with a tag the orchestrator adds,
+  // removes, and reads by hand. The delivery floor cannot see the miss — one
+  // delivered verify launch anywhere in the run satisfies it, keyed per
+  // round's findings digest — so compose-review reads the cumulative
+  // findings file itself and caps on any surviving tag.
+
+  function findingsFile(content: string): string {
+    const f = join(dir, 'qwen-review-findings.md');
+    writeFileSync(f, content);
+    return f;
+  }
+
+  const TAGGED =
+    '- **File:** src/pay.ts:42\n' +
+    '- **Issue:** off-by-one in the retry cap\n' +
+    '- **Severity:** Critical — [unverified]\n';
+  const CLEAN =
+    '- **File:** src/pay.ts:42\n' +
+    '- **Issue:** off-by-one in the retry cap\n' +
+    '- **Severity:** Critical\n';
+
+  it('caps a clean Approve at Comment and discloses the surviving tag', () => {
+    const r = composeReview(base({ findingsPath: findingsFile(TAGGED) }));
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain(
+      '1 finding(s) still carried the `— [unverified]` tag when the loop ' +
+        'ended',
+    );
+    // The opener may not certify over a loop that ended mid-verification.
+    expect(r.body).not.toContain('no blockers');
+    expect(r.remediation.join(' ')).toContain('--role verify');
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — an Approve was NOT available: findings were ' +
+        'still unverified when the loop ended',
+    );
+  });
+
+  it('counts every surviving tag', () => {
+    const two = `${TAGGED}\n- **File:** src/other.ts:7 — race in the retry queue — [unverified]\n`;
+    const r = composeReview(base({ findingsPath: findingsFile(two) }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('2 finding(s) still carried the');
+  });
+
+  it('a tag-free findings file caps nothing', () => {
+    const r = composeReview(base({ findingsPath: findingsFile(CLEAN) }));
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).not.toContain('findings-unverified-at-compose');
+  });
+
+  it('a missing findingsPath disables the check — every non-high run', () => {
+    const r = composeReview(base({}));
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).not.toContain('findings-unverified-at-compose');
+  });
+
+  it('softens a Request changes whose blockers are non-deterministic', () => {
+    // The verifier's delivery is clean here (coveredPlan records it), so the
+    // softening is the tag flag alone: a review posting non-deterministic
+    // Criticals cannot prove they are not the still-tagged entries.
+    const r = composeReview(
+      base({ criticalsInline: 1, findingsPath: findingsFile(TAGGED) }),
+    );
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — a Request changes was NOT available: findings ' +
+        'were still unverified when the loop ended (they are posted, ' +
+        'disclosed)',
+    );
+  });
+
+  it('a deterministic-only Request changes stands despite the tag', () => {
+    // A [build] blocker is pre-confirmed; nothing posted owed a verifier, so
+    // a tag on an entry the review did not confirm un-blocks nothing — but
+    // the disclosure still rides the body.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['[build] tsc fails on the merge commit'],
+        findingsPath: findingsFile(TAGGED),
+      }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('still carried the `— [unverified]` tag');
+  });
+
+  it('fails CLOSED on a findingsPath that does not read', () => {
+    const r = composeReview(
+      base({ findingsPath: join(dir, 'no-such-findings.md') }),
+    );
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('findings file could not be read at compose time');
+    expect(r.remediation.join(' ')).toContain('findingsPath');
+  });
+
+  it('refuses a present findingsPath of the wrong shape', () => {
+    expect(() =>
+      composeReview(base({ findingsPath: 42 as unknown as string })),
+    ).toThrow(/findingsPath must be a non-empty string/);
   });
 });
