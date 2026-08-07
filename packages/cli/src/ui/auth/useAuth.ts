@@ -181,16 +181,19 @@ export const useAuthCommand = (
 
         completeAuthentication();
 
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: t(
-              'Successfully configured {{provider}}. Use /model to switch models.',
-              { provider: providerConfig.label },
-            ),
-          },
-          Date.now(),
-        );
+        const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+          type: MessageType.INFO,
+          text: t(
+            'Successfully configured {{provider}}. Use /model to switch models.',
+            { provider: providerConfig.label },
+          ),
+        };
+        addItem(feedbackItem, Date.now());
+        config.getChatRecordingService?.()?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: '/auth',
+          outputHistoryItems: [feedbackItem],
+        });
 
         logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
       } catch (error) {

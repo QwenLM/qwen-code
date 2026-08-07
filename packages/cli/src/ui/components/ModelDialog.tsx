@@ -34,6 +34,7 @@ import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
 } from '../voice/voice-model.js';
+import type { HistoryItemWithoutId } from '../types.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -667,6 +668,17 @@ export function ModelDialog({
   // the dialog; latch so the close feedback and onClose fire only once.
   const closeLatchRef = useRef(false);
   const selectionInFlightRef = useRef(false);
+  const reportAuxiliaryModelSelection = useCallback(
+    (feedbackItem: HistoryItemWithoutId & Record<string, unknown>) => {
+      uiState?.historyManager.addItem(feedbackItem, Date.now());
+      config?.getChatRecordingService?.()?.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [feedbackItem],
+      });
+    },
+    [config, uiState],
+  );
   const closeWithoutSelection = useCallback(() => {
     if (closeLatchRef.current || selectionInFlightRef.current) return;
     closeLatchRef.current = true;
@@ -776,13 +788,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -803,13 +812,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -850,13 +856,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Vision Model')}: ${visionModelDisplay}${scopeSuffix}${visionWarning}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Vision Model')}: ${visionModelDisplay}${scopeSuffix}${visionWarning}`,
+        });
         onClose();
         return;
       }
@@ -878,13 +881,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -915,13 +915,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Image Model')}: ${imageModelDisplay}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Image Model')}: ${imageModelDisplay}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -1054,6 +1051,7 @@ export function ModelDialog({
       isImageModelMode,
       availableModelEntries,
       persistScope,
+      reportAuxiliaryModelSelection,
     ],
   );
 

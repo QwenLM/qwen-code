@@ -58,7 +58,7 @@ const createSettings = () => ({
   })),
 });
 
-const createConfig = () => {
+const createConfig = (recordSlashCommand = vi.fn()) => {
   const modelsConfig = {
     syncAfterAuthRefresh: vi.fn(),
   };
@@ -68,6 +68,7 @@ const createConfig = () => {
     reloadModelProvidersConfig: vi.fn(),
     refreshAuth: vi.fn(async () => undefined),
     getModelsConfig: vi.fn(() => modelsConfig),
+    getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
   };
 };
 
@@ -99,7 +100,8 @@ describe('useAuthCommand', () => {
 
   it('configures DeepSeek via the unified provider submit', async () => {
     const settings = createSettings();
-    const config = createConfig();
+    const recordSlashCommand = vi.fn();
+    const config = createConfig(recordSlashCommand);
     const addItem = vi.fn();
 
     const { result } = renderHook(() =>
@@ -139,6 +141,15 @@ describe('useAuthCommand', () => {
       }),
       expect.any(Number),
     );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/auth',
+      outputHistoryItems: [
+        expect.objectContaining({
+          text: expect.stringContaining('Successfully configured DeepSeek'),
+        }),
+      ],
+    });
   });
 
   it('configures OpenRouter via the unified provider submit', async () => {

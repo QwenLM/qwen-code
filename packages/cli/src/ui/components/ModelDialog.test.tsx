@@ -60,6 +60,8 @@ const renderComponent = (
     ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
+  const recordSlashCommand = vi.fn();
+
   const mockConfig = {
     // --- Functions used by ModelDialog ---
     getModel: vi.fn(() => DEFAULT_QWEN_MODEL),
@@ -78,7 +80,7 @@ const renderComponent = (
       getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
     })),
     getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
-    getChatRecordingService: vi.fn(() => undefined),
+    getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
 
     // --- Functions used by ClearcutLogger ---
     getUsageStatisticsEnabled: vi.fn(() => true),
@@ -119,6 +121,7 @@ const renderComponent = (
     mockConfig,
     mockSettings,
     mockHistoryManager,
+    recordSlashCommand,
   };
 };
 
@@ -689,27 +692,30 @@ describe('<ModelDialog />', () => {
 
   it('stores authType-qualified selectors in fast model mode', async () => {
     const setFastModel = vi.fn();
-    const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {
-      getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
-      getModel: vi.fn(() => 'claude-opus-4-7'),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'deepseek-v4-flash',
-          label: 'deepseek-v4-flash',
-          authType: AuthType.USE_OPENAI,
-        },
-        {
-          id: 'claude-opus-4-7',
-          label: 'claude-opus-4-7',
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
+      { isFastModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+        getModel: vi.fn(() => 'claude-opus-4-7'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'deepseek-v4-flash',
+            label: 'deepseek-v4-flash',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4-7',
+            label: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
           authType: AuthType.USE_ANTHROPIC,
-        },
-      ]),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.USE_ANTHROPIC,
-        model: 'claude-opus-4-7',
-      })),
-      setFastModel,
-    } as unknown as Partial<Config>);
+          model: 'claude-opus-4-7',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     await childOnSelect(`${AuthType.USE_OPENAI}::deepseek-v4-flash`);
@@ -720,13 +726,20 @@ describe('<ModelDialog />', () => {
       'openai:deepseek-v4-flash',
     );
     expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Fast Model: openai:deepseek-v4-flash' },
+      ],
+    });
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('stores authType-qualified selectors in vision model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isVisionModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
@@ -763,6 +776,13 @@ describe('<ModelDialog />', () => {
       'openai:qwen-vl-max',
     );
     expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Vision Model: openai:qwen-vl-max' },
+      ],
+    });
     expect(switchModel).not.toHaveBeenCalled();
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
       SettingScope.User,
@@ -775,7 +795,7 @@ describe('<ModelDialog />', () => {
   it('stores compaction model selector without switching models', async () => {
     const switchModel = vi.fn();
     const setCompactionModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isCompactionModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
@@ -812,6 +832,16 @@ describe('<ModelDialog />', () => {
       'openai:compaction-model',
     );
     expect(setCompactionModel).toHaveBeenCalledWith('openai:compaction-model');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        {
+          type: 'success',
+          text: 'Compaction Model: openai:compaction-model',
+        },
+      ],
+    });
     expect(switchModel).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
@@ -820,9 +850,8 @@ describe('<ModelDialog />', () => {
     const setImageModel = vi.fn().mockResolvedValue(undefined);
     const baseUrl = 'https://images.example.com/api/v1';
     const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
-    const { props, mockSettings, getByText } = renderComponent(
-      { isImageModelMode: true },
-      {
+    const { props, mockSettings, getByText, recordSlashCommand } =
+      renderComponent({ isImageModelMode: true }, {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
         getAllConfiguredModels: vi.fn(() => [
           {
@@ -856,8 +885,7 @@ describe('<ModelDialog />', () => {
             : undefined,
         ),
         setImageModel,
-      } as unknown as Partial<Config>,
-    );
+      } as unknown as Partial<Config>);
 
     expect(getByText('Select Image Model')).toBeDefined();
     const selectProps = mockedSelect.mock.calls[0][0];
@@ -872,6 +900,13 @@ describe('<ModelDialog />', () => {
       persisted,
     );
     expect(setImageModel).toHaveBeenCalledWith(persisted);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Image Model: openai:qwen-image-2.0' },
+      ],
+    });
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -969,7 +1004,7 @@ describe('<ModelDialog />', () => {
   it('stores the plain model id in voice model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setFastModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isVoiceModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
@@ -1006,6 +1041,13 @@ describe('<ModelDialog />', () => {
     );
     expect(switchModel).not.toHaveBeenCalled();
     expect(setFastModel).not.toHaveBeenCalled();
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Voice Model: qwen3-asr-flash' },
+      ],
+    });
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',

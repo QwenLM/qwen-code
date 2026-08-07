@@ -50,29 +50,28 @@ export const useEffortCommand = (
         // for future sessions, but say it won't take effect until thinking is
         // re-enabled; otherwise confirm the requested tier.
         if (addItem) {
-          if (config.getReasoningEffort() !== effort) {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          } else {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          }
+          const feedbackItem: HistoryItemWithoutId & Record<string, unknown> =
+            config.getReasoningEffort() !== effort
+              ? {
+                  type: MessageType.INFO,
+                  text: t(
+                    'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
+                    { tier: effort },
+                  ),
+                }
+              : {
+                  type: MessageType.INFO,
+                  text: t(
+                    'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
+                    { tier: effort },
+                  ),
+                };
+          addItem(feedbackItem, Date.now());
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/effort',
+            outputHistoryItems: [feedbackItem],
+          });
         }
       } finally {
         setIsEffortDialogOpen(false);

@@ -4549,6 +4549,7 @@ export class QwenAgent extends BaseAgent {
     const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
     if (!existsSync(transcriptPath)) return [];
 
+    const recordsByUuid = new Map<string, JsonRecord>();
     const invocations = new Map<string, SlashCommandInvocation>();
     const seenResults = new Set<string>();
     const messages: Message[] = [];
@@ -4567,6 +4568,9 @@ export class QwenAgent extends BaseAgent {
           continue;
         }
 
+        const uuid = asString(record.uuid);
+        if (uuid) recordsByUuid.set(uuid, record);
+
         if (record.type !== 'system' || record.subtype !== 'slash_command')
           continue;
 
@@ -4577,7 +4581,6 @@ export class QwenAgent extends BaseAgent {
         const phase = asString(payload.phase);
         const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
         if (phase === 'invocation') {
-          const uuid = asString(record.uuid);
           if (uuid) {
             invocations.set(uuid, {
               rawCommand,
@@ -4604,7 +4607,17 @@ export class QwenAgent extends BaseAgent {
         if (seenResults.has(resultKey)) continue;
         seenResults.add(resultKey);
 
-        const invocation = parentUuid ? invocations.get(parentUuid) : undefined;
+        let ancestorUuid = parentUuid;
+        const visited = new Set<string>();
+        let invocation: SlashCommandInvocation | undefined;
+        while (ancestorUuid && !visited.has(ancestorUuid)) {
+          visited.add(ancestorUuid);
+          invocation = invocations.get(ancestorUuid);
+          if (invocation) break;
+          ancestorUuid = asString(
+            recordsByUuid.get(ancestorUuid)?.parentUuid,
+          );
+        }
         if (!invocation?.hidden) {
           const userContent = invocation?.rawCommand || rawCommand;
           messages.push({

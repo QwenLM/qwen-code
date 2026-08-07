@@ -716,10 +716,23 @@ describe('QwenAgent slash command history', () => {
         },
       },
       {
-        uuid: 'model-result',
+        uuid: 'model-open-result',
         parentUuid: 'model-invocation',
         sessionId,
         timestamp: '2026-03-25T07:36:40.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/model',
+          outputHistoryItems: [],
+        },
+      },
+      {
+        uuid: 'model-result',
+        parentUuid: 'model-open-result',
+        sessionId,
+        timestamp: '2026-03-25T07:36:41.000Z',
         type: 'system',
         subtype: 'slash_command',
         systemPayload: {
@@ -783,7 +796,7 @@ describe('QwenAgent slash command history', () => {
       [
         'assistant',
         'Kept model as qwen3-max',
-        Date.parse('2026-03-25T07:36:40.000Z'),
+        Date.parse('2026-03-25T07:36:41.000Z'),
       ],
       ['user', '/insight', Date.parse(insightInvocation)],
       [
