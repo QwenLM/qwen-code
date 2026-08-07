@@ -295,6 +295,7 @@ const {
       messages: [] as unknown[],
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestToastHostElevated: false,
       latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
       latestMessageListProps: null as {
         failedPromptMessageId?: string;
@@ -906,7 +907,15 @@ vi.doMock('./components/StreamingStatus', async () => {
       }),
   };
 });
-mockComponent('./components/ToastHost', 'ToastHost');
+vi.doMock('./components/ToastHost', async () => {
+  const React = await import('react');
+  return {
+    ToastHost: (props: { elevated?: boolean }) => {
+      testState.latestToastHostElevated = props.elevated ?? false;
+      return React.createElement('div');
+    },
+  };
+});
 vi.doMock('./components/panels/TodoPanel', async () => {
   const React = await import('react');
   return {
@@ -1613,7 +1622,7 @@ describe('task activity key', () => {
       container.querySelector('button[title="watch server log"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
 
     const dockedAside = container.querySelector(
@@ -1629,7 +1638,7 @@ describe('task activity key', () => {
       await Promise.resolve();
     });
 
-    const fullscreenOverlay = container.querySelector(
+    const fullscreenOverlay = document.querySelector(
       '[class*="artifactPanelFullscreen"]',
     );
     expect(fullscreenOverlay).not.toBeNull();
@@ -1638,6 +1647,15 @@ describe('task activity key', () => {
     // remount would silently discard panel-local state (drafts, scroll).
     expect(fullscreenAside).toBe(dockedAside);
     expect(fullscreenAside?.className).toContain('panelFullscreen');
+    // The fullscreen surface renders through the top-level portal root so a
+    // transformed/stacking-context host ancestor cannot trap the fixed panel.
+    expect(
+      fullscreenOverlay?.closest('[data-web-shell-portal-root]'),
+    ).not.toBeNull();
+    // Chat-only interaction is gated while the surface covers the chat.
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    // Panel toasts elevate alongside the surface.
+    expect(testState.latestToastHostElevated).toBe(true);
     // The covered shells must drop out of layout, tab order, and AT while the
     // opaque surface is up — keyboard/AT reaching them behind the overlay is
     // exactly what the hiding prevents.
@@ -1664,7 +1682,7 @@ describe('task activity key', () => {
       await Promise.resolve();
     });
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(container.querySelector('[role="separator"]')).not.toBeNull();
     // The same instance must survive the shrink too — the resize handle
@@ -1672,6 +1690,11 @@ describe('task activity key', () => {
     expect(container.querySelector('aside[aria-label="Right panel"]')).toBe(
       dockedAside,
     );
+    // The surface moved back into the app tree's layout slot, and the chat
+    // interaction gate and toast elevation reset with it.
+    expect(container.contains(dockedAside)).toBe(true);
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(testState.latestToastHostElevated).toBe(false);
     // The dock node just swapped back from fullscreen: suppress its open
     // animation so the already-open panel doesn't re-play the slide-in.
     expect(
@@ -1683,11 +1706,11 @@ describe('task activity key', () => {
       await Promise.resolve();
     });
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     await act(async () => {
-      container
+      document
         .querySelector('[class*="artifactPanelFullscreen"]')
         ?.dispatchEvent(
           new KeyboardEvent('keydown', {
@@ -1700,7 +1723,7 @@ describe('task activity key', () => {
     });
 
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(container.querySelector('[role="separator"]')).not.toBeNull();
     expect(
@@ -1940,12 +1963,12 @@ describe('artifact panel fullscreen', () => {
     });
     await flush();
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // Close the panel with its own toggle while it is fullscreen.
     await act(async () => {
-      container
+      document
         .querySelector<HTMLButtonElement>(
           'aside button[aria-label="Toggle right panel"]',
         )
@@ -1971,7 +1994,7 @@ describe('artifact panel fullscreen', () => {
       container.querySelector('aside[aria-label="Right panel"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(container.querySelector('[role="separator"]')).not.toBeNull();
     // A genuine close-and-reopen re-arms the dock's open animation: the
@@ -2014,7 +2037,7 @@ describe('artifact panel fullscreen', () => {
     act(openPanel);
     act(enterFullscreen);
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // Back to session-2: its saved state reopens the panel docked; the
@@ -2028,7 +2051,7 @@ describe('artifact panel fullscreen', () => {
       container.querySelector('aside[aria-label="Right panel"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(container.querySelector('[role="separator"]')).not.toBeNull();
   });
@@ -2264,6 +2287,13 @@ describe('artifact panel fullscreen', () => {
         ?.getAttribute('aria-valuenow'),
     ).toBe('400');
 
+    // The hidden pane collapses to 0x0 once fullscreen covers the chat. Seed
+    // the 0 measurement BEFORE entering fullscreen: entering runs the clamp
+    // effect's cleanup (observer.disconnect()), so a 0 fired afterwards
+    // reaches nothing — the hazard is the immediate clampWidth() the effect
+    // runs with the fullscreen guard removed (and again when it re-arms on
+    // exit).
+    chatPaneWidth = 0;
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
@@ -2271,7 +2301,7 @@ describe('artifact panel fullscreen', () => {
       await Promise.resolve();
     });
     await flush();
-    const fullscreenAside = container.querySelector<HTMLElement>(
+    const fullscreenAside = document.querySelector<HTMLElement>(
       '[class*="artifactPanelFullscreen"] aside',
     );
     expect(fullscreenAside).not.toBeNull();
@@ -2280,17 +2310,11 @@ describe('artifact panel fullscreen', () => {
     expect(fullscreenAside?.style.width).toBe('');
     expect(fullscreenAside?.style.flexBasis).toBe('');
 
-    // The hidden pane collapses to 0x0 and its ResizeObserver fires.
-    chatPaneWidth = 0;
-    await act(async () => {
-      resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver));
-      await Promise.resolve();
-    });
-
-    // The pane lays back out at viewport(900) - panel(400) = 500 on exit.
+    // The pane lays back out at viewport(900) - panel(400) = 500 on exit; the
+    // persisted width must survive the 0 measurement round-trip.
     chatPaneWidth = 500;
     await act(async () => {
-      container
+      document
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Exit fullscreen"]',
         )
@@ -2322,7 +2346,7 @@ describe('artifact panel fullscreen', () => {
         ?.click();
     });
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // A gated tool call arrives while the opaque surface covers the chat;
@@ -2335,7 +2359,7 @@ describe('artifact panel fullscreen', () => {
     });
 
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     // The panel steps aside for the approval; it must not close — the
     // user's artifact/tab context survives beside the overlay.
@@ -2371,7 +2395,7 @@ describe('artifact panel fullscreen', () => {
         ?.click();
     });
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // Mirror of the tool-approval case: the question overlay renders in the
@@ -2386,7 +2410,7 @@ describe('artifact panel fullscreen', () => {
     });
 
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(
       container.querySelector('aside[aria-label="Right panel"]'),
@@ -2415,7 +2439,7 @@ describe('artifact panel fullscreen', () => {
         .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
         ?.click();
     });
-    const fullscreenSurface = container.querySelector(
+    const fullscreenSurface = document.querySelector(
       '[class*="artifactPanelFullscreen"]',
     );
     expect(fullscreenSurface).not.toBeNull();
@@ -2438,7 +2462,7 @@ describe('artifact panel fullscreen', () => {
 
     expect(compositionEscape.defaultPrevented).toBe(false);
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // The keyCode 229 shape (isComposing still false) must behave the same:
@@ -2450,7 +2474,7 @@ describe('artifact panel fullscreen', () => {
     });
     Object.defineProperty(keyCodeEscape, 'keyCode', { value: 229 });
     await act(async () => {
-      container
+      document
         .querySelector('[class*="artifactPanelFullscreen"]')
         ?.dispatchEvent(keyCodeEscape);
       await Promise.resolve();
@@ -2459,13 +2483,13 @@ describe('artifact panel fullscreen', () => {
 
     expect(keyCodeEscape.defaultPrevented).toBe(false);
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // A plain Escape afterwards still shrinks the panel back to its docked
     // width instead of closing it.
     await act(async () => {
-      container
+      document
         .querySelector('[class*="artifactPanelFullscreen"]')
         ?.dispatchEvent(
           new KeyboardEvent('keydown', {
@@ -2478,7 +2502,7 @@ describe('artifact panel fullscreen', () => {
     });
     await flush();
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(
       container.querySelector('aside[aria-label="Right panel"]'),
@@ -2501,7 +2525,7 @@ describe('artifact panel fullscreen', () => {
         ?.click();
     });
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     await act(async () => {
@@ -2515,7 +2539,7 @@ describe('artifact panel fullscreen', () => {
     // whose affordance renders inside the hidden (display:none) chat subtree
     // — the user would see nothing and a second Escape would kill the turn.
     await act(async () => {
-      container
+      document
         .querySelector('[class*="artifactPanelFullscreen"]')
         ?.dispatchEvent(
           new KeyboardEvent('keydown', {
@@ -2529,7 +2553,7 @@ describe('artifact panel fullscreen', () => {
     await flush();
 
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     // The panel shrinks but stays open.
     expect(
@@ -2590,7 +2614,7 @@ describe('artifact panel fullscreen', () => {
     });
     await flush();
     await act(async () => {
-      container
+      document
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Exit fullscreen"]',
         )
@@ -2632,6 +2656,197 @@ describe('artifact panel fullscreen', () => {
     expect(
       container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
     ).toBeNull();
+  });
+
+  it('keeps the dock animation suppressed across a fullscreen floating interlude', async () => {
+    // Docked fullscreen -> narrow (the drawer takes over) -> widen -> shrink
+    // via a non-toggle exit: the suppression flag must survive the interlude,
+    // or the exit class swap replays the slide-in on the already-open panel.
+    const dockQuery = '(min-width: 1001px)';
+    let dockMatches = true;
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches:
+          query === dockQuery ? dockMatches : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    // Narrow: the drawer takes over while fullscreen persists.
+    dockMatches = false;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: false }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[class*="panelFullscreen"]',
+      ),
+    ).not.toBeNull();
+
+    // Widen: the dock remounts straight into the fullscreen class.
+    dockMatches = true;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: true }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // Shrink via Escape — a non-toggle exit that does not re-set the flag.
+    await act(async () => {
+      document
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
+    ).not.toBeNull();
+  });
+
+  it('suppresses the dock animation when a floating fullscreen hands back to the dock', async () => {
+    // Floating (narrow viewport) -> fullscreen -> widen -> shrink: the toggle
+    // never set the flag (the panel was floating when it fired), so the
+    // hand-over back to the dock must arm it itself.
+    const dockQuery = '(min-width: 1001px)';
+    let dockMatches = false;
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches:
+          query === dockQuery ? dockMatches : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    // The narrow viewport floats the panel in a drawer.
+    const drawerAside = () =>
+      document.querySelector<HTMLElement>(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      );
+    expect(drawerAside()).not.toBeNull();
+    await act(async () => {
+      drawerAside()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(drawerAside()?.className).toContain('panelFullscreen');
+
+    // Widen: the dock mounts directly into the fullscreen class.
+    dockMatches = true;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: true }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+
+    // Shrink via Escape; the hand-over must have armed the suppression flag.
+    await act(async () => {
+      document
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
+    ).not.toBeNull();
   });
 
   it('does not dismiss the floating environment panel on pointerdown while fullscreen', async () => {
@@ -2685,19 +2900,19 @@ describe('artifact panel fullscreen', () => {
         ?.click();
     });
     expect(
-      container.querySelector('[class*="artifactPanelFullscreen"]'),
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).not.toBeNull();
 
     // A pointerdown lands on the fullscreen surface; the covered environment
     // panel is hidden but must not be dismissed by its outside-click listener.
     act(() => {
-      container
+      document
         .querySelector('[class*="artifactPanelFullscreen"]')
         ?.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     });
 
     act(() => {
-      container
+      document
         .querySelector<HTMLButtonElement>(
           'button[aria-label="Exit fullscreen"]',
         )
@@ -3300,6 +3515,7 @@ beforeEach(() => {
   testState.messages = [];
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.latestToastHostElevated = false;
   testState.latestStatusBarTasks = null;
   testState.latestMessageListProps = null;
   testState.latestAddWorkspaceDialogProps = null;
@@ -5981,7 +6197,9 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
     const artifactDock =
       container.querySelector('[role="separator"]')?.parentElement;
-    expect(artifactDock?.parentElement).toBe(
+    // The dock renders through a display:contents slot, so the .appShell flex
+    // parent sits one level above the wrapper itself.
+    expect(artifactDock?.parentElement?.parentElement).toBe(
       header?.parentElement?.parentElement?.parentElement,
     );
     expect(header?.parentElement?.contains(artifactDock ?? null)).toBe(false);

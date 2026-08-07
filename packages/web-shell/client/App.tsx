@@ -11,6 +11,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
+import { createPortal } from 'react-dom';
+import { FocusScope } from '@radix-ui/react-focus-scope';
 import {
   DAEMON_APPROVAL_MODES,
   useActions,
@@ -2411,6 +2413,12 @@ export function App({
     suppressArtifactDockOpenAnimation,
     setSuppressArtifactDockOpenAnimation,
   ] = useState(false);
+  // In-tree portal target for the docked panel (display:contents keeps the
+  // portaled wrapper a direct flex item of .appShell). Held in state so the
+  // portal container exists before the wrapper renders.
+  const [artifactPanelSlotEl, setArtifactPanelSlotEl] =
+    useState<HTMLDivElement | null>(null);
+  const artifactPanelFullscreenSurfaceRef = useRef<HTMLDivElement | null>(null);
   const artifactPanelResizeCleanupRef = useRef<(() => void) | null>(null);
   const artifactPanelSessionStateRef = useRef<ArtifactPanelSessionState | null>(
     null,
@@ -3694,10 +3702,71 @@ export function App({
       setSuppressArtifactDockOpenAnimation(false);
     } else if (useFloatingArtifactPanel) {
       // The dock node unmounts while the drawer takes over; a stale flag would
-      // suppress the slide-in of the next genuine dock mount.
-      setSuppressArtifactDockOpenAnimation(false);
+      // suppress the slide-in of the next genuine dock mount. Keep it while
+      // fullscreen persists: the next dock mount enters the fullscreen class,
+      // and shrinking it back still replays the slide-in without the flag.
+      if (!artifactPanelFullscreen) {
+        setSuppressArtifactDockOpenAnimation(false);
+      }
+    } else if (artifactPanelFullscreen) {
+      // Floating -> docked hand-over mid-fullscreen: the toggle never set the
+      // flag (the panel was floating when it fired), but shrinking the dock
+      // back to its docked class would replay the slide-in.
+      setSuppressArtifactDockOpenAnimation(true);
     }
-  }, [artifactPanelOpen, useFloatingArtifactPanel]);
+  }, [artifactPanelOpen, useFloatingArtifactPanel, artifactPanelFullscreen]);
+  const dockedFullscreenActive =
+    artifactPanelOpen && !useFloatingArtifactPanel && artifactPanelFullscreen;
+  // Fullscreen moves the docked panel's portal slot into the top-level portal
+  // root so a transformed/paint-contained/lower-stacking host ancestor can
+  // neither bound the fixed surface nor paint over it; shrinking moves it
+  // back. The wrapper itself is portaled INTO the slot, so it stays mounted
+  // (and React's delegated listeners stay attached to the slot) across the
+  // move — a remount would discard panel-local state.
+  useLayoutEffect(() => {
+    const slot = artifactPanelSlotEl;
+    if (!slot || !dockedFullscreenActive) return;
+    const host = slot.parentElement;
+    if (!host) return;
+    const next = slot.nextSibling;
+    (portalRoot ?? document.body).appendChild(slot);
+    return () => {
+      host.insertBefore(slot, next);
+    };
+  }, [dockedFullscreenActive, portalRoot, artifactPanelSlotEl]);
+  // Document-level modal semantics for the fullscreen surface,
+  // matching what the floating variant gets from vaul's Radix dialog: hide
+  // every outside tree from AT (Tab containment is the FocusScope's job) and
+  // move stray focus into the surface — the covered chat subtree drops focus
+  // to body when it goes display:none.
+  useLayoutEffect(() => {
+    const surface = artifactPanelFullscreenSurfaceRef.current;
+    if (!dockedFullscreenActive || !surface) return;
+    const hidden: Array<{ element: Element; previous: string | null }> = [];
+    let node: Element | null = surface;
+    while (node && node !== document.body) {
+      const root = node.getRootNode();
+      const parent: Element | null =
+        node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+      if (!parent) break;
+      for (const sibling of Array.from(parent.children)) {
+        if (sibling === node) continue;
+        hidden.push({
+          element: sibling,
+          previous: sibling.getAttribute('aria-hidden'),
+        });
+        sibling.setAttribute('aria-hidden', 'true');
+      }
+      node = parent;
+    }
+    if (!surface.contains(document.activeElement)) surface.focus();
+    return () => {
+      for (const { element, previous } of hidden) {
+        if (previous === null) element.removeAttribute('aria-hidden');
+        else element.setAttribute('aria-hidden', previous);
+      }
+    };
+  }, [dockedFullscreenActive]);
   // The drawer's Radix dismiss layer only checks `event.key === 'Escape'`
   // (no isComposing guard), so while composing in a panel input an Escape
   // that cancels the composition would close the drawer — and its
@@ -4696,9 +4765,13 @@ export function App({
     activePanel !== null;
   // Block chat interaction (composer, chat keyboard shortcuts) both when a modal
   // is open (dialogOpen, which already includes the Settings/Status panel) and
-  // while a full-pane view (the Scheduled Tasks page) covers the chat, so
-  // keystrokes/Escape can't reach the hidden composer underneath.
-  const interactionBlocked = dialogOpen || mainView !== 'chat';
+  // while a covering surface hides the chat — a full-pane view (the Scheduled
+  // Tasks page) or the fullscreen artifact panel — so keystrokes/Escape can't
+  // reach the hidden composer underneath. The fullscreen gate also keeps the
+  // btw capture-phase Escape handler from dismissing hidden content and
+  // swallowing the Escape that shrinks the panel.
+  const interactionBlocked =
+    dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
   const mainVoiceTarget = useMemo(
     () =>
       resolveVoiceWorkspaceTarget({
@@ -10609,7 +10682,7 @@ export function App({
                 <DrawerContent
                   className={
                     artifactPanelFullscreen
-                      ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0'
+                      ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)]'
                       : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
                   }
                   onEscapeKeyDown={(event) => {
@@ -10638,45 +10711,66 @@ export function App({
             )}
               </div>
             </div>
-            {artifactPanelOpen && !useFloatingArtifactPanel && (
-              <div
-                className={
-                  artifactPanelFullscreen
-                    ? styles.artifactPanelFullscreen
-                    : [
-                        styles.artifactPanelDock,
-                        suppressArtifactDockOpenAnimation
-                          ? styles.artifactPanelDockNoOpenAnimation
-                          : undefined,
-                      ]
-                        .filter(Boolean)
-                        .join(' ')
-                }
-                style={
-                  {
-                    '--artifact-panel-dock-width': `${artifactPanelWidth + 4}px`,
-                  } as CSSProperties
-                }
-              >
-                {!artifactPanelFullscreen && (
-                  <div
-                    className={styles.artifactResizeHandle}
-                    role="separator"
-                    aria-orientation="vertical"
-                    aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
-                    aria-valuemax={getMaxArtifactPanelWidth()}
-                    aria-valuenow={artifactPanelWidth}
-                    onPointerDown={handleArtifactPanelResizeStart}
-                  />
-                )}
-                <div className={styles.artifactPanelClip}>
-                  <ArtifactPanel
-                    {...artifactPanelSharedProps}
-                    panelWidth={artifactPanelWidth}
-                  />
-                </div>
-              </div>
-            )}
+            {/* Stays mounted even when the panel is closed: the fullscreen
+                effect moves it to the portal root, and React must never
+                delete it while it is parked there. */}
+            <div
+              ref={setArtifactPanelSlotEl}
+              className={styles.artifactPanelSlot}
+            />
+            {/* The wrapper portals into the slot above, and the fullscreen
+                effect moves that slot to the portal root (and back), so the
+                panel stays mounted across the mode change. FocusScope adds
+                the modal Tab containment the floating variant gets from
+                vaul's Radix dialog. */}
+            {artifactPanelOpen &&
+              !useFloatingArtifactPanel &&
+              artifactPanelSlotEl &&
+              createPortal(
+                <FocusScope
+                  ref={artifactPanelFullscreenSurfaceRef}
+                  trapped={artifactPanelFullscreen}
+                  loop={artifactPanelFullscreen}
+                  onMountAutoFocus={(event) => event.preventDefault()}
+                  onUnmountAutoFocus={(event) => event.preventDefault()}
+                  className={
+                    artifactPanelFullscreen
+                      ? styles.artifactPanelFullscreen
+                      : [
+                          styles.artifactPanelDock,
+                          suppressArtifactDockOpenAnimation
+                            ? styles.artifactPanelDockNoOpenAnimation
+                            : undefined,
+                        ]
+                          .filter(Boolean)
+                          .join(' ')
+                  }
+                  style={
+                    {
+                      '--artifact-panel-dock-width': `${artifactPanelWidth + 4}px`,
+                    } as CSSProperties
+                  }
+                >
+                  {!artifactPanelFullscreen && (
+                    <div
+                      className={styles.artifactResizeHandle}
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
+                      aria-valuemax={getMaxArtifactPanelWidth()}
+                      aria-valuenow={artifactPanelWidth}
+                      onPointerDown={handleArtifactPanelResizeStart}
+                    />
+                  )}
+                  <div className={styles.artifactPanelClip}>
+                    <ArtifactPanel
+                      {...artifactPanelSharedProps}
+                      panelWidth={artifactPanelWidth}
+                    />
+                  </div>
+                </FocusScope>,
+                artifactPanelSlotEl,
+              )}
           </div>
         </div>
         </WebShellPortalRootContext.Provider>

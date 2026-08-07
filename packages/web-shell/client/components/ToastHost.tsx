@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import styles from './ToastHost.module.css';
 
 export type ToastTone = 'info' | 'warning' | 'error' | 'success';
@@ -24,8 +26,9 @@ export function ToastHost({
   autoDismissMs = 5000,
   elevated = false,
 }: ToastHostProps) {
+  const portalRoot = useWebShellPortalRoot();
   if (toasts.length === 0) return null;
-  return (
+  const host = (
     <div
       className={`${styles.host} ${elevated ? styles.hostElevated : ''}`}
       role="status"
@@ -42,6 +45,12 @@ export function ToastHost({
       ))}
     </div>
   );
+  // While elevated the host must share the portal root's stacking context:
+  // in shadow-DOM portal mode the fullscreen drawer surface is sealed inside
+  // the portal host (z = --web-shell-portal-root-z-index), so a toast left in
+  // the app tree paints beneath it for its whole auto-dismiss lifetime.
+  if (elevated && portalRoot) return createPortal(host, portalRoot);
+  return host;
 }
 
 function ToastItem({
