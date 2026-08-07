@@ -2810,7 +2810,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['member-staff'],
         isMentioned: true,
       }),
     );
@@ -2875,13 +2876,14 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 2 other group members]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['user-a', 'user-b'],
         isMentioned: true,
       }),
     );
   });
 
-  it('falls back to staffId when dingtalkId is absent', () => {
+  it('uses staffId when dingtalkId is absent', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -2907,7 +2909,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]\nhello',
+        text: 'hello',
+        mentionedMemberIds: ['only-staff'],
         isMentioned: true,
       }),
     );
@@ -2939,6 +2942,9 @@ describe('DingtalkChannel sender attribution', () => {
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'hello', isMentioned: true }),
     );
+    // The guard skips collection entirely, so the key must be absent.
+    const envelope = vi.mocked(channel.handleInbound).mock.calls.at(-1)?.[0];
+    expect(envelope).not.toHaveProperty('mentionedMemberIds');
   });
 
   it('returns context only when text is empty after mention stripping', () => {
@@ -2967,7 +2973,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member]',
+        text: '',
+        mentionedMemberIds: ['user-a'],
         isMentioned: true,
       }),
     );

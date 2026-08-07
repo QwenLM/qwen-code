@@ -168,6 +168,67 @@ describe('<VirtualizedList />', () => {
     ]);
   });
 
+  it('collapses after measuring changed content at full viewport height', async () => {
+    const liveItems = [{ id: -1, label: 'live' }];
+
+    const { frames, lastFrame, rerender } = render(
+      <VirtualizedList<Item>
+        data={liveItems}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        isStaticItem={(item) => item.id >= 0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+
+    const shortConfirmationItems = [{ id: -1, label: 'confirm' }];
+    rerender(
+      <VirtualizedList<Item>
+        data={shortConfirmationItems}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        isStaticItem={(item) => item.id >= 0}
+        containerHeight={5}
+        measureAtFullHeight
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+    await act(async () => {});
+    expect(lastFrame()?.split('\n')).toEqual(['confirm']);
+
+    const longConfirmationItems = [
+      { id: -1, label: ['confirm', 'line 2', 'line 3'].join('\n') },
+    ];
+    const frameCountBeforeLongContent = frames.length;
+    rerender(
+      <VirtualizedList<Item>
+        data={longConfirmationItems}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        isStaticItem={(item) => item.id >= 0}
+        containerHeight={5}
+        measureAtFullHeight
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+    await act(async () => {});
+
+    expect(
+      frames.slice(frameCountBeforeLongContent).map((frame) => frame.trimEnd()),
+    ).not.toContain('confirm');
+    expect(lastFrame()?.split('\n')).toEqual(['confirm', 'line 2', 'line 3']);
+  });
+
   it('targetScrollIndex anchors to that index on first usable render', () => {
     type RefShape = VirtualizedListRef<Item>;
     let listRef: RefShape | null = null;
