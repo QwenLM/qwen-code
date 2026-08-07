@@ -83,6 +83,10 @@ function loadQoderConfig(extensionDir: string): QoderPluginConfig {
       typeof config.version === 'string' && config.version.length > 0
         ? config.version
         : '1.0.0',
+    displayName:
+      typeof config.displayName === 'string' ? config.displayName : undefined,
+    description:
+      typeof config.description === 'string' ? config.description : undefined,
   };
 }
 
@@ -95,6 +99,7 @@ function loadMcpServersFile(
   if (!mcpPath || !fs.existsSync(mcpPath)) {
     return undefined;
   }
+  const safeMcpPath = stripAnsiAndControl(mcpPath);
 
   let parsed: unknown;
   try {
@@ -102,13 +107,13 @@ function loadMcpServersFile(
   } catch (error) {
     throw new Error(
       stripAnsiAndControl(
-        `Invalid Qoder MCP configuration at ${mcpPath}: ${error instanceof Error ? error.message : String(error)}`,
+        `Invalid Qoder MCP configuration at ${safeMcpPath}: ${error instanceof Error ? error.message : String(error)}`,
       ),
     );
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(
-      `Invalid Qoder MCP configuration at ${mcpPath}: expected a JSON object`,
+      `Invalid Qoder MCP configuration at ${safeMcpPath}: expected a JSON object`,
     );
   }
   const hasWrapper = Object.prototype.hasOwnProperty.call(parsed, 'mcpServers');
@@ -123,13 +128,13 @@ function loadMcpServersFile(
     Array.isArray(servers)
   ) {
     throw new Error(
-      `Invalid Qoder MCP configuration at ${mcpPath}: expected an "mcpServers" object`,
+      `Invalid Qoder MCP configuration at ${safeMcpPath}: expected an "mcpServers" object`,
     );
   }
 
   return normalizeMcpServers(
     servers as Record<string, MCPServerConfig>,
-    mcpPath,
+    safeMcpPath,
   );
 }
 

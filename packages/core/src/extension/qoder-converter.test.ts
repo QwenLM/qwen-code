@@ -139,6 +139,28 @@ describe('convertQoderPlugin', () => {
     fs.rmSync(result.extensionDir, { recursive: true, force: true });
   });
 
+  it('omits null optional metadata from the generated config', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      displayName: null,
+      description: null,
+    });
+
+    const result = await convertQoderPlugin(root);
+    const generated = JSON.parse(
+      fs.readFileSync(
+        path.join(result.convertedDir, 'qwen-extension.json'),
+        'utf-8',
+      ),
+    ) as Record<string, unknown>;
+
+    expect(result.config.displayName).toBeUndefined();
+    expect(result.config.description).toBeUndefined();
+    expect(generated).not.toHaveProperty('displayName');
+    expect(generated).not.toHaveProperty('description');
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
   it('merges explicit context with system-prompt.md without duplicates', async () => {
     writeManifest({
       name: 'sample-qoder-plugin',
@@ -221,6 +243,35 @@ describe('convertQoderPlugin', () => {
     expect((error as Error).message).not.toContain('\u001b');
     expect((error as Error).message).toMatch(/Invalid Qoder MCP configuration/);
   });
+
+  it.skipIf(process.platform === 'win32').each([
+    ['JSON value', 'null', /expected a JSON object/],
+    [
+      'wrapper',
+      JSON.stringify({ mcpServers: null }),
+      /expected an "mcpServers" object/,
+    ],
+    [
+      'server entry',
+      JSON.stringify({ mcpServers: { invalid: null } }),
+      /server entries must be JSON objects/,
+    ],
+  ])(
+    'sanitizes control sequences in MCP %s errors',
+    async (_case, body, errorPattern) => {
+      const mcpFile = 'mcp\u001b[31m.json';
+      writeManifest({ name: 'sample-qoder-plugin', mcpServers: mcpFile });
+      fs.writeFileSync(path.join(root, mcpFile), body, 'utf-8');
+
+      const error = await convertQoderPlugin(root).catch(
+        (caught: unknown) => caught,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toContain('\u001b');
+      expect((error as Error).message).toMatch(errorPattern);
+    },
+  );
 
   it('rejects an invalid MCP wrapper from a configured path', async () => {
     writeManifest({
