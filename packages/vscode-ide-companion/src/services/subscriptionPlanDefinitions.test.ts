@@ -20,10 +20,12 @@ describe('subscription plan definitions', () => {
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen3.8-max',
       'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
+      'deepseek-v4-flash-0731',
       'deepseek-v3.2',
       'kimi-k2.7-code',
       'kimi-k2.6',
@@ -40,6 +42,15 @@ describe('subscription plan definitions', () => {
       tokenPlan.template.find((model) => model.id === 'deepseek-v4-pro')
         ?.generationConfig,
     ).toEqual({ contextWindowSize: 1000000 });
+    // The companion spec carries no modality metadata for any model, so
+    // qwen3.8-max relies on the core defaultModalities() fallback for video.
+    expect(
+      tokenPlan.template.find((model) => model.id === 'qwen3.8-max')
+        ?.generationConfig,
+    ).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 1000000,
+    });
   });
 
   it('defaults Token Plan to China and supports the Singapore region', () => {

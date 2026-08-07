@@ -32,6 +32,15 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     modalities: { image: true, video: true },
   },
   { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
+  // Unlike the preview below, the GA model accepts `enable_thinking: false`,
+  // so it must not be marked thinkingMandatory — that would keep thinking on
+  // for side queries that deliberately turn it off.
+  {
+    id: 'qwen3.8-max',
+    contextWindowSize: 1000000,
+    enableThinking: true,
+    modalities: { image: true, video: true },
+  },
   {
     id: 'qwen3.8-max-preview',
     contextWindowSize: 1000000,
@@ -45,7 +54,13 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     enableThinking: true,
   },
   { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
+  // Singapore's catalog lists only the dated snapshot; the bare alias answers
+  // there with 403 Unpurchased rather than 404, so it is a per-plan entitlement
+  // gap, not a retired id — it stays a built-in of the DeepSeek, Alibaba
+  // standard and IdeaLab presets. Both ship rather than one replacing the
+  // other, so neither region's users are stranded.
   { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
+  { id: 'deepseek-v4-flash-0731', contextWindowSize: 1000000 },
   { id: 'deepseek-v3.2', contextWindowSize: 131072 },
   {
     id: 'kimi-k2.7-code',
