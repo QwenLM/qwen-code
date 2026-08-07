@@ -56,6 +56,7 @@ export type AuditAction =
   | 'token_revoked'
   | 'auth_failed'
   | 'scope_denied'
+  | 'session_created'
   | 'session_attached'
   | 'session_detached'
   | 'permission_voted'

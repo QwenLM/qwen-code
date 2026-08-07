@@ -111,6 +111,13 @@
       <button id="stop" disabled>Stop</button>
     </section>
     <section>
+      <label
+        >New conversation cwd
+        <input id="new-session-cwd" placeholder="(daemon workspace)"
+      /></label>
+      <button id="new-session">New conversation</button>
+    </section>
+    <section>
       <button id="enable">Enable notifications</button>
     </section>
     <section id="owner-events">
@@ -626,6 +633,49 @@
           setStatus('send failed: ' + e);
         } finally {
           $('send').disabled = false;
+        }
+      };
+
+      // Create (or attach to) a daemon session, then hand off to Watch so the
+      // composer opens on it immediately. `cwd` empty → the daemon's bound
+      // workspace. Needs a write/owner token.
+      $('new-session').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        $('new-session').disabled = true;
+        setStatus('creating session…');
+        try {
+          const res = await fetch('/session', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({
+              cwd: $('new-session-cwd').value.trim(),
+              scope: 'single',
+            }),
+          });
+          if (res.status === 200) {
+            const j = await res.json();
+            $('session').value = j.sessionId;
+            setStatus(
+              'created ' +
+                j.sessionId.slice(0, 8) +
+                '… in ' +
+                (j.workspaceCwd || 'daemon workspace'),
+            );
+            $('watch').onclick(); // connect the stream + open the composer
+          } else if (res.status === 401 || res.status === 403) {
+            setStatus('not authorized — needs a write/owner token');
+          } else if (res.status === 502) {
+            setStatus('daemon unavailable');
+          } else {
+            setStatus('create failed (' + res.status + ')');
+          }
+        } catch (e) {
+          setStatus('create failed: ' + e);
+        } finally {
+          $('new-session').disabled = false;
         }
       };
 

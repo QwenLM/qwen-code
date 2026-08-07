@@ -117,6 +117,7 @@ import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
+import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import {
   createListTokensRoute,
   createMintTokenRoute,
@@ -663,6 +664,15 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       promptEventBroadcaster,
       queue: promptQueue,
     }),
+  );
+  // POST /session — create (or attach to) a session so a freshly-paired client
+  // (the web UI's "New conversation" button) has one to watch and prompt.
+  // Write-scoped; bare namespace, mirroring the daemon's own POST /session.
+  app.post(
+    '/session',
+    requireScope(WRITE, audit),
+    subActorBan, // banned chat user → 403 (before touching the daemon)
+    createSessionCreateRoute(deps.daemon, audit),
   );
   // GET /rc/usage (add-cost-tracking) — any authenticated token; the route applies
   // owner-sees-all / lesser-sees-own scope filtering internally. Mounted only when

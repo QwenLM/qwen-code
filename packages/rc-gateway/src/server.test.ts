@@ -198,6 +198,50 @@ describe('gateway app', () => {
     expect(prefixed.status).toBe(404);
   });
 
+  it('POST /session (create): a WRITE token creates a session; read-only is denied', async () => {
+    // add "New conversation": the gateway now mounts a bare create-session
+    // route so a freshly-paired client has a session to drive.
+    const { url, pairing } = await boot();
+
+    // A WRITE token creates one (daemon stub returns stub-agent-N).
+    const { code: wcode } = pairing.mint([WRITE, SESSION_READ]);
+    const wredeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: wcode, label: 'phone' }),
+    });
+    const { token: wtoken } = (await wredeem.json()) as { token: string };
+    const created = await fetch(`${url}/session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${wtoken}`,
+      },
+      body: JSON.stringify({ cwd: '' }),
+    });
+    expect(created.status).toBe(200);
+    const body = (await created.json()) as { sessionId: string };
+    expect(body.sessionId).toBeTruthy();
+
+    // A session:read-only token cannot create (WRITE required).
+    const { code: rcode } = pairing.mint([SESSION_READ]);
+    const rredeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: rcode, label: 'viewer' }),
+    });
+    const { token: rtoken } = (await rredeem.json()) as { token: string };
+    const denied = await fetch(`${url}/session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${rtoken}`,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(denied.status).toBe(403);
+  });
+
   it('a bridge-scope token can stream a session (the bundle includes session:read)', async () => {
     // add-bridge-protocol slice 1: a `bridge` grant expands to the concrete
     // {bridge, session:read, approve, write} bundle, so a bridge can subscribe
