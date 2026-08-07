@@ -403,6 +403,20 @@ describe('advisorCommand', () => {
       );
     });
 
+    it('should preserve truthy non-Error rejection text', async () => {
+      mockRunForkedAgent.mockRejectedValue('string error');
+
+      await advisorCommand.action!(mockContext, '');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Advisor review failed: string error',
+        },
+        expect.any(Number),
+      );
+    });
+
     it('should block when another pendingItem exists', async () => {
       const busyContext = createMockCommandContext({
         services: { config: createConfig() },

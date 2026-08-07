@@ -375,12 +375,17 @@ export function normalizeCodeFences(
     // would hand the parser a fence the tracker never decided on, so leave
     // the line untouched.
     const prefix = text.slice(lineStart, runStart);
-    // Same-delimiter runs in the prefix pair left-to-right as inline code;
-    // an even count leaves the candidate unpaired (a fence candidate), an odd
-    // count leaves the last prefix run unpaired and paired with the run
-    // itself (inline code content, never a fence).
-    const prefixRuns = prefix.match(run[0] === '`' ? /`{3,}/g : /~{3,}/g);
-    const prefixRunsPairUp = (prefixRuns?.length ?? 0) % 2 === 0;
+    // Same-delimiter fence runs in the prefix pair left-to-right as inline
+    // content; an even count leaves the candidate unpaired.
+    const prefixFenceRuns = prefix.match(run[0] === '`' ? /`{3,}/g : /~{3,}/g);
+    const prefixFenceRunsPairUp = (prefixFenceRuns?.length ?? 0) % 2 === 0;
+    const prefixSameDelimiterRuns = prefix.match(
+      run[0] === '`' ? /`+/g : /~+/g,
+    );
+    const prefixSameDelimiterRunsPairUp =
+      (prefixSameDelimiterRuns?.length ?? 0) % 2 === 0;
+    const prefixHasOtherFenceRun =
+      run[0] === '`' ? /~{3,}/.test(prefix) : /`{3,}/.test(prefix);
     const prefixBecomesFenceLine =
       !startsLine &&
       (CODE_FENCE_RE.test(prefix) ||
@@ -404,7 +409,7 @@ export function normalizeCodeFences(
         !prefixBecomesFenceLine &&
         !startsLine &&
         prefix.trim() !== '' &&
-        prefixRunsPairUp &&
+        prefixFenceRunsPairUp &&
         run[0] === openFence.char &&
         run.length >= openFence.length &&
         /^[ \t]*\r?$/.test(rest) &&
@@ -427,7 +432,8 @@ export function normalizeCodeFences(
       if (!promotes) {
         promotes =
           prefix.trim() !== '' &&
-          prefixRunsPairUp &&
+          prefixSameDelimiterRunsPairUp &&
+          !prefixHasOtherFenceRun &&
           (run[0] === '`' || !/~{3,}/.test(rest));
       }
       if (promotes) {

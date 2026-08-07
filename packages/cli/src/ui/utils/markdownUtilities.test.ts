@@ -434,8 +434,19 @@ describe('markdownUtilities', () => {
       );
     });
 
+    it('does not promote runs after unpaired short inline delimiters', () => {
+      const text =
+        'Use ``x``` for it.\nSee ~~old~~~ for the previous spelling.';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
     it('is idempotent on two-runs-on-one-line shapes', () => {
       const once = normalizeCodeFences('```a ```b\nThen```ts\ncode\n```');
+      expect(normalizeCodeFences(once)).toBe(once);
+    });
+
+    it('is idempotent when competing delimiter runs share one line', () => {
+      const once = normalizeCodeFences('Intro~~~js```\ncode\n');
       expect(normalizeCodeFences(once)).toBe(once);
     });
 
@@ -515,6 +526,33 @@ describe('markdownUtilities', () => {
       // stays open, matching the parser.
       const text = '```text\nUse ```a then```\n```\nAfter';
       expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not split a glued closer when earlier same-line fence runs are unpaired', () => {
+      const text = '~~~text\nUse ~~~a then~~~\n~~~\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not split a glued closer whose prefix would become a fence line', () => {
+      const text = '~~~\ncode\n~~~foo~~~\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not split a glued closer when the same-line prefix is blank', () => {
+      const text = '```py\n\t```\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not let math fences inside code blocks hide later code fences', () => {
+      expect(normalizeCodeFences('```py\n$$\n```\nAfter```ts\nx\n```')).toBe(
+        '```py\n$$\n```\nAfter\n```ts\nx\n```',
+      );
+    });
+
+    it('closes a block with a longer glued fence before a mid-line opener', () => {
+      expect(normalizeCodeFences('```\ncode\n````\nAfter```ts\nx\n```')).toBe(
+        '```\ncode\n````\nAfter\n```ts\nx\n```',
+      );
     });
   });
 });

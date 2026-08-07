@@ -255,6 +255,34 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('passes the abort signal to executed commands', async () => {
+    const mockCommand = {
+      name: 'advisor',
+      description: 'Ask for advice',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'ok',
+      }),
+    };
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    await handleSlashCommand(
+      '/advisor check this',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: abortController.signal }),
+      'check this',
+    );
+  });
+
   it('returns canonical goal_control for a non-interactive create', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 

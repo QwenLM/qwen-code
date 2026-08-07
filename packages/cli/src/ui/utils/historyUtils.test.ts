@@ -142,6 +142,14 @@ describe('itemsAfterAreOnlySynthetic', () => {
     expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(false);
   });
 
+  it('returns false when an advisor result follows the user message', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'foo' }, 1),
+      mk({ type: 'advisor', text: 'review', model: 'm' }, 2),
+    ];
+    expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(false);
+  });
+
   it('treats gemini_thought / gemini_thought_content trailing items as synthetic (matches claude-code)', () => {
     const h: HistoryItem[] = [
       mk({ type: 'user', text: 'foo' }, 1),

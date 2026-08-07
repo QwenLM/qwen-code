@@ -2739,6 +2739,7 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/advisor check my work');
       });
 
+      expect(advisorCmd.action).toHaveBeenCalled();
       expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
     });
 
