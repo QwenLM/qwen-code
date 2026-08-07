@@ -58,10 +58,11 @@ export function loadPolicy(raw) {
         throw new Error(`${OWNERS_FILE}: invalid login in ${area.name}`);
       }
       // A repeated login would be counted twice and win ties unfairly.
-      if (seen.has(owner)) {
+      const normalizedOwner = owner.toLowerCase();
+      if (seen.has(normalizedOwner)) {
         throw new Error(`${OWNERS_FILE}: duplicate owner ${owner}`);
       }
-      seen.add(owner);
+      seen.add(normalizedOwner);
     }
   }
   return policy;
@@ -216,6 +217,27 @@ function main() {
       `Area: ${area.name}`,
       `Assignment: dry-run — would assign @${assignee} (${loadByOwner.get(assignee)} open)`,
     ]);
+    return;
+  }
+
+  const latestIssue = JSON.parse(
+    gh([
+      'issue',
+      'view',
+      String(issueNumber),
+      '--repo',
+      repository,
+      '--json',
+      'state,labels,assignees',
+    ]),
+  );
+  const latestSkip = skipReason(policy, latestIssue);
+  if (latestSkip) {
+    record([`Assignment: skipped — ${latestSkip}`]);
+    return;
+  }
+  if (matchArea(policy, latestIssue)?.name !== area.name) {
+    record(['Assignment: skipped — issue labels changed']);
     return;
   }
 

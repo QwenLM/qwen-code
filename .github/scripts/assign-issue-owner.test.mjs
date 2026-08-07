@@ -59,7 +59,7 @@ describe('assign-issue-owner: owner map', () => {
   // additions. Push access is verified against the live API at write time.
   it('rejects a duplicated owner that would skew load balancing', () => {
     const broken = JSON.parse(ownersRaw);
-    broken.areas[0].owners = ['wenshao', 'wenshao'];
+    broken.areas[0].owners = ['wenshao', 'WENSHAO'];
     assert.throws(() => loadPolicy(JSON.stringify(broken)), /duplicate owner/);
   });
 
@@ -159,7 +159,7 @@ describe('assign-issue-owner: owner selection', () => {
 
 // The stub reports wenshao as the least loaded owner so the pick is
 // unambiguous regardless of the rotation offset for issue 42.
-function runAssign(dryRun) {
+function runAssign(dryRun, secondIssueJson = '') {
   const dir = mkdtempSync(join(tmpdir(), 'assign-issue-owner-'));
   tempDirs.push(dir);
   const log = join(dir, 'gh.log');
@@ -169,7 +169,16 @@ function runAssign(dryRun) {
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$GH_STUB_LOG"
 case "$*" in
-  "issue view 42 "*) printf '%s' '{"state":"OPEN","labels":[{"name":"category/core"},{"name":"need-discussion"}],"assignees":[]}' ;;
+  "issue view 42 "*)
+    count=$(cat "$GH_STUB_VIEW_COUNT" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    printf '%s' "$count" > "$GH_STUB_VIEW_COUNT"
+    if [ "$count" = 2 ] && [ -n "$GH_STUB_SECOND_ISSUE" ]; then
+      printf '%s' "$GH_STUB_SECOND_ISSUE"
+    else
+      printf '%s' '{"state":"OPEN","labels":[{"name":"category/core"},{"name":"need-discussion"}],"assignees":[]}'
+    fi
+    ;;
   *"/collaborators/"*"/permission"*) printf '%s' 'write' ;;
   *"--assignee wenshao"*"--json number"*) printf '%s' '0' ;;
   *"issue list"*"--json number"*) printf '%s' '5' ;;
@@ -184,6 +193,8 @@ esac
       ...process.env,
       PATH: `${dir}:${process.env.PATH}`,
       GH_STUB_LOG: log,
+      GH_STUB_VIEW_COUNT: join(dir, 'view-count'),
+      GH_STUB_SECOND_ISSUE: secondIssueJson,
       GITHUB_REPOSITORY: 'QwenLM/qwen-code',
       GITHUB_STEP_SUMMARY: '',
       ISSUE_NUMBER: '42',
@@ -210,6 +221,15 @@ describe('assign-issue-owner: apply boundary', () => {
     const { log, stdout } = runAssign(false);
     assert.match(log, /issue edit 42 .*--add-assignee wenshao/);
     assert.match(stdout, /assigned @wenshao/);
+  });
+
+  it('re-checks issue state immediately before assigning', () => {
+    const { log, stdout } = runAssign(
+      false,
+      '{"state":"OPEN","labels":[{"name":"category/core"},{"name":"need-discussion"}],"assignees":[{"login":"someone"}]}',
+    );
+    assert.doesNotMatch(log, /issue edit/);
+    assert.match(stdout, /skipped — issue already has an assignee/);
   });
 });
 
