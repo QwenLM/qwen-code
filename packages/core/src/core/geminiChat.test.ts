@@ -42,6 +42,7 @@ import {
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
 import { SessionStartSource } from '../hooks/types.js';
+import * as sideQueryModule from '../utils/sideQuery.js';
 import {
   getToolCallPreparations,
   setToolCallPreparations,
@@ -191,6 +192,10 @@ describe('GeminiChat', async () => {
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getModelFallbacks: vi.fn().mockReturnValue([]),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getClearContextOnIdle: vi.fn().mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      }),
       getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
@@ -3272,14 +3277,14 @@ describe('GeminiChat', async () => {
       );
     });
 
-    it('triggers compaction end-to-end through the real ChatCompressionService when lastPromptTokenCount === 0 and inherited history is large (R3.4)', async () => {
+    it('triggers cache-sharing compaction end-to-end when a provider token count is available (R3.4)', async () => {
       // Reviewer R3.4: the "forwards the pending user message" test above
-      // mocks the service entirely, so the real cheap-gate (the actual
-      // estimatePromptTokens fallback branch when lastPromptTokenCount===0)
-      // never runs. Exercise the full chain here:
+      // mocks the service entirely, so the real cheap-gate never runs there.
+      // Exercise the full chain here with the provider token-count anchor
+      // required for cache sharing:
       //   sendMessageStream → tryCompress → service.compress (REAL) →
-      //   cheap-gate (real estimate via getHistory + userMessage) →
-      //   splitter (real) → runSideQuery (mocked at baseLlmClient) →
+      //   cheap-gate (count-based estimate from the 172K anchor) →
+      //   splitter (real) → cache-sharing request (mocked at baseLlmClient) →
       //   persistence.
       const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
       const inheritedHistory: Content[] = [
@@ -3289,11 +3294,13 @@ describe('GeminiChat', async () => {
         { role: 'model', parts: [{ text: 'response' }] },
       ];
       chat.setHistory(inheritedHistory);
-      expect(chat.getLastPromptTokenCount()).toBe(0);
+      chat.setLastPromptTokenCount(172_000);
+      expect(chat.getLastPromptTokenCount()).toBe(172_000);
 
       // Full 200K window (DEFAULT_TOKEN_LIMIT): auto = 0.85 × 200K = 170K,
       // hard = 177K. ~172K sits between them, so the cheap-gate (force=false
       // path) must let compaction proceed without tripping hard-rescue.
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
       const generateText = vi.fn().mockResolvedValue({
         text: '<state_snapshot>compressed</state_snapshot>',
         usage: {
@@ -3327,9 +3334,80 @@ describe('GeminiChat', async () => {
         (compressed as { type: StreamEventType; info: ChatCompressionInfo })
           .info.compressionStatus,
       ).toBe(CompressionStatus.COMPRESSED);
-      // Real runSideQuery was hit (proves the cheap-gate didn't short-circuit
-      // and the splitter produced a non-empty historyToCompress).
+      // Google GenAI uses the cache-sharing request rather than the cold side
+      // query, while still exercising the real splitter and accounting path.
       expect(generateText).toHaveBeenCalled();
+      expect(coldSpy).not.toHaveBeenCalled();
+    });
+
+    it('routes zero-baseline compression through the cold side query end-to-end (R5-3)', async () => {
+      // Companion to the R3.4 test above without a provider token-count
+      // anchor: an inherited history with lastPromptTokenCount === 0 must
+      // derive a non-zero compression baseline locally, and the service must
+      // skip cache sharing (no provider-reported anchor) and run the cold
+      // side query. Pins the tryCompress-baseline → service-anchor-gate
+      // composition; a gate re-sourced from opts.originalTokenCount would
+      // mis-route this to the shared path, and a dropped derivation would
+      // zero the baseline.
+      const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
+      const inheritedHistory: Content[] = [
+        { role: 'user', parts: [{ text: largeChars }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+        { role: 'user', parts: [{ text: 'follow up' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      chat.setHistory(inheritedHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>compressed</state_snapshot>',
+          usage: {
+            promptTokenCount: 99_000,
+            candidatesTokenCount: 1500,
+            totalTokenCount: 100_500,
+          },
+        } as never);
+      const generateText = vi.fn();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('done'),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'follow-up after restore' },
+        'prompt-r5-3',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const compressed = events.find(
+        (e) => e.type === StreamEventType.COMPRESSED,
+      );
+      expect(compressed).toBeDefined();
+      expect(
+        (compressed as { type: StreamEventType; info: ChatCompressionInfo })
+          .info.compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      // The derived non-zero baseline (not the zero counter) reached the
+      // service...
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBeGreaterThan(
+        0,
+      );
+      // ...and the missing provider anchor kept the request on the cold
+      // path.
+      expect(generateText).not.toHaveBeenCalled();
+      expect(coldSpy).toHaveBeenCalledTimes(1);
     });
 
     it('clears consecutiveFailures after a forced successful compression', async () => {
@@ -3916,6 +3994,7 @@ describe('GeminiChat', async () => {
           info: {
             originalTokenCount: 176_000,
             newTokenCount: 40_000,
+            newTokenCountIsEstimated: true,
             compressionStatus: CompressionStatus.COMPRESSED,
           },
         });
@@ -3961,6 +4040,7 @@ describe('GeminiChat', async () => {
           newTokenCount: 40_000,
         }),
       );
+      expect(recordPayload.info.newTokenCountIsEstimated).toBe(true);
       expect(recordPayload.compressedHistory).toEqual([
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ack' }] },
@@ -4055,6 +4135,7 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(176_999);
+      expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
       );
@@ -4108,6 +4189,7 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(175_500);
+      expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
       );
@@ -5167,6 +5249,153 @@ describe('GeminiChat', async () => {
         mockContentGenerator.generateContentStream,
       ).mock.calls[0][0].config as { maxOutputTokens?: number };
       expect(requestConfig.maxOutputTokens).toBe(9_999);
+    });
+
+    it('keeps the overhead pad after compression uses an estimated baseline', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 40_000,
+      });
+
+      vi.spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ok' }] },
+          ],
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 79,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 79,
+            newTokenCount: 79,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('first send after compression'),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'history without usage' }] },
+          { role: 'model', parts: [{ text: 'response' }] },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      await chatInstance.tryCompress('prompt-estimated-compression', true);
+      expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(true);
+
+      const stream = await chatInstance.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-estimated-clamp-pad',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const requestConfig = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[0][0].config as { maxOutputTokens?: number };
+      expect(requestConfig.maxOutputTokens).toBe(9_919);
+    });
+
+    it('clears estimated provenance when provider usage is received', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 40_000,
+      });
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 79,
+          newTokenCount: 79,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('usage received', {
+          promptTokenCount: 123,
+          candidatesTokenCount: 7,
+          totalTokenCount: 130,
+        }),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      chatInstance.seedResumeTokenCounts(79, 0, true);
+      expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(true);
+
+      const stream = await chatInstance.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-provider-usage-clears-estimate',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(chatInstance.getLastPromptTokenCount()).toBe(123);
+      expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(false);
+    });
+
+    it('keeps estimated provenance when provider usage has no usable count', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 40_000,
+      });
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 79,
+          newTokenCount: 79,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('usage omitted', {
+          promptTokenCount: 0,
+          totalTokenCount: 0,
+        }),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      chatInstance.seedResumeTokenCounts(79, 0, true);
+
+      const stream = await chatInstance.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-provider-usage-keeps-estimate',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(chatInstance.getLastPromptTokenCount()).toBe(79);
+      expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(true);
     });
 
     it('keeps a sane input budget on small custom windows (issue #6144)', async () => {
@@ -14087,6 +14316,7 @@ describe('GeminiChat', async () => {
           info: {
             originalTokenCount: 1000,
             newTokenCount: 200,
+            newTokenCountIsEstimated: true,
             compressionStatus: CompressionStatus.COMPRESSED,
           },
         });
@@ -14178,6 +14408,123 @@ describe('GeminiChat', async () => {
 
       await chat.tryCompress('p1', true);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
+    });
+
+    it('derives a compression baseline when no API token count is available', async () => {
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('x'.repeat(4000)), modelMsg('acknowledged')]);
+
+      await chat.tryCompress('p-zero-baseline', true);
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBeGreaterThan(
+        0,
+      );
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+    });
+
+    it('retains estimated provenance across repeated compression', async () => {
+      const compressSpy = mockCompressionService('compressed');
+
+      await chat.tryCompress('p-estimated-first', true);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+
+      await chat.tryCompress('p-estimated-second', true);
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+    });
+
+    it('persists estimated provenance in a compression checkpoint', async () => {
+      const recordChatCompression = vi.fn();
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [userMsg('history without usage'), modelMsg('response')],
+        {
+          recordChatCompression,
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      mockCompressionService('compressed');
+
+      await recordingChat.tryCompress('p-estimated-checkpoint', true);
+
+      expect(recordChatCompression).toHaveBeenCalledWith(
+        expect.objectContaining({
+          info: expect.objectContaining({ newTokenCountIsEstimated: true }),
+        }),
+      );
+    });
+
+    it('preserves an authoritative compression count from the service', async () => {
+      const recordChatCompression = vi.fn();
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [userMsg('history'), modelMsg('response')],
+        {
+          recordChatCompression,
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: [userMsg('summary'), modelMsg('ok')],
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          newTokenCountIsEstimated: false,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      const info = await recordingChat.tryCompress('p-authoritative', true);
+
+      expect(info.newTokenCountIsEstimated).toBe(false);
+      expect(recordingChat.isLastPromptTokenCountEstimated()).toBe(false);
+      expect(recordChatCompression).toHaveBeenCalledWith(
+        expect.objectContaining({
+          info: expect.objectContaining({ newTokenCountIsEstimated: false }),
+        }),
+      );
+    });
+
+    it('marks and records the locally adjusted fast-compression count as estimated', () => {
+      const recordChatCompression = vi.fn();
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          userMsg('question'),
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning '.repeat(100), thought: true },
+              { text: 'answer' },
+            ],
+          },
+        ],
+        {
+          recordChatCompression,
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      recordingChat.seedResumeTokenCounts(1000, 0, false);
+
+      const result = recordingChat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.newTokenCount).toBeGreaterThan(0);
+      expect(result.info.newTokenCount).toBeLessThan(1000);
+      expect(recordingChat.isLastPromptTokenCountEstimated()).toBe(true);
+      expect(recordChatCompression).toHaveBeenCalledWith(
+        expect.objectContaining({
+          info: expect.objectContaining({ newTokenCountIsEstimated: true }),
+        }),
+      );
     });
   });
 

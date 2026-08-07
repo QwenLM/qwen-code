@@ -145,6 +145,46 @@ New OTel metric names:
 - `qwen-code.daemon.prompt.queue_wait`, histogram in milliseconds.
 - `qwen-code.daemon.pipe.message_bytes`, histogram in bytes with `direction=inbound|outbound`.
 
+### 11. Is the daemon under memory pressure?
+
+```bash
+curl -s 'http://127.0.0.1:4170/daemon/status' | \
+  jq '.runtime.memory.pressure'
+```
+
+`level` is `normal` / `soft` / `hard` / `critical`, classified from `ratio` —
+the worse of `rssRatio` (RSS against detected cgroup/host memory, which is what
+the OOM killer watches) and `heapRatio` (V8 heap used against this process's
+`heap_size_limit` — the whole heap, not only the old space that
+`--max-old-space-size` names). `source` says which one produced it. Check `source` before acting:
+`unknown` means the daemon could measure neither side, so `normal` there is the
+absence of a reading, not evidence of health. A side is only reported when both
+its numerator and its denominator were usable, so `source` is also what tells a
+zero `rssBytes` / `heapUsedBytes` apart from a real one.
+
+**`rssRatio` is only as good as its denominator, and
+`limits.memory.availableMemorySource` is what grades it.** Under a cgroup
+(`constrained`) it is exactly the limit the OOM killer enforces, so the ratio
+means what it says. On bare metal (`host`) it is the size of the whole machine,
+while the daemon actually dies when the _machine_ runs out — which depends on
+every other process on the box. A daemon holding 20% of a 64 GB host beside a
+55 GB neighbour reports `level: normal, source: rss` right up until it is
+killed. Under `source: 'host'`, read `rssRatio` as a **lower bound** on real
+pressure. This is separate from the thresholds being uncalibrated: no threshold
+choice fixes a denominator that is measuring the wrong thing.
+
+Two further things this does **not** cover. It is the daemon **root** process only, so
+a daemon whose `qwen --acp` children are the ones growing can report `normal`
+throughout — read `runtime.memory.children` beside it, which sums the live
+children's own RSS (and says via `sampled` how many actually reported).
+And nothing remediates: leaving `normal` raises a `daemon_memory_pressure`
+warning and changes no behaviour.
+
+Under `--memory-pressure-mode off` every figure above is still reported and the
+issue is not raised, so the top-level `status` stays whatever it would have
+been. Use `off` while calibrating thresholds against a real workload, or if you
+alert on `status` and do not want an uncalibrated signal moving it.
+
 ## Flow
 
 ### Typical triage flow
