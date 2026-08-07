@@ -1380,17 +1380,35 @@ describe('docs-only medium gate', () => {
     const context = doc.jobs['review-pr'].steps.find((s) => s.id === 'context');
     // One assignment site, guarded on both the event and the action.
     expect(context.run.match(/AUTO_REVIEW=true/g)).toHaveLength(1);
+    // Both halves of the guard: the event must be pull_request_target AND the
+    // action must not be review_requested. Pinning only the action half let a
+    // deleted event condition survive — the branch is shared with
+    // pull_request_review(_comment), whose actions are never review_requested,
+    // so a review-body `@qwen-code /review` would have downgraded silently.
     expect(context.run).toMatch(
-      /!= "review_requested" \]; then\s*\n\s*AUTO_REVIEW=true/,
+      /= "pull_request_target" \] &&\s*\n\s*\[ "\$\{\{ github\.event\.action \}\}" != "review_requested" \]; then\s*\n\s*AUTO_REVIEW=true/,
     );
   });
 
-  it('registers the relay marker in every autofix bot-comment filter site', () => {
+  it('pins the relay marker producer↔filter contract, author-scoped', () => {
+    // Producer side: the marker literal as the relay step actually posts it.
+    const doc = parse(workflow);
+    const relay = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    const m = relay.run.match(/<!-- qwen-review docs-only-medium -->/);
+    expect(m).not.toBeNull();
+    // Filter side: every autofix exclusion of that marker must carry the
+    // author scope ($rb) — a human quoting the marker stays actionable —
+    // and all six sites (definition + five inline copies) must be present.
     const autofix = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
-    // Definition + five inline jq copies; the trailing space is part of the
-    // pattern (marker text is always followed by a space before `-->`).
-    const hits = autofix.match(/\|qwen-review docs-only-medium\) /g) ?? [];
-    expect(hits.length).toBeGreaterThanOrEqual(6);
+    const scoped =
+      autofix.match(
+        /\(\.user\.login \/\/ ""\) == \$rb\)\) and \(\(\.body \/\/ ""\) \| test\("<!-- qwen-review docs-only-medium "\)/g,
+      ) ?? [];
+    expect(scoped.length).toBeGreaterThanOrEqual(6);
+    // No body-only exclusion of the marker may survive anywhere.
+    expect(autofix).not.toMatch(/\|qwen-review docs-only-medium\)/);
   });
 
   it('routes classification through the shared classify-pr-profile wrapper', () => {
@@ -1402,5 +1420,166 @@ describe('docs-only medium gate', () => {
     expect(ci).not.toContain(
       "--jq '.[] | {filename, status, previous_filename}'",
     );
+  });
+});
+
+describe('docs-only gate and relay, executed', () => {
+  // R2-4 / R3-4: the classification gate and the relay step are the feature's
+  // two integration boundaries; both are executed here with stubbed
+  // executables rather than asserted as text, because the probed mutants
+  // (flipped PATCH/POST branch, swapped exit-code handling, inverted
+  // docs_only comparison) all stayed green under text-only assertions.
+  const doc = parse(workflow);
+  const runStep = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  ).run;
+  const relayRun = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Report docs-only medium outcome',
+  ).run;
+
+  function gateSource() {
+    const start = runStep.indexOf('DOCS_ONLY_MEDIUM=false');
+    const endAnchor =
+      'echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"';
+    const end = runStep.indexOf(endAnchor) + endAnchor.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return runStep.slice(start, end);
+  }
+
+  function runGate({ autoReview, wrapper }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-gate-'));
+    try {
+      const stub = join(dir, '.github/scripts/ci');
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(join(stub, 'classify-pr-profile.sh'), wrapper);
+      chmodSync(join(stub, 'classify-pr-profile.sh'), 0o755);
+      const gho = join(dir, 'gho');
+      writeFileSync(gho, '');
+      const script = [
+        'set -euo pipefail',
+        `AUTO_REVIEW=${autoReview}`,
+        'REPO=o/r',
+        'PR_NUMBER=42',
+        'EFFECTIVE_TIMEOUT_MINUTES=360',
+        `GITHUB_OUTPUT="${gho}"`,
+        gateSource(),
+        'printf "timeout=%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: dir,
+      });
+      return { stdout, output: readFileSync(gho, 'utf8').trim() };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('downgrades and halves the budget when the classifier says docs_only', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('keeps the full review for a full classification', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('falls back to the full review when the wrapper fails', () => {
+    const r = runGate({ autoReview: 'true', wrapper: '#!/bin/bash\nexit 2\n' });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('could not classify');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('never classifies on an explicit (non-automatic) run', () => {
+    const r = runGate({
+      autoReview: 'false',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  function runRelay({ scenario }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-relay-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const write = (name, body) => {
+        writeFileSync(join(bin, name), body);
+        chmodSync(join(bin, name), 0o755);
+      };
+      write('sleep', '#!/bin/bash\nexit 0\n');
+      write(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "$*" >> "$CALLS"',
+          'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
+          'case "$*" in',
+          '  "api user"*) echo \'{"login":"relay-bot"}\' | jq -r .login; exit 0 ;;',
+          '  *"--method GET"*)',
+          '    if [ "$SCENARIO" = "existing" ]; then',
+          '      echo \'[{"id":777,"user":{"login":"relay-bot"},"body":"<!-- qwen-review docs-only-medium --> old"}]\'',
+          '    else echo "[]"; fi ;;',
+          '  *) : ;;',
+          'esac',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      const script = [
+        'set -euo pipefail',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        'COMPLETION_LINE="Review complete: pr-42 — Comment, not posted (0 Critical, 1 Suggestion)"',
+        'RUN_URL=https://x',
+        relayRun,
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          SCENARIO: scenario,
+          CALLS: calls,
+        },
+      });
+      return { stdout, calls: readFileSync(calls, 'utf8') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('POSTs a fresh relay comment when none exists', () => {
+    const r = runRelay({ scenario: 'fresh' });
+    expect(r.stdout).toContain('relayed to PR #42');
+    expect(r.calls).toContain('api repos/o/r/issues/42/comments -f');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('PATCHes the existing bot-authored relay comment', () => {
+    const r = runRelay({ scenario: 'existing' });
+    expect(r.stdout).toContain('relayed to PR #42');
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/777',
+    );
+  });
+
+  it('warns and exits 0 when every attempt fails', () => {
+    const r = runRelay({ scenario: 'all-fail' });
+    expect(r.stdout).toContain('::warning::');
+    expect(r.stdout).toContain('the review itself succeeded');
   });
 });

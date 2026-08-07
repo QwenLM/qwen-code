@@ -1226,17 +1226,26 @@ jobs:
             # form, which deliberately does NOT start with the reserved
             # `Review complete: ` prefix so log scrapers never parse it.
             COMPLETION_LINE="$(printf '%s\n' "$RESULT_TEXT" | grep -E '^Review complete: ' | tail -n1 || true)"
+            # Bound to THIS PR's target and to the only verdict a medium run
+            # can produce (medium caps at Comment): a stale line for another
+            # PR, or an injection-steered Approve/Request-changes shape,
+            # must not be republished under the bot's name.
             if ! printf '%s' "$COMPLETION_LINE" \
-              | grep -qE '^Review complete: \S+ — (Approve|Request changes|Comment), not posted \([0-9]+ Critical, [0-9]+ Suggestion\)$'; then
+              | grep -qE "^Review complete: pr-${PR_NUMBER} — Comment, not posted \([0-9]+ Critical, [0-9]+ Suggestion\)$"; then
               COMPLETION_LINE=""
             fi
             echo "completion_line=${COMPLETION_LINE:-(no relayable \"Review complete:\" line in the run output — see the run log)}" >> "$GITHUB_OUTPUT"
           fi
+          # Distinct from the step's exit code: the state/head guards above
+          # exit 0 without running Qwen (closed PR, stale head), and the
+          # relay must not announce a review that never ran.
+          echo "review_completed=true" >> "$GITHUB_OUTPUT"
 
       - name: 'Report docs-only medium outcome'
         if: |-
           steps.context.outputs.should_run == 'true' &&
           steps.review.outcome == 'success' &&
+          steps.review.outputs.review_completed == 'true' &&
           steps.review.outputs.docs_only_medium == 'true' &&
           steps.context.outputs.pr_number != ''
         env:
@@ -1265,31 +1274,46 @@ jobs:
             "📄 **纯文档变更** —— 自动评审以 \`--effort medium\` 运行（发现已验证、无反向审计；medium 不发布行内评论），结果见上方引用行。完整报告见 [workflow 运行](${RUN_URL})；如需带行内评论的完整高强度（high-effort）评审，请评论 \`@qwen-code /review\`。" \
             '' \
             '</details>')"
-          # Upsert by marker, mirroring the queued-acknowledgement step: each
-          # push of a docs-only PR re-runs the automatic review, and without
-          # the PATCH branch every run would stack another near-identical
-          # relay comment on the PR page.
-          EXISTING_ID="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --method GET \
-              --paginate \
-              -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review docs-only-medium -->"))] | last | .id // empty'
-          )" || EXISTING_ID=""
+          # Upsert by marker AND author, mirroring the queued-acknowledgement
+          # step: each push of a docs-only PR re-runs the automatic review, and
+          # without the PATCH branch every run would stack another
+          # near-identical relay comment on the PR page. The author filter is
+          # load-bearing — a PR participant can post the marker themselves, and
+          # an author-blind `last` match would then PATCH user-owned content
+          # (or fail on it forever, suppressing the authoritative relay).
+          BOT_LOGIN="$(gh api user --jq '.login')" || BOT_LOGIN=""
           # Bounded retry, and never fail the job over the relay: the review
           # itself succeeded, and a failing step here would trip the
           # post-failure fallback into announcing a review failure that never
           # happened. Losing the relay costs a comment; the outcome line below
-          # keeps it recoverable from the job log.
+          # keeps it recoverable from the job log. The lookup is re-resolved
+          # on every attempt — a transient failure on the listing GET must not
+          # settle the loop into the POST branch (a permanent duplicate), and
+          # a comment deleted between attempts must fall back to POST rather
+          # than PATCHing a 404 three times.
           posted=false
           for attempt in 1 2 3; do
-            if [ -n "$EXISTING_ID" ]; then
-              gh api --method PATCH \
-                "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
-                -f body="$BODY" >/dev/null && posted=true && break
-            else
+            EXISTING_ID="$(
               gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-                -f body="$BODY" >/dev/null && posted=true && break
+                --method GET \
+                --paginate \
+                -F per_page=100 \
+                | jq -sr --arg bot "$BOT_LOGIN" '[.[][]
+                    | select((.user.login // "") == $bot)
+                    | select(.body | contains("<!-- qwen-review docs-only-medium -->"))]
+                  | last | .id // empty'
+            )" || EXISTING_ID=""
+            if [ -n "$EXISTING_ID" ]; then
+              if gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
+                -f body="$BODY" >/dev/null; then
+                posted=true
+                break
+              fi
+            elif gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              -f body="$BODY" >/dev/null; then
+              posted=true
+              break
             fi
             sleep 10
           done

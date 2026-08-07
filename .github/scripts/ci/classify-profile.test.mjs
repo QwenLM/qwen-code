@@ -114,3 +114,14 @@ test('falls back to full for runtime markdown assets and instruction files', () 
   );
   assert.equal(classifyChangedFiles(['AGENTS.md']), 'full');
 });
+
+test('reserved prose basenames classify docs_only only with inert extensions', () => {
+  assert.equal(classifyChangedFiles(['README.md']), 'docs_only');
+  assert.equal(classifyChangedFiles(['LICENSE']), 'docs_only');
+  assert.equal(classifyChangedFiles(['SECURITY.txt']), 'docs_only');
+  // Executable files named after reserved basenames must never downgrade a
+  // review: the open-extension form classified all of these as docs.
+  assert.equal(classifyChangedFiles(['README.js']), 'full');
+  assert.equal(classifyChangedFiles(['SECURITY.ts']), 'full');
+  assert.equal(classifyChangedFiles(['LICENSE.sh']), 'full');
+});

@@ -17,12 +17,28 @@ set -euo pipefail
 repo="${1:?usage: classify-pr-profile.sh <owner/repo> <pr-number>}"
 pr="${2:?usage: classify-pr-profile.sh <owner/repo> <pr-number>}"
 
+# mktemp + trap, not a fixed name: the self-hosted pool is persistent and
+# shared, so a predictable path is a leftover-file landmine, and ci.yml's
+# gate and the review gate can run concurrently for the same PR — two
+# writers interleaving one JSONL would classify one job against the other
+# job's file list.
 tmp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-files="${tmp}/classify-pr-${pr}-files.jsonl"
+files="$(mktemp "${tmp}/classify-pr-${pr}-files.XXXXXX")"
+trap 'rm -f "$files"' EXIT
 
 if ! gh api --paginate "repos/${repo}/pulls/${pr}/files" \
     --jq '.[] | {filename, status, previous_filename}' > "${files}"; then
   exit 2
+fi
+
+# The list-files endpoint caps at 3,000 entries. A truncated listing can be
+# all docs while an omitted later entry is source, so any mismatch against
+# the PR's own changed-file count conservatively classifies as `full`.
+declared="$(gh api "repos/${repo}/pulls/${pr}" --jq '.changed_files')" || exit 2
+retrieved="$(wc -l < "${files}")"
+if [ "${retrieved}" -ne "${declared}" ]; then
+  echo "full"
+  exit 0
 fi
 
 node "$(dirname "$0")/classify-profile.mjs" "${files}" || exit 3
