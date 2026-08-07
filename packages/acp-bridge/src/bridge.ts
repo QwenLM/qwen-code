@@ -1685,27 +1685,48 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   /**
-   * Whether this Session must be preserved from automatic cleanup.
-   *
-   * Fails closed on ignorance: a channel that negotiated reporting but has not
-   * been heard from *recently enough* holds the Session. Never-reported and
-   * gone-quiet land in the same bucket deliberately — a snapshot from ten
-   * minutes ago says nothing about whether a background agent started since,
-   * so letting it authorize a reap is exactly the stale-empty race this
-   * mechanism exists to remove.
-   *
-   * That is not a terminal state: `maybeCloseIdleSession` asks the child
-   * directly rather than waiting for a report that may never come. A channel
-   * that has genuinely stopped answering is out of scope here — reclaiming it
-   * belongs to transport liveness, which has its own timeout and its own
-   * escalation, and must not be inferred from one Session's silence.
+   * Whether the child has told us, recently enough to count, that it is
+   * holding work for this Session. Positive knowledge only — a channel that
+   * never negotiated and one that has gone quiet both answer `false` here,
+   * because neither is a report *of work*.
    */
-  function entryHasActiveWork(entry: SessionEntry): boolean {
-    if (entryHasLocalWork(entry)) return true;
+  function childReportsHeldWork(entry: SessionEntry): boolean {
     const owner = channelInfoForEntry(entry);
     if (!owner?.activeWork) return false;
-    if (!childHoldsAreFresh(entry, owner.activeWork)) return true;
+    if (!childHoldsAreFresh(entry, owner.activeWork)) return false;
     return entry.childHolds !== null && entry.childHolds.size > 0;
+  }
+
+  /**
+   * Whether the child's side of this Session's state is currently unknown:
+   * the channel negotiated reporting, but no snapshot recent enough to grade
+   * has arrived. Never-reported and gone-quiet are the same state on purpose —
+   * a snapshot from ten minutes ago says nothing about whether a background
+   * agent started since.
+   *
+   * A channel that never negotiated is not "unknown", it is out of scope:
+   * treating it as unknown would make every legacy Session unreapable.
+   */
+  function childWorkIsUnknown(entry: SessionEntry): boolean {
+    const owner = channelInfoForEntry(entry);
+    if (!owner?.activeWork) return false;
+    return !childHoldsAreFresh(entry, owner.activeWork);
+  }
+
+  /**
+   * Whether this Session counts as busy for the health surface.
+   *
+   * Fails closed on ignorance: unknown reads the same as busy, because a
+   * controller must not be able to mistake "nobody told me" for "nothing is
+   * running". The reporting grade published alongside is what lets a caller
+   * tell those two apart when it needs to.
+   */
+  function entryHasActiveWork(entry: SessionEntry): boolean {
+    return (
+      entryHasLocalWork(entry) ||
+      childReportsHeldWork(entry) ||
+      childWorkIsUnknown(entry)
+    );
   }
 
   /**
@@ -1713,6 +1734,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    * was time to look. Each caller adds its own policy on top (the reaper its
    * TTL, the detach path its client bookkeeping) but none of them may skip
    * these.
+   *
+   * Note what is deliberately *not* here: `childWorkIsUnknown`. Unknown is not
+   * a reason to skip, it is a reason to ask — the candidate goes on to
+   * `confirmChildUnheld`, and the child answers authoritatively under its own
+   * close gate whether or not its snapshots are arriving. Skipping on unknown
+   * instead would retain such a Session forever, with no path that ever
+   * resolves it; asking costs one bounded round trip and still retains on any
+   * non-answer. Only *known* work — daemon-owned, or a fresh report of held
+   * work — blocks the attempt outright.
    *
    * `activeWorkCloseInFlight` is in here because a conditional close is a
    * multi-step, awaited sequence: while one is outstanding this Session is
@@ -1724,7 +1754,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (byId.get(entry.sessionId) !== entry) return false;
     if (isClosingOrAuthorizingClose(entry)) return false;
     if (entry.events.subscriberCount > 0) return false;
-    return !entryHasActiveWork(entry);
+    if (entryHasLocalWork(entry)) return false;
+    return !childReportsHeldWork(entry);
   }
 
   /**

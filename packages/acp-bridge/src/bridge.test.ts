@@ -532,6 +532,69 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('asks the child about a session it has never reported on', async () => {
+      const closeCalls: Array<Record<string, unknown>> = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            closeCalls.push(params);
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // No snapshot has arrived, so the child's side is unknown. Health reads
+      // that as busy...
+      expect(bridge.activeWork).toBe(true);
+      // ...but unknown must not make the Session unreapable. Retaining without
+      // ever asking leaves nothing that can resolve it; the ask is bounded and
+      // still retains on any non-answer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      await vi.waitFor(() => expect(closeCalls.length).toBe(1));
+      expect(closeCalls[0]?.['sessionId']).toBe(session.sessionId);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('keeps an unreported session when the child says it holds work', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true) {
+            return { closed: true, holds: [] };
+          }
+          return { closed: false, holds: [agentHold('never-reported')] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Asking is what resolves the unknown, and a refusal resolves it toward
+      // retention with the reason attached rather than leaving it a guess.
+      await bridge
+        .detachClient(session.sessionId, session.clientId)
+        .catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.sessionCount).toBe(1);
+      expect(bridge.activeWork).toBe(true);
+      expect(reportingGrade(bridge)).toBe('full');
+
+      await bridge.shutdown();
+    });
+
     it('treats a snapshot aged past the freshness window as no evidence', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),

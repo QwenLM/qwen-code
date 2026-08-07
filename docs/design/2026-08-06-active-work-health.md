@@ -47,10 +47,14 @@ A snapshot is flushed ahead of the prompt response on the same stream. The daemo
 Per Session the daemon holds one of:
 
 - **unsupported** — the channel never negotiated. Contributes nothing; pre-existing cleanup behavior applies unchanged. Treating this as "unknown" would make every legacy Session permanently unreapable.
-- **unknown** — negotiated, not yet heard from _recently enough_. Reads as retained, but is not a state the daemon sits in: it asks.
+- **unknown** — negotiated, not yet heard from _recently enough_. Reads as busy on the health surface, but is not a state the daemon sits in: it asks.
 - **known** — a fresh snapshot has been applied.
 
-Never-reported and gone-quiet are the same state on purpose. A snapshot older than the grading window (`intervalMs × 3`) is not a report that the Session is idle, it is the absence of one — a background Agent could have started at any point since — so it stops counting as evidence and the Session reads as retained again. Reclaiming a channel that has genuinely stopped answering is not this mechanism's job; see below.
+Never-reported and gone-quiet are the same state on purpose. A snapshot older than the grading window (`intervalMs × 3`) is not a report that the Session is idle, it is the absence of one — a background Agent could have started at any point since — so it stops counting as evidence.
+
+**Unknown is a reason to ask, not a reason to skip.** The two consumers read it differently, and they have to: the health surface reports unknown as busy (a controller must never mistake "nobody told me" for "nothing is running"), while automatic cleanup treats it as a candidate and goes on to the conditional close below. Only _known_ work — daemon-owned, or a fresh report of held work — blocks the attempt outright. Skipping on unknown instead would look safe and in fact be the worse failure: nothing would ever resolve it, so a Session on a channel that went quiet would be retained forever with no path out. Asking costs one bounded round trip and still retains on any non-answer, and the child can answer authoritatively under its close gate whether or not its snapshots are arriving.
+
+Reclaiming a channel that has stopped answering entirely is still not this mechanism's job; see below.
 
 The cache decides _when_ it is worth asking. It never authorizes destruction, because a fresh empty snapshot only describes the moment it was built and work can start in the gap. So automatic cleanup closes through a conditional RPC:
 
@@ -76,7 +80,7 @@ Four things can decide it is time to look at a Session: the last client detachin
 | not already closing or close-in-flight      | two paths racing the same teardown duplicate the round trip and race each other's guards                             |
 | no SSE subscriber                           | someone is watching this Session's stream                                                                            |
 | nothing daemon-owned in flight              | queued and dispatched prompts and notifications the daemon is pushing; never depends on the child reporting anything |
-| no fresh child report of held work          | fails closed on ignorance and on staleness alike                                                                     |
+| no fresh child report of held work          | only _known_ work blocks; unknown is a candidate that goes on to ask                                                 |
 | the child confirms under its own close gate | the cache says what _was_ true; only the child can say what is true now                                              |
 
 The reaper deliberately ignores registered client ids — it exists for the crash path where a detach never arrived — but that is the only difference, and it still has to ask the child before destroying anything.

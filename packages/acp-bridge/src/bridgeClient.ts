@@ -35,6 +35,53 @@ import {
   type ActiveWorkHoldV1,
   type ActiveWorkSnapshotV1,
 } from './bridgeTypes.js';
+import type {
+  BridgeWorkspaceGenerationNotificationEvent,
+  BridgeGenerationNotificationEvent,
+  BridgePendingInteraction,
+  MidTurnQueueEntry,
+  PendingPromptEntry,
+} from './bridgeTypes.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import { isValidExternalToolGuardDenialReason } from './externalToolGuard.js';
+import type {
+  ChannelDeliveryErrorCode,
+  ChannelDeliveryHandler,
+  ChannelDeliveryHostResult,
+  ChannelDeliveryInfo,
+  ClientMcpMessageSender,
+  CreateSubSessionHandler,
+  ExternalToolGuardHandler,
+  LiveScreenContextCaptureHandler,
+  LiveSpeakToUserHandler,
+  LiveTaskToolRequestHandler,
+} from './bridgeOptions.js';
+import {
+  CHANNEL_DELIVERY_ERROR_CODES,
+  LIVE_TASK_TOOL_NAMES,
+  MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
+  MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
+  MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './bridgeOptions.js';
+import type { BridgeFileSystem } from './bridgeFileSystem.js';
+import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+// Narrowed from the concrete `MultiClientPermissionMediator` to the
+// sub-interface this class actually uses (`request` only). Structural
+// typing lets the bridge factory pass the full mediator instance
+// without a cast; test stubs only need to fake the `request` method.
+import type { PermissionMediator } from './permission.js';
+import type {
+  PermissionRequestRecord,
+  PermissionResolution,
+} from './permission.js';
+import { CancelSentinelCollisionError } from './bridgeErrors.js';
+import { writeStderrLine } from './internal/stderrLine.js';
+import type {
+  SessionArtifactChange,
+  SessionArtifactInput,
+  SessionArtifactStore,
+} from './sessionArtifacts.js';
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -97,53 +144,6 @@ function parseActiveWorkSnapshot(
   }
   return { v: ACTIVE_WORK_HEARTBEAT_VERSION, seq, sessions: parsed };
 }
-import type {
-  BridgeWorkspaceGenerationNotificationEvent,
-  BridgeGenerationNotificationEvent,
-  BridgePendingInteraction,
-  MidTurnQueueEntry,
-  PendingPromptEntry,
-} from './bridgeTypes.js';
-import { SERVE_CONTROL_EXT_METHODS } from './status.js';
-import { isValidExternalToolGuardDenialReason } from './externalToolGuard.js';
-import type {
-  ChannelDeliveryErrorCode,
-  ChannelDeliveryHandler,
-  ChannelDeliveryHostResult,
-  ChannelDeliveryInfo,
-  ClientMcpMessageSender,
-  CreateSubSessionHandler,
-  ExternalToolGuardHandler,
-  LiveScreenContextCaptureHandler,
-  LiveSpeakToUserHandler,
-  LiveTaskToolRequestHandler,
-} from './bridgeOptions.js';
-import {
-  CHANNEL_DELIVERY_ERROR_CODES,
-  LIVE_TASK_TOOL_NAMES,
-  MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
-  MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
-  MAX_SUB_SESSION_NAME_CHARS,
-  MAX_SUB_SESSION_PROMPT_CHARS,
-} from './bridgeOptions.js';
-import type { BridgeFileSystem } from './bridgeFileSystem.js';
-import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
-// Narrowed from the concrete `MultiClientPermissionMediator` to the
-// sub-interface this class actually uses (`request` only). Structural
-// typing lets the bridge factory pass the full mediator instance
-// without a cast; test stubs only need to fake the `request` method.
-import type { PermissionMediator } from './permission.js';
-import type {
-  PermissionRequestRecord,
-  PermissionResolution,
-} from './permission.js';
-import { CancelSentinelCollisionError } from './bridgeErrors.js';
-import { writeStderrLine } from './internal/stderrLine.js';
-import type {
-  SessionArtifactChange,
-  SessionArtifactInput,
-  SessionArtifactStore,
-} from './sessionArtifacts.js';
 
 // Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
 // import from core for this hot demux path.
