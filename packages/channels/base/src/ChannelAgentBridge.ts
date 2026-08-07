@@ -3,6 +3,9 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 
+export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
+  'qwen.daemon.promptDisplayText';
+
 export interface AvailableCommand {
   name: string;
   description: string;
@@ -90,6 +93,13 @@ export interface ChannelAgentBridgeSessionOptions {
   sourceId?: string;
 }
 
+export interface ChannelAgentBridgePromptOptions {
+  imageBase64?: string;
+  imageMimeType?: string;
+  /** User-authored text shown in transcripts when `text` includes hidden context. */
+  displayText?: string;
+}
+
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
   getAvailableCommands?(sessionId: string): AvailableCommand[];
@@ -115,7 +125,7 @@ export interface ChannelAgentBridge {
   prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
@@ -123,6 +133,8 @@ export interface ChannelAgentBridge {
     sessionId: string,
     expectedBindingToken?: object,
   ): Promise<void>;
+  /** Permanently remove an internal bridge session and its persisted data. */
+  deleteSessionData?(sessionId: string): Promise<void>;
   respondToPermission?(
     requestId: string,
     response: RequestPermissionResponse,

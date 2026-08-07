@@ -26,6 +26,16 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    expect(
+      catalog.find((entry) => entry.type === 'dingtalk')?.fields,
+    ).toContainEqual(
+      expect.objectContaining({
+        key: 'sessionScope',
+        kind: 'enum',
+        required: true,
+        default: 'user',
+      }),
+    );
     for (const type of ['github', 'gitlab'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
       expect(fields).toContainEqual(
@@ -49,6 +59,17 @@ describe('channel registry', () => {
         }),
       );
     }
+    expect(
+      catalog.find((entry) => entry.type === 'github')?.fields,
+    ).toContainEqual(
+      expect.objectContaining({
+        key: 'sessionScope',
+        default: 'chat_thread',
+      }),
+    );
+    expect(
+      catalog.find((entry) => entry.type === 'telegram')?.fields,
+    ).not.toContainEqual(expect.objectContaining({ key: 'sessionScope' }));
     expect(
       catalog.find((entry) => entry.type === 'gitlab')?.fields,
     ).toContainEqual(

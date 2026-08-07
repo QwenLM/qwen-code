@@ -111,6 +111,13 @@ interface DaemonCapabilitiesLike {
 
 interface DaemonClientLike {
   capabilities(): Promise<DaemonCapabilitiesLike>;
+  workspaceByCwd?(cwd: string): {
+    deleteSessionsData(sessionIds: string[]): Promise<{
+      removed: string[];
+      notFound: string[];
+      errors: Array<{ sessionId: string; error: string }>;
+    }>;
+  };
 }
 
 interface DaemonSessionClientStaticLike {
@@ -244,6 +251,10 @@ export function createDaemonChannelBridgeFacade(
 
   if (bridge.discardSession) {
     facade.discardSession = bridge.discardSession.bind(bridge);
+  }
+
+  if (bridge.deleteSessionData) {
+    facade.deleteSessionData = bridge.deleteSessionData.bind(bridge);
   }
 
   if (bridge.getAvailableCommands) {
@@ -473,6 +484,22 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
+    deleteSessionData: async (sessionId, workspaceCwd) => {
+      const workspaceClient = client.workspaceByCwd?.(workspaceCwd);
+      if (!workspaceClient) {
+        throw new Error('Daemon SDK does not support session data deletion.');
+      }
+      const result = await workspaceClient.deleteSessionsData([sessionId]);
+      if (
+        !result.removed.includes(sessionId) &&
+        !result.notFound.includes(sessionId)
+      ) {
+        const detail = result.errors.find(
+          (entry) => entry.sessionId === sessionId,
+        )?.error;
+        throw new Error(detail ?? `Session ${sessionId} was not deleted.`);
+      }
+    },
     ...(modelServiceId ? { modelServiceId } : {}),
     ...(opts.channelLoopMcpHost
       ? { channelLoopMcpHost: opts.channelLoopMcpHost }

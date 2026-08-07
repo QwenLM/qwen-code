@@ -1,6 +1,7 @@
 import type {
   ChannelConfigFieldDescriptor,
   ChannelPlugin,
+  SessionScope,
 } from '@qwen-code/channel-base';
 
 export interface ChannelTypeDescriptor {
@@ -12,6 +13,16 @@ export interface ChannelTypeDescriptor {
 
 const registry = new Map<string, ChannelPlugin>();
 let builtinsPromise: Promise<void> | null = null;
+
+const SESSION_SCOPE_OPTIONS: ReadonlyArray<{
+  value: SessionScope;
+  label: string;
+}> = [
+  { value: 'user', label: 'Per user and chat' },
+  { value: 'thread', label: 'Per thread' },
+  { value: 'chat_thread', label: 'Per chat and thread' },
+  { value: 'single', label: 'One shared session' },
+];
 
 function ensureBuiltins(): Promise<void> {
   if (!builtinsPromise) {
@@ -69,12 +80,29 @@ export async function supportedChannelCatalog(): Promise<
   ChannelTypeDescriptor[]
 > {
   await ensureBuiltins();
-  return [...registry.values()].map(
-    ({ channelType, displayName, management }) => ({
+  return [...registry.values()].map((plugin) => {
+    const { channelType, displayName, management } = plugin;
+    const fields = management?.fields ?? [];
+    return {
       type: channelType,
       displayName,
       manageable: management !== undefined,
-      fields: management?.fields ?? [],
-    }),
-  );
+      fields:
+        management && !fields.some((field) => field.key === 'sessionScope')
+          ? [
+              ...fields,
+              {
+                key: 'sessionScope',
+                label: 'Session scope',
+                kind: 'enum',
+                required: true,
+                default: plugin.defaultSessionScope ?? 'user',
+                description:
+                  'Controls which incoming conversations share one agent session.',
+                options: SESSION_SCOPE_OPTIONS,
+              },
+            ]
+          : fields,
+    };
+  });
 }

@@ -16,6 +16,7 @@ const {
   active,
   archived,
   useSessions,
+  useChannels,
   listWorkspaceSessions,
   archiveSessionsData,
   unarchiveSessionsData,
@@ -24,6 +25,7 @@ const {
   exportSession,
   exportArchivedSession,
   sessionActions,
+  channelState,
 } = vi.hoisted(() => {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
@@ -58,11 +60,35 @@ const {
   const active = makeSessions();
   const archived = makeSessions();
   const useSessions = vi.fn(
-    (options?: { archiveState?: string; sourceType?: string }) =>
-      options?.archiveState === 'archived' ? archived : active,
+    (options?: {
+      archiveState?: string;
+      sourceType?: string;
+      group?: string;
+    }) => (options?.archiveState === 'archived' ? archived : active),
   );
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
+  const channelState = {
+    data: undefined as
+      | {
+          catalog: Array<{
+            type: string;
+            displayName: string;
+            manageable: boolean;
+            fields: [];
+          }>;
+          snapshot: { revision: string; instances: Record<string, unknown> };
+        }
+      | undefined,
+    catalog: [] as Array<{
+      type: string;
+      displayName: string;
+      manageable: boolean;
+      fields: [];
+    }>,
+    channels: {} as Record<string, unknown>,
+  };
+  const useChannels = vi.fn(() => channelState);
   return {
     connection: {
       status: 'connected',
@@ -105,6 +131,7 @@ const {
     active,
     archived,
     useSessions,
+    useChannels,
     listWorkspaceSessions,
     archiveSessionsData,
     unarchiveSessionsData,
@@ -113,6 +140,7 @@ const {
     exportSession,
     exportArchivedSession,
     sessionActions,
+    channelState,
   };
 });
 
@@ -122,6 +150,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
   useSessions,
+  useChannels,
 }));
 
 const { I18nProvider } = await import('../../i18n');
@@ -485,8 +514,12 @@ beforeEach(() => {
   archived.reload.mockReset();
   archived.reload.mockResolvedValue(undefined);
   useSessions.mockClear();
+  useChannels.mockClear();
   active.sessions.length = 0;
   archived.sessions.length = 0;
+  channelState.data = undefined;
+  channelState.catalog = [];
+  channelState.channels = {};
 });
 
 afterEach(() => {
@@ -2887,6 +2920,346 @@ describe('WebShellSidebar primary workspace header', () => {
     );
     expect(primaryBadges).toHaveLength(0);
     expect(container.textContent).toContain('project');
+  });
+});
+
+describe('WebShellSidebar session source switch', () => {
+  it('never renders primary sessions from the inactive source', async () => {
+    active.sessions.push(
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+      {
+        sessionId: 'channel-session',
+        displayName: 'Channel session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('Task session');
+    expect(container.textContent).not.toContain('Channel session');
+
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain('Task session');
+    expect(container.textContent).toContain('Channel session');
+  });
+
+  it('applies the source switch to the archived list', async () => {
+    archived.sessions.push(
+      {
+        sessionId: 'archived-task-session',
+        displayName: 'Archived task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        isArchived: true,
+      },
+      {
+        sessionId: 'archived-channel-session',
+        displayName: 'Archived channel session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        isArchived: true,
+      },
+    );
+    renderSidebar();
+    await expandArchived();
+
+    expect(container.textContent).toContain('Archived task session');
+    expect(container.textContent).not.toContain('Archived channel session');
+
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    // Both halves of the archived application: the request carries the
+    // channel sourceType, and the client-side dedupe filter keeps archived
+    // task sessions out of the Channels tab.
+    expect(
+      useSessions.mock.calls.findLast(
+        ([options]) => options?.archiveState === 'archived',
+      )?.[0]?.sourceType,
+    ).toBe('channel');
+    expect(container.textContent).toContain('Archived channel session');
+    expect(container.textContent).not.toContain('Archived task session');
+  });
+
+  it('switches primary and workspace-qualified lists from tasks to channels', async () => {
+    renderSidebar();
+
+    const sourceTabs = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    const tasksTab = sourceTabs.find(
+      (button) => button.textContent?.trim() === 'Tasks',
+    );
+    const channelsTab = sourceTabs.find(
+      (button) => button.textContent?.trim() === 'Channels',
+    );
+    expect(tasksTab?.getAttribute('data-state')).toBe('active');
+    expect(channelsTab).toBeDefined();
+    expect(
+      useSessions.mock.calls.find(
+        ([options]) =>
+          options?.archiveState === 'active' && options.group !== 'pinned',
+      )?.[0]?.sourceType,
+    ).toBe('default');
+
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    expect(channelsTab?.getAttribute('data-state')).toBe('active');
+    expect(
+      useSessions.mock.calls.findLast(
+        ([options]) =>
+          options?.archiveState === 'active' && options.group !== 'pinned',
+      )?.[0]?.sourceType,
+    ).toBe('channel');
+
+    await expandWorkspace('other');
+    expect(
+      listWorkspaceSessions.mock.calls.some(
+        ([options]) => options?.sourceType === 'channel',
+      ),
+    ).toBe(true);
+  });
+
+  it('hides the switch and keeps legacy session requests unfiltered', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: capabilities.features.filter(
+        (feature) => feature !== 'session_source_metadata',
+      ),
+    };
+    renderSidebar();
+
+    expect(container.querySelector('[aria-label="Session source"]')).toBeNull();
+    expect(
+      useSessions.mock.calls.every(
+        ([options]) => options?.sourceType === undefined,
+      ),
+    ).toBe(true);
+    await expandWorkspace('other');
+    expect(listWorkspaceSessions).toHaveBeenCalled();
+    expect(
+      listWorkspaceSessions.mock.calls.every(
+        ([options]) => options?.sourceType === undefined,
+      ),
+    ).toBe(true);
+  });
+
+  it('polls channel sessions on the active-session interval', async () => {
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    expect(
+      setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 2_000),
+    ).toBe(false);
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+    expect(channelsTab?.getAttribute('data-state')).toBe('active');
+    const activePoll = setIntervalSpy.mock.calls.findLast(
+      ([, timeout]) => timeout === 2_000,
+    );
+    expect(activePoll).toBeDefined();
+    active.reload.mockClear();
+
+    await act(async () => {
+      const callback = activePoll![0];
+      expect(callback).toBeTypeOf('function');
+      if (typeof callback === 'function') callback();
+      await Promise.resolve();
+    });
+
+    expect(active.reload).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a flat channel list when channel metadata is unavailable', async () => {
+    active.sessions.push({
+      sessionId: 'legacy-channel-session',
+      displayName: 'Legacy channel',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      sourceId: 'legacy-bot',
+    });
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    expect(useChannels).toHaveBeenCalledWith({
+      autoLoad: false,
+      enabled: false,
+    });
+    expect(container.textContent).toContain('Legacy channel');
+    expect(container.querySelector('section[aria-label]')).toBeNull();
+  });
+
+  it('groups channel sessions by platform type and toggles each group', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    channelState.catalog = [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+      {
+        type: 'feishu',
+        displayName: 'Feishu',
+        manageable: true,
+        fields: [],
+      },
+    ];
+    channelState.channels = {
+      'ding-one': {
+        name: 'ding-one',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+      'ding-two': {
+        name: 'ding-two',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+      feishu: {
+        name: 'feishu',
+        config: { type: 'feishu' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+    };
+    channelState.data = {
+      catalog: channelState.catalog,
+      snapshot: { revision: '1', instances: channelState.channels },
+    };
+    active.sessions.push(
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+      {
+        sessionId: 'feishu-session',
+        displayName: 'Feishu one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'feishu',
+      },
+      {
+        sessionId: 'ding-two-session',
+        displayName: 'DingTalk two',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-two',
+        isPinned: true,
+      },
+      {
+        sessionId: 'legacy-channel-session',
+        displayName: 'Legacy channel',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    expect(useChannels).toHaveBeenCalledWith({
+      autoLoad: true,
+      enabled: true,
+    });
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(dingTalkGroup!.textContent).toContain('DingTalk one');
+    expect(dingTalkGroup?.textContent).toContain('DingTalk two');
+    expect(dingTalkGroup?.textContent).not.toContain('Feishu one');
+    expect(
+      container.querySelector('section[aria-label="Feishu"]')?.textContent,
+    ).toContain('Feishu one');
+    expect(
+      container.querySelector('section[aria-label="Other channels"]')
+        ?.textContent,
+    ).toContain('Legacy channel');
+
+    const toggle = dingTalkGroup?.querySelector<HTMLButtonElement>(
+      'button[aria-expanded="true"]',
+    );
+    await act(async () => click(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(dingTalkGroup?.textContent).not.toContain('DingTalk one');
+    await act(async () => click(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(dingTalkGroup?.textContent).toContain('DingTalk one');
   });
 });
 

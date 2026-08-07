@@ -237,6 +237,15 @@ describe('resumeHistoryUtils', () => {
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
     });
 
+    it('does not fall back to hidden text when displayText is empty', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'internal channel instructions' }] },
+        systemPayload: { displayText: '' },
+      });
+      expect(items).toEqual([]);
+    });
+
     it('prefers displayText over the tag-strip fallback', () => {
       // Fixture where the two branches disagree: without displayText the
       // tag-strip path would expose the middle "expanded extra" part.

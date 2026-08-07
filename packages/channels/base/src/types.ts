@@ -106,6 +106,8 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
+  /** User-authored text to display when `text` contains model-only context. */
+  displayText?: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;

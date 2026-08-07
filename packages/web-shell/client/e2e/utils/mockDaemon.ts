@@ -848,10 +848,18 @@ async function handleDaemonRoute(
     // `group=all` (and missing group) returns the full active list. The UI
     // excludes pinned rows from organized sections via `excludePinned`.
     const group = searchParams.get('group');
+    const sourceType = searchParams.get('sourceType');
+    const sourceSessions = sourceType
+      ? scenario.sessions.filter(
+          (session) =>
+            session.sourceType === sourceType ||
+            (sourceType === 'default' && session.sourceType === undefined),
+        )
+      : scenario.sessions;
     const sessions =
       group === 'pinned'
-        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions;
+        ? sourceSessions.filter((session) => Boolean(session.isPinned))
+        : sourceSessions;
     await json(route, { sessions });
     return;
   }
