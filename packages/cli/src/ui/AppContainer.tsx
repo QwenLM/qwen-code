@@ -1306,11 +1306,18 @@ export const AppContainer = (props: AppContainerProps) => {
       ),
   );
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
+  const refreshStaticRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshStatic = useCallback(() => {
-    if (!useTerminalBuffer) {
-      stdout.write(ansiEscapes.clearTerminal);
+    if (refreshStaticRef.current) {
+      clearTimeout(refreshStaticRef.current);
     }
-    remountStaticHistory();
+    refreshStaticRef.current = setTimeout(() => {
+      refreshStaticRef.current = null;
+      if (!useTerminalBuffer) {
+        stdout.write(ansiEscapes.clearTerminal);
+      }
+      remountStaticHistory();
+    }, 0);
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
   // Keep the static header in sync with model changes without polling.
