@@ -16,7 +16,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
-import { promptRecordDir, recordPrompt } from './prompt-record.js';
+import {
+  promptRecordDir,
+  recordPrompt,
+  writeFindingsFile,
+} from './prompt-record.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 
 // Direct unit coverage for the scheduler's own rules — the classifier's
@@ -715,6 +719,127 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([]);
     expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('quoting a WHOLE entry from the findings FILE is not a yield (post-#8597 shape)', () => {
+    // Since #8597 the cumulative list rides a digest-named `.findings.md`
+    // file the launch prompt points at, not the prompt itself. The echo
+    // guard must read the list back from that file: quoting the whole entry
+    // the auditor was told not to re-report is still not a yield.
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const findingsFile = writeFindingsFile(
+        plan,
+        `reverse-audit--round-${r}--abc123`,
+        '- **File:** src/pay.ts:42 — the double charge\n' +
+          '- **Severity:** Suggestion\n',
+      );
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${findingsFile}")`,
+      );
+      transcript(built, quoted);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('a MISSING findings file fails toward auditing — the quotation reads as a yield', () => {
+    // The pointer is there but the list is gone (a cleaned-up record dir):
+    // the guard falls back to the prompt, no entry matches, and the quoted
+    // block keeps the chunk hot — the module's failure direction.
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${join(dir, 'gone.findings.md')}")`,
+      );
+      transcript(built, quoted);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a pointer outside the record dir is not followed — degrades to the prompt', () => {
+    // The echo guard reads the pointer the record carries, confined to this
+    // plan's record dir. A prompt whose `.findings.md` path escapes it
+    // (here: a list sitting outside, with the quoted entry in it) must NOT
+    // be read — the guard falls back to the prompt, no entry matches, and
+    // the quotation keeps the chunk hot rather than reading an arbitrary path.
+    const outside = join(dir, 'outside.findings.md');
+    writeFileSync(
+      outside,
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+        '- **Severity:** Suggestion\n',
+    );
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` + `read_file(file_path="${outside}")`,
+      );
+      transcript(built, quoted);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('a missing findings file is not cross-contaminated between chunks of a round', () => {
+    // Every chunk of a round points at the SAME (chunk-free) findings file.
+    // When it is missing, each record must fall back to its OWN prompt as the
+    // echo-guard corpus — not to a sibling chunk's prompt cached under the
+    // shared pointer. Here chunk 13's prompt carries a `**File:**` line that
+    // chunk 14 quotes; if chunk 14 were handed chunk 13's prompt, the quote
+    // would match and chunk 14 would wrongly skip-to-dry.
+    const missing = join(promptRecordDir(plan), 'gone.findings.md');
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const b13 = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n**File:** src/pay.ts:42\n` +
+          `read_file(file_path="${missing}")`,
+      );
+      const b14 = record(
+        r,
+        14,
+        `chunk 14 round ${r} territory\n` + `read_file(file_path="${missing}")`,
+      );
+      transcript(b13, DRY);
+      transcript(b14, quoted);
+    }
+
+    const r3 = schedule(3, [13, 14]);
+    // Chunk 13 (clean DRY) may retire; chunk 14 must stay hot — its quotation
+    // matches nothing in its OWN prompt, so it reads as a yield, not an echo.
+    expect(r3.due).toContain(14);
   });
 
   it('a cold check nobody certified puts the chunk back on the every-round schedule', () => {
