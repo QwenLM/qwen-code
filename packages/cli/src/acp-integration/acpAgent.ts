@@ -2156,7 +2156,7 @@ function readProviderSetupInputs(
   // Reconnect clients (including the desktop connect form) echo back the model
   // IDs saved in settings. Reconcile them against the current built-in template
   // so a reconnect after a template change installs the new built-ins rather
-  // than stamping the new version over a stale list.
+  // than persisting a stale list that re-triggers the update prompt.
   const resolvedModelIds =
     modelIds.length > 0
       ? reconcileInstallModelIds(config, modelIds)

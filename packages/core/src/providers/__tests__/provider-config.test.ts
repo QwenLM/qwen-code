@@ -250,6 +250,37 @@ describe('buildInstallPlan', () => {
       },
     });
   });
+
+  it('keeps a deliberately installed subset visible to update detection', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }, { id: 'model-b' }],
+    });
+    // The user deselected 'model-b' in the wizard; the subset is installed
+    // verbatim by design.
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+
+    // The persisted version hashes only the installed built-in entries, so it
+    // mismatches the full template hash and findAllPendingUpdates re-offers
+    // the missing built-in at next startup.
+    const version = (
+      plan.providerState?.['providerMetadata.test'] as { version: string }
+    ).version;
+    expect(version).toBe(
+      computeModelListVersion(
+        buildProviderTemplate(config, 'https://api.test.com/v1').filter(
+          (m) => m.id === 'model-a',
+        ),
+      ),
+    );
+    expect(version).not.toBe(
+      computeProviderTemplateVersion(config, 'https://api.test.com/v1'),
+    );
+  });
 });
 
 describe('specToModelConfig (via buildProviderTemplate)', () => {
@@ -436,18 +467,22 @@ describe('reconcileInstallModelIds', () => {
   });
 
   it('keeps the install plan version in step with the template', () => {
-    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
+    // Editable so the plan honors inputs.modelIds: without reconciliation the
+    // plan would install only ['a', 'mine'], persisting a version hash that
+    // mismatches the template and re-triggers the update prompt.
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'a' }, { id: 'b' }],
+    });
     const plan = buildInstallPlan(config, {
       baseUrl: 'https://api.test.com/v1',
       apiKey: 'k',
-      // Stale echoed list: without reconciliation the plan would install only
-      // 'a' while still stamping the current two-model template version,
-      // permanently suppressing update detection.
-      modelIds: reconcileInstallModelIds(config, ['a']),
+      modelIds: reconcileInstallModelIds(config, ['a', 'mine']),
     });
     expect(plan.modelProviders?.[0]?.models.map((m) => m.id)).toEqual([
       'a',
       'b',
+      'mine',
     ]);
     expect(
       plan.providerState?.['providerMetadata.test'] as {

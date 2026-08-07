@@ -18,6 +18,7 @@ import {
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
+  reconcileInstallModelIds,
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
@@ -238,14 +239,13 @@ export function useProviderUpdates(
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
-        const defaultIds = getDefaultModelIds(providerCfg);
-        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !defaultIds.includes(id),
-        );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
-          modelIds: [...defaultIds, ...customIds],
+          modelIds: reconcileInstallModelIds(
+            providerCfg,
+            readInstalledOwnedIds(settings, providerCfg),
+          ),
         });
         delete installPlan.env;
         const previousModel = config.getModel();

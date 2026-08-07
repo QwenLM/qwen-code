@@ -13,6 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
 import express from 'express';
 import {
+  buildProviderSetupInputs,
   createLazyBridgeProxy,
   extractContextFilename,
   formatChannelWorkerDaemonUrl,
@@ -909,6 +910,87 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
     const onWarning = vi.fn();
     subSessionConcurrencyCapsFromSettings({}, onWarning);
     expect(onWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildProviderSetupInputs', () => {
+  const provider: qwenCore.ProviderConfig = {
+    id: 'test-plan',
+    label: 'Test Plan',
+    description: 'A test provider',
+    protocol: qwenCore.AuthType.USE_OPENAI,
+    baseUrl: 'https://api.test.com/v1',
+    envKey: 'TEST_PLAN_KEY',
+    modelNamePrefix: 'Test Plan',
+    models: [{ id: 'builtin-a' }, { id: 'builtin-b' }],
+    modelsEditable: true,
+  };
+  const helpers = {
+    getDefaultModelIds: qwenCore.getDefaultModelIds,
+    reconcileInstallModelIds: qwenCore.reconcileInstallModelIds,
+    resolveBaseUrl: qwenCore.resolveBaseUrl,
+  };
+
+  it('refreshes built-ins a reconnect echoed back stale and keeps custom IDs', () => {
+    // The daemon install request echoes the model list saved before
+    // 'builtin-b' was added to the template.
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'test-plan',
+        apiKey: ' sk-test ',
+        modelIds: [' builtin-a ', 'my-custom'],
+      },
+      provider,
+      helpers,
+    );
+
+    expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b', 'my-custom']);
+    expect(inputs.apiKey).toBe('sk-test');
+    expect(inputs.baseUrl).toBe('https://api.test.com/v1');
+  });
+
+  it('falls back to the default model IDs when the request has none', () => {
+    for (const modelIds of [undefined, [], ['  ']]) {
+      const inputs = buildProviderSetupInputs(
+        { providerId: 'test-plan', apiKey: 'sk-test', modelIds },
+        provider,
+        helpers,
+      );
+      expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b']);
+    }
+  });
+
+  it('deduplicates echoed IDs', () => {
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'test-plan',
+        apiKey: 'sk-test',
+        modelIds: ['builtin-a', 'builtin-a', 'my-custom', 'my-custom'],
+      },
+      provider,
+      helpers,
+    );
+    expect(inputs.modelIds).toEqual(['builtin-a', 'builtin-b', 'my-custom']);
+  });
+
+  it('keeps the requested IDs untouched for a provider without built-ins', () => {
+    const customProvider: qwenCore.ProviderConfig = {
+      ...provider,
+      id: 'custom',
+      models: undefined,
+      baseUrl: undefined,
+    };
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'custom',
+        baseUrl: 'https://custom.example/v1',
+        apiKey: 'sk-test',
+        modelIds: ['only-mine'],
+      },
+      customProvider,
+      helpers,
+    );
+    expect(inputs.modelIds).toEqual(['only-mine']);
   });
 });
 

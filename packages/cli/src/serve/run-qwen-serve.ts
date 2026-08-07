@@ -919,7 +919,7 @@ function channelServiceStartingConflictError(): Error {
   );
 }
 
-function normalizeInstallModelIds(
+export function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
   getDefaultModelIds: CoreRuntime['getDefaultModelIds'],
@@ -929,8 +929,8 @@ function normalizeInstallModelIds(
     ?.map((id) => id.trim())
     .filter((id) => id.length > 0);
   // A reconnect echoes back the saved model IDs; reconcile them against the
-  // current built-in template so the install cannot stamp the new template
-  // version over a stale model set (which would suppress update detection).
+  // current built-in template so the install lands on the current template
+  // instead of persisting a stale set that re-triggers the update prompt.
   const modelIds =
     fromRequest && fromRequest.length > 0
       ? reconcileInstallModelIds(provider, fromRequest)
@@ -938,7 +938,7 @@ function normalizeInstallModelIds(
   return [...new Set(modelIds)];
 }
 
-function buildProviderSetupInputs(
+export function buildProviderSetupInputs(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
   helpers: {

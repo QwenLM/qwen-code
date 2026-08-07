@@ -229,15 +229,20 @@ export const PROVIDER_METADATA_NS = 'providerMetadata';
 function resolveProviderState(
   config: ProviderConfig,
   baseUrl: string,
+  models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config);
   if (key) {
+    // Version hashes only the plan's built-in entries. User-added custom IDs
+    // must not perturb the hash (they re-opened the #8504 prompt loop), while
+    // a deliberately installed subset must keep differing from the full
+    // template hash so update detection re-offers the missing built-ins.
+    const builtinIds = new Set(getDefaultModelIds(config));
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        // Version tracks the built-in template, not the caller's model list:
-        // installs can carry user-added custom IDs, and update detection
-        // compares this value against the template hash.
-        version: computeProviderTemplateVersion(config, baseUrl),
+        version: computeModelListVersion(
+          models.filter((model) => builtinIds.has(model.id)),
+        ),
         baseUrl,
       },
     };
@@ -289,7 +294,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl),
+    providerState: resolveProviderState(config, inputs.baseUrl, models),
   };
 }
 
@@ -521,9 +526,10 @@ export function buildProviderTemplate(
 }
 
 /**
- * Version oracle for the provider's built-in template. Install persists this
- * value and update detection compares against it; the core/CLI install and
- * detection paths must call this helper instead of re-spelling the hash.
+ * Version oracle for the provider's built-in template. Update detection
+ * compares the persisted install version against this value, and an install
+ * that carries the full built-in template persists exactly this hash (see
+ * `resolveProviderState`, which filters out user-added custom IDs).
  * (Exception: the VS Code companion's settingsWriter persists its own hash.)
  */
 export function computeProviderTemplateVersion(
@@ -540,16 +546,17 @@ export function computeProviderTemplateVersion(
  * Reconnect paths echo back the model IDs they read from settings — ACP
  * `qwen/providers/connect`, `qwen serve`'s install request, and the desktop
  * connect form (which pre-fills from `existingConfig.modelIds` and posts them
- * through ACP). Installing that echoed list verbatim is unsafe because
- * `resolveProviderState` stamps the *current* template version regardless: after
- * a release that adds or removes a built-in, a key rotation or reconnect would
- * persist the stale model set under the new version, and `findAllPendingUpdates`
- * would then never offer the update again.
+ * through ACP). Installing that echoed list verbatim after a release that adds
+ * or removes a built-in would persist the stale model set, whose built-in-only
+ * version hash mismatches the current template and re-triggers the update
+ * prompt on the next startup.
  *
  * Built-ins are refreshed to the current template while user-added custom IDs
- * survive — the same reconciliation the TUI wizard and `executeUpdate` already
- * perform. For providers with no built-in list (custom providers, which carry no
- * version metadata) this is the identity.
+ * survive — the same merge `executeUpdate` performs, and the list the TUI
+ * wizard pre-fills (a user-edited subset is installed verbatim by design; its
+ * built-in-only version hash keeps update detection aware of it). For providers
+ * with no built-in list (custom providers, which carry no version metadata)
+ * this is the identity.
  */
 export function reconcileInstallModelIds(
   config: ProviderConfig,
