@@ -11,8 +11,6 @@ import type {
   ExternalToolGuardPrepareRequest,
   ExternalToolGuardPrepareResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
-import { ToolNames } from '@qwen-code/qwen-code-core';
-import { parse } from 'shell-quote';
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'blame',
@@ -34,11 +32,11 @@ const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set([
   '--super-prefix',
 ]);
 
-const EXTERNAL_GUARD_UNSUPPORTED_TOOLS = new Set<string>([
-  ToolNames.AGENT,
-  ToolNames.WORKFLOW,
-  ToolNames.CREATE_SUB_SESSION,
-  ToolNames.SEND_MESSAGE,
+const EXTERNAL_GUARD_UNSUPPORTED_TOOLS = new Set([
+  'agent',
+  'workflow',
+  'create_sub_session',
+  'send_message',
 ]);
 
 interface TrustedDaemonToolGuardRequest
@@ -156,9 +154,13 @@ function readGitInvocation(tokens: string[]): GitInvocation | null {
     : null;
 }
 
-function readCommandSegments(command: string): string[][] {
+let shellQuotePromise: Promise<typeof import('shell-quote')> | undefined;
+
+async function readCommandSegments(command: string): Promise<string[][]> {
   const segments: string[][] = [];
   try {
+    shellQuotePromise ??= import('shell-quote');
+    const { parse } = await shellQuotePromise;
     for (const line of command.split(/\r?\n/)) {
       const parsed = parse(line, (key) => `$${key}`);
       segments.push([]);
@@ -210,7 +212,7 @@ async function evaluateBuiltInGuard(
       : request.effectiveCwd;
   const canonicalEffectiveCwd = await canonicalize(request.effectiveCwd);
 
-  for (const segment of readCommandSegments(command)) {
+  for (const segment of await readCommandSegments(command)) {
     const invocationStart = findGitInvocationStart(segment);
     if (invocationStart < 0) continue;
     const invocation = readGitInvocation(segment.slice(invocationStart));
