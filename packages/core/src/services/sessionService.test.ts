@@ -19,6 +19,8 @@ import {
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import type {
+  BranchPublicationUnsupportedError} from './sessionService.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
@@ -4380,27 +4382,28 @@ describe('SessionService', () => {
         realPath.join(sourceBackupDir, 'backup-copy-fails'),
         'cannot copy',
       );
-      const realLinkSync = fs.linkSync;
-      const realCopyFileSync = fs.copyFileSync;
-      const linkSpy = vi.spyOn(fs, 'linkSync').mockImplementation(((
-        source: fs.PathLike,
-        target: fs.PathLike,
-      ) => {
-        if (String(source).endsWith('backup-copy-fails')) {
-          throw new Error('hard link unavailable');
-        }
-        return realLinkSync(source, target);
-      }) as typeof fs.linkSync);
-      const copySpy = vi.spyOn(fs, 'copyFileSync').mockImplementation(((
-        source: fs.PathLike,
-        target: fs.PathLike,
-        mode?: number,
-      ) => {
-        if (String(source).endsWith('backup-copy-fails')) {
-          throw new Error('backup copy failed');
-        }
-        return realCopyFileSync(source, target, mode);
-      }) as typeof fs.copyFileSync);
+      const realLink = fs.promises.link;
+      const realCopyFile = fs.promises.copyFile;
+      const linkSpy = vi
+        .spyOn(fs.promises, 'link')
+        .mockImplementation(
+          async (source: fs.PathLike, target: fs.PathLike) => {
+            if (String(source).endsWith('backup-copy-fails')) {
+              throw new Error('hard link unavailable');
+            }
+            return realLink(source, target);
+          },
+        );
+      const copySpy = vi
+        .spyOn(fs.promises, 'copyFile')
+        .mockImplementation(
+          async (source: fs.PathLike, target: fs.PathLike, mode?: number) => {
+            if (String(source).endsWith('backup-copy-fails')) {
+              throw new Error('backup copy failed');
+            }
+            return realCopyFile(source, target, mode);
+          },
+        );
 
       try {
         await expect(service.forkSession(oldId, newId)).rejects.toThrow(
@@ -4444,18 +4447,21 @@ describe('SessionService', () => {
         realPath.join(sourceBackupDir, 'backup-cross-device'),
         'cross device content',
       );
-      const realLinkSync = fs.linkSync;
-      const linkSpy = vi.spyOn(fs, 'linkSync').mockImplementation(((
-        source: fs.PathLike,
-        target: fs.PathLike,
-      ) => {
-        if (String(source).endsWith('backup-cross-device')) {
-          const error = new Error('cross-device link') as NodeJS.ErrnoException;
-          error.code = 'EXDEV';
-          throw error;
-        }
-        return realLinkSync(source, target);
-      }) as typeof fs.linkSync);
+      const realLink = fs.promises.link;
+      const linkSpy = vi
+        .spyOn(fs.promises, 'link')
+        .mockImplementation(
+          async (source: fs.PathLike, target: fs.PathLike) => {
+            if (String(source).endsWith('backup-cross-device')) {
+              const error = new Error(
+                'cross-device link',
+              ) as NodeJS.ErrnoException;
+              error.code = 'EXDEV';
+              throw error;
+            }
+            return realLink(source, target);
+          },
+        );
 
       try {
         await expect(service.forkSession(oldId, newId)).resolves.toBeDefined();
@@ -4622,6 +4628,89 @@ describe('SessionService', () => {
       );
     });
 
+    it.each(['ENOTSUP', 'EPERM', 'EXDEV'] as const)(
+      'returns a typed error when atomic transcript publication fails with %s',
+      async (causeCode) => {
+        const oldId = '55555555-5555-5555-5555-555555555559';
+        const newId = '66666666-6666-6666-6666-666666666673';
+        seedSession(oldId);
+        const chatsDir = realPath.join(
+          service['storage'].getProjectDir(),
+          'chats',
+        );
+        const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
+        const realLink = fs.promises.link;
+        const linkSpy = vi
+          .spyOn(fs.promises, 'link')
+          .mockImplementation(async (source, target) => {
+            if (target === targetPath) {
+              const error = new Error(
+                'hard links are unsupported',
+              ) as NodeJS.ErrnoException;
+              error.code = causeCode;
+              throw error;
+            }
+            return realLink(source, target);
+          });
+
+        try {
+          await expect(service.forkSession(oldId, newId)).rejects.toMatchObject(
+            {
+              name: 'BranchPublicationUnsupportedError',
+              errorKind: 'branch_publication_unsupported',
+              causeCode,
+            } satisfies Partial<BranchPublicationUnsupportedError>,
+          );
+        } finally {
+          linkSpy.mockRestore();
+        }
+
+        expect(fs.existsSync(targetPath)).toBe(false);
+        expect(
+          fs.readdirSync(realPath.join(chatsDir, '.branch-claims')),
+        ).toEqual([]);
+        expect(
+          fs.readdirSync(realPath.join(chatsDir, '.branch-staging')),
+        ).toEqual([]);
+      },
+    );
+
+    it('uses asynchronous filesystem APIs for fork publication and backup staging', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555560';
+      const newId = '66666666-6666-6666-6666-666666666674';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, ['backup-async']);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'backup-async'),
+        'async backup',
+      );
+      const syncSpies = [
+        vi.spyOn(fs, 'mkdirSync'),
+        vi.spyOn(fs, 'openSync'),
+        vi.spyOn(fs, 'writeFileSync'),
+        vi.spyOn(fs, 'fsyncSync'),
+        vi.spyOn(fs, 'closeSync'),
+        vi.spyOn(fs, 'linkSync'),
+        vi.spyOn(fs, 'copyFileSync'),
+        vi.spyOn(fs, 'renameSync'),
+        vi.spyOn(fs, 'lstatSync'),
+        vi.spyOn(fs, 'existsSync'),
+        vi.spyOn(fs, 'unlinkSync'),
+        vi.spyOn(fs, 'rmSync'),
+        vi.spyOn(fs, 'readFileSync'),
+        vi.spyOn(fs, 'readdirSync'),
+      ];
+
+      try {
+        await expect(service.forkSession(oldId, newId)).resolves.toBeDefined();
+        for (const spy of syncSpies) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of syncSpies) spy.mockRestore();
+      }
+    });
+
     it('removes a partially written target when fork creation fails', async () => {
       const oldId = '55555555-5555-5555-5555-555555555556';
       const newId = '66666666-6666-6666-6666-666666666667';
@@ -4631,14 +4720,13 @@ describe('SessionService', () => {
         'chats',
         `${newId}.jsonl`,
       );
-      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(((
-        file: fs.PathOrFileDescriptor,
-      ) => {
-        if (typeof file === 'number') {
-          fs.writeSync(file, 'partial');
+      const realOpen = fs.promises.open;
+      vi.spyOn(fs.promises, 'open').mockImplementation(async (...args) => {
+        if (String(args[0]).includes(`${realPath.sep}.branch-staging`)) {
+          throw new Error('disk full');
         }
-        throw new Error('disk full');
-      }) as typeof fs.writeFileSync);
+        return realOpen(...args);
+      });
 
       await expect(service.forkSession(oldId, newId)).rejects.toThrow(
         'disk full',
@@ -4661,21 +4749,25 @@ describe('SessionService', () => {
           'chats',
         );
         const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
-        const realOpenSync = fs.openSync;
-        const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
-          filePath: fs.PathLike,
-          flags: fs.OpenMode,
-          mode?: fs.Mode,
-        ) => {
-          if (
-            filePath === chatsDir &&
-            flags === 'r' &&
-            fs.existsSync(targetPath)
-          ) {
-            throw new Error('directory fsync failed');
-          }
-          return realOpenSync(filePath, flags, mode);
-        }) as typeof fs.openSync);
+        const realOpen = fs.promises.open;
+        const openSpy = vi
+          .spyOn(fs.promises, 'open')
+          .mockImplementation(
+            async (
+              filePath: fs.PathLike,
+              flags?: string | number,
+              mode?: fs.Mode,
+            ) => {
+              if (
+                filePath === chatsDir &&
+                flags === 'r' &&
+                fs.existsSync(targetPath)
+              ) {
+                throw new Error('directory fsync failed');
+              }
+              return realOpen(filePath, flags, mode);
+            },
+          );
 
         try {
           await expect(
@@ -4708,19 +4800,19 @@ describe('SessionService', () => {
       const claimsDir = realPath.join(chatsDir, '.branch-claims');
       const stagingDir = realPath.join(chatsDir, '.branch-staging');
       const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
-      const realUnlinkSync = fs.unlinkSync;
-      const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(((
-        filePath: fs.PathLike,
-      ) => {
-        if (
-          String(filePath).includes(
-            `${realPath.sep}.branch-staging${realPath.sep}`,
-          )
-        ) {
-          throw new Error('staging cleanup failed');
-        }
-        return realUnlinkSync(filePath);
-      }) as typeof fs.unlinkSync);
+      const realUnlink = fs.promises.unlink;
+      const unlinkSpy = vi
+        .spyOn(fs.promises, 'unlink')
+        .mockImplementation(async (filePath: fs.PathLike) => {
+          if (
+            String(filePath).includes(
+              `${realPath.sep}.branch-staging${realPath.sep}`,
+            )
+          ) {
+            throw new Error('staging cleanup failed');
+          }
+          return realUnlink(filePath);
+        });
 
       try {
         await service.forkSession(oldId, newId);
@@ -4738,26 +4830,53 @@ describe('SessionService', () => {
 
       const stale = new Date(Date.now() - 25 * 60 * 60 * 1000);
       fs.utimesSync(claimPath, stale, stale);
-      service['cleanupStaleBranchCreations']();
+      await service['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(claimPath)).toBe(false);
       expect(fs.readdirSync(stagingDir)).toEqual([]);
       expect(fs.existsSync(targetPath)).toBe(true);
     });
 
-    it('garbage-collects an owned backup published before transcript commit', () => {
+    it('garbage-collects an owned backup published before transcript commit', async () => {
       const newId = '66666666-6666-6666-6666-666666666668';
       const ownerToken = '77777777-7777-7777-7777-777777777778';
       const paths = seedStaleBranchCreation(newId, ownerToken, {
         publishBackup: true,
       });
 
-      service['cleanupStaleBranchCreations']();
+      await service['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(paths.claimPath)).toBe(false);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
       expect(fs.existsSync(paths.targetBackupPath)).toBe(false);
       expect(fs.existsSync(paths.targetTranscriptPath)).toBe(false);
+    });
+
+    it('uses asynchronous filesystem APIs for branch garbage collection', async () => {
+      const newId = '66666666-6666-6666-6666-666666666677';
+      const ownerToken = '77777777-7777-7777-7777-777777777787';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        stageBackup: true,
+      });
+      const syncSpies = [
+        vi.spyOn(fs, 'readFileSync'),
+        vi.spyOn(fs, 'readdirSync'),
+        vi.spyOn(fs, 'statSync'),
+        vi.spyOn(fs, 'existsSync'),
+        vi.spyOn(fs, 'unlinkSync'),
+        vi.spyOn(fs, 'rmSync'),
+      ];
+
+      try {
+        await service['cleanupStaleBranchCreations']();
+        for (const spy of syncSpies) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of syncSpies) spy.mockRestore();
+      }
+
+      expect(fs.existsSync(paths.claimPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedBackupPath)).toBe(false);
     });
 
     it('isolates branch GC failures from list operations', async () => {
@@ -4776,7 +4895,7 @@ describe('SessionService', () => {
       await expect(gcService.listSessions()).resolves.toBeDefined();
     });
 
-    it('preserves a branch creation younger than the stale threshold', () => {
+    it('preserves a branch creation younger than the stale threshold', async () => {
       const newId = '66666666-6666-6666-6666-666666666675';
       const ownerToken = '77777777-7777-7777-7777-777777777785';
       const paths = seedStaleBranchCreation(newId, ownerToken, {
@@ -4784,7 +4903,7 @@ describe('SessionService', () => {
         stale: false,
       });
 
-      service['cleanupStaleBranchCreations']();
+      await service['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(paths.claimPath)).toBe(true);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
@@ -4807,7 +4926,7 @@ describe('SessionService', () => {
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
     });
 
-    it('preserves committed branch resources while removing stale markers', () => {
+    it('preserves committed branch resources while removing stale markers', async () => {
       const newId = '66666666-6666-6666-6666-666666666669';
       const ownerToken = '77777777-7777-7777-7777-777777777779';
       const paths = seedStaleBranchCreation(newId, ownerToken, {
@@ -4819,7 +4938,7 @@ describe('SessionService', () => {
         '.branch-owner',
       );
 
-      service['cleanupStaleBranchCreations']();
+      await service['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(paths.targetTranscriptPath)).toBe(true);
       expect(
@@ -4830,7 +4949,7 @@ describe('SessionService', () => {
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
     });
 
-    it('preserves stale resources when a backup owner marker mismatches', () => {
+    it('preserves stale resources when a backup owner marker mismatches', async () => {
       const newId = '66666666-6666-6666-6666-666666666670';
       const ownerToken = '77777777-7777-7777-7777-777777777780';
       const paths = seedStaleBranchCreation(newId, ownerToken, {
@@ -4842,7 +4961,7 @@ describe('SessionService', () => {
       const gcService = new SessionService(cwd, {
         onWarning: (message) => warnings.push(message),
       });
-      gcService['cleanupStaleBranchCreations']();
+      await gcService['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(paths.claimPath)).toBe(true);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
@@ -4852,7 +4971,7 @@ describe('SessionService', () => {
       ]);
     });
 
-    it('preserves backup of a committed branch whose transcript was archived', () => {
+    it('preserves backup of a committed branch whose transcript was archived', async () => {
       const newId = '66666666-6666-6666-6666-666666666672';
       const ownerToken = '77777777-7777-7777-7777-777777777782';
       const paths = seedStaleBranchCreation(newId, ownerToken, {
@@ -4860,7 +4979,7 @@ describe('SessionService', () => {
         publishBackup: true,
       });
 
-      service['cleanupStaleBranchCreations']();
+      await service['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(paths.claimPath)).toBe(false);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
@@ -4869,21 +4988,21 @@ describe('SessionService', () => {
       ).toBe(true);
     });
 
-    it('garbage-collects a stale staged backup with matching marker', () => {
+    it('garbage-collects a stale staged backup with matching marker', async () => {
       const newId = '66666666-6666-6666-6666-666666666673';
       const ownerToken = '77777777-7777-7777-7777-777777777783';
       const paths = seedStaleBranchCreation(newId, ownerToken, {
         stageBackup: true,
       });
 
-      service['cleanupStaleBranchCreations']();
+      await service['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(paths.claimPath)).toBe(false);
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
       expect(fs.existsSync(paths.stagedBackupPath)).toBe(false);
     });
 
-    it('preserves staged backup when its owner marker mismatches', () => {
+    it('preserves staged backup when its owner marker mismatches', async () => {
       const newId = '66666666-6666-6666-6666-666666666674';
       const ownerToken = '77777777-7777-7777-7777-777777777784';
       const paths = seedStaleBranchCreation(newId, ownerToken, {
@@ -4895,7 +5014,7 @@ describe('SessionService', () => {
       const gcService = new SessionService(cwd, {
         onWarning: (message) => warnings.push(message),
       });
-      gcService['cleanupStaleBranchCreations']();
+      await gcService['cleanupStaleBranchCreations']();
 
       expect(fs.existsSync(paths.claimPath)).toBe(true);
       expect(fs.existsSync(paths.stagedBackupPath)).toBe(true);

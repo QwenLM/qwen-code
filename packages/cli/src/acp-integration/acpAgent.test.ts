@@ -183,6 +183,12 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  BranchPublicationUnsupportedError: class BranchPublicationUnsupportedError extends Error {
+    readonly errorKind = 'branch_publication_unsupported';
+    constructor(readonly causeCode?: string) {
+      super('Atomic branch publication is unsupported');
+    }
+  },
   BranchPointInvalidError: class BranchPointInvalidError extends Error {
     constructor(readonly recordId: string) {
       super(`Invalid or inactive branch point: ${recordId}`);
@@ -825,6 +831,7 @@ import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
+  BranchPublicationUnsupportedError,
   BranchPointInvalidError,
   SessionEndReason,
   MCPServerConfig,
@@ -1873,6 +1880,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
+        beginHistoryMutation: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
@@ -3487,6 +3495,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: vi
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+        beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
         clearActiveTodoPlanRevision: vi.fn(),
         clearTodoStopGuardTrust: vi.fn(),
@@ -3812,7 +3821,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('aborts a prompt queued behind the history-mutation gate on session/cancel', async () => {
+  it('does not serialize overlapping prompts behind the history-mutation gate', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
     const { agent, agentPromise } = await bootAcpAgent();
@@ -3830,11 +3839,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         signal?: AbortSignal,
       ) => {
         abortedAtEntry.push(signal?.aborted ?? false);
-        if (signal?.aborted) {
-          return { stopReason: 'cancelled' };
-        }
-        await firstPromptGate;
-        return { stopReason: 'end_turn' };
+        if (abortedAtEntry.length === 1) await firstPromptGate;
+        return { stopReason: signal?.aborted ? 'cancelled' : 'end_turn' };
       },
     );
 
@@ -3843,15 +3849,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(lastSessionMock?.prompt).toHaveBeenCalledTimes(1),
     );
     const second = agent.prompt({ sessionId, prompt: [] });
-    await Promise.resolve();
-    expect(lastSessionMock?.prompt).toHaveBeenCalledTimes(1);
-
-    await agent.cancel({ sessionId });
+    await vi.waitFor(() =>
+      expect(lastSessionMock?.prompt).toHaveBeenCalledTimes(2),
+    );
+    await expect(second).resolves.toEqual({ stopReason: 'end_turn' });
     releaseFirstPrompt();
 
     await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
-    await expect(second).resolves.toEqual({ stopReason: 'cancelled' });
-    expect(abortedAtEntry).toEqual([false, true]);
+    expect(abortedAtEntry).toEqual([false, false]);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -12212,6 +12217,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
       rewindFiles: true,
     });
+    expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalledOnce();
+    expect(
+      lastSessionMock?.beginHistoryMutation.mock.results[0]?.value,
+    ).toHaveBeenCalledOnce();
     expect(SessionService).toHaveBeenCalledWith('/tmp');
     expect(innerConfig.getSessionService).toHaveBeenCalled();
     expect(response).toEqual({
@@ -13090,6 +13099,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
   let liveReleaseCloseGate: ReturnType<typeof vi.fn>;
   let liveBeginClose: ReturnType<typeof vi.fn>;
   let liveAssertCanStartTurn: ReturnType<typeof vi.fn>;
+  let liveBeginHistoryMutation: ReturnType<typeof vi.fn>;
+  let liveReleaseHistoryMutation: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -13106,6 +13117,10 @@ describe('QwenAgent extMethod renameSession routing', () => {
     liveReleaseCloseGate = vi.fn();
     liveBeginClose = vi.fn().mockReturnValue(liveReleaseCloseGate);
     liveAssertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+    liveReleaseHistoryMutation = vi.fn();
+    liveBeginHistoryMutation = vi
+      .fn()
+      .mockReturnValue(liveReleaseHistoryMutation);
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -13216,6 +13231,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
           waitForActiveTurnsToSettle: liveWaitForActiveTurnsToSettle,
           assertCanStartTurn: liveAssertCanStartTurn,
+          beginHistoryMutation: liveBeginHistoryMutation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -13637,6 +13653,40 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('maps unsupported atomic branch publication to a typed ACP error', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(new BranchPublicationUnsupportedError('ENOTSUP')),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32010,
+      data: {
+        errorKind: 'branch_publication_unsupported',
+        causeCode: 'ENOTSUP',
+      },
+    });
+    expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('branches a live session through its pinned SessionService', async () => {
     const recording = makeRecordingService();
     const sessionService = {
@@ -13664,6 +13714,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
     expect(recording.flush).not.toHaveBeenCalled();
     expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
+    expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
     expect(innerConfig.getSessionService).toHaveBeenCalledOnce();
     expect(SessionService).not.toHaveBeenCalled();
     expect(sessionService.forkSession).toHaveBeenCalledWith(
@@ -13799,6 +13851,39 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(result).toMatchObject({
       title: 'Side task',
       displayName: 'Side task',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps unsupported side-task publication to a typed ACP error', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(new BranchPublicationUnsupportedError('EPERM')),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSideTask, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        name: 'Side task',
+      }),
+    ).rejects.toMatchObject({
+      code: -32010,
+      data: {
+        errorKind: 'branch_publication_unsupported',
+        causeCode: 'EPERM',
+      },
     });
 
     mockConnectionState.resolve();

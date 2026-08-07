@@ -1839,6 +1839,51 @@ describe('Session', () => {
     releaseClose();
   });
 
+  it('rejects a prompt while an exclusive history mutation is active', async () => {
+    const releaseMutation = session.beginHistoryMutation();
+
+    expect(session.isIdle()).toBe(false);
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'must wait for the branch' }],
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+    releaseMutation();
+    expect(session.isIdle()).toBe(true);
+  });
+
+  it('rejects a prompt when a history mutation begins during writer admission', async () => {
+    let resolveAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      resolveAdmission = resolve;
+    });
+    let markAdmissionStarted!: () => void;
+    const admissionStarted = new Promise<void>((resolve) => {
+      markAdmissionStarted = resolve;
+    });
+    vi.mocked(mockConfig.assertCanStartTurn).mockImplementationOnce(
+      async () => {
+        markAdmissionStarted();
+        await admission;
+      },
+    );
+
+    const prompt = session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'must not race the branch' }],
+    });
+    await admissionStarted;
+    const releaseMutation = session.beginHistoryMutation();
+    resolveAdmission();
+
+    await expect(prompt).rejects.toMatchObject({ code: -32602 });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    releaseMutation();
+  });
+
   it('does not reopen a disposed session when a close gate releases late', async () => {
     const releaseClose = session.beginClose();
     const closeGateCompletion = session.waitForCloseGateToRelease();

@@ -65,6 +65,29 @@ export class BranchPointInvalidError extends Error {
   }
 }
 
+const BRANCH_PUBLICATION_UNSUPPORTED_CODES = new Set([
+  'ENOSYS',
+  'ENOTSUP',
+  'EOPNOTSUPP',
+  'EXDEV',
+  'EPERM',
+]);
+
+export class BranchPublicationUnsupportedError extends Error {
+  readonly errorKind = 'branch_publication_unsupported' as const;
+
+  constructor(
+    readonly causeCode: string | undefined,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      'Cannot atomically publish the branch because the session filesystem does not support or permit hard links. Move Qwen session storage to a filesystem with hard-link support.',
+      options,
+    );
+    this.name = 'BranchPublicationUnsupportedError';
+  }
+}
+
 export interface ForkSessionOptions {
   atRecordId?: string;
   title?: string;
@@ -351,13 +374,31 @@ function serializeBranchOwnerMarker(
   } satisfies BranchOwnerMarkerV1);
 }
 
-function branchOwnerMarkerMatches(
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.promises.access(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function removeFileIfExistsAsync(filePath: string): Promise<void> {
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+async function branchOwnerMarkerMatches(
   markerPath: string,
   manifest: BranchCreationManifestV1,
-): boolean {
+): Promise<boolean> {
   try {
     const parsed = JSON.parse(
-      fs.readFileSync(markerPath, 'utf8'),
+      await fs.promises.readFile(markerPath, 'utf8'),
     ) as Partial<BranchOwnerMarkerV1>;
     return (
       parsed.v === BRANCH_CREATION_MANIFEST_VERSION &&
@@ -369,11 +410,14 @@ function branchOwnerMarkerMatches(
   }
 }
 
-function fsyncPath(filePath: string, openFlags: fs.OpenMode = 'r'): void {
-  let fd: number;
+async function fsyncPath(
+  filePath: string,
+  openFlags: fs.OpenMode = 'r',
+): Promise<void> {
+  let handle: fs.promises.FileHandle;
   try {
     // Windows maps fsync to FlushFileBuffers, which needs write access.
-    fd = fs.openSync(filePath, openFlags);
+    handle = await fs.promises.open(filePath, openFlags);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== 'EACCES' && code !== 'EPERM') throw error;
@@ -381,18 +425,18 @@ function fsyncPath(filePath: string, openFlags: fs.OpenMode = 'r'): void {
     // be opened for write: POSIX flushes through a read handle, while
     // Windows has no flush path without write access (best-effort skip).
     if (process.platform === 'win32') return;
-    fd = fs.openSync(filePath, 'r');
+    handle = await fs.promises.open(filePath, 'r');
   }
   try {
-    fs.fsyncSync(fd);
+    await handle.sync();
   } finally {
-    fs.closeSync(fd);
+    await handle.close();
   }
 }
 
-function fsyncDirectoryBestEffort(directory: string): void {
+async function fsyncDirectoryBestEffort(directory: string): Promise<void> {
   try {
-    fsyncPath(directory);
+    await fsyncPath(directory);
   } catch (error) {
     if (process.platform !== 'win32') throw error;
   }
@@ -410,14 +454,14 @@ function validatedBackupPath(directory: string, name: string): string {
   return resolved;
 }
 
-function copyFileHistoryBackupsToStaging(
+async function copyFileHistoryBackupsToStaging(
   sourceSessionId: string,
   targetSessionId: string,
   targetDirectory: string,
   backupNames: ReadonlySet<string>,
   ownerToken: string,
   onMissing: (name: string) => void,
-): Set<string> {
+): Promise<Set<string>> {
   const copiedNames = new Set<string>();
   if (backupNames.size === 0) return copiedNames;
   const sourceDir = path.join(
@@ -426,16 +470,23 @@ function copyFileHistoryBackupsToStaging(
     sourceSessionId,
   );
   let stagingCreated = false;
-  const ensureStaging = () => {
+  const ensureStaging = async () => {
     if (stagingCreated) return;
-    fs.mkdirSync(targetDirectory, { recursive: false, mode: 0o700 });
+    await fs.promises.mkdir(targetDirectory, {
+      recursive: false,
+      mode: 0o700,
+    });
     const ownerMarker = path.join(targetDirectory, '.branch-owner');
-    fs.writeFileSync(
-      ownerMarker,
-      serializeBranchOwnerMarker(targetSessionId, ownerToken),
-      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
-    );
-    fsyncPath(ownerMarker, 'r+');
+    const ownerHandle = await fs.promises.open(ownerMarker, 'wx', 0o600);
+    try {
+      await ownerHandle.writeFile(
+        serializeBranchOwnerMarker(targetSessionId, ownerToken),
+        'utf8',
+      );
+      await ownerHandle.sync();
+    } finally {
+      await ownerHandle.close();
+    }
     stagingCreated = true;
   };
   for (const name of backupNames) {
@@ -443,7 +494,7 @@ function copyFileHistoryBackupsToStaging(
     const target = validatedBackupPath(targetDirectory, name);
     let sourceIsRegularFile: boolean;
     try {
-      sourceIsRegularFile = fs.lstatSync(source).isFile();
+      sourceIsRegularFile = (await fs.promises.lstat(source)).isFile();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         onMissing(name);
@@ -455,16 +506,16 @@ function copyFileHistoryBackupsToStaging(
       onMissing(name);
       continue;
     }
-    ensureStaging();
+    await ensureStaging();
     try {
-      fs.linkSync(source, target);
+      await fs.promises.link(source, target);
     } catch {
-      fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+      await fs.promises.copyFile(source, target, fs.constants.COPYFILE_EXCL);
     }
-    fsyncPath(target, 'r+');
+    await fsyncPath(target, 'r+');
     copiedNames.add(name);
   }
-  if (stagingCreated) fsyncDirectoryBestEffort(targetDirectory);
+  if (stagingCreated) await fsyncDirectoryBestEffort(targetDirectory);
   return copiedNames;
 }
 
@@ -496,14 +547,14 @@ export class SessionService {
   // SessionService is short-lived in several callers, so an owned interval
   // would leak timers. Active list/fork entry points provide an at-most-hourly,
   // activity-triggered GC schedule without blocking every construction path.
-  private maybeCleanupStaleBranchCreations(): void {
+  private async maybeCleanupStaleBranchCreations(): Promise<void> {
     const now = Date.now();
     const gcKey = this.getChatsDir();
     const lastRunAt = SessionService.branchGcLastRunAt.get(gcKey) ?? 0;
     if (now - lastRunAt < 60 * 60 * 1000) return;
     SessionService.branchGcLastRunAt.set(gcKey, now);
     try {
-      this.cleanupStaleBranchCreations();
+      await this.cleanupStaleBranchCreations();
     } catch (error) {
       debugLogger.warn(
         `branch staging GC aborted: ${error instanceof Error ? error.message : String(error)}`,
@@ -511,12 +562,12 @@ export class SessionService {
     }
   }
 
-  private cleanupStaleBranchCreations(): void {
+  private async cleanupStaleBranchCreations(): Promise<void> {
     const chatsDir = this.getChatsDir();
     const claimsDir = path.join(chatsDir, '.branch-claims');
     let claims: string[];
     try {
-      claims = fs.readdirSync(claimsDir);
+      claims = await fs.promises.readdir(claimsDir);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
       this.warn(`branch staging GC failed to list claims: ${error}`);
@@ -529,13 +580,13 @@ export class SessionService {
       const claimPath = path.join(claimsDir, claimName);
       try {
         if (
-          Date.now() - fs.statSync(claimPath).mtimeMs <
+          Date.now() - (await fs.promises.stat(claimPath)).mtimeMs <
           BRANCH_STAGING_STALE_MS
         ) {
           continue;
         }
         const manifest = parseBranchCreationManifest(
-          fs.readFileSync(claimPath, 'utf8'),
+          await fs.promises.readFile(claimPath, 'utf8'),
           sessionId,
         );
         if (!manifest) {
@@ -563,19 +614,28 @@ export class SessionService {
           'archived',
         );
 
-        const stagedBackupExists = fs.existsSync(stagedBackup);
-        const targetBackupExists = fs.existsSync(targetBackup);
+        const [
+          stagedBackupExists,
+          targetBackupExists,
+          activeTranscriptExists,
+          archivedTranscriptExists,
+        ] = await Promise.all([
+          pathExists(stagedBackup),
+          pathExists(targetBackup),
+          pathExists(targetTranscript),
+          pathExists(archivedTranscript),
+        ]);
         const targetTranscriptExists =
-          fs.existsSync(targetTranscript) || fs.existsSync(archivedTranscript);
+          activeTranscriptExists || archivedTranscriptExists;
         if (
           (stagedBackupExists &&
-            !branchOwnerMarkerMatches(stagedOwnerMarker, manifest)) ||
+            !(await branchOwnerMarkerMatches(stagedOwnerMarker, manifest))) ||
           (targetBackupExists &&
             !targetTranscriptExists &&
-            !branchOwnerMarkerMatches(targetOwnerMarker, manifest)) ||
+            !(await branchOwnerMarkerMatches(targetOwnerMarker, manifest))) ||
           (targetTranscriptExists &&
-            fs.existsSync(targetOwnerMarker) &&
-            !branchOwnerMarkerMatches(targetOwnerMarker, manifest))
+            (await pathExists(targetOwnerMarker)) &&
+            !(await branchOwnerMarkerMatches(targetOwnerMarker, manifest)))
         ) {
           this.warn(
             `branch staging GC preserved ambiguous resources for ${sessionId}: owner marker mismatch`,
@@ -583,23 +643,23 @@ export class SessionService {
           continue;
         }
 
-        this.removeFileIfExists(stagedTranscript);
+        await removeFileIfExistsAsync(stagedTranscript);
         if (stagedBackupExists) {
-          fs.rmSync(stagedBackup, { recursive: true, force: true });
+          await fs.promises.rm(stagedBackup, { recursive: true, force: true });
         }
         if (targetTranscriptExists) {
-          if (branchOwnerMarkerMatches(targetOwnerMarker, manifest)) {
-            this.removeFileIfExists(targetOwnerMarker);
+          if (await branchOwnerMarkerMatches(targetOwnerMarker, manifest)) {
+            await removeFileIfExistsAsync(targetOwnerMarker);
           }
         } else if (targetBackupExists) {
-          fs.rmSync(targetBackup, { recursive: true, force: true });
+          await fs.promises.rm(targetBackup, { recursive: true, force: true });
         }
         const currentManifest = parseBranchCreationManifest(
-          fs.readFileSync(claimPath, 'utf8'),
+          await fs.promises.readFile(claimPath, 'utf8'),
           sessionId,
         );
         if (currentManifest?.ownerToken === manifest.ownerToken) {
-          this.removeFileIfExists(claimPath);
+          await removeFileIfExistsAsync(claimPath);
         }
       } catch (error) {
         this.warn(
@@ -1216,7 +1276,7 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    this.maybeCleanupStaleBranchCreations();
+    await this.maybeCleanupStaleBranchCreations();
     const { cursor, size = 20, archiveState = 'active' } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
@@ -1966,7 +2026,7 @@ export class SessionService {
     newSessionId: string,
     options: ForkSessionOptions = {},
   ): Promise<{ filePath: string; copiedCount: number }> {
-    this.maybeCleanupStaleBranchCreations();
+    await this.maybeCleanupStaleBranchCreations();
     if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
       throw new Error(`Invalid source sessionId: ${sourceSessionId}`);
     }
@@ -2224,14 +2284,19 @@ export class SessionService {
       backupNames: [...backupNames].sort(),
     };
 
-    fs.mkdirSync(chatsDir, { recursive: true });
-    fs.mkdirSync(claimsDir, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(transcriptStagingDir, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+    await Promise.all([
+      fs.promises.mkdir(chatsDir, { recursive: true }),
+      fs.promises.mkdir(claimsDir, { recursive: true, mode: 0o700 }),
+      fs.promises.mkdir(transcriptStagingDir, {
+        recursive: true,
+        mode: 0o700,
+      }),
+      fs.promises.mkdir(backupRoot, { recursive: true, mode: 0o700 }),
+    ]);
 
-    let claimFd: number;
+    let claimHandle: fs.promises.FileHandle;
     try {
-      claimFd = fs.openSync(claimPath, 'wx', 0o600);
+      claimHandle = await fs.promises.open(claimPath, 'wx', 0o600);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new Error(
@@ -2246,30 +2311,37 @@ export class SessionService {
     let transcriptStagingCreated = false;
     try {
       try {
-        fs.writeFileSync(claimFd, JSON.stringify(manifest), 'utf8');
-        fs.fsyncSync(claimFd);
+        await claimHandle.writeFile(JSON.stringify(manifest), 'utf8');
+        await claimHandle.sync();
         claimReady = true;
       } finally {
-        fs.closeSync(claimFd);
+        await claimHandle.close();
       }
-      fsyncDirectoryBestEffort(claimsDir);
+      await fsyncDirectoryBestEffort(claimsDir);
 
-      if (fs.existsSync(targetPath) || fs.existsSync(targetBackupPath)) {
+      if (
+        (await pathExists(targetPath)) ||
+        (await pathExists(targetBackupPath))
+      ) {
         throw new Error(`Target session already exists: ${newSessionId}`);
       }
 
-      const stagedFd = fs.openSync(stagedTranscriptPath, 'wx', 0o600);
+      const stagedHandle = await fs.promises.open(
+        stagedTranscriptPath,
+        'wx',
+        0o600,
+      );
       transcriptStagingCreated = true;
       try {
-        fs.writeFileSync(stagedFd, body, { encoding: 'utf8' });
-        fs.fsyncSync(stagedFd);
+        await stagedHandle.writeFile(body, { encoding: 'utf8' });
+        await stagedHandle.sync();
       } finally {
-        fs.closeSync(stagedFd);
+        await stagedHandle.close();
       }
-      fsyncDirectoryBestEffort(transcriptStagingDir);
+      await fsyncDirectoryBestEffort(transcriptStagingDir);
 
       if (backupNames.size > 0) {
-        const copiedBackupNames = copyFileHistoryBackupsToStaging(
+        const copiedBackupNames = await copyFileHistoryBackupsToStaging(
           sourceSessionId,
           newSessionId,
           stagedBackupPath,
@@ -2285,26 +2357,39 @@ export class SessionService {
           backupNames = copiedBackupNames;
         }
         if (backupNames.size > 0) {
-          fsyncDirectoryBestEffort(stagedBackupPath);
-          if (fs.existsSync(targetBackupPath)) {
+          await fsyncDirectoryBestEffort(stagedBackupPath);
+          if (await pathExists(targetBackupPath)) {
             throw new Error(`Target session already exists: ${newSessionId}`);
           }
-          fs.renameSync(stagedBackupPath, targetBackupPath);
+          await fs.promises.rename(stagedBackupPath, targetBackupPath);
           backupPublished = true;
           for (const name of backupNames) {
-            if (!fs.existsSync(validatedBackupPath(targetBackupPath, name))) {
+            if (
+              !(await pathExists(validatedBackupPath(targetBackupPath, name)))
+            ) {
               throw new Error(
                 `Published file-history backup is missing: ${name}`,
               );
             }
           }
-          fsyncDirectoryBestEffort(backupRoot);
+          await fsyncDirectoryBestEffort(backupRoot);
         }
       }
 
-      fs.linkSync(stagedTranscriptPath, targetPath);
+      try {
+        await fs.promises.link(stagedTranscriptPath, targetPath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EEXIST') {
+          throw new Error(`Target session already exists: ${newSessionId}`);
+        }
+        if (code && BRANCH_PUBLICATION_UNSUPPORTED_CODES.has(code)) {
+          throw new BranchPublicationUnsupportedError(code, { cause: error });
+        }
+        throw error;
+      }
       committed = true;
-      fsyncDirectoryBestEffort(chatsDir);
+      await fsyncDirectoryBestEffort(chatsDir);
     } catch (error) {
       if (committed) {
         this.warn(
@@ -2316,9 +2401,12 @@ export class SessionService {
       const cleanupFailures: string[] = [];
       const cleanupStatuses: string[] = [];
       let ownershipAmbiguous = false;
-      const cleanup = (resource: string, operation: () => void) => {
+      const cleanup = async (
+        resource: string,
+        operation: () => Promise<void>,
+      ) => {
         try {
-          operation();
+          await operation();
           cleanupStatuses.push(`${resource}=ok`);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
@@ -2326,57 +2414,63 @@ export class SessionService {
           cleanupStatuses.push(`${resource}=failed(${reason})`);
         }
       };
-      cleanup('transcript staging', () => {
-        if (!fs.existsSync(stagedTranscriptPath)) return;
+      await cleanup('transcript staging', async () => {
+        if (!(await pathExists(stagedTranscriptPath))) return;
         if (!transcriptStagingCreated) {
           ownershipAmbiguous = true;
           throw new Error('staging ownership ambiguous; preserved');
         }
-        this.removeFileIfExists(stagedTranscriptPath);
+        await removeFileIfExistsAsync(stagedTranscriptPath);
       });
-      cleanup('backup staging', () => {
-        if (!fs.existsSync(stagedBackupPath)) return;
+      await cleanup('backup staging', async () => {
+        if (!(await pathExists(stagedBackupPath))) return;
         if (
-          !branchOwnerMarkerMatches(
+          !(await branchOwnerMarkerMatches(
             path.join(stagedBackupPath, '.branch-owner'),
             manifest,
-          )
+          ))
         ) {
           ownershipAmbiguous = true;
           throw new Error('owner token mismatch; preserved');
         }
-        fs.rmSync(stagedBackupPath, { recursive: true, force: true });
+        await fs.promises.rm(stagedBackupPath, {
+          recursive: true,
+          force: true,
+        });
       });
-      cleanup('published backup ownership', () => {
-        if (!fs.existsSync(backupOwnerMarker)) return;
-        if (!branchOwnerMarkerMatches(backupOwnerMarker, manifest)) {
+      await cleanup('published backup ownership', async () => {
+        if (!(await pathExists(backupOwnerMarker))) return;
+        if (!(await branchOwnerMarkerMatches(backupOwnerMarker, manifest))) {
           ownershipAmbiguous = true;
           throw new Error('owner token mismatch; preserved');
         }
         if (committed) {
-          this.removeFileIfExists(backupOwnerMarker);
-        } else if (backupPublished && !fs.existsSync(targetPath)) {
-          fs.rmSync(targetBackupPath, { recursive: true, force: true });
+          await removeFileIfExistsAsync(backupOwnerMarker);
+        } else if (backupPublished && !(await pathExists(targetPath))) {
+          await fs.promises.rm(targetBackupPath, {
+            recursive: true,
+            force: true,
+          });
         }
       });
-      cleanup('branch claim', () => {
-        if (!fs.existsSync(claimPath)) return;
+      await cleanup('branch claim', async () => {
+        if (!(await pathExists(claimPath))) return;
         if (ownershipAmbiguous || cleanupFailures.length > 0) {
           throw new Error('resource cleanup incomplete; preserved for GC');
         }
         if (!claimReady) {
-          this.removeFileIfExists(claimPath);
+          await removeFileIfExistsAsync(claimPath);
           return;
         }
         if (
           parseBranchCreationManifest(
-            fs.readFileSync(claimPath, 'utf8'),
+            await fs.promises.readFile(claimPath, 'utf8'),
             newSessionId,
           )?.ownerToken !== ownerToken
         ) {
           throw new Error('owner token mismatch; preserved');
         }
-        this.removeFileIfExists(claimPath);
+        await removeFileIfExistsAsync(claimPath);
       });
       if (cleanupFailures.length > 0) {
         this.warn(

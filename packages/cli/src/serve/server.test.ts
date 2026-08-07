@@ -14845,6 +14845,34 @@ describe('createServeApp', () => {
       });
     });
 
+    it('returns a typed error when atomic branch publication is unsupported', async () => {
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async () => {
+        throw Object.assign(
+          new Error('Atomic branch publication is unsupported'),
+          {
+            data: {
+              errorKind: 'branch_publication_unsupported',
+              causeCode: 'ENOTSUP',
+            },
+          },
+        );
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId: '11111111-1111-4111-8111-111111111111' });
+
+      expect(res.status).toBe(501);
+      expect(res.body).toMatchObject({
+        code: 'branch_publication_unsupported',
+        errorKind: 'branch_publication_unsupported',
+        causeCode: 'ENOTSUP',
+      });
+    });
+
     it('rejects a non-string checkpoint id before calling the bridge', async () => {
       const bridge = fakeBridge();
       const branchSession = vi.fn();

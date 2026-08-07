@@ -76,6 +76,7 @@ import {
   redactUrlCredentials,
   computeUniqueBranchTitle,
   BranchPointInvalidError,
+  BranchPublicationUnsupportedError,
   getActiveGoal,
   unregisterGoalHook,
   ToolNames,
@@ -5230,13 +5231,11 @@ class QwenAgent implements Agent {
     }
     calls.add(call);
     try {
-      return await this.runExclusiveHistoryMutation(params.sessionId, () =>
-        session.prompt(
-          sanitizedParams,
-          invocationContext,
-          call.controller.signal,
-          modelPrompt,
-        ),
+      return await session.prompt(
+        sanitizedParams,
+        invocationContext,
+        call.controller.signal,
+        modelPrompt,
       );
     } finally {
       calls.delete(call);
@@ -10570,14 +10569,19 @@ class QwenAgent implements Agent {
           const rewindFiles = params['rewindFiles'] !== false;
           const historyBeforeRewind = session.captureHistorySnapshot();
           let rewindResult;
+          let releaseHistoryMutation: () => void;
           try {
             rewindResult = session.rewindToTurn(turnIndex as number, {
               rewindFiles,
             });
+            releaseHistoryMutation = session.beginHistoryMutation();
           } catch (err) {
             if (err instanceof RequestError) {
               const msg = err.message;
-              if (msg.includes('Cannot rewind while a prompt is running')) {
+              if (
+                msg.includes('Cannot rewind while a prompt is running') ||
+                msg.includes('Session is busy processing a turn')
+              ) {
                 throw new RequestError(err.code, msg, {
                   errorKind: 'session_busy',
                 });
@@ -10591,71 +10595,75 @@ class QwenAgent implements Agent {
             throw err;
           }
 
-          let filesChanged: string[] = [];
-          let filesFailed: string[] = [];
-          if (rewindFiles && promptId) {
-            const fhs = session.getConfig().getFileHistoryService();
+          try {
+            let filesChanged: string[] = [];
+            let filesFailed: string[] = [];
+            if (rewindFiles && promptId) {
+              const fhs = session.getConfig().getFileHistoryService();
+              try {
+                const fileResult = await fhs.rewind(promptId, true);
+                filesChanged = fileResult.filesChanged;
+                filesFailed = fileResult.filesFailed;
+              } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                debugLogger.error(
+                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+                );
+                filesFailed = [`file-history-rewind: ${reason}`];
+              }
+            }
+            let artifactSnapshot: unknown;
+            let artifactSnapshotUnavailable: string | undefined;
             try {
-              const fileResult = await fhs.rewind(promptId, true);
-              filesChanged = fileResult.filesChanged;
-              filesFailed = fileResult.filesFailed;
+              const config = session.getConfig();
+              const recording = config.getChatRecordingService();
+              await recording?.flush();
+              const loadAuthoritative = () =>
+                config.getSessionService().loadSession(sessionId);
+              const sessionData = recording
+                ? await recording.runWithWriteBarrier(loadAuthoritative)
+                : await loadAuthoritative();
+              if (sessionData === undefined) {
+                artifactSnapshotUnavailable =
+                  'session data unavailable after rewind';
+              } else if (sessionData.artifactSnapshot) {
+                artifactSnapshot = sessionData.artifactSnapshot;
+              } else {
+                // A successful reload with no artifact records is a valid empty
+                // artifact timeline, distinct from an unavailable reload.
+                artifactSnapshot = {
+                  v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                  sessionId,
+                  sequence: 0,
+                  artifacts: [],
+                  tombstonedIds: [],
+                  stickyEphemeralIds: [],
+                  warnings: [],
+                };
+              }
             } catch (err) {
               const reason = err instanceof Error ? err.message : String(err);
-              debugLogger.error(
-                `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
-              );
-              filesFailed = [`file-history-rewind: ${reason}`];
-            }
-          }
-          let artifactSnapshot: unknown;
-          let artifactSnapshotUnavailable: string | undefined;
-          try {
-            const config = session.getConfig();
-            const recording = config.getChatRecordingService();
-            await recording?.flush();
-            const loadAuthoritative = () =>
-              config.getSessionService().loadSession(sessionId);
-            const sessionData = recording
-              ? await recording.runWithWriteBarrier(loadAuthoritative)
-              : await loadAuthoritative();
-            if (sessionData === undefined) {
               artifactSnapshotUnavailable =
-                'session data unavailable after rewind';
-            } else if (sessionData.artifactSnapshot) {
-              artifactSnapshot = sessionData.artifactSnapshot;
-            } else {
-              // A successful reload with no artifact records is a valid empty
-              // artifact timeline, distinct from an unavailable reload.
-              artifactSnapshot = {
-                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-                sessionId,
-                sequence: 0,
-                artifacts: [],
-                tombstonedIds: [],
-                stickyEphemeralIds: [],
-                warnings: [],
-              };
+                'artifact snapshot unavailable after rewind';
+              debugLogger.warn(
+                `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
+              );
             }
-          } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            artifactSnapshotUnavailable =
-              'artifact snapshot unavailable after rewind';
-            debugLogger.warn(
-              `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${reason}`,
-            );
-          }
 
-          return {
-            success: true,
-            historyBeforeRewind,
-            ...rewindResult,
-            filesChanged,
-            filesFailed,
-            ...(artifactSnapshot ? { artifactSnapshot } : {}),
-            ...(artifactSnapshotUnavailable
-              ? { artifactSnapshotUnavailable }
-              : {}),
-          };
+            return {
+              success: true,
+              historyBeforeRewind,
+              ...rewindResult,
+              filesChanged,
+              filesFailed,
+              ...(artifactSnapshot ? { artifactSnapshot } : {}),
+              ...(artifactSnapshotUnavailable
+                ? { artifactSnapshotUnavailable }
+                : {}),
+            };
+          } finally {
+            releaseHistoryMutation();
+          }
         });
       }
       case 'qwen/session/loadUpdates': {
@@ -10793,28 +10801,38 @@ class QwenAgent implements Agent {
               sessionId,
               async () => {
                 await sourceSession.assertCanStartTurn();
-                const sourceConfig = sourceSession.getConfig();
-                const recording = sourceConfig.getChatRecordingService();
-                const sessionService = sourceConfig.getSessionService();
+                const releaseHistoryMutation =
+                  sourceSession.beginHistoryMutation();
+                try {
+                  const sourceConfig = sourceSession.getConfig();
+                  const recording = sourceConfig.getChatRecordingService();
+                  const sessionService = sourceConfig.getSessionService();
 
-                const baseName = deriveForkBaseName(name, recording, sessionId);
+                  const baseName = deriveForkBaseName(
+                    name,
+                    recording,
+                    sessionId,
+                  );
 
-                const title = await computeUniqueBranchTitle(
-                  baseName,
-                  sessionService,
-                );
-                const newSessionId = randomUUID();
-                const fork = () =>
-                  sessionService.forkSession(sessionId, newSessionId, {
-                    title,
-                    ...(atRecordId !== undefined ? { atRecordId } : {}),
-                  });
-                if (recording) {
-                  await recording.runWithWriteBarrier(fork);
-                } else {
-                  await fork();
+                  const title = await computeUniqueBranchTitle(
+                    baseName,
+                    sessionService,
+                  );
+                  const newSessionId = randomUUID();
+                  const fork = () =>
+                    sessionService.forkSession(sessionId, newSessionId, {
+                      title,
+                      ...(atRecordId !== undefined ? { atRecordId } : {}),
+                    });
+                  if (recording) {
+                    await recording.runWithWriteBarrier(fork);
+                  } else {
+                    await fork();
+                  }
+                  return { newSessionId, title, displayName: title };
+                } finally {
+                  releaseHistoryMutation();
                 }
-                return { newSessionId, title, displayName: title };
               },
             );
           } catch (error) {
@@ -10822,6 +10840,12 @@ class QwenAgent implements Agent {
               throw new RequestError(-32009, error.message, {
                 errorKind: 'branch_point_invalid',
                 recordId: error.recordId,
+              });
+            }
+            if (error instanceof BranchPublicationUnsupportedError) {
+              throw new RequestError(-32010, error.message, {
+                errorKind: error.errorKind,
+                causeCode: error.causeCode,
               });
             }
             throw error;
@@ -10842,10 +10866,20 @@ class QwenAgent implements Agent {
             },
             title,
           });
-        if (recording) {
-          await recording.runWithWriteBarrier(fork);
-        } else {
-          await fork();
+        try {
+          if (recording) {
+            await recording.runWithWriteBarrier(fork);
+          } else {
+            await fork();
+          }
+        } catch (error) {
+          if (error instanceof BranchPublicationUnsupportedError) {
+            throw new RequestError(-32010, error.message, {
+              errorKind: error.errorKind,
+              causeCode: error.causeCode,
+            });
+          }
+          throw error;
         }
         return { newSessionId, title, displayName: title };
       }

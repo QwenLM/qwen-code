@@ -119,7 +119,7 @@ turns. Legacy responses without a checkpoint do not display the action.
 
 ```mermaid
 flowchart TD
-  A["User submits an interactive prompt"] --> B["Agent acquires the history mutation lock"]
+  A["User submits an interactive prompt"] --> B["Session admits the prompt and preempts the previous prompt"]
   B --> C["Recorder captures startExclusiveRecordUuid"]
   C --> D["Execute model, tools, and stop hooks"]
   D --> E{"stopReason is end_turn?"}
@@ -495,17 +495,29 @@ the queue but must reject a session that is already closing where appropriate.
 
 ### 12.2 Agent lock
 
-The Agent also owns a non-reentrant `runExclusiveHistoryMutation` boundary
-covering:
+The Agent owns a non-reentrant `runExclusiveHistoryMutation` boundary covering
+exclusive history mutations:
 
-- the complete interactive prompt and checkpoint transaction;
 - branch read, validation, and creation;
 - rewind; and
 - cron and notification transcript writers.
 
-The checkpoint helper runs as an already-locked operation and must not acquire
-the Agent lock again. Automatic writers acquire the same lock independently
-after the prompt releases it.
+Interactive prompts do not hold this lock for their complete lifetime. They
+retain the Session's existing direct-preemption semantics: a newly admitted
+prompt aborts and waits for the previous prompt. The checkpoint helper instead
+uses the recorder's synchronous topology fence, which is the ownership boundary
+needed for its append-and-flush transaction.
+
+Before an Agent-locked branch performs any asynchronous work, it synchronously
+acquires a Session history-mutation admission flag. Prompt admission checks the
+flag both before and after writer admission and after live-tool synchronization.
+Conversely, the flag can be acquired only while the Session has no active
+prompt, cron, or notification turn. This closes the prompt-versus-branch race
+without serializing overlapping interactive prompts behind the Agent lock.
+Rewind rechecks idleness and performs its in-memory truncation synchronously,
+then acquires the same flag before asynchronous file and artifact
+reconciliation. Automatic writers continue to acquire the Agent lock
+independently.
 
 The Bridge queue provides request ordering and lifecycle coordination. The
 Agent lock protects transcript ownership even for callers that bypass the HTTP
@@ -518,9 +530,9 @@ not replace this cross-process ownership check.
 
 ### 13.1 Source selection
 
-Inside the Agent lock, flush the source recorder and read the source transcript.
-Resolve its current active chain and validate `atRecordId` against the shared
-branch-point catalog.
+Inside the Agent lock and Session history-mutation admission boundary, flush
+the source recorder and read the source transcript. Resolve its current active
+chain and validate `atRecordId` against the shared branch-point catalog.
 
 Find the checkpoint at one unique physical index and first truncate the raw
 record array:
@@ -570,7 +582,7 @@ For each referenced name:
 3. if the source is already missing or is no longer a regular file, warn and
    omit it from backup staging (the claim manifest keeps listing every
    referenced name);
-4. copy or link every available source into staging; and
+4. asynchronously copy or link every available source into staging; and
 5. treat an access or copy failure for an existing backup as a fork failure.
 
 The branch operation does not restore these backups into the working tree.
@@ -606,6 +618,10 @@ token. Staged transcript and backup files use restrictive permissions.
 
 ### 14.3 Commit sequence
 
+All filesystem operations in this sequence use asynchronous promise APIs so a
+large transcript, backup set, or stale-claim cleanup does not block the daemon
+event loop.
+
 1. Write the complete titled transcript to staging.
 2. Copy or link every available referenced backup to backup staging. The
    claim manifest lists every referenced name; backups whose source is
@@ -619,6 +635,13 @@ token. Staged transcript and backup files use restrictive permissions.
    primitive, such as `link(temp, target)` or a platform
    `RENAME_NOREPLACE` equivalent.
 7. Flush the chats directory.
+
+The current implementation deliberately uses a hard link for the transcript
+commit point. If the backing filesystem reports that hard links are unsupported
+or disallowed, or the staging and destination paths cannot share a link, Core
+returns the typed, actionable `branch_publication_unsupported` error. ACP
+preserves that error and HTTP maps it to `501`; the implementation must not
+silently fall back to a non-atomic copy or overwrite-capable rename.
 
 The transcript publication is the commit point. Before it, the session is not
 discoverable. After it, the session is complete, titled, and owns every
@@ -655,9 +678,10 @@ not replace the original operation error, but logs the session ID, owner token
 fingerprint, and resource statuses.
 
 On bounded, activity-triggered list and fork entry points, garbage collection
-scans stale branch claims and staging manifests. Construction itself performs
-no filesystem scan, so creating a request-scoped service cannot synchronously
-stall the event loop:
+asynchronously scans stale branch claims and staging manifests. Construction
+itself performs no filesystem scan, and the scan, ownership verification, and
+cleanup use promise-based filesystem APIs so they do not synchronously stall
+the event loop:
 
 - if the final transcript exists, preserve the session and formal backup
   directory and remove only stale staging, claim, and owner markers;
@@ -671,19 +695,20 @@ Normal session deletion remains separate from this pre-commit cleanup path.
 
 ## 16. Failure Semantics
 
-| Failure point                                                       | Visible session? | Required result                                   |
-| ------------------------------------------------------------------- | ---------------- | ------------------------------------------------- |
-| Invalid or inactive checkpoint                                      | No new session   | `409 branch_point_invalid`                        |
-| Title computation                                                   | No               | Return error; create no target resources          |
-| Staged transcript write                                             | No               | Token-aware pre-commit cleanup                    |
-| Referenced backup already missing                                   | Yes, degraded    | Warn, omit backup, preserve branch                |
-| Backup partially copied                                             | No               | Fail and clean staging                            |
-| Target checkpoint revalidation                                      | No               | Fail and clean staging                            |
-| Process exits before backup publication                             | No               | Activity-triggered GC reclaims owned staging      |
-| Process exits after backup publication but before transcript commit | No               | Activity-triggered GC removes owned orphan backup |
-| Process exits after transcript commit                               | Yes, complete    | Preserve session; GC removes stale markers only   |
-| Restore or attach fails after commit                                | Yes, complete    | Keep session in picker; clean only live state     |
-| HTTP response fails after commit                                    | Yes, complete    | Detach requesting client; never delete session    |
+| Failure point                                                       | Visible session? | Required result                                     |
+| ------------------------------------------------------------------- | ---------------- | --------------------------------------------------- |
+| Invalid or inactive checkpoint                                      | No new session   | `409 branch_point_invalid`                          |
+| Filesystem cannot atomically hard-link the transcript               | No               | `501 branch_publication_unsupported`; clean staging |
+| Title computation                                                   | No               | Return error; create no target resources            |
+| Staged transcript write                                             | No               | Token-aware pre-commit cleanup                      |
+| Referenced backup already missing                                   | Yes, degraded    | Warn, omit backup, preserve branch                  |
+| Backup partially copied                                             | No               | Fail and clean staging                              |
+| Target checkpoint revalidation                                      | No               | Fail and clean staging                              |
+| Process exits before backup publication                             | No               | Activity-triggered GC reclaims owned staging        |
+| Process exits after backup publication but before transcript commit | No               | Activity-triggered GC removes owned orphan backup   |
+| Process exits after transcript commit                               | Yes, complete    | Preserve session; GC removes stale markers only     |
+| Restore or attach fails after commit                                | Yes, complete    | Keep session in picker; clean only live state       |
+| HTTP response fails after commit                                    | Yes, complete    | Detach requesting client; never delete session      |
 
 ## 17. Implementation Map
 
@@ -692,9 +717,9 @@ Normal session deletion remains separate from this pre-commit cleanup path.
 | `packages/core/src/services/chatRecordingService.ts`              | Checkpoint schema, central append coordinator, topology transaction                       |
 | `packages/core/src/services/sessionService.ts`                    | Shared resolver integration, bounded fork, backup whitelist, staging, commit, cleanup, GC |
 | `packages/core/src/services/session-transcript-reader.ts`         | Same-snapshot branch-point catalog for paged replay                                       |
-| `packages/cli/src/acp-integration/session/Session.ts`             | Turn start capture and checkpoint transaction timing                                      |
+| `packages/cli/src/acp-integration/session/Session.ts`             | Prompt preemption, branch admission flag, turn capture, and checkpoint timing             |
 | `packages/cli/src/acp-integration/session/history-replay-page.ts` | Attach branch metadata while projecting Assistant records                                 |
-| `packages/cli/src/acp-integration/acpAgent.ts`                    | Agent history lock, branch parameters, titled fork invocation                             |
+| `packages/cli/src/acp-integration/acpAgent.ts`                    | Exclusive-mutation lock, branch parameters, typed error mapping, titled fork invocation   |
 | `packages/acp-bridge/src/bridge.ts`                               | Per-session mutation queue and live branch-point forwarding                               |
 | `packages/cli/src/serve/routes/session.ts`                        | Optional `atRecordId`, validation, and typed HTTP error mapping                           |
 | `packages/sdk-typescript`                                         | Branch request and live/replay metadata types                                             |
@@ -734,6 +759,12 @@ Normal session deletion remains separate from this pre-commit cleanup path.
 - Branch enters before rewind.
 - Rewind enters before branch.
 - Prompt or continuation enters around branch.
+- A second direct prompt reaches Session admission immediately and preempts the
+  first instead of waiting behind the Agent mutation queue.
+- Branch admission wins atomically against a prompt waiting for writer or
+  live-tool admission, and releases the flag on every success/failure path.
+- Rewind holds the Session history-mutation flag through asynchronous file and
+  artifact reconciliation.
 - Close rejects new work and drains admitted work.
 - Automatic turns cannot mutate the transcript inside an interactive prompt's
   checkpoint boundary.
@@ -754,6 +785,8 @@ Normal session deletion remains separate from this pre-commit cleanup path.
   target session.
 - Current working files remain unchanged.
 - Rewind in the fork can consume retained backups.
+- Fork publication and stale-claim GC do not call synchronous filesystem APIs.
+- Unsupported transcript hard links produce the typed ACP error and HTTP 501.
 
 ### 18.5 Crash and lifecycle injection
 

@@ -1358,6 +1358,7 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private historyMutationActive = false;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -2186,6 +2187,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     try {
       await this.config.assertCanStartTurn();
     } catch (error) {
@@ -2199,6 +2206,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
   }
 
   isIdle(): boolean {
@@ -2208,6 +2221,7 @@ export class Session implements SessionContext {
   #hasActiveTurn(): boolean {
     return Boolean(
       this.pendingPrompt ||
+        this.historyMutationActive ||
         this.pendingPromptCompletion ||
         this.cronProcessing ||
         this.cronAbortController ||
@@ -2216,6 +2230,28 @@ export class Session implements SessionContext {
         this.notificationAbortController ||
         this.notificationCompletion,
     );
+  }
+
+  beginHistoryMutation(): () => void {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.#hasActiveTurn()) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session is busy processing a turn',
+      );
+    }
+    this.historyMutationActive = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.historyMutationActive = false;
+      if (this.disposed) return;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
   }
 
   beginClose(): () => void {
@@ -2666,6 +2702,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     if (modelPrompt !== undefined && invocationContext === undefined) {
       throw RequestError.invalidParams(
         undefined,
@@ -2688,6 +2730,12 @@ export class Session implements SessionContext {
     }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
     }
     if (admissionCancellation?.aborted) {
       return { stopReason: 'cancelled' };
