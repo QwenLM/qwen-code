@@ -14,6 +14,7 @@ import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
+  isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
@@ -40,13 +41,6 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'TMP',
   'TEMP',
 ]);
-
-// Loader-affecting keys are rejected on every .env application path — the
-// initial load included — not just reloads. The daemon process hosts every
-// workspace, so an initial load writing them into process.env would
-// repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
-// #8653 cross-workspace vector.
-const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(INHERITED_LOADER_ENV_KEYS);
 
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
@@ -382,7 +376,12 @@ function canApplyParsedEnvKey(
   options: { readonly reload?: boolean } = {},
 ): boolean {
   if (!Object.hasOwn(envFile.parsedEnv, key)) return false;
-  if (LOADER_ENV_KEYS.has(key)) return false;
+  // Loader-affecting keys are rejected on every .env application path — the
+  // initial load included — not just reloads. The daemon process hosts every
+  // workspace, so an initial load writing them into process.env would
+  // repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
+  // #8653 cross-workspace vector.
+  if (isLoaderEnvKey(key)) return false;
   if (options.reload && RELOAD_EXCLUDED_KEYS.has(key)) return false;
   if (
     !envFile.isHomeScopedEnvFile &&
@@ -451,12 +450,14 @@ export function buildRuntimeEnvironment(
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const [key, value] of Object.entries(settings.env)) {
+      if (isLoaderEnvKey(key)) continue;
       if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
       if (excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
       setRuntimeEnvIfUnset(effectiveEnv, key, value);
     }
+    reportRejectedLoaderKeys('settings.env', Object.keys(settings.env));
   }
 
   const overlayKeys = Object.keys(effectiveEnv)
@@ -503,12 +504,7 @@ export function loadEnvironment(
     //   only these may set QWEN_HOME / QWEN_RUNTIME_DIR.
     // qwenScoped: any `.env` whose immediate parent is `.qwen` (including
     //   `<repo>/.qwen/.env`) — exempt from the user `excludedEnvVars` list.
-    const rejectedLoaderKeys: string[] = [];
     for (const key in envFile.parsedEnv) {
-      if (LOADER_ENV_KEYS.has(key)) {
-        rejectedLoaderKeys.push(key);
-        continue;
-      }
       if (!canApplyParsedEnvKey(envFile, key, excludedVars)) continue;
 
       const existingValue = process.env[key];
@@ -524,7 +520,10 @@ export function loadEnvironment(
         lastReloadSnapshot.set(key, envFile.parsedEnv[key]!);
       }
     }
-    reportRejectedLoaderKeys(`.env file ${envFile.path}`, rejectedLoaderKeys);
+    reportRejectedLoaderKeys(
+      `.env file ${envFile.path}`,
+      Object.keys(envFile.parsedEnv),
+    );
   }
 
   // Step 2: settings.env fallback (lowest priority, no-override).
@@ -532,6 +531,9 @@ export function loadEnvironment(
   // settings.json could otherwise redirect global state after path bootstrap.
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
+      if (isLoaderEnvKey(key)) {
+        continue;
+      }
       if (RELOAD_EXCLUDED_KEYS.has(key)) {
         continue;
       }
@@ -557,6 +559,7 @@ export function loadEnvironment(
         lastReloadSnapshot.set(key, value);
       }
     }
+    reportRejectedLoaderKeys('settings.env', Object.keys(settings.env));
   }
   lastReloadSnapshotSeeded = true;
   publishPendingCompileCache();
@@ -598,12 +601,7 @@ export function reloadEnvironment(
   for (const envFile of parsedEnvFiles.files) {
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-    const rejectedLoaderKeys: string[] = [];
     for (const key in envFile.parsedEnv) {
-      if (LOADER_ENV_KEYS.has(key)) {
-        rejectedLoaderKeys.push(key);
-        continue;
-      }
       if (!canApplyParsedEnvKey(envFile, key, excludedVars, { reload: true })) {
         continue;
       }
@@ -611,11 +609,15 @@ export function reloadEnvironment(
         newDotEnvKeys.set(key, envFile.parsedEnv[key]!);
       }
     }
-    reportRejectedLoaderKeys(`.env file ${envFile.path}`, rejectedLoaderKeys);
+    reportRejectedLoaderKeys(
+      `.env file ${envFile.path}`,
+      Object.keys(envFile.parsedEnv),
+    );
   }
 
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
+      if (isLoaderEnvKey(key)) continue;
       if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
       if (typeof value !== 'string') continue;
@@ -627,6 +629,7 @@ export function reloadEnvironment(
       if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
       newSettingsEnvKeys.set(key, value);
     }
+    reportRejectedLoaderKeys('settings.env', Object.keys(settings.env));
   }
 
   // Union of all new keys

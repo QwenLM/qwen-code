@@ -13,7 +13,7 @@ import { V1_INDICATOR_KEYS } from '../config/migration/versions/v1-to-v2-shared.
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
-  INHERITED_LOADER_ENV_KEYS,
+  isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
@@ -49,11 +49,6 @@ const V2_SETTINGS_VERSION = 2;
 const TRUST_FOLDER = 'TRUST_FOLDER';
 const TRUST_PARENT = 'TRUST_PARENT';
 const DO_NOT_TRUST = 'DO_NOT_TRUST';
-// Loader-affecting keys must never enter process.env here: this fast path
-// runs before runQwenServeImpl freezes daemonRuntimeBaseEnv, so anything it
-// writes is baked into the base env distributed to every workspace's session
-// subprocesses — the exact #8653 vector the daemon-side scrub closes.
-const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(INHERITED_LOADER_ENV_KEYS);
 
 type CachedTrustRule = {
   level: 'trusted' | 'untrusted';
@@ -248,12 +243,19 @@ function setUpCloudShellEnvironmentFromFilesFastPath(
   process.env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
 }
 
+// Loader-affecting keys must never enter process.env here: this fast path
+// runs before runQwenServeImpl freezes daemonRuntimeBaseEnv, so anything it
+// writes is baked into the base env distributed to every workspace's session
+// subprocesses — the exact #8653 vector the daemon-side scrub closes.
+// Returns every rejected loader key (all case variants) so the daemon can
+// persist the decision once its durable log exists.
 export function loadServeFastPathEnvironment(
   settings: ServeFastPathSettings,
   startDir: string = process.cwd(),
-): void {
+): readonly string[] {
   const userLevelPaths = getUserLevelEnvPathsFastPath();
   const envFilePaths = findEnvFilesFastPath(settings, startDir, userLevelPaths);
+  const rejectedLoaderKeys: string[] = [];
 
   if (process.env['CLOUD_SHELL'] === 'true') {
     setUpCloudShellEnvironmentFromFilesFastPath(envFilePaths);
@@ -271,13 +273,9 @@ export function loadServeFastPathEnvironment(
         path.basename(path.dirname(normalizedEnvFilePath)) ===
           SETTINGS_DIRECTORY_NAME;
 
-      const rejectedLoaderKeys: string[] = [];
       for (const key in parsedEnv) {
         if (!Object.hasOwn(parsedEnv, key)) continue;
-        if (LOADER_ENV_KEYS.has(key)) {
-          rejectedLoaderKeys.push(key);
-          continue;
-        }
+        if (isLoaderEnvKey(key)) continue;
         if (
           !isHomeScopedEnvFile &&
           PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
@@ -291,9 +289,11 @@ export function loadServeFastPathEnvironment(
           process.env[key] = parsedEnv[key];
         }
       }
+      const fileRejectedKeys = Object.keys(parsedEnv).filter(isLoaderEnvKey);
+      rejectedLoaderKeys.push(...fileRejectedKeys);
       reportRejectedLoaderKeys(
         `.env file ${normalizedEnvFilePath}`,
-        rejectedLoaderKeys,
+        fileRejectedKeys,
       );
     } catch {
       // Errors are ignored to match dotenv quiet-mode behavior.
@@ -301,20 +301,34 @@ export function loadServeFastPathEnvironment(
   }
 
   if (settings.env) {
-    const rejectedLoaderKeys: string[] = [];
+    const settingsRejectedKeys = Object.keys(settings.env).filter(
+      isLoaderEnvKey,
+    );
+    rejectedLoaderKeys.push(...settingsRejectedKeys);
     for (const [key, value] of Object.entries(settings.env)) {
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
-      if (LOADER_ENV_KEYS.has(key)) {
-        rejectedLoaderKeys.push(key);
-        continue;
-      }
+      if (isLoaderEnvKey(key)) continue;
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
       }
     }
-    reportRejectedLoaderKeys('settings.env', rejectedLoaderKeys);
+    reportRejectedLoaderKeys('settings.env', settingsRejectedKeys);
   }
   publishPendingCompileCache();
+  serveFastPathRejectedLoaderKeys = rejectedLoaderKeys;
+  return rejectedLoaderKeys;
+}
+
+// The fast path rejects loader keys before initDaemonLogger exists, and the
+// warn-once map dedupes any later daemon-side warning for the same file+key,
+// so stash the rejections for the daemon to persist once its durable log is
+// up — boot stderr rarely survives systemd/desktop launches.
+let serveFastPathRejectedLoaderKeys: readonly string[] = [];
+
+export function consumeServeFastPathRejectedLoaderKeys(): readonly string[] {
+  const keys = serveFastPathRejectedLoaderKeys;
+  serveFastPathRejectedLoaderKeys = [];
+  return keys;
 }
 
 function readTrustedFolderRulesFastPath(): readonly CachedTrustRule[] {

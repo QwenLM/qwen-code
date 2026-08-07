@@ -79,6 +79,25 @@ describe('scrubInheritedLoaderEnv', () => {
     );
   });
 
+  // npm applies npm_config_* env vars case-insensitively, and Windows env
+  // lookup is case-insensitive outright, so exact-case scrubbing would leave
+  // variants like NPM_CONFIG_NODE_OPTIONS loader-effective after the scrub.
+  it('removes case variants of loader-affecting keys', () => {
+    const env: NodeJS.ProcessEnv = {
+      NPM_CONFIG_NODE_OPTIONS: '--import file:///other-checkout/hook.mjs',
+      Node_Options: '--import file:///other-checkout/harness.mjs',
+      ld_preload: '/evil.so',
+      PATH: '/usr/bin',
+    };
+
+    expect(scrubInheritedLoaderEnv(env)).toEqual([
+      'NPM_CONFIG_NODE_OPTIONS',
+      'Node_Options',
+      'ld_preload',
+    ]);
+    expect(env['PATH']).toBe('/usr/bin');
+  });
+
   it('pins the exact loader-key list so silent edits fail', () => {
     expect([...INHERITED_LOADER_ENV_KEYS].sort()).toEqual([
       'BASH_ENV',

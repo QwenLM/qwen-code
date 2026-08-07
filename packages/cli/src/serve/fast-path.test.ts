@@ -1671,6 +1671,7 @@ describe('serve fast path environment bootstrap', () => {
     const trackedKeys = [
       'NODE_OPTIONS',
       'npm_config_node_options',
+      'NPM_CONFIG_NODE_OPTIONS',
       'NODE_PATH',
       'LD_PRELOAD',
     ] as const;
@@ -1689,6 +1690,9 @@ describe('serve fast path environment bootstrap', () => {
         [
           'NODE_OPTIONS=--import file:///workspace-a/harness.mjs',
           'npm_config_node_options=--import file:///workspace-a/hook.mjs',
+          // npm applies npm_config_* case-insensitively, so the gate must
+          // reject case variants too.
+          'NPM_CONFIG_NODE_OPTIONS=--import file:///workspace-a/upper.mjs',
           'FASTPATH_DOTENV_ALLOWED=allowed',
           '',
         ].join('\n'),
@@ -1696,6 +1700,7 @@ describe('serve fast path environment bootstrap', () => {
       loadServeFastPathEnvironment({}, tempWorkspace);
       expect(process.env['NODE_OPTIONS']).toBeUndefined();
       expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
       expect(process.env['FASTPATH_DOTENV_ALLOWED']).toBe('allowed');
       rmSync(tempWorkspace, { recursive: true, force: true });
 
@@ -1721,12 +1726,14 @@ describe('serve fast path environment bootstrap', () => {
         {
           env: {
             LD_PRELOAD: '/workspace-a/hijack.so',
+            NPM_CONFIG_NODE_OPTIONS: '--import file:///workspace-a/upper.mjs',
             FASTPATH_SETTINGS_ALLOWED: 'allowed',
           },
         },
         tempWorkspace,
       );
       expect(process.env['LD_PRELOAD']).toBeUndefined();
+      expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
       expect(process.env['FASTPATH_SETTINGS_ALLOWED']).toBe('allowed');
     } finally {
       for (const key of trackedKeys) {
@@ -1784,9 +1791,9 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
-  // Daemon-side loadSettings() never re-runs the full .env load
-  // (skipLoadEnvironment: true everywhere), so a loader key rejected at boot
-  // would vanish without a breadcrumb unless the fast path reports it.
+  // Daemon-side loadSettings() skips the .env load for untrusted workspaces
+  // and only re-runs it later for trusted ones, so a loader key rejected at
+  // boot would vanish without a breadcrumb unless the fast path reports it.
   it('warns when loader-affecting keys are rejected on the fast path', () => {
     resetLoaderKeyRejectionReportingForTesting();
     const trackedKeys = ['NODE_OPTIONS', 'LD_PRELOAD'] as const;

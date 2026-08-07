@@ -33,6 +33,7 @@ import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
+  consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
@@ -2611,6 +2612,16 @@ async function runQwenServeImpl(
       'scrubbed inherited loader env vars from the daemon process; ' +
         'session subprocesses will not inherit them',
       { removedKeys: scrubbedLoaderEnvKeys },
+    );
+  }
+  // The serve fast path rejects loader keys before this logger exists, and
+  // its stderr warnings rarely survive desktop/systemd launches either.
+  const fastPathRejectedLoaderKeys = consumeServeFastPathRejectedLoaderKeys();
+  if (fastPathRejectedLoaderKeys.length > 0) {
+    daemonLog.info(
+      'rejected loader-affecting env keys during serve fast-path boot; ' +
+        'they were not applied to the daemon process',
+      { rejectedKeys: fastPathRejectedLoaderKeys },
     );
   }
   let loggerPublished = false;

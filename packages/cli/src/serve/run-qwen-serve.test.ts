@@ -27,6 +27,7 @@ import {
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
@@ -7224,6 +7225,58 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       } else {
         process.env['NODE_OPTIONS'] = previousNodeOptions;
       }
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+    }
+  });
+
+  // The serve fast path rejects loader keys before initDaemonLogger exists,
+  // and warn-once dedupes any later daemon-side warning for the same
+  // file+key, so its rejections are persisted to the durable daemon log.
+  it('persists serve fast-path loader key rejections in the daemon log', async () => {
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    fs.writeFileSync(
+      path.join(tmpDir, '.env'),
+      'NODE_OPTIONS=--max-old-space-size=8192\n',
+    );
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      loadServeFastPathEnvironment({}, tmpDir);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+        await vi.waitFor(
+          () => {
+            const content = fs.readFileSync(logPath, 'utf8');
+            expect(content).toContain(
+              'rejected loader-affecting env keys during serve fast-path boot',
+            );
+            expect(content).toContain('NODE_OPTIONS');
+          },
+          { timeout: 7_000, interval: 50 },
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      stderrWrite.mockRestore();
       if (previousQwenRuntimeDir === undefined) {
         delete process.env['QWEN_RUNTIME_DIR'];
       } else {

@@ -63,10 +63,24 @@ export const INHERITED_LOADER_ENV_KEYS = [
   'ENV',
 ] as const;
 
+// Loader-key matching is case-insensitive: npm applies npm_config_* env vars
+// regardless of case (it matches the prefix case-insensitively and lowercases
+// the rest), and Windows env lookup is case-insensitive outright. Exact-case
+// gates would leave variants like NPM_CONFIG_NODE_OPTIONS loader-effective
+// while slipping past the denylist and the scrubs. Every gate and scrub must
+// go through this predicate instead of re-deriving set membership.
+const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(
+  INHERITED_LOADER_ENV_KEYS.map((key) => key.toLowerCase()),
+);
+
+export function isLoaderEnvKey(key: string): boolean {
+  return LOADER_ENV_KEYS.has(key.toLowerCase());
+}
+
 export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): string[] {
   const removedKeys: string[] = [];
-  for (const key of INHERITED_LOADER_ENV_KEYS) {
-    if (Object.hasOwn(env, key)) {
+  for (const key of Object.keys(env)) {
+    if (isLoaderEnvKey(key)) {
       delete env[key];
       removedKeys.push(key);
     }
@@ -103,14 +117,18 @@ export function scrubAndReportInheritedLoaderEnv(
 // starts with an empty map and warns once for itself.
 const reportedLoaderKeyRejections = new Map<string, Set<string>>();
 
+// candidateKeys is the raw key list of a parsed source (e.g.
+// Object.keys(parsedEnv)); the intersection with the loader denylist happens
+// here so every application site reports with identical matching semantics.
 export function reportRejectedLoaderKeys(
   source: string,
-  rejectedKeys: readonly string[],
+  candidateKeys: readonly string[],
 ): void {
-  if (rejectedKeys.length === 0) return;
   const warnedKeys =
     reportedLoaderKeyRejections.get(source) ?? new Set<string>();
-  const freshKeys = rejectedKeys.filter((key) => !warnedKeys.has(key));
+  const freshKeys = candidateKeys.filter(
+    (key) => isLoaderEnvKey(key) && !warnedKeys.has(key),
+  );
   if (freshKeys.length === 0) return;
   for (const key of freshKeys) warnedKeys.add(key);
   reportedLoaderKeyRejections.set(source, warnedKeys);

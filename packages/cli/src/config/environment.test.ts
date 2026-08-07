@@ -31,6 +31,8 @@ const TRACKED_ENV = [
   'NODE_OPTIONS',
   'NODE_PATH',
   'npm_config_node_options',
+  'NPM_CONFIG_NODE_OPTIONS',
+  'Node_Options',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'QWEN_HOME',
@@ -89,6 +91,7 @@ describe('buildRuntimeEnvironment', () => {
         'RUNTIME_SETTINGS=dotenv-wins',
         'RUNTIME_EXCLUDED=excluded',
         'NODE_OPTIONS=--require ./bad.js',
+        'NPM_CONFIG_NODE_OPTIONS=--require ./bad.js',
         'QWEN_SERVER_TOKEN=dotenv-token',
         'QWEN_HOME=/tmp/ignored-qwen-home',
         '',
@@ -126,6 +129,7 @@ describe('buildRuntimeEnvironment', () => {
     expect(snapshot.effectiveEnv['RUNTIME_EXCLUDED']).toBeUndefined();
     expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_EXCLUDED']).toBeUndefined();
     expect(snapshot.effectiveEnv['NODE_OPTIONS']).toBeUndefined();
+    expect(snapshot.effectiveEnv['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
     expect(snapshot.effectiveEnv['BASH_ENV']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_HOME']).toBeUndefined();
@@ -439,6 +443,80 @@ describe('loadEnvironment', () => {
 
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
     expect(process.env['npm_config_node_options']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  it('never applies loader-affecting keys from settings.env, including reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const settings = testSettings({
+      env: {
+        NODE_OPTIONS: '--import file:///workspace-a/harness.mjs',
+        npm_config_node_options: '--import file:///workspace-a/hook.mjs',
+        NPM_CONFIG_NODE_OPTIONS: '--import file:///workspace-a/upper.mjs',
+        RUNTIME_SETTINGS_ONLY: 'from-settings',
+      },
+    });
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+
+    try {
+      loadEnvironment(settings, workspace);
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+      // Reload force-writes settings.env keys into process.env; the loader
+      // gate must keep rejecting them there too.
+      reloadEnvironment(settings, workspace);
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['npm_config_node_options']).toBeUndefined();
+      expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+    } finally {
+      stderrWrite.mockRestore();
+    }
+
+    // The settings.env application paths warn like the serve fast path.
+    const warnings = stderrWrites.filter((chunk) =>
+      chunk.includes('cannot set loader-affecting env vars'),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('settings.env');
+    expect(warnings[0]).toContain('NODE_OPTIONS');
+    expect(warnings[0]).toContain('npm_config_node_options');
+    expect(warnings[0]).toContain('NPM_CONFIG_NODE_OPTIONS');
+  });
+
+  // npm applies npm_config_* env vars case-insensitively and Windows env
+  // lookup is case-insensitive outright, so exact-case gates would let
+  // variants like NPM_CONFIG_NODE_OPTIONS through on load and reload.
+  it('rejects loader-affecting .env keys regardless of case, including reload', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'NPM_CONFIG_NODE_OPTIONS=--import file:///workspace-a/hook.mjs',
+        'Node_Options=--import file:///workspace-a/harness.mjs',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['Node_Options']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['NPM_CONFIG_NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['Node_Options']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 });
