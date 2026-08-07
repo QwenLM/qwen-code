@@ -30,15 +30,22 @@ describe('session lifecycle events', () => {
   });
 
   it('does not claim continuation for a replacement session', () => {
-    emitSessionStart('session-2');
+    emitSessionStart('replacement-session');
 
     expect(emit).toHaveBeenCalledWith({
       body: 'Session started.',
       attributes: {
         'event.name': 'session.start',
-        'session.id': 'session-2',
+        'session.id': 'replacement-session',
       },
     });
+  });
+
+  it('does not emit session.start twice for the same session', () => {
+    emitSessionStart('duplicate-session');
+    emitSessionStart('duplicate-session');
+
+    expect(emit).toHaveBeenCalledTimes(1);
   });
 
   it('emits the required attributes for session.end', () => {
