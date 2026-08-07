@@ -645,6 +645,68 @@ describe('ParallelAgentsGroup activity rendering', () => {
     }
   });
 
+  it('skips the exit sequence when the user collapsed the group while auto-management was disabled', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+      const onAutomaticExpansionChange = vi.fn();
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        onAutomaticExpansionChange,
+      });
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+
+      // Catch-up suspends auto-management; the user collapses the group.
+      render(active, {
+        autoManageExpansion: false,
+        onAutomaticExpansionChange,
+      });
+      act(() => groupSummary(container).click());
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+
+      render(completed, {
+        autoManageExpansion: false,
+        onAutomaticExpansionChange,
+      });
+      render(completed, {
+        autoManageExpansion: true,
+        onAutomaticExpansionChange,
+      });
+      act(() => vi.advanceTimersByTime(1_500));
+
+      // Finalizing ownership must not remount the viewport in its closing
+      // state or disable the summary button.
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      expect(groupSummary(container).disabled).toBe(false);
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(0);
+
+      act(() => vi.advanceTimersByTime(180));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      expect(groupSummary(container).disabled).toBe(false);
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('treats active agents seen while auto-management is disabled as baseline', () => {
     const active = [
       agent({ callId: 'a1', status: 'pending' }),

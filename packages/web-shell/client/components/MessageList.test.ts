@@ -552,6 +552,7 @@ describe('pinActiveParallelAgentsToTurnEnd', () => {
         path: 'src/app.ts',
         status: 'modified',
         toolCallId: 'call-a1',
+        isArtifact: false,
         diffs: [{ oldText: 'one\n', newText: 'two\n' }],
       },
     ];

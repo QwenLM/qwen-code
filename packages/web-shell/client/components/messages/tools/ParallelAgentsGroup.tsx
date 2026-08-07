@@ -122,6 +122,8 @@ export function ParallelAgentsGroup({
   const [now, setNow] = useState(() => Date.now());
   const liveStartedAtRef = useRef(Date.now());
   const expansionOwnerRef = useRef<'none' | 'automatic' | 'manual'>('none');
+  const groupExpandedRef = useRef(groupExpanded);
+  groupExpandedRef.current = groupExpanded;
   const automaticExpansionChangeRef = useRef(onAutomaticExpansionChange);
   automaticExpansionChangeRef.current = onAutomaticExpansionChange;
   const autoCollapseTimerRef = useRef<
@@ -231,6 +233,15 @@ export function ParallelAgentsGroup({
             !wasActiveRef.current &&
             expansionOwnerRef.current === 'automatic'
           ) {
+            if (!groupExpandedRef.current) {
+              // The user collapsed while auto-management was suspended
+              // (which intentionally does not latch 'manual'): finalize
+              // ownership without playing the exit sequence against an
+              // already-collapsed panel.
+              expansionOwnerRef.current = 'none';
+              automaticExpansionChangeRef.current?.(false);
+              return;
+            }
             if (approvalAgentRef.current) {
               // The approval keeps the group visible; retry later so its
               // resolution still gets the normal delayed exit animation.
