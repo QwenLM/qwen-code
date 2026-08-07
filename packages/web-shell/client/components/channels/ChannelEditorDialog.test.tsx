@@ -43,6 +43,27 @@ const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ),
 };
 
+const GROUP_POLICY_DESCRIPTOR: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: false,
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+  ],
+};
+
 const GITHUB_LOCAL_GH: DaemonChannelTypeDescriptor = {
   type: 'github',
   displayName: 'GitHub',
@@ -317,5 +338,57 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('Pairing approvals');
     expect(document.body.textContent).not.toContain('Configured allowlist');
+  });
+
+  it('shows pairing affordance from a descriptor-driven groupPolicy draft', async () => {
+    const groupPolicyInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        senderPolicy: 'open',
+        groupPolicy: 'open',
+      },
+    };
+    await renderDialog({
+      descriptor: GROUP_POLICY_DESCRIPTOR,
+      instance: groupPolicyInstance,
+    });
+
+    expect(document.body.textContent).not.toContain('Save pairing mode first');
+
+    const trigger = inputByLabel('Group Policy');
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Pairing');
+    expect(option).toBeDefined();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(document.body.textContent).toContain('Save pairing mode first');
+  });
+
+  it('shows pairing management when only group pairing is enabled', async () => {
+    const groupPairingInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        senderPolicy: 'open',
+        groupPolicy: 'pairing',
+      },
+    };
+    const listPairingRequests = vi.fn().mockResolvedValue({ requests: [] });
+
+    await renderDialog({
+      instance: groupPairingInstance,
+      listPairingRequests,
+    });
+
+    expect(document.body.textContent).toContain('Pairing approvals');
+    expect(listPairingRequests).toHaveBeenCalledWith('release-bot');
   });
 });

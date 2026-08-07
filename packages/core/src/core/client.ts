@@ -534,6 +534,7 @@ export class GeminiClient {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
           resumeTokenCounts.outputTokenCount,
+          resumeTokenCounts.isEstimated,
         );
       } else {
         chat.setLastPromptTokenCount(
@@ -4249,7 +4250,8 @@ export class GeminiClient {
     const presentedProxySchemas = this.config
       .getToolRegistry()
       .getPresentedProxySchemas();
-    const info = await this.getChat().tryCompress(
+    const previousChat = this.getChat();
+    const info = await previousChat.tryCompress(
       prompt_id,
       force,
       signal,
@@ -4257,8 +4259,8 @@ export class GeminiClient {
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       this.clearProxySchemaPresentationsAfterHistoryMutation('tryCompressChat');
-      const chat = this.getChat();
-      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
+      const compressedHistory =
+        previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       this.restoreProxySchemasAfterCompaction(presentedProxySchemas);
       if (
@@ -4279,7 +4281,10 @@ export class GeminiClient {
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
-      this.getChat().setLastPromptTokenCount(info.newTokenCount);
+      this.getChat().setLastPromptTokenCount(
+        info.newTokenCount,
+        info.newTokenCountIsEstimated ?? true,
+      );
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.
