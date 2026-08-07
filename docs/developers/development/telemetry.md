@@ -576,8 +576,8 @@ The following events are logged:
 
 #### Tool Events
 
-- `qwen-code.tool_call`: Each function/tool call. Terminal events are normalized so `status` is authoritative: success and cancelled events omit error fields, while error events always have a non-empty `error_type` (`unknown` when the producer did not classify the error). Blank tool names are emitted as `unknown_tool`.
-  - **Attributes**: `function_name` (string), `function_args` (object), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
+- `qwen-code.tool_call`: Each function/tool call. Terminal events are normalized so `status` is authoritative: success and cancelled events omit error fields, while error events always have a non-empty `error_type` (`unknown` when the producer did not classify the error). Blank tool names are emitted as `unknown_tool`. A missing `execution_status` is normalized to `unknown` and is never inferred from the terminal `status`.
+  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
 
 - `qwen-code.file_operation`: Each file operation.
   - **Attributes**: `tool_name` (string), `operation` (string: "create", "read", "update"), `lines` (int, optional), `mimetype` (string, optional), `extension` (string, optional), `programming_language` (string, optional)
@@ -723,6 +723,9 @@ Metrics are numerical measurements of behavior over time. Metric names use the `
 - `qwen-code.tool.call.count` (Counter, Int): Counts tool calls.
   - **Attributes**: `function_name`, `status` ("success"/"error"/"cancelled"), `success` (boolean, retained for compatibility), `decision` ("accept"/"reject"/"auto_accept"/"modify", optional), `tool_type` ("mcp"/"native", optional)
 
+- `qwen-code.tool.execution.count` (Counter, Int): Counts tool execution outcomes. Deliberately carries no `function_name` dimension to stay low-cardinality, so an execution-failure rate cannot be attributed to a specific tool without dropping to the `qwen-code.tool_call` logs; exclude `unknown`, `not_started`, and `cancelled` when computing execution-failure ratios (denominator is `success` + `error`).
+  - **Attributes**: `execution_status` ("not_started"/"success"/"error"/"cancelled"/"unknown"), `tool_type` ("mcp"/"native"), plus globally configured common metric attributes such as the opt-in `session.id`
+
 - `qwen-code.tool.call.latency` (Histogram, ms): Measures tool call latency.
   - **Attributes**: `function_name` (string)
 
@@ -866,10 +869,10 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
   - Streaming requests emit `gen_ai.request.stream=true`. `gen_ai.response.time_to_first_chunk` measures seconds from the provider call to the first normalized response yielded by the provider adapter, which may differ from the first raw network frame. Non-streaming requests omit both standard streaming attributes because an absent `gen_ai.request.stream` means non-streaming in the semantic convention.
 
 - `qwen-code.tool`: Wraps the full tool lifecycle (approval wait + execution).
-  - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.type` (`function`), `gen_ai.tool.call.id`, `tool.call_id`, `duration_ms`, `success`, `error`
+  - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.type` (`function`), `gen_ai.tool.call.id`, `tool.call_id`, `duration_ms`, `success`, `error`, `tool.failure_kind` (string, optional — the specific failure reason, e.g. "cancelled", "tool_error", "tool_exception", "timeout", "permission_denied", "pre_hook_blocked")
 
-- `qwen-code.tool.execution`: Wraps the tool execution phase (after approval).
-  - **Attributes**: `session.id`, `duration_ms`, `success`, `error`
+- `qwen-code.tool.execution`: Wraps the tool execution phase (after approval). Emitted only for attempted executions.
+  - **Attributes**: `session.id`, `gen_ai.tool.name` (optional), `tool.call_id` (optional), `duration_ms`, `success`, `error`, `execution_status` ("success"/"error"/"cancelled"), `error_type`, `error.type`
 
 - `qwen-code.tool.blocked_on_user`: Time a tool spends waiting on user approval.
   - **Attributes**: `session.id`, `tool.name`, `tool.call_id`, `duration_ms`, `decision` ("proceed_once"/"proceed_always"/"cancel"/"aborted"/"auto_approved"/"error"), `source` ("cli"/"ide"/"hook"/"auto"/"system")

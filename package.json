@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.21.3",
+  "version": "0.21.7",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -26,7 +26,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.7"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -47,6 +47,8 @@
     "test:release": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false && npm run test:scripts",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
+    "test:chrome-extension:e2e": "npm -w packages/chrome-extension run test:e2e:chrome",
+    "test:chrome-extension:release": "npm run build && cross-env DEV=true npm run bundle && npm -w packages/chrome-extension run test:release",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
     "test:integration:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests",
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
@@ -87,6 +89,7 @@
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
     "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
+    "check:voice-guard-sync": "node scripts/check-voice-guard-sync.js",
     "check:serve-fast-path-bundle": "node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle && node scripts/check-serve-fast-path-bundle.js",
     "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",

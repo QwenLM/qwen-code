@@ -14,9 +14,7 @@ import {
   useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
-  useWorkspaceActions,
   type DaemonSessionActions,
-  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionArtifact,
@@ -47,7 +45,10 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
-import { getLatestActiveTodos } from '../utils/todos';
+import {
+  getActiveTodosForPlanRevision,
+  isExitPlanApprovalRequest,
+} from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import type { WebShellSlashCommandHandler } from '../App';
@@ -171,7 +172,6 @@ export interface ChatPaneProps {
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Allow prompt admission to recover a disconnected SSE stream. */
@@ -183,6 +183,8 @@ export interface ChatPaneProps {
   voiceUserRevision?: number;
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
+  /** Enable the app-scoped experimental Session Workflow presentation. */
+  sessionWorkflowEnabled?: boolean;
 }
 
 /**
@@ -212,13 +214,13 @@ export function ChatPane({
   voiceUserRevision = 0,
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
   voiceWorkspaces,
+  sessionWorkflowEnabled = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
   const { renderComposerFooter: CustomComposerFooter } =
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
-  const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
@@ -289,16 +291,11 @@ export function ChatPane({
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
-    onPaneArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    onPaneArtifactsChange?.(sessionId, artifacts);
     return () => {
-      onPaneArtifactsChange?.(sessionId, [], workspaceActions);
+      onPaneArtifactsChange?.(sessionId, []);
     };
-  }, [
-    artifacts,
-    connection.sessionId,
-    onPaneArtifactsChange,
-    workspaceActions,
-  ]);
+  }, [artifacts, connection.sessionId, onPaneArtifactsChange]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
   const firstPromptAdmittedRef = useRef(false);
@@ -343,12 +340,13 @@ export function ChatPane({
     pendingApproval && !isAskUser ? pendingApproval : null;
   const pendingAskUserApproval =
     pendingApproval && isAskUser ? pendingApproval : null;
-  const isExitPlanApproval =
-    pendingToolApproval?.toolKind === 'switch_mode' &&
-    pendingToolApproval?.toolName?.toLowerCase() === 'exit_plan_mode';
+  const isExitPlanApproval = isExitPlanApprovalRequest(pendingToolApproval);
   const planTodos = useMemo(
-    () => (isExitPlanApproval ? getLatestActiveTodos(messages) : []),
-    [isExitPlanApproval, messages],
+    () =>
+      sessionWorkflowEnabled && isExitPlanApproval
+        ? getActiveTodosForPlanRevision(messages, pendingToolApproval?.todoPlan)
+        : [],
+    [isExitPlanApproval, messages, pendingToolApproval, sessionWorkflowEnabled],
   );
   // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
   // the approval current when setApprovalMode *resolves*, not a stale one
@@ -533,20 +531,12 @@ export function ChatPane({
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
-      if (request.kind === 'subagent') {
-        onRightPanelOpen({
-          ...request,
-          sourceSessionId: connection.sessionId,
-        });
-        return;
-      }
       onRightPanelOpen({
         ...request,
-        workspaceActions,
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen, workspaceActions],
+    [connection.sessionId, onRightPanelOpen],
   );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
@@ -875,6 +865,7 @@ export function ChatPane({
           workspaceTitle={paneWorkspaceCwd}
           workspaceColor={workspaceAccent}
           currentMode={connection.currentMode ?? 'default'}
+          sessionWorkflowEnabled={sessionWorkflowEnabled}
           currentModel={connection.currentModel ?? ''}
           availableModels={availableModels}
           onSelectMode={handleSelectMode}

@@ -3453,6 +3453,9 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[1][1].force).toBe(true);
       expect(compressSpy.mock.calls[1][1].trigger).toBe('auto');
       expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(135_000);
+      expect(compressSpy.mock.calls[1][1].precomputedEffectiveTokens).toBe(
+        135_000,
+      );
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         2,
       );
@@ -7298,54 +7301,81 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('does not retry retryable transport stream errors after yielding a content chunk', async () => {
-      const transportError = Object.assign(new TypeError('terminated'), {
-        cause: Object.assign(new Error('other side closed'), {
-          code: 'UND_ERR_SOCKET',
-        }),
-      });
+    it('does not replay a transport stream error after yielding a chunk', async () => {
+      // The replay path stays closed once output has reached callers —
+      // re-sending would duplicate it. Recovery goes through the
+      // continuation path instead (see 'transport stream continuation'
+      // below), which is what the second attempt here is.
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
 
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Partial response before socket close' }],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          throw transportError;
-        })(),
-      );
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Partial response before socket close' }],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: ' …and the rest.' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-transport-no-retry-after-chunk',
-      );
-      const events: StreamEvent[] = [];
-      await expect(async () => {
-        for await (const event of stream) {
-          events.push(event);
-        }
-      }).rejects.toThrow('terminated');
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-no-replay-after-chunk',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
 
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      expect(
-        events.filter((event) => event.type === StreamEventType.RETRY),
-      ).toHaveLength(0);
-      expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-              'Partial response before socket close',
-        ),
-      ).toBe(true);
+        // The second attempt is a continuation, not a replay: its request
+        // carries the delivered text plus a resume instruction rather than
+        // repeating the original contents unchanged.
+        const secondRequest = vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mock.calls[1]![0].contents as Content[];
+        expect(secondRequest.at(-2)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Partial response before socket close' }],
+        });
+        expect(
+          events.filter(
+            (event) =>
+              event.type === StreamEventType.RETRY && !event.isContinuation,
+          ),
+        ).toHaveLength(0);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Partial response before socket close',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('retries a transport stream error after yielding only thinking chunks', async () => {
@@ -7420,58 +7450,86 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('does not retry when visible content followed the thinking chunks', async () => {
+    it('does not replay when visible content followed the thinking chunks', async () => {
       // The content flag must accumulate across the whole attempt: once a
       // non-thought part has flowed — even after any amount of thinking —
-      // a replay would duplicate visible output and stays blocked.
-      const transportError = Object.assign(new TypeError('terminated'), {
-        cause: Object.assign(new Error('other side closed'), {
-          code: 'UND_ERR_SOCKET',
-        }),
-      });
+      // a replay would duplicate visible output and stays blocked. Recovery
+      // goes through the continuation path instead, so the assertion is on
+      // *which* path fired rather than on the request count: a replay resends
+      // the original contents unchanged, a continuation carries the delivered
+      // text and a resume instruction, and only the latter is acceptable here.
+      //
+      // Only the visible text is anchored on. The thought part is excluded
+      // from the continuation prefix as well, so this also covers thoughts not
+      // leaking into the resumed request.
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
 
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Reasoning first…', thought: true }],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Visible answer begins' }],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          throw transportError;
-        })(),
-      );
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Reasoning first…', thought: true }],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Visible answer begins' }],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: ' …and ends.' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-transport-no-retry-after-thinking-then-content',
-      );
-      const events: StreamEvent[] = [];
-      await expect(async () => {
-        for await (const event of stream) {
-          events.push(event);
-        }
-      }).rejects.toThrow('terminated');
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-no-replay-after-thinking-then-content',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
 
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      expect(
-        events.filter((event) => event.type === StreamEventType.RETRY),
-      ).toHaveLength(0);
+        const secondRequest = vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mock.calls[1]![0].contents as Content[];
+        expect(secondRequest.at(-2)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Visible answer begins' }],
+        });
+        expect(
+          events.filter(
+            (event) =>
+              event.type === StreamEventType.RETRY && !event.isContinuation,
+          ),
+        ).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('retries a transport stream error after yielding only tool preparation metadata', async () => {
@@ -7527,6 +7585,778 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    describe('transport stream continuation (#7832)', () => {
+      const socketCut = () =>
+        Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+      function textChunk(
+        text: string,
+        finishReason?: string,
+      ): GenerateContentResponse {
+        return {
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text }] },
+              ...(finishReason ? { finishReason } : {}),
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      }
+
+      /** Stream that yields `chunks` and then dies from a socket cut. */
+      function cutAfter(chunks: GenerateContentResponse[]) {
+        return (async function* () {
+          for (const chunk of chunks) yield chunk;
+          throw socketCut();
+        })();
+      }
+
+      function requestContentsOfCall(index: number): Content[] {
+        return vi.mocked(mockContentGenerator.generateContentStream).mock.calls[
+          index
+        ]![0].contents as Content[];
+      }
+
+      it('continues from the delivered text instead of failing the send', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('<html><body>')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('</body></html>', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'write a game' },
+            'prompt-transport-continuation',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+
+          // `isContinuation` is what tells the UI to KEEP the text already on
+          // screen. A plain RETRY would make it discard the first half.
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(1);
+          expect(
+            retries[0]!.type === StreamEventType.RETRY &&
+              retries[0]!.isContinuation,
+          ).toBe(true);
+
+          // The continuation request shows the model its own output and asks
+          // it to resume — it does not re-send the original request alone.
+          const secondRequest = requestContentsOfCall(1);
+          expect(secondRequest.at(-2)).toEqual({
+            role: 'model',
+            parts: [{ text: '<html><body>' }],
+          });
+          const instruction = secondRequest.at(-1)!;
+          expect(instruction.role).toBe('user');
+          expect(instruction.parts?.[0]?.text).toContain(
+            'The connection dropped mid-response',
+          );
+          expect(instruction.parts?.[0]?.text).toContain(
+            '<previous_response_suffix>',
+          );
+
+          // Both halves reach the caller, in order and exactly once.
+          const delivered = events
+            .filter((event) => event.type === StreamEventType.CHUNK)
+            .map(
+              (event) =>
+                (event as { value: GenerateContentResponse }).value
+                  .candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+            )
+            .join('');
+          expect(delivered).toBe('<html><body></body></html>');
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('stitches the delivered text into durable history', async () => {
+        // Without the merge, history would keep only the continuation half and
+        // every later turn (plus /compress and --resume) would see an answer
+        // that starts mid-document.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('first half ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('second half', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-history',
+          );
+          await collectStreamWithFakeTimers(stream, 5_000);
+
+          const history = chat.getHistory();
+          expect(history.at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'first half second half' }],
+          });
+          // The synthetic resume instruction is request-only; it must never
+          // land in history as if the user had typed it.
+          expect(
+            history.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops replayed overlap when the model repeats its own tail', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('The quick brown fox jumps over')]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('jumps over the lazy dog.', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-overlap',
+          );
+          await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'The quick brown fox jumps over the lazy dog.' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('survives repeated cuts and accumulates every delivered fragment', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(cutAfter([textChunk('part two ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('part three', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-repeated',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          // The third request carries BOTH earlier fragments, not just the
+          // most recent one.
+          expect(requestContentsOfCall(2).at(-2)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two ' }],
+          });
+          expect(
+            events.filter(
+              (event) =>
+                event.type === StreamEventType.RETRY && event.isContinuation,
+            ),
+          ).toHaveLength(2);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two part three' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops replayed overlap when an intermediate attempt is cut again', async () => {
+        // The two cases above, combined: a middle attempt both replays the
+        // previous tail *and* is cut before finishing. Dedup at merge time
+        // only compares the final attempt against the accumulated prefix, so
+        // an overlap replayed by an intermediate attempt is baked into that
+        // prefix — it is propagated to every later request and into durable
+        // history, where it corrupts /compress, --resume, and the context of
+        // every following turn.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(cutAfter([textChunk('part one part two ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('part three', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-intermediate-replay',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          // The third request must not carry "part one" twice.
+          expect(requestContentsOfCall(2).at(-2)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two ' }],
+          });
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two part three' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps continuing when a later attempt is cut during thinking', async () => {
+        // `streamYieldedContentChunk` is per-attempt, so an attempt cut while
+        // still in its thinking phase looks identical to a cut that delivered
+        // nothing at all — even though earlier attempts already put text on
+        // the caller's screen. The replay gate is checked first, so without a
+        // guard on the accumulated text it fires here, resets the
+        // continuation state, and emits a plain RETRY that tells the UI to
+        // discard output the user was watching.
+        vi.useFakeTimers();
+        try {
+          const thoughtOnly = {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: 'Now let me check the next part.', thought: true },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(cutAfter([thoughtOnly]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('part two', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-thought-only-cut',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 10_000);
+
+          // Every RETRY must be a continuation. A plain RETRY here is the UI
+          // being told to throw away "part one ".
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(2);
+          expect(
+            retries.every(
+              (event) =>
+                (event as { isContinuation?: boolean }).isContinuation === true,
+            ),
+          ).toBe(true);
+
+          // The delivered text must still anchor the third request...
+          expect(requestContentsOfCall(2).at(-2)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one ' }],
+          });
+          // ...and survive into history rather than being regenerated.
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('pins the delivered text after a thought part in the merged turn', async () => {
+        // Covers `textIndex > 0`: the continuation turn leads with a thought
+        // part, so the delivered text must merge into the *text* part rather
+        // than being spliced at index 0 ahead of the thinking.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [
+                          { text: 'still reasoning', thought: true },
+                          { text: 'part two' },
+                        ],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-thought-then-text',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [
+              { text: 'still reasoning', thought: true },
+              { text: 'part one part two' },
+            ],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('inserts the delivered text when the continuation has no text part', async () => {
+        // Covers `textIndex < 0`: a thinking model completes the continuation
+        // with only a thought part. The delivered text has nothing to merge
+        // into, so it is inserted as its own part — and must land *after* the
+        // thought, not ahead of it.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [{ text: 'only thinking', thought: true }],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-thought-only',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [
+              { text: 'only thinking', thought: true },
+              { text: 'part one ' },
+            ],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('propagates once the continuation budget is exhausted', async () => {
+        vi.useFakeTimers();
+        try {
+          let call = 0;
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockImplementation(() =>
+            Promise.resolve(cutAfter([textChunk(`fragment ${call++} `)])),
+          );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-exhausted',
+          );
+          let caughtError: unknown;
+          const collecting = (async () => {
+            try {
+              for await (const _ of stream) {
+                /* consume */
+              }
+            } catch (error) {
+              caughtError = error;
+            }
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(30_000);
+          await collecting;
+
+          expect((caughtError as Error).message).toContain('terminated');
+          // Initial attempt + maxContinuationRetries continuations, then stop.
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(4);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('does not continue a cut that delivered a functionCall', async () => {
+        // Injecting a user turn between a functionCall and its
+        // functionResponse produces a sequence providers reject; the partial
+        // tool-use turn is left for the scheduler's repair path instead.
+        const toolChunk = {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'Let me read that file. ' },
+                  {
+                    functionCall: {
+                      id: 'call_1',
+                      name: 'read_file',
+                      args: { path: '/tmp/a.txt' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          cutAfter([toolChunk]),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-continuation-functioncall',
+        );
+        await expect(async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        }).rejects.toThrow('terminated');
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('replays rather than continues when only a thought was delivered', async () => {
+        // The reported failure mode: thinking models emit reasoning within
+        // seconds, so gating replay on "any chunk yielded" made it
+        // unreachable. A thought carries no answer text a replay could
+        // duplicate, so the clean replay is still the right recovery.
+        vi.useFakeTimers();
+        try {
+          const thoughtChunk = {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: 'Let me plan this out.', thought: true }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([thoughtChunk]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('the full answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-thought-only',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          // A replay, not a continuation: no resume instruction is injected
+          // and the RETRY tells the UI to discard the failed attempt.
+          const secondRequest = requestContentsOfCall(1);
+          expect(
+            secondRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+          expect(
+            events.filter(
+              (event) =>
+                event.type === StreamEventType.RETRY && !event.isContinuation,
+            ),
+          ).toHaveLength(1);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'the full answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('replays rather than continues when the delivered text was blank', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('   ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('real content', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-blank',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(
+            events.filter(
+              (event) =>
+                event.type === StreamEventType.RETRY && event.isContinuation,
+            ),
+          ).toHaveLength(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops a pending continuation when a fresh-restart retry takes over', async () => {
+        // A socket cut starts a continuation; the continuation attempt then
+        // fails with an InvalidStreamError, whose retry re-sends the ORIGINAL
+        // request and emits a plain RETRY (UI discards the delivered text).
+        // The request must drop it too — otherwise the resend keeps asking the
+        // model to continue output the caller no longer has.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('doomed fragment ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                throw new InvalidStreamError(
+                  'Model stream ended with empty response text.',
+                  'NO_RESPONSE_TEXT',
+                );
+
+                yield {} as GenerateContentResponse;
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-superseded',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('doomed fragment'),
+              ),
+            ),
+          ).toBe(false);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps continuing when a later attempt is cut with nothing yielded', async () => {
+        // A socket cut delivers text and schedules a continuation; the
+        // continuation attempt is then cut again having yielded nothing at
+        // all. The replay branch is checked first and its per-attempt
+        // "nothing delivered" test is satisfied here, so it must also consult
+        // the accumulated buffer — replaying would re-send the original
+        // request under a plain RETRY, telling the UI to discard text the
+        // caller already has and making the model regenerate it.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('kept half ')]))
+            .mockResolvedValueOnce(cutAfter([]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-empty-later-attempt',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          // Both RETRYs keep the UI's buffer; a plain one would drop the text.
+          expect(
+            events
+              .filter((event) => event.type === StreamEventType.RETRY)
+              .every(
+                (event) =>
+                  (event as { isContinuation?: boolean }).isContinuation ===
+                  true,
+              ),
+          ).toBe(true);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(true);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'kept half a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops a pending continuation when reactive compression takes over', async () => {
+        // The third branch that emits a plain RETRY alongside
+        // `suppressNextRetryEvent`. This ordering is not far-fetched: a
+        // continuation attempt sends *more* than the original request (the
+        // delivered text plus the resume instruction ride along), so it is
+        // exactly the attempt most likely to overflow the context window.
+        // Compression rebuilds `requestContents` from a compacted history, so a
+        // continuation staged against the old contents is stale twice over.
+        vi.useFakeTimers();
+        try {
+          vi.spyOn(ChatCompressionService.prototype, 'compress')
+            // The pre-send proactive pass; the reactive one is the second call.
+            .mockResolvedValueOnce({
+              newHistory: null,
+              info: {
+                originalTokenCount: 0,
+                newTokenCount: 0,
+                compressionStatus: CompressionStatus.NOOP,
+              },
+            })
+            .mockResolvedValueOnce({
+              newHistory: [
+                { role: 'user', parts: [{ text: 'summary' }] },
+                { role: 'model', parts: [{ text: 'ack' }] },
+                { role: 'user', parts: [{ text: 'test' }] },
+              ],
+              info: {
+                originalTokenCount: 135_000,
+                newTokenCount: 40_000,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+            });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('discarded half ')]))
+            .mockRejectedValueOnce(
+              new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-replaced-by-compression',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('discarded half'),
+              ),
+            ),
+          ).toBe(false);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
 
     it('falls back after yielding only tool preparation metadata', async () => {

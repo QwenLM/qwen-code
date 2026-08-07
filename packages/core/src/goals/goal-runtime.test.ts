@@ -18,13 +18,14 @@ import {
 import {
   createGoalRuntime,
   GoalPersistenceUnavailableError,
-  MAX_GOAL_CONTINUATION_TURNS,
   type GoalEvidenceSource,
   type GoalJournal,
   type GoalTurnHost,
 } from './goal-runtime.js';
 import { GoalConflictError } from './goal-reducer.js';
 import type { GoalVerifier } from './goal-verifier.js';
+
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -74,7 +75,10 @@ function fakeGoalJournal(
   };
 }
 
-function goalStateRecord(snapshot: GoalSnapshotV2): RuntimeRecord {
+function goalStateRecord(
+  snapshot: GoalSnapshotV2,
+  cause: GoalStateCause = 'pause',
+): RuntimeRecord {
   return {
     uuid: 'restore-record',
     parentUuid: null,
@@ -85,7 +89,7 @@ function goalStateRecord(snapshot: GoalSnapshotV2): RuntimeRecord {
     provenance: 'goal_control',
     cwd: '/tmp',
     version: 'test',
-    systemPayload: { v: 2, cause: 'pause', snapshot },
+    systemPayload: { v: 2, cause, snapshot },
   };
 }
 
@@ -368,6 +372,87 @@ describe('goal runtime', () => {
       activity: 'running',
       goal: { status: 'active' },
     });
+    expect(host.started).toHaveLength(2);
+  });
+
+  it('stops continuations when completion evidence exceeds the catalog', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [
+      verifierEvidenceRecords(permit, cursorId)[0]!,
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...verifierEvidenceRecords(
+          permit,
+          cursorId,
+          `assistant-evidence-${index}`,
+        )[1]!,
+        message: {
+          role: 'model',
+          parts: [{ text: `Delivered result ${index}` }],
+        },
+      })),
+    ];
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['assistant-evidence-100'],
+    });
+    const causes: Array<GoalStateCause | undefined> = [];
+    runtime.subscribe((_snapshot, cause) => causes.push(cause));
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        lastReason: expect.stringContaining('bounded evidence catalog'),
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'usage_limited',
+    ]);
+    expect(causes).toEqual(['turn_finished', 'usage_limited']);
+    expect(host.started).toHaveLength(1);
+
+    await expect(
+      runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      }),
+    ).rejects.toThrow('edit or replace');
+    expect(host.started).toHaveLength(1);
+
+    const edited = await runtime.dispatch({
+      action: 'edit',
+      objective: 'deliver result',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+    });
+    expect(edited.snapshot.goal).toMatchObject({
+      status: 'usage_limited',
+      revision: 2,
+      lastReason: undefined,
+    });
+    expect(edited.snapshot.goal?.evidenceCursor.recordId).not.toBe(cursorId);
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: permit.goalId,
+      expectedRevision: 2,
+    });
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(host.started).toHaveLength(2);
   });
 
@@ -924,112 +1009,72 @@ describe('goal runtime', () => {
     expect(observed[0]?.activity).toBe('running');
   });
 
-  it('transitions to usage_limited after exceeding the continuation turn budget', async () => {
+  it('continues beyond the former fixed continuation limit', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'loop forever' });
 
-    // Drive turns up to the budget cap.
-    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS; i++) {
+    const turns = FORMER_GOAL_CONTINUATION_LIMIT + 25;
+    for (let i = 0; i < turns; i++) {
       const permit = host.started[host.started.length - 1];
       expect(permit).toBeDefined();
       await runtime.finishTurn(permit);
     }
 
-    // Allow the async usage_limited transition to settle.
-    await vi.waitFor(() =>
-      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited'),
-    );
-    expect(runtime.getSnapshot().goal?.lastReason).toContain(
-      String(MAX_GOAL_CONTINUATION_TURNS),
-    );
-    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
-  });
-
-  it('resumes a budget-exhausted goal into a fresh turn instead of re-limiting', async () => {
-    const journal = fakeGoalJournal();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
-
-    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS; i++) {
-      const permit = host.started[host.started.length - 1];
-      expect(permit).toBeDefined();
-      await runtime.finishTurn(permit);
-    }
-
-    await vi.waitFor(() =>
-      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited'),
-    );
-    const goal = runtime.getSnapshot().goal!;
-    const startedBeforeResume = host.started.length;
-
-    const response = await runtime.dispatch({
-      action: 'resume',
-      expectedGoalId: goal.goalId,
-      expectedRevision: goal.revision,
+    expect(host.started).toHaveLength(turns + 1);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active', turnCount: turns },
     });
-
-    // The reported outcome must match the settled outcome: resume grants a
-    // fresh budget and starts a continuation turn rather than reporting
-    // `active` and immediately re-transitioning to `usage_limited`.
-    expect(response.snapshot.goal?.status).toBe('active');
-    expect(response.snapshot.goal?.turnCount).toBe(0);
-    await vi.waitFor(() =>
-      expect(host.started.length).toBe(startedBeforeResume + 1),
-    );
-    expect(runtime.getSnapshot().goal?.status).toBe('active');
-  });
-
-  it('does not usage-limit a replacement goal created during budget-exhaustion persistence', async () => {
-    const appendReached = deferred<void>();
-    const appendGate = deferred<void>();
-    let blockNext = false;
-    const journal = fakeGoalJournal({
-      beforeAppend: async () => {
-        if (!blockNext) return;
-        blockNext = false;
-        appendReached.resolve();
-        await appendGate.promise;
-      },
-    });
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
-
-    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS - 1; i++) {
-      const permit = host.started[host.started.length - 1];
-      expect(permit).toBeDefined();
-      await runtime.finishTurn(permit);
-    }
-
-    const goalId = runtime.getSnapshot().goal!.goalId;
-    const revision = runtime.getSnapshot().goal!.revision;
-    blockNext = true;
-    const lastPermit = host.started[host.started.length - 1];
-    const finishing = runtime.finishTurn(lastPermit);
-    await appendReached.promise;
-
-    const replacing = runtime.dispatch({
-      action: 'replace',
-      objective: 'fresh start',
-      expectedGoalId: goalId,
-      expectedRevision: revision,
-    });
-    appendGate.resolve();
-    await Promise.all([finishing, replacing]);
-
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(runtime.getSnapshot().goal?.status).toBe('active');
-    expect(runtime.getSnapshot().goal?.objective).toBe('fresh start');
     expect(
       journal.appended.map((p) => p.cause).filter((c) => c === 'usage_limited'),
     ).toHaveLength(0);
+  });
+
+  it('resumes persisted state at the former limit without resetting its turn count', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.restore([
+      goalStateRecord(
+        {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'g-1',
+            revision: 1,
+            objective: 'keep going',
+            status: 'usage_limited',
+            evidenceCursor: { recordId: 'limit-record' },
+            turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
+            activeTimeMs: 1_000,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        },
+        'usage_limited',
+      ),
+    ]);
+
+    const resumed = await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: 'g-1',
+      expectedRevision: 1,
+    });
+
+    expect(resumed.snapshot).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active', turnCount: FORMER_GOAL_CONTINUATION_LIMIT },
+    });
+    expect(host.started).toHaveLength(1);
+    await runtime.finishTurn(host.started[0]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active', turnCount: FORMER_GOAL_CONTINUATION_LIMIT + 1 },
+    });
   });
 
   it('returns a bounded catalog without exposing full evidence content', async () => {
