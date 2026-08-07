@@ -53,6 +53,10 @@ Then run:
 #   : | "${QWEN_CODE_CLI:-qwen}" review parse-args --stdin | tee .qwen/tmp/qwen-review-parse-args.json
 ```
 
+**If any `qwen review …` command prints `review: the bundle these commands run from was NOT built from the review sources in this tree`, stop and tell the user before doing anything else.** Every step below runs the built bundle, so a review source changed since that build takes no effect and this run measures the old behaviour — silently. That is true of bundled launches; an `npm start` or `npm run dev` session runs the `tsc` output in `packages/cli/dist/` instead, which lags `src/` the same way but is a layout this check does not cover — there `npm run build:packages` is what refreshes what runs. Measured on 2026-08-02: a round against #8368 exercised commands that had merged that morning and were simply absent from the binary, and reproduced a bug whose fix had merged but was not in the build — it had to be discarded. The user reads your summary, not this stderr, so a line you do not repeat is a line nobody sees. Say what it said, and let them decide whether to rebuild or to read every result as being about the older build. (A related note, `review: could not check whether the bundle is current`, means the same risk is present and unmeasurable — pass it on the same way.)
+
+You cannot fix this yourself: the skill you are reading comes from that same bundle, so any instruction here is already as old as the code it is warning about.
+
 (Step 9 removes these files with the other temp files.)
 
 **Keep the verdict file** — for _your_ reading, not as authorisation. It is how you know the target, the effort and whether `--comment` was effective. It is **not** what lets Step 7 post: `submit` deliberately ignores this JSON and re-parses the CLI's verbatim record of what the user typed, because this file is a document _you_ write, and a run that wanted to post could simply write `effective: true` into it. Step 9's cleanup sweeps it with the rest.
