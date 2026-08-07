@@ -5440,6 +5440,48 @@ describe('Session', () => {
       );
     });
 
+    it('fails closed oversized ACP audio in an embedded resource block', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      delete process.env[ENV_KEY];
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'caption before audio' },
+            {
+              type: 'resource',
+              resource: {
+                uri: 'file:///recording.ogg',
+                mimeType: 'audio/ogg',
+                blob: 'A'.repeat(Math.ceil(((10 * 1024 * 1024 + 1) * 4) / 3)),
+              },
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('audio too large');
+      expect(textParts(sent).join('\n')).not.toContain('Media omitted');
+      expect(agentMessageChunks()).toContain(
+        'Audio bridge could not transcribe 1 audio file(s): audio too large.',
+      );
+    });
+
     it('still bridges direct ACP audio when the inline media cap is lowered', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];

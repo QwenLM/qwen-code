@@ -1437,6 +1437,12 @@ describe('runNonInteractive', () => {
       'prompt-mixed-media',
     );
 
+    expect(runAudioBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockSettings,
+      parts: mixedParts,
+      signal: expect.any(AbortSignal),
+    });
     expect(resolveForModel).not.toHaveBeenCalled();
     expect(runVisionBridgeSpy).toHaveBeenCalledWith({
       config: mockConfig,
@@ -1505,6 +1511,61 @@ describe('runNonInteractive', () => {
         modelOverride: 'audio-model\0',
       },
     );
+  });
+
+  it('clamps audio sent through an audio-capable slash prompt override', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    setupMetricsMock();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+    });
+    const mockCommand = {
+      name: 'audio-model',
+      description: 'submit audio to another model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: headlessAudioParts,
+        modelOverride: 'audio-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'audio-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/audio-model',
+        'prompt-audio-model-clamped',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(runAudioBridgeSpy).not.toHaveBeenCalled();
+    expect(mockGeminiClient.sendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen to this audio' },
+      expect.objectContaining({
+        text: expect.stringContaining('Media omitted'),
+      }),
+    ]);
   });
 
   it('fails closed when a slash prompt selects a text-only model', async () => {
@@ -1605,7 +1666,7 @@ describe('runNonInteractive', () => {
       { text: 'listen to this audio' },
       expect.objectContaining({
         text: expect.stringContaining(
-          'active model override does not support audio',
+          'active model override could not be resolved',
         ),
       }),
     ]);

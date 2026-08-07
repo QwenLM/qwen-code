@@ -1251,6 +1251,7 @@ export async function runNonInteractive(
       };
       if (inlineModelOverride !== undefined && hasAudioParts(initialParts)) {
         let supportsAudio = false;
+        let routeResolutionFailed = false;
         try {
           const runtimeView = await config
             .getBaseLlmClient()
@@ -1258,6 +1259,7 @@ export async function runNonInteractive(
           supportsAudio =
             runtimeView.contentGeneratorConfig.modalities?.audio === true;
         } catch (error) {
+          routeResolutionFailed = true;
           debugLogger.warn(
             `audio route capability check failed for '${inlineModelOverride}': ${
               error instanceof Error ? error.message : String(error)
@@ -1265,9 +1267,15 @@ export async function runNonInteractive(
           );
         }
         if (!supportsAudio) {
-          const reason = 'the active model override does not support audio';
+          const reason = routeResolutionFailed
+            ? 'the active model override could not be resolved'
+            : 'the active model override does not support audio';
           initialParts = replaceAudioPartsWithUnavailable(initialParts, reason);
           emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
+        } else {
+          initialParts = initialParts.map((part) =>
+            hasAudioParts([part]) ? clampInlineMediaPart(part) : part,
+          );
         }
       } else if (
         inlineModelOverride === undefined &&

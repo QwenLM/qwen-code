@@ -880,6 +880,49 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('clamps audio forwarded through an audio-capable inline override', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'audio-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      expect.objectContaining({
+        text: expect.stringContaining('Media omitted'),
+      }),
+    ]);
+  });
+
   it('fails closed when an inline model override does not support audio', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
@@ -963,7 +1006,7 @@ describe('useGeminiStream', () => {
       { text: 'listen' },
       expect.objectContaining({
         text: expect.stringContaining(
-          'active model override does not support audio',
+          'active model override could not be resolved',
         ),
       }),
     ]);
@@ -4053,7 +4096,7 @@ describe('useGeminiStream', () => {
     expect(mockRunAudioBridge).not.toHaveBeenCalled();
     const secondSent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
     expect(secondSent).toContain(
-      'the active model override does not support audio',
+      'the active model override could not be resolved',
     );
     expect(secondSent).not.toContain('inlineData');
     expect(mockAddItem).toHaveBeenCalledWith(

@@ -1267,7 +1267,9 @@ export const useGeminiStream = (
           targetSupportsAudio = supportsAudio;
           if (!supportsAudio) {
             if (inlineModelOverrideActiveRef.current || routeResolutionFailed) {
-              const reason = 'the active model override does not support audio';
+              const reason = routeResolutionFailed
+                ? 'the active model override could not be resolved'
+                : 'the active model override does not support audio';
               nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
               addItem(
                 {
@@ -1279,6 +1281,14 @@ export const useGeminiStream = (
             } else {
               shouldRunBridge = true;
             }
+          } else {
+            nextParts = (
+              Array.isArray(nextParts) ? nextParts : [nextParts]
+            ).map((part) =>
+              typeof part !== 'string' && hasAudioParts([part])
+                ? clampInlineMediaPart(part)
+                : part,
+            );
           }
         }
         if (shouldRunBridge) {
