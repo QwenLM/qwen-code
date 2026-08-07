@@ -7,6 +7,7 @@
 import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
 import {
   isActiveWorkflowStatus,
+  isTerminalWorkflowStatus,
   listWorkflowSnapshots,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
@@ -197,9 +198,6 @@ export const workflowsCommand: SlashCommand = {
       }
       const runId = tokens[1];
       let target = registry.get(runId);
-      // Snapshots are always terminal, so a snapshot-only hit skips the
-      // isBackgrounded gate below and lands on the terminal wording —
-      // the same answer a still-retained terminal run gets.
       let fromSnapshot = false;
       if (!target) {
         // Fall back to a persisted snapshot — the same source the listing
@@ -220,6 +218,18 @@ export const workflowsCommand: SlashCommand = {
           type: 'message' as const,
           messageType: 'error' as const,
           content: `Unknown live workflow runId: ${runId}`,
+        };
+      }
+      // Terminal status before the foreground gate: a still-retained
+      // terminal foreground run must get the same terminal wording a
+      // snapshot-only hit gets, not the foreground wording (which
+      // implies backgrounding would help — impossible for a run that
+      // already settled).
+      if (isTerminalWorkflowStatus(target.status)) {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: `Workflow ${runId} is ${target.status} and cannot be paused or resumed.`,
         };
       }
       if (!fromSnapshot && !target.isBackgrounded) {

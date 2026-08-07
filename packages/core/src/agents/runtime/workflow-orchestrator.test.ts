@@ -803,6 +803,30 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('parent:nested-agent:inner');
   });
 
+  it('merges nested workflow logs into the parent run logs', async () => {
+    // R11-22: nested logs (here the unconsumed-rejection mirror) reach
+    // no production surface on the nested sandbox's own buffer — the
+    // orchestrator reads getLogs() only on the top-level sandbox. The
+    // merge must surface a failed nested dispatch in the parent run.
+    const orchestrator = new WorkflowOrchestrator(() =>
+      Promise.reject(new Error('nested-boom')),
+    );
+    const outcome = await orchestrator.run({
+      script: `return 'parent:' + (await workflow('child'));`,
+      args: undefined,
+      resolveSavedWorkflow: async () => ({
+        // The fire-and-forget dispatch fails but the nested script
+        // still completes — the only trace of the failure is the
+        // nested mirror line, which the merge must carry upward.
+        script: `agent('x'); return 'child-done';`,
+      }),
+    });
+    expect(outcome.result).toBe('parent:child-done');
+    expect(outcome.logs).toContain(
+      'dispatch failed (result not consumed): nested-boom',
+    );
+  });
+
   it('keeps a nested agent result behind the shared pause gate', async () => {
     let finishDispatch: ((value: string) => void) | undefined;
     const scheduler = new WorkflowDispatchScheduler(1);
@@ -826,9 +850,17 @@ describe('WorkflowOrchestrator', () => {
     finishDispatch?.('nested result');
     await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
     let settled = false;
-    void run.then(() => {
-      settled = true;
-    });
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     // Flush all microtasks + a timer tick so the negative check
     // distinguishes the pause gate from a gate-less resolve
     // (which settles in a few microtasks without one).
@@ -961,7 +993,20 @@ describe('WorkflowOrchestrator', () => {
       scheduler,
     });
 
+    // Mirror the sibling hold tests: a bare Promise.reject regression
+    // settles the run during this wait, and abort() then finds no
+    // waiters — the unsettled assertion is what pins the gate.
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
     controller.abort();
 
     await expect(run).resolves.toMatchObject({
@@ -1191,9 +1236,17 @@ describe('WorkflowOrchestrator', () => {
     await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
     expect(entries.filter((entry) => entry.type === 'result')).toHaveLength(1);
     let settled = false;
-    void run.then(() => {
-      settled = true;
-    });
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     // Flush all microtasks + a timer tick so the negative check
     // distinguishes the pause gate from a gate-less resolve
     // (which settles in a few microtasks without one).
@@ -1503,9 +1556,17 @@ describe('WorkflowOrchestrator', () => {
       scheduler,
     });
     let settled = false;
-    void run.then(() => {
-      settled = true;
-    });
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     // Flush all microtasks + a timer tick so the negative check
     // distinguishes the pause gate from a gate-less cached resolve
     // (which settles in ~4 microtasks without one).

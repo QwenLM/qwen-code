@@ -203,11 +203,19 @@ export class WorkflowRunner {
           }
           registry?.setRecentLogs(runId, outcome.logs);
           // A held successful dispatch resolves its gate on abort, so a
-          // cancelled run's script can still finish normally. Settle as
-          // cancelled instead of reporting a success that contradicts
-          // the registry entry, telemetry, and snapshot.
-          if (entry?.status === 'cancelled') {
-            return { ok: false, message: 'Workflow run cancelled.' };
+          // run whose entry settled terminal mid-script — cancelled via
+          // the dialog, or failed via resolvePendingApproval's
+          // contingency — can still finish normally. Settle with the
+          // entry's terminal state instead of reporting a success that
+          // contradicts the registry entry, telemetry, and snapshot.
+          if (entry && isTerminalWorkflowStatus(entry.status)) {
+            return {
+              ok: false,
+              message:
+                entry.status === 'cancelled'
+                  ? 'Workflow run cancelled.'
+                  : (entry.error ?? 'Workflow run failed.'),
+            };
           }
           registry?.complete(runId, outcome.result, Date.now());
           return { ok: true, outcome };
@@ -230,20 +238,23 @@ export class WorkflowRunner {
         } finally {
           controller.abort();
           if (entry && isTerminalWorkflowStatus(entry.status)) {
+            // Capture the telemetry projection before the first await:
+            // the finally path from complete()/fail() up to here has no
+            // yield, so this IS the settlement-time state. In-flight
+            // dispatches keep draining (mutating the live entry) across
+            // the snapshot write's awaits, and a post-await read made
+            // the snapshot and telemetry disagree with each other.
+            const telemetryEvent = new WorkflowRunEvent({
+              status: entry.status,
+              agents_dispatched: entry.agentsDispatched,
+              agents_completed: entry.agentsCompleted,
+              phase_count: entry.phases.length,
+              tokens_spent: entry.tokensSpent,
+              duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
+            });
             await writeWorkflowSnapshot(config, entry);
             try {
-              logWorkflowRun(
-                config,
-                new WorkflowRunEvent({
-                  status: entry.status,
-                  agents_dispatched: entry.agentsDispatched,
-                  agents_completed: entry.agentsCompleted,
-                  phase_count: entry.phases.length,
-                  tokens_spent: entry.tokensSpent,
-                  duration_ms:
-                    (entry.endTime ?? entry.startTime) - entry.startTime,
-                }),
-              );
+              logWorkflowRun(config, telemetryEvent);
             } catch {
               // Telemetry must not affect workflow execution.
             }

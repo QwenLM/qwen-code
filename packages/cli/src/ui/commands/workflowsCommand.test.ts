@@ -131,6 +131,12 @@ describe('workflowsCommand', () => {
     expect(result.content.indexOf('wf_paused')).toBeLessThan(
       result.content.indexOf('Recent'),
     );
+    // Oldest startTime first inside the Active bucket — the entries
+    // above are registered in exactly the inverse order, so a dropped
+    // or flipped sort would still keep both rows before 'Recent'.
+    expect(result.content.indexOf('wf_paused')).toBeLessThan(
+      result.content.indexOf('wf_pausing'),
+    );
     expect(result.content).toContain('Background tasks');
     expect(result.content).toContain('Background tasks + p');
     expect(result.content).toContain('cooperative');
@@ -181,6 +187,32 @@ describe('workflowsCommand', () => {
     });
     if (!result || result.type !== 'message') throw new Error('no result');
     expect(result.content).toContain('Cooperative pause requested');
+  });
+
+  it('reports the terminal status for a retained terminal foreground run', async () => {
+    // The terminal gate runs before the foreground gate: a completed
+    // foreground run gets the same wording as a snapshot-only hit,
+    // never the foreground wording (which implies backgrounding would
+    // help — impossible once settled).
+    getMock.mockReturnValue(
+      entry({
+        runId: 'wf_fore_done',
+        status: 'completed',
+        isBackgrounded: false,
+        endTime: 1_700_000_010_000,
+      }),
+    );
+
+    const result = await workflowsCommand.action!(context, 'p wf_fore_done');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Workflow wf_fore_done is completed and cannot be paused or resumed.',
+    });
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
   });
 
   it('explains that foreground workflows cannot be paused', async () => {
@@ -263,6 +295,10 @@ describe('workflowsCommand', () => {
   it('rejects p for targets unknown to both registry and snapshots', async () => {
     const unknown = await workflowsCommand.action!(context, 'p wf_missing');
     const malformed = await workflowsCommand.action!(context, 'p');
+    // The >2-token shape must hit the same usage guard — a loosened
+    // `!== 2` check would silently act on the first runId and ignore
+    // the trailing argument.
+    const trailing = await workflowsCommand.action!(context, 'p wf_x extra');
 
     expect(unknown).toMatchObject({
       type: 'message',
@@ -272,6 +308,12 @@ describe('workflowsCommand', () => {
     expect(malformed).toMatchObject({
       type: 'message',
       messageType: 'error',
+      content: 'Usage: /workflows p <runId>',
+    });
+    expect(trailing).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: 'Usage: /workflows p <runId>',
     });
     expect(pauseMock).not.toHaveBeenCalled();
     expect(resumeMock).not.toHaveBeenCalled();
@@ -312,6 +354,8 @@ describe('workflowsCommand', () => {
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
+        content:
+          'Workflow pause controls are available only in the interactive TUI.',
       });
       expect(pauseMock).not.toHaveBeenCalled();
       expect(resumeMock).not.toHaveBeenCalled();

@@ -7,7 +7,11 @@
 import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
 import type { Config } from '../../config/config.js';
-import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
+import {
+  createWorkflowSandbox,
+  debugLogger,
+  type WorkflowSandbox,
+} from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
   WorkflowAgentResult,
@@ -1630,6 +1634,12 @@ export class WorkflowOrchestrator {
     // is created WITHOUT a `workflow` impl — that throws on a second-level
     // `workflow()` call, enforcing the single-level nesting limit.
     const resolveSavedWorkflow = req.resolveSavedWorkflow;
+    // The parent sandbox is created after this closure but before any
+    // script can invoke workflow(), so the late binding is always set
+    // by the time it runs.
+    const parentSandboxRef: { current: WorkflowSandbox | undefined } = {
+      current: undefined,
+    };
     const workflowImpl = resolveSavedWorkflow
       ? async (
           nameOrRef: string | { scriptPath: string },
@@ -1638,6 +1648,7 @@ export class WorkflowOrchestrator {
           const resolved = await resolveSavedWorkflow(nameOrRef);
           const nestedSandbox = createWorkflowSandbox({
             args: nestedArgs,
+            runId,
             dispatch: countedDispatch,
             parallel: parallelImpl,
             pipeline: pipelineImpl,
@@ -1647,15 +1658,29 @@ export class WorkflowOrchestrator {
             scheduler,
             // No `workflow` — single-level nesting limit.
           });
-          // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
-          // rejection crosses back to the parent script's `await workflow()`
-          // so the parent can try/catch it like any other async failure.
-          return nestedSandbox.run(resolved.script);
+          try {
+            // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
+            // rejection crosses back to the parent script's `await workflow()`
+            // so the parent can try/catch it like any other async failure.
+            return await nestedSandbox.run(resolved.script);
+          } finally {
+            // Nested logs (script log() lines AND the unconsumed-
+            // rejection mirror) reach no production surface on their
+            // own — getLogs() is only ever read on the top-level
+            // sandbox and the production emitter's logAppended is a
+            // deliberate no-op. Merge them into the parent run's logs
+            // at nested settlement (after the nested flush ran) so a
+            // failed nested dispatch leaves a visible trace.
+            for (const line of nestedSandbox.getLogs()) {
+              parentSandboxRef.current?.appendLog(line);
+            }
+          }
         }
       : undefined;
 
     const sandbox = createWorkflowSandbox({
       args: req.args,
+      runId,
       dispatch: countedDispatch,
       parallel: parallelImpl,
       pipeline: pipelineImpl,
@@ -1665,6 +1690,7 @@ export class WorkflowOrchestrator {
       budget,
       scheduler,
     });
+    parentSandboxRef.current = sandbox;
     try {
       const result = await sandbox.run(req.script);
       return {

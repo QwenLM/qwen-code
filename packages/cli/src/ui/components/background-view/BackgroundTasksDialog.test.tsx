@@ -433,6 +433,29 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogMode).toBe('list');
   });
 
+  it('exits to list mode when a running workflow entry being viewed fails', () => {
+    // R11-12: pins the `selectedStatus === 'failed'` arm of
+    // selectedIsTerminal — the cancelled/completed arms have their own
+    // tests, but a run failing while watched must also fall back.
+    const running = workflowEntry({
+      runId: 'wf_running',
+      id: 'wf_running',
+      status: 'running',
+      endTime: undefined,
+    });
+    const h = setup([running]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    h.setEntries([
+      { ...running, status: 'failed', error: 'boom', endTime: Date.now() },
+    ]);
+
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+  });
+
   it('re-renders a paused workflow detail on the 1s tick and runs no tick for terminal entries', () => {
     vi.useFakeTimers();
     try {
@@ -476,6 +499,35 @@ describe('BackgroundTasksDialog', () => {
         setIntervalSpy.mock.calls.filter((call) => call[1] === 1000),
       ).toHaveLength(0);
       setIntervalSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-renders a running workflow detail on the 1s tick', () => {
+    // R11-24: workflow entries receive no activity callbacks, so the 1s
+    // interval is the only re-render driver between registry emissions
+    // — narrowing the tick gate to 'paused' would freeze the elapsed
+    // display for the whole time the user watches a live run.
+    vi.useFakeTimers();
+    try {
+      const running = workflowEntry({
+        runId: 'wf_running',
+        id: 'wf_running',
+        status: 'running',
+        startTime: Date.now() - 5_000,
+        endTime: undefined,
+      });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+      const before = h.lastFrame();
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(h.lastFrame()).not.toBe(before);
     } finally {
       vi.useRealTimers();
     }
@@ -705,6 +757,62 @@ describe('BackgroundTasksDialog', () => {
 
     expect(h.lastFrame()).not.toContain('x again to confirm stop');
     // Esc closes the dialog outright — a stale arm would swallow it.
+    h.pressKey({ name: 'escape' });
+    expect(h.probe.current!.state.dialogMode).toBe('closed');
+    expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('clears the armed cancel confirm when auto-fallback exits detail because the entry disappeared', () => {
+    // R11-5: a session switch (/clear, /branch, resume) empties the
+    // entries while the dialog is open — the !selectedEntryId exit
+    // must clear the armed state like every other exit, or the first
+    // Esc back in list mode is swallowed by the confirm-backout
+    // branch.
+    const fg = entry({
+      agentId: 'fg-1',
+      status: 'running',
+      isBackgrounded: false,
+    });
+    const h = setup([fg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    h.pressKey({ sequence: 'x' }); // arm the confirm step
+    expect(h.lastFrame()).toContain('x again to confirm stop');
+
+    h.setEntries([]);
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+
+    expect(h.lastFrame()).not.toContain('x again to confirm stop');
+    // A single Esc closes the dialog — a stale arm would swallow it.
+    h.pressKey({ name: 'escape' });
+    expect(h.probe.current!.state.dialogMode).toBe('closed');
+    expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('clears the armed cancel confirm when auto-fallback exits detail on roster drift', () => {
+    // R11-5: the drift exit (viewed entry gone, a different entry moved
+    // into the pinned index) must clear the armed state too.
+    const fg = entry({
+      agentId: 'fg-1',
+      status: 'running',
+      isBackgrounded: false,
+    });
+    const other = entry({ agentId: 'other', id: 'other', status: 'running' });
+    const h = setup([fg, other]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    h.pressKey({ sequence: 'x' }); // arm the confirm step
+    expect(h.lastFrame()).toContain('x again to confirm stop');
+
+    // fg disappears; other moves into the pinned index 0.
+    h.setEntries([other]);
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+
+    expect(h.lastFrame()).not.toContain('x again to confirm stop');
     h.pressKey({ name: 'escape' });
     expect(h.probe.current!.state.dialogMode).toBe('closed');
     expect(h.cancel).not.toHaveBeenCalled();
@@ -1405,6 +1513,11 @@ describe('BackgroundTasksDialog', () => {
       expect(h.probe.current!.state.dialogMode).toBe('detail');
       expect(h.lastFrame()).not.toContain('s save');
       expect(h.lastFrame()).toContain('cooperative');
+      // R11-24: pin the status line itself — without the statusPresentation
+      // branch the pausing run is visually indistinguishable from running.
+      expect(h.lastFrame()).toContain(
+        status === 'pausing' ? 'Pausing' : 'Paused',
+      );
       if (status === 'pausing') {
         // Pin the pausing explainer itself: bare 'cooperative' is also
         // satisfied by the footer hint. A single-line fragment is used
@@ -1441,6 +1554,10 @@ describe('BackgroundTasksDialog', () => {
       const h = setup([workflowEntry({ status })]);
 
       h.call(() => h.probe.current!.actions.openDialog());
+      // R11-24: pin the footer hint gate for pausing/paused workflows —
+      // a simplification back to status === 'running' would hide the
+      // only discoverability path while the key handler still works.
+      expect(h.lastFrame()).toContain('x stop');
       h.pressKey({ sequence: 'x' });
 
       expect(h.workflowCancel).toHaveBeenCalledWith(

@@ -67,7 +67,7 @@ These shortcuts apply while an interactive foreground shell command is running.
 
 ## Background tasks dialog
 
-Focus the Background tasks pill in the footer (use `Down Arrow` from an empty composer) and press `Enter` to open the dialog. It lists background agents, shells, monitors, and workflow runs.
+Focus the Background tasks pill in the footer (use `Down Arrow` from an empty composer — this moves through the live-agent panel and, if present, the Arena tab bar first) and press `Enter` to open the dialog. It lists background agents, shells, monitors, workflow runs, and memory dreams.
 
 | Shortcut                  | Description                                                                                                                                              |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -76,7 +76,7 @@ Focus the Background tasks pill in the footer (use `Down Arrow` from an empty co
 | `x`                       | Stop the selected task (abandon a paused agent). A foreground agent that blocks your turn needs a second `x` to confirm.                                 |
 | `r`                       | Resume the selected paused agent.                                                                                                                        |
 | `p`                       | Cooperatively pause or resume the selected background workflow run. No new agents start while paused, but script code between agent calls keeps running. |
-| `s`                       | Save the script of a completed workflow run (detail view only).                                                                                          |
+| `s`                       | Save the script of a finished (completed, failed, or cancelled) workflow run (detail view only).                                                         |
 | `Left Arrow` / `Esc`      | Return to the list from the detail view, or close the dialog.                                                                                            |
 
 ## Suggestions

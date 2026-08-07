@@ -741,9 +741,9 @@ export class WorkflowRunRegistry {
     // their burn keeps mirroring into `tokensSpent` so the live entry's
     // completed-agent count and token total stay consistent. The
     // persisted snapshot and telemetry event are a best-effort
-    // projection frozen at settlement — the runner writes both before
-    // in-flight dispatches drain — so they may read lower than this
-    // entry.
+    // projection frozen at settlement — the runner captures both
+    // before its first await, ahead of the in-flight drain — so they
+    // may read lower than this entry.
     if (!entry) return;
     const delta = spent - entry.tokensSpent;
     const totalChanged = entry.tokenBudgetTotal !== total;

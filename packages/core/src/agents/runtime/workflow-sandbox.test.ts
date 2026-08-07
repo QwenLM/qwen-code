@@ -1045,6 +1045,59 @@ describe('createWorkflowSandbox security', () => {
     expect(Date.now() - resumedAt).toBeGreaterThan(40);
   });
 
+  it('survives a second pause after resume without burning banked budget', async () => {
+    // R11-19: every other watchdog test exercises at most one
+    // pause→resume cycle. The multi-cycle guarantee hangs on
+    // resume() clearing the paused flag (pause() early-returns while
+    // it is set) — a pause→resume→pause must suspend again, and the
+    // run must not settle mid-second-pause.
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      maxWallClockMs: 100,
+      scheduler,
+    });
+    const run = sandbox.run(`return new Promise(() => {});`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(scheduler.pause()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    expect(scheduler.resume()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(scheduler.pause()).toBe(true);
+    // Wait out the entire (remaining) budget inside the SECOND pause —
+    // pre-fix the watchdog stayed armed and killed the run mid-pause.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    expect(scheduler.resume()).toBe(true);
+    await expect(run).rejects.toThrow(/exceeded 100 ms of active time/);
+  });
+
   it('keeps the wall-clock watchdog armed while an in-flight dispatch drains a pause', async () => {
     // `pausing` means a dispatch is still executing real work — the exact
     // hang the backstop exists for. Suspending the watchdog on `pausing`
@@ -1098,9 +1151,12 @@ describe('createWorkflowSandbox security', () => {
     abortOnTimeout.abort();
     const rearmAt = Date.now();
     await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
-    // The banked remainder (~80 ms) bounds the settle; pre-fix the race
-    // never settled at all, and a fresh-budget re-arm would overshoot.
+    // The banked remainder (~80 ms) bounds the settle: pre-fix the race
+    // never settled at all, a fresh-budget re-arm would overshoot the
+    // upper bound, and a zero-remainder re-arm would fire before the
+    // lower bound.
     expect(Date.now() - rearmAt).toBeLessThan(150);
+    expect(Date.now() - rearmAt).toBeGreaterThan(40);
   });
 
   it('keeps the watchdog armed when a post-abort drain lands paused', async () => {
@@ -1832,7 +1888,9 @@ describe('createWorkflowSandbox primitives', () => {
     );
     const logs = sandbox.getLogs();
     expect(logs).toHaveLength(1);
-    expect(logs[0]).toMatch(/^script handler failed \(result not consumed\): /);
+    expect(logs[0]).toMatch(
+      /^script handler failed \(rejection not handled\): /,
+    );
   });
 
   it('does not mirror a side branch once the script handles the root rejection', async () => {
@@ -2067,6 +2125,348 @@ describe('createWorkflowSandbox primitives', () => {
     expect(sandbox.getLogs()).toEqual(['handled: all-boom']);
   });
 
+  // R11-3: await / Promise.resolve adoption of an ObservedPromise
+  // attaches through the observed then with the adopting promise's
+  // native capability pair. Adoption consumes (clearing a recorded
+  // verdict) but is NOT handling: the rejection transfers into the
+  // (unobserved) adopting promise, and the run-level escape hook
+  // surfaces forgotten transfers instead of letting them escape with
+  // no log, alarm, or telemetry.
+  it('mirrors a forgotten dispatch failure inside an async wrapper (adoption escape)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('kaboom')),
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await sandbox.run(
+        `async function step() { await agent('x'); } step(); return 'done';`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (rejection not handled): kaboom',
+    ]);
+    // The escape event itself cannot be cancelled from inside the
+    // sandbox (the adopting promise is unreachable), so a host-level
+    // listener still observes it — capture it here so it cannot leak
+    // into the test runner.
+    expect(unhandled.length).toBeGreaterThan(0);
+  });
+
+  it('mirrors every forgotten dispatch failure in an adoption fan-out', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: (prompt: string) => Promise.reject(new Error(prompt + '-boom')),
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await sandbox.run(
+        `[1, 2].map(async (i) => { await agent('x' + i); }); return 'done';`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (rejection not handled): x1-boom',
+      'dispatch failed (rejection not handled): x2-boom',
+    ]);
+  });
+
+  it('does not mirror a dispatch failure the script awaits at the top level', async () => {
+    // The adoption transfers the rejection into the script IIFE, which
+    // the run observes — the failure surfaces as the run's own error,
+    // never as a mirror line.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('kaboom')),
+    });
+    await expect(sandbox.run(`return await agent('x');`)).rejects.toThrow(
+      'kaboom',
+    );
+    expect(sandbox.getLogs()).toEqual([]);
+  });
+
+  it('does not mirror a dispatch failure the script catches around an await', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('kaboom')),
+    });
+    await sandbox.run(`
+      try { await agent('x'); } catch (e) { log('handled: ' + e.message); }
+      return 'done';
+    `);
+    expect(sandbox.getLogs()).toEqual(['handled: kaboom']);
+  });
+
+  it('clears a recorded verdict when the rejection is adopted late', async () => {
+    // The root rejects while still unconsumed (verdict recorded), then
+    // Promise.resolve adopts it — consumption via adoption must clear
+    // the verdict exactly like a delayed await.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('kaboom')),
+    });
+    await sandbox.run(`
+      const p = agent('x');
+      const q = Promise.resolve(p);
+      try { await q; } catch (e) { log('handled: ' + e.message); }
+      return 'done';
+    `);
+    expect(sandbox.getLogs()).toEqual(['handled: kaboom']);
+  });
+
+  it('attributes an all-rejected Promise.any aggregate to the dispatch, not the script', async () => {
+    // R11-4: the native static rejects with a fresh vm-realm
+    // AggregateError carrying no markers; the attribution must be
+    // derived from the element causes instead of blaming the script.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('any-boom')),
+    });
+    await sandbox.run(`Promise.any([agent('a'), agent('b')]); return 'done';`);
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (result not consumed): All promises were rejected',
+    ]);
+  });
+
+  it('dedupes one failed dispatch fanned out into N unconsumed branches', async () => {
+    // R11-11: the mirror records one entry per observed node, but one
+    // failed dispatch is one failure — the flush must emit exactly one
+    // line regardless of the fan-out.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('x-boom')),
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await sandbox.run(`
+        const p = agent('x');
+        p.then(() => 1);
+        p.then(() => 2);
+        return 'done';
+      `);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (rejection not handled): x-boom',
+    ]);
+  });
+
+  it('does not mirror a side branch once the script attached a rejection handler to the root', async () => {
+    // R11-14: the suppression keys on rejectionHandled alone — with a
+    // script catch on the root, an unconsumed fulfillment-only side
+    // branch stays silent even though its own entry is dispatch-failed.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('x-boom')),
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await sandbox.run(`
+        const p = agent('x');
+        p.catch(() => log('handled'));
+        p.then((v) => v);
+        return 'done';
+      `);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(sandbox.getLogs()).toEqual(['handled']);
+  });
+
+  it('does not mirror an unconsumed aggregate once the script handles the element rejection', async () => {
+    // R11-15: aggregate roots track rejectionHandled independently of
+    // their elements' roots; handling the element must transitively
+    // suppress the forwarded rejection on the dangling aggregate.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('x-boom')),
+    });
+    await sandbox.run(`
+      const a = agent('x');
+      Promise.all([a]);
+      await a.catch((e) => log('handled: ' + e.message));
+      return 'done';
+    `);
+    expect(sandbox.getLogs()).toEqual(['handled: x-boom']);
+  });
+
+  it('preserves the species contract for script-defined Promise subclasses', async () => {
+    // R11-16: Promise.all/race/any called on a subclass must return a
+    // subclass instance; the wrappers bypass observation for
+    // non-default receivers instead of re-wrapping into ObservedPromise.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+    });
+    const result = await sandbox.run(`
+      class P extends Promise {}
+      const x = P.all([agent('a')]);
+      const y = P.race([agent('b')]);
+      const z = P.any([agent('c')]);
+      return [x instanceof P, y instanceof P, z instanceof P];
+    `);
+    expect(result).toEqual([true, true, true]);
+  });
+
+  it('mirrors an unconsumed static Promise.race aggregate holding a failed dispatch', async () => {
+    // R11-21: race and any aggregates need the same observation the
+    // all aggregate has — without it a fire-and-forget race holding a
+    // failed dispatch escapes as a process-level unhandledRejection.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: (prompt: string) =>
+        prompt === 'bad'
+          ? Promise.reject(new Error('bad-boom'))
+          : new Promise<string>(() => {}),
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await sandbox.run(
+        `Promise.race([agent('slow'), agent('bad')]); return 'done';`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (result not consumed): bad-boom',
+    ]);
+  });
+
+  it('does not mirror Promise.any teardown rejections of an aborted run', async () => {
+    // R11-30: the AggregateError carries no abort marker, so the
+    // observer must also consult the run-level abort state — a
+    // correctly-cancelled run with a dangling any() must stay silent.
+    const controller = new AbortController();
+    const rejectors: Array<(err: Error) => void> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      abortOnTimeout: controller,
+      dispatch: () =>
+        new Promise((_resolve, reject) => {
+          rejectors.push(reject);
+        }),
+    });
+    const runPromise = sandbox.run(
+      `Promise.any([agent('a'), agent('b')]); return 'done';`,
+    );
+    await runPromise;
+    controller.abort();
+    for (const reject of rejectors) {
+      reject(new Error('teardown after cancel'));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sandbox.getLogs()).toEqual([]);
+  });
+
+  it('does not mirror a post-settlement rejection whose root the script handled', async () => {
+    // R11-20: pins the suppression gate in the immediate-mirror path —
+    // a slow dispatch the script caught rejects only after the flush;
+    // the gate keyed on rejectionHandled keeps the log free of the
+    // self-contradicting mirror line.
+    let rejectSlow: (err: Error) => void = () => {};
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectSlow = reject;
+        }),
+    });
+    const runPromise = sandbox.run(`
+      const p = agent('slow');
+      p.catch(() => log('handled late'));
+      p.then((v) => v);
+      return 'done';
+    `);
+    await runPromise;
+    rejectSlow(new Error('slow-boom'));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(sandbox.getLogs()).toEqual(['handled late']);
+  });
+
+  it('flushes mirror entries when the script throws synchronously after a fire-and-forget dispatch', async () => {
+    // R11-10 companion: the flush lives in the finally that wraps the
+    // whole run body, so any throw path still surfaces queued entries.
+    // (The 30s sync vm timeout is the other sync-throw member of this
+    // path but is impractical to exercise in unit tests.)
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('boom')),
+    });
+    await expect(
+      sandbox.run(`agent('a'); throw new Error('script-sync-boom');`),
+    ).rejects.toThrow('script-sync-boom');
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (result not consumed): boom',
+    ]);
+  });
+
+  it('keeps then() native-compatible when the rejection handler is a revoked Proxy', async () => {
+    // R11-26: the handler introspection must be guarded — a revoked
+    // Proxy wrapping a function makes property reads throw, and an
+    // unguarded read made .then() throw synchronously (something
+    // native then never does).
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('kaboom')),
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const result = await sandbox.run(`
+        const pair = Proxy.revocable(function () {}, {});
+        pair.revoke();
+        agent('x').then(undefined, pair.proxy);
+        return 'done';
+      `);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(result).toBe('done');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('mirrors an exotic rejection value whose message access throws', async () => {
     // R10-12: a script handler can throw a value whose property access
     // throws (getter / Proxy trap). The observer must survive it —
@@ -2094,7 +2494,7 @@ describe('createWorkflowSandbox primitives', () => {
     }
     expect(unhandled).toEqual([]);
     expect(sandbox.getLogs()).toEqual([
-      'script handler failed (result not consumed): [unserializable rejection value]',
+      'script handler failed (rejection not handled): [unserializable rejection value]',
     ]);
   });
 

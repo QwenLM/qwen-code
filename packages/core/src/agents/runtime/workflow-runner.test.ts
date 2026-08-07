@@ -507,6 +507,42 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.status).toBe('cancelled');
   });
 
+  it('settles an externally failed run as failed even if its script still completes', async () => {
+    // The settlement guard must cover every terminal status, not only
+    // 'cancelled': resolvePendingApproval's contingency fails the entry
+    // and aborts the handle, and the success arm still delivers held
+    // successful dispatches on abort — so the script can finish
+    // normally while the registry entry, snapshot, and telemetry say
+    // 'failed'. The handle must not report ok: true.
+    const { config, registry } = configWithRegistry();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    registry.fail(
+      handle.runId,
+      'Failed to resolve workflow approval: wfap_1',
+      Date.now(),
+    );
+    handle.abort();
+    finishDispatch?.('done');
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: false,
+      message: 'Failed to resolve workflow approval: wfap_1',
+    });
+    expect(registry.get(handle.runId)?.status).toBe('failed');
+  });
+
   it('rejects a concurrent resume while the original run is active', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';

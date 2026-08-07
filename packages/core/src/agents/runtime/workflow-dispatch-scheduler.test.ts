@@ -181,4 +181,33 @@ describe('WorkflowDispatchScheduler', () => {
     });
     expect(thunk).not.toHaveBeenCalled();
   });
+
+  it('refuses resume() after the abort signal fired on a paused scheduler', async () => {
+    // R11-13: a user-paused run whose enclosing turn is then cancelled
+    // keeps status 'paused' on an aborted scheduler (abortPending emits
+    // no state transition). Without the signal guard, resume() would
+    // flip the dead, draining run's registry entry back to 'running'.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    expect(scheduler.pause()).toBe(true);
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    expect(scheduler.resume()).toBe(false);
+    expect(scheduler.snapshot().state).toBe('paused');
+  });
+
+  it('refuses pause() after the abort signal fired on a running scheduler', async () => {
+    // Symmetric guard: an aborted running run must not transition into
+    // pausing/paused.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    expect(scheduler.snapshot().state).toBe('running');
+
+    controller.abort();
+
+    expect(scheduler.pause()).toBe(false);
+    expect(scheduler.snapshot().state).toBe('running');
+  });
 });
