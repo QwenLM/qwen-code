@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-dingtalk",
-  "version": "0.21.5",
+  "version": "0.21.7",
   "description": "DingTalk channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.21.5",
+    "@qwen-code/channel-base": "0.21.7",
     "dingtalk-stream-sdk-nodejs": "^2.0.4"
   },
   "devDependencies": {

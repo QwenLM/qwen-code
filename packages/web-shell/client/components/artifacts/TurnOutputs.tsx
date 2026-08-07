@@ -1,7 +1,5 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
-import { useWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import {
   DownloadIcon,
   FileAudioIcon,
@@ -28,6 +26,7 @@ import {
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
+import { useArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import styles from './TurnOutputs.module.css';
 
 export interface TurnOutputFileChange {
@@ -55,6 +54,7 @@ export interface TurnOutputScheduledTask {
   prompt: string;
   recurring: boolean;
   durable: boolean;
+  workspaceId?: string;
   display?: string;
 }
 
@@ -74,8 +74,8 @@ export type TurnOutputOpenRequest = (
       turnId: string;
       changes: readonly TurnOutputFileChange[];
       selectedPath?: string;
-      workspaceActions?: DaemonWorkspaceActions;
       workspaceCwd?: string;
+      workspaceId?: string;
     }
   | {
       id: string;
@@ -85,7 +85,8 @@ export type TurnOutputOpenRequest = (
       artifactId: string;
       managedId?: string;
       artifact: DaemonSessionArtifact;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
       previewContent?: string;
     }
   | {
@@ -94,7 +95,8 @@ export type TurnOutputOpenRequest = (
       title: string;
       turnId: string;
       task: TurnOutputScheduledTask;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
     }
   | {
       id: string;
@@ -139,7 +141,8 @@ function TurnOutputsComponent({
   onError,
 }: TurnOutputsProps) {
   const { t } = useI18n();
-  const workspaceActions = useWorkspaceActions();
+  const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
+  const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
   if (
     changes.length === 0 &&
@@ -160,6 +163,9 @@ function TurnOutputsComponent({
         turnId,
         changes,
         ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
         ...(selectedPath ? { selectedPath } : {}),
       });
       return;
@@ -181,6 +187,10 @@ function TurnOutputsComponent({
         artifactId: artifact.id,
         ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
         artifact,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       });
       return;
@@ -194,7 +204,13 @@ function TurnOutputsComponent({
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
         turnId,
-        task,
+        task: workspaceTarget?.workspaceId
+          ? { ...task, workspaceId: workspaceTarget.workspaceId }
+          : task,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
       });
       return;
     }
@@ -323,7 +339,7 @@ function TurnOutputsComponent({
           onOpen={() => openArtifact(artifact)}
           onError={onError}
           onDownload={
-            canDownloadArtifact(artifact)
+            canDownloadArtifact(artifact) && workspaceActions
               ? (isCancelled) =>
                   downloadWorkspaceFile(
                     workspaceActions,

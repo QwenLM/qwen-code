@@ -13,6 +13,13 @@ class ProviderResponseError extends Error {
   }
 }
 
+export class ProviderHttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super('External context provider rejected the request.');
+    this.name = 'ProviderHttpStatusError';
+  }
+}
+
 export function validateProviderBaseUrl(value: string): URL {
   let url: URL;
   try {
@@ -74,7 +81,7 @@ export async function postJson(input: {
   }
   if (!response.ok) {
     cancelResponseBody(response);
-    throw new Error('External context provider rejected the request.');
+    throw new ProviderHttpStatusError(response.status);
   }
 
   const declaredLength = response.headers.get('content-length');

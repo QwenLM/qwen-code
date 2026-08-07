@@ -68,6 +68,7 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
+  clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
 }
@@ -93,8 +94,14 @@ export interface UseBranchCommandResult {
 export function useBranchCommand(
   options: UseBranchCommandOptions,
 ): UseBranchCommandResult {
-  const { config, historyManager, startNewSession, setSessionName, remount } =
-    options;
+  const {
+    config,
+    historyManager,
+    startNewSession,
+    clearPendingState,
+    setSessionName,
+    remount,
+  } = options;
 
   const handleBranch = useCallback(
     async (name?: string) => {
@@ -208,6 +215,7 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
+        clearPendingState?.();
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
         uiSwapped = true;
@@ -294,6 +302,7 @@ export function useBranchCommand(
       config,
       historyManager,
       startNewSession,
+      clearPendingState,
       setSessionName,
       remount,
       options.settings.merged.ui?.history?.collapseOnResume,

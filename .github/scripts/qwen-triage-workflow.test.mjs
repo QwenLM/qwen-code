@@ -755,8 +755,8 @@ describe('qwen-triage: npm cache producer workflow', () => {
   it('runs on the same target as the consumers so the cache version matches', () => {
     // actions/cache scopes an entry by a hash of the literal cache path plus
     // the compression method. A producer on a different runner or outside the
-    // container computes a different version, so every restore misses even
-    // when the key and path strings match — pin runs-on + container to the
+    // container image computes a different version, so every restore misses
+    // even when the key and path strings match — pin runs-on + image to the
     // consumers' so both match by construction.
     for (const [jobName, jobDef] of [
       ['verify', verifyJob],
@@ -767,11 +767,16 @@ describe('qwen-triage: npm cache producer workflow', () => {
         jobDef['runs-on'],
         `producer runs-on must match ${jobName}`,
       );
-      assert.deepEqual(
-        saveJob.container,
-        jobDef.container,
-        `producer container must match ${jobName}`,
+      assert.equal(
+        saveJob.container.image,
+        jobDef.container.image,
+        `producer container image must match ${jobName}`,
       );
     }
+    assert.equal(
+      saveJob.container.options,
+      '--init --user node',
+      'producer must not leave root-owned files on the self-hosted runner',
+    );
   });
 });
