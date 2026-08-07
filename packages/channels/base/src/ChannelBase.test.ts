@@ -11245,6 +11245,20 @@ describe('ChannelBase', () => {
       expect(promptText.endsWith('\n\n[Alice] hi')).toBe(true);
     });
 
+    it('omits the mention marker when all IDs sanitize to empty', async () => {
+      const ch = createChannel({ groupPolicy: 'open' });
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Alice',
+          text: 'hi',
+          mentionedMemberIds: ['[', ']'],
+        }),
+      );
+      const promptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(promptText).toBe('[Alice] hi');
+    });
+
     /**
      * Set the bridge's synchronous availableCommands snapshot (agent commands).
      * Pass a bare name, or `{ name, altNames }` to attach aliases.
@@ -11792,6 +11806,59 @@ describe('ChannelBase', () => {
       // ...and the whole blob is NOT re-wrapped with the last sender's prefix.
       expect(coalesced.startsWith('[Bob] second')).toBe(true);
       expect(coalesced.match(/\[Carol\]/g)?.length).toBe(1);
+    });
+
+    it('collect: buffered messages keep their mention markers when coalesced', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('coalesced response');
+      });
+
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { dispatchMode: 'collect' } },
+      });
+
+      // Alice's message starts processing
+      const p1 = ch.handleInbound(
+        groupEnv({ senderName: 'Alice', text: 'first' }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+      // Bob and Carol buffer while Alice's turn runs, each with a mention
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Bob',
+          text: 'second',
+          mentionedMemberIds: ['member-b'],
+        }),
+      );
+      await ch.handleInbound(
+        groupEnv({
+          senderName: 'Carol',
+          text: 'third',
+          mentionedMemberIds: ['member-c'],
+        }),
+      );
+
+      expect(callCount).toBe(1);
+      resolveFirst('first response');
+      await p1;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const coalesced = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      // Each marker was rendered before buffering and must survive the
+      // coalescing drain exactly once — no loss, no stale re-render.
+      expect(coalesced).toContain('[Mentioned 1 other group member: member-b]');
+      expect(coalesced).toContain('[Mentioned 1 other group member: member-c]');
+      expect(coalesced.match(/Mentioned/g)?.length).toBe(2);
     });
 
     it('sanitizes the sender name so it cannot break out of the prefix tag', async () => {

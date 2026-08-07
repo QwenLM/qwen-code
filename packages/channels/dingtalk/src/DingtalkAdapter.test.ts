@@ -2942,6 +2942,9 @@ describe('DingtalkChannel sender attribution', () => {
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'hello', isMentioned: true }),
     );
+    // The guard skips collection entirely, so the key must be absent.
+    const envelope = vi.mocked(channel.handleInbound).mock.calls.at(-1)?.[0];
+    expect(envelope).not.toHaveProperty('mentionedMemberIds');
   });
 
   it('returns context only when text is empty after mention stripping', () => {

@@ -1415,6 +1415,7 @@ export abstract class ChannelBase {
       text: coalesced,
       alreadyPrefixed: true,
       referencedText: undefined,
+      mentionedMemberIds: undefined,
       attachments: undefined,
       metadata: undefined,
       imageBase64: undefined,
@@ -5709,6 +5710,7 @@ export abstract class ChannelBase {
             alreadyPrefixed: true,
             // Clear attachments/references — already resolved in original text
             referencedText: undefined,
+            mentionedMemberIds: undefined,
             attachments: undefined,
             metadata: undefined,
             imageBase64: undefined,
