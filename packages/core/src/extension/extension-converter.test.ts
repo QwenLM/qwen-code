@@ -94,6 +94,16 @@ describe('convertGeminiOrClaudeExtension', () => {
       includeMarketplace: false,
     },
     {
+      installKind: 'named root without marketplace',
+      pluginName: 'ponytail',
+      marketplacePluginName: 'ponytail',
+      marketplaceSource: './',
+      marketplaceHooks: undefined,
+      expectedHookPath: 'scripts/session-start.sh',
+      pluginSourceKind: 'marketplace-entry' as const,
+      includeMarketplace: false,
+    },
+    {
       installKind: 'sourceless marketplace root',
       pluginName: 'ponytail',
       marketplacePluginName: 'ponytail',
@@ -308,6 +318,48 @@ describe('convertGeminiOrClaudeExtension', () => {
           ? path.join(installedDir, expectedHookPath)
           : undefined,
       );
+    },
+  );
+
+  it.each([
+    {
+      format: 'Qwen',
+      manifest: 'qwen-extension.json',
+      expectedOrigin: 'QwenCode' as const,
+    },
+    {
+      format: 'Gemini',
+      manifest: 'gemini-extension.json',
+      expectedOrigin: 'Gemini' as const,
+    },
+  ])(
+    'keeps a classic $format root extension when a named install has no marketplace',
+    async ({ manifest, expectedOrigin }) => {
+      fs.writeFileSync(
+        path.join(extensionDir, manifest),
+        JSON.stringify({ name: 'classic-root', version: '1.0.0' }),
+      );
+
+      const converted = await convertGeminiOrClaudeExtension(
+        extensionDir,
+        'classic-root',
+        undefined,
+        undefined,
+        'marketplace-entry',
+      );
+      if (converted.extensionDir !== extensionDir) {
+        convertedDir = converted.extensionDir;
+      }
+      const config = JSON.parse(
+        fs.readFileSync(
+          path.join(converted.extensionDir, 'qwen-extension.json'),
+          'utf-8',
+        ),
+      ) as ExtensionConfig;
+
+      expect(converted.originSource).toBe(expectedOrigin);
+      expect(config.name).toBe('classic-root');
+      expect(config.version).toBe('1.0.0');
     },
   );
 

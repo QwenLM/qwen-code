@@ -198,6 +198,7 @@ export async function convertGeminiOrClaudeExtension(
   if (
     isExplicitMarketplaceEntry &&
     pluginName &&
+    marketplaceLocation !== 'missing-marketplace' &&
     !selectedMarketplaceEntryUsesRoot
   ) {
     newExtensionDir = (

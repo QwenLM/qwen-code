@@ -721,6 +721,72 @@ describe('git extension helpers', () => {
       expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
     });
 
+    it('checks a selected marketplace entry when its local source is a directory', async () => {
+      const sourceDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-marketplace-update-test-'),
+      );
+      try {
+        await fs.writeFile(
+          path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'marketplace-root', version: '1.0.0' }),
+        );
+        const marketplaceDir = path.join(sourceDir, '.claude-plugin');
+        const pluginDir = path.join(sourceDir, 'plugins', 'selected');
+        await fs.mkdir(marketplaceDir, { recursive: true });
+        await fs.mkdir(path.join(pluginDir, '.claude-plugin'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(marketplaceDir, 'marketplace.json'),
+          JSON.stringify({
+            name: 'marketplace-root',
+            owner: { name: 'Owner' },
+            plugins: [
+              {
+                name: 'selected',
+                source: './plugins/selected',
+              },
+            ],
+          }),
+        );
+        await fs.writeFile(
+          path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+          JSON.stringify({ name: 'selected', version: '2.0.0' }),
+        );
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) =>
+              JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ),
+          ),
+        } as unknown as ExtensionManager;
+        const installMetadata = {
+          type: 'local' as const,
+          source: sourceDir,
+          pluginName: 'selected',
+          pluginSourceKind: 'marketplace-entry' as const,
+        };
+
+        const unchanged = await checkForExtensionUpdate(
+          createExtension({ version: '2.0.0', installMetadata }),
+          mockManager,
+        );
+        const outdated = await checkForExtensionUpdate(
+          createExtension({ version: '1.0.0', installMetadata }),
+          mockManager,
+        );
+
+        expect(unchanged).toBe(ExtensionUpdateState.UP_TO_DATE);
+        expect(outdated).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      } finally {
+        await fs.rm(sourceDir, { recursive: true, force: true });
+      }
+    });
+
     it('should convert a local Gemini archive before checking for updates', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'local-archive-update-test-'),
