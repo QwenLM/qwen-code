@@ -13,6 +13,10 @@ import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
 import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
+import {
+  MAX_WORKFLOW_AGENTS_ENV,
+  MAX_WORKFLOW_CONCURRENCY_ENV,
+} from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
 
 function fakeConfig(): Config {
@@ -55,13 +59,17 @@ describe('WorkflowTool', () => {
   // would notice — so anchor the load-bearing claims.
   it('description carries both the runtime facts and the orchestration policy', () => {
     const { description } = new WorkflowTool(fakeConfig());
-    // Every env knob the description names is anchored by its exact
-    // spelling: the runtime reads the constant, so a typo here would go
-    // green while the model told users to set a variable nothing reads.
+    // Every env knob the description names is anchored. The two that the
+    // orchestrator exports are anchored *through the exported constant*, so
+    // a rename on the runtime side fails here too — a hardcoded literal
+    // would only have caught a description-side typo, and the model would
+    // go on telling users to set a variable nothing reads.
+    // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
+    // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
     for (const anchor of [
       'min(16, cpus-2)',
-      'QWEN_CODE_MAX_WORKFLOW_AGENTS',
-      'QWEN_CODE_MAX_WORKFLOW_CONCURRENCY',
+      MAX_WORKFLOW_AGENTS_ENV,
+      MAX_WORKFLOW_CONCURRENCY_ENV,
       'QWEN_CODE_MAX_WORKFLOW_SECONDS',
       'resumeFromRunId',
       '/workflows',
@@ -80,7 +88,12 @@ describe('WorkflowTool', () => {
     expect(description).toMatch(/against everything already seen/);
     expect(description).toMatch(/log\(\)` what was dropped/);
     // Limits the model has to plan around rather than discover from a
-    // mid-run failure.
+    // mid-run failure — the numbers themselves, not just the knob names,
+    // so raising a runtime constant without updating the description here
+    // turns this red instead of leaving the model sizing fan-outs against
+    // a stale cap.
+    expect(description).toMatch(/up to 1000 agents total/);
+    expect(description).toMatch(/30-minute wall-clock cap/);
     expect(description).toMatch(/nests one level only/);
     expect(description).toMatch(/read `budget\.total`/);
   });
