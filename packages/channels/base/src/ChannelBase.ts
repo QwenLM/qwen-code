@@ -1424,6 +1424,7 @@ export abstract class ChannelBase {
       text: coalesced,
       alreadyPrefixed: true,
       referencedText: undefined,
+      mentionedMemberIds: undefined,
       attachments: undefined,
       metadata: undefined,
       imageBase64: undefined,
@@ -5169,6 +5170,24 @@ export abstract class ChannelBase {
         envelope.senderName || envelope.senderId || 'unknown',
       );
       promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+      // Render the non-bot mention marker AFTER sanitization (like the
+      // [Replying to:] wrapper below). Inside `text` it would pass through
+      // sanitizePromptText, which strips brackets only on content <=64 chars
+      // and folds its newline — so with IDs included, the delivered format
+      // would depend on the ID list's length. IDs are platform-controlled, so
+      // neutralize them like quoted text before they bypass the sanitizer here.
+      if (envelope.mentionedMemberIds?.length) {
+        const ids = envelope.mentionedMemberIds
+          .map((id) => sanitizeQuotedText(id, 64).trim())
+          // A junk-only ID over the cap truncates to a bare '…' (not
+          // whitespace), which would advertise a phantom member — drop it
+          // like an empty ID.
+          .filter((id) => id.length > 0 && id !== '…');
+        if (ids.length > 0) {
+          const memberLabel = ids.length === 1 ? 'member' : 'members';
+          promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
+        }
+      }
     }
 
     if (envelope.referencedText) {
@@ -5744,6 +5763,7 @@ export abstract class ChannelBase {
             alreadyPrefixed: true,
             // Clear attachments/references — already resolved in original text
             referencedText: undefined,
+            mentionedMemberIds: undefined,
             attachments: undefined,
             metadata: undefined,
             imageBase64: undefined,
