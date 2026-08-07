@@ -1707,7 +1707,14 @@ export interface AcpSessionBridge {
    *  live. Synchronous cache read for the metrics sampler. Optional — see
    *  {@link pendingPromptTotal}. */
   getChildResourceSnapshot?():
-    | { rssBytes: number; cpuPercent: number }
+    | {
+        rssBytes: number;
+        cpuPercent: number;
+        /** How old this reading is, in ms. Absent on bridges predating the
+         *  field — see {@link pendingPromptTotal} — so a caller aggregating
+         *  several children must treat it as unknown rather than as fresh. */
+        ageMs?: number;
+      }
     | undefined;
   /** Poll the live child's resource extMethod and refresh the cache that
    *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the

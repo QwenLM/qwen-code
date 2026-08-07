@@ -78,17 +78,17 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                   |
-| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication          |
-| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                     |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
-| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
-| `blockStreaming`          | `"off"`                  | Always forced to `"off"`; intermediate model chunks aren't published; `"on"` is not supported |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                  |
+| Option                    | Default                  | Description                                                                                                                                      |
+| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                             |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                        |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                              |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                           |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow |
+| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                                                                          |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                 |
+| `blockStreaming`          | `"off"`                  | Always forced to `"off"`; intermediate model chunks aren't published; `"on"` is not supported                                                    |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                     |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
@@ -103,6 +103,8 @@ On a **public repository**, setting `senderPolicy: "open"` allows **any GitHub u
 Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
 
 Allowlist and pairing entries follow the **username**, not the immutable account ID. If an allowlisted user renames their GitHub account, remove the stale entry — GitHub releases the old username for anyone else to claim, and the new holder would inherit the allowlist/pairing authorization.
+
+Note that under `groupPolicy: "pairing"`, access is granted per repository: once a repository is approved, **any GitHub user** can drive the bot through that repository's issues and pull requests. All GitHub traffic is group traffic, so `senderPolicy` and `allowedUsers` do not gate members of an approved repository. Approvals are keyed by the repository full name (`owner/repo`), which changes on rename or transfer — revoke stale group approvals after any repository rename, transfer, or deletion.
 
 ## Mention Detection
 
