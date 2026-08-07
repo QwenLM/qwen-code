@@ -21956,6 +21956,15 @@ describe('computeKeepaliveIntervalMs', () => {
 });
 
 describe('runQwenServe', () => {
+  // Some CI containers disable IPv6 entirely; binding ::1 then fails with
+  // EADDRNOTAVAIL.
+  const hasIpv6Loopback = Object.values(os.networkInterfaces()).some(
+    (addresses) =>
+      addresses?.some(
+        (info) => info.family === 'IPv6' && info.address === '::1',
+      ),
+  );
+
   let handle: RunHandle | undefined;
   let runtimeDir: string | undefined;
 
@@ -22510,25 +22519,28 @@ describe('runQwenServe', () => {
     expect(handle.url).toMatch(/^http:\/\/Localhost:\d+$/);
   });
 
-  it('strips brackets from `[::1]` before passing to app.listen()', async () => {
-    // Node's app.listen wants the unbracketed IPv6 literal — `[::1]`
-    // would fail with ENOTFOUND. The fixup is in runQwenServe's
-    // bind-time normalization.
-    handle = await runQwenServe({
-      hostname: '[::1]',
-      port: 0,
-      mode: 'http-bridge',
-    });
-    const addr = handle.server.address();
-    expect(typeof addr).toBe('object');
-    if (typeof addr === 'object' && addr) {
-      // Successfully bound — the string the OS reports is `::1` (no
-      // brackets).
-      expect(
-        addr.address === '::1' || addr.address === '::ffff:127.0.0.1',
-      ).toBe(true);
-    }
-  });
+  it.skipIf(!hasIpv6Loopback)(
+    'strips brackets from `[::1]` before passing to app.listen()',
+    async () => {
+      // Node's app.listen wants the unbracketed IPv6 literal — `[::1]`
+      // would fail with ENOTFOUND. The fixup is in runQwenServe's
+      // bind-time normalization.
+      handle = await runQwenServe({
+        hostname: '[::1]',
+        port: 0,
+        mode: 'http-bridge',
+      });
+      const addr = handle.server.address();
+      expect(typeof addr).toBe('object');
+      if (typeof addr === 'object' && addr) {
+        // Successfully bound — the string the OS reports is `::1` (no
+        // brackets).
+        expect(
+          addr.address === '::1' || addr.address === '::ffff:127.0.0.1',
+        ).toBe(true);
+      }
+    },
+  );
 
   it('rejects `[host]:port` syntax in --hostname with a useful error', async () => {
     // Operators typing `--hostname [2001:db8::1]:8080` are conflating the
@@ -22566,13 +22578,15 @@ describe('runQwenServe', () => {
         mode: 'http-bridge',
       }),
     ).rejects.toThrow(/Invalid --hostname "127\.0\.0\.1:4170"/);
-    // But raw IPv6 (multiple colons) still works.
-    handle = await runQwenServe({
-      hostname: '::1',
-      port: 0,
-      mode: 'http-bridge',
-    });
-    expect(handle.url).toMatch(/^http:\/\/\[::1\]:\d+$/);
+    if (hasIpv6Loopback) {
+      // But raw IPv6 (multiple colons) still works.
+      handle = await runQwenServe({
+        hostname: '::1',
+        port: 0,
+        mode: 'http-bridge',
+      });
+      expect(handle.url).toMatch(/^http:\/\/\[::1\]:\d+$/);
+    }
   });
 
   it('rejects empty-bracket `[]` --hostname (would bind to all interfaces)', async () => {
