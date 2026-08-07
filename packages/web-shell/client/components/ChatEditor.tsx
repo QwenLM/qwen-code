@@ -74,6 +74,7 @@ import {
   PopoverTrigger,
 } from './ui/popover';
 import { Input } from './ui/input';
+import { Switch } from './ui/switch';
 import {
   Tooltip,
   TooltipContent,
@@ -167,9 +168,23 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
-  availableModels?: Array<{ id: string; label?: string }>;
+  availableModels?: Array<{
+    id: string;
+    baseModelId?: string;
+    label?: string;
+  }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  reasoningControlsSupported?: boolean;
+  reasoningState?: {
+    thinkingEnabled: boolean;
+    effort: 'low' | 'medium' | 'xhigh';
+  };
+  reasoningBusy?: Partial<Record<'thinking' | 'effort', boolean>>;
+  onSelectReasoningOption?: (
+    configId: 'thinking' | 'effort',
+    value: string,
+  ) => void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -652,6 +667,7 @@ function ToolbarPopover({
   searchable = false,
   searchLabel,
   noResultsLabel,
+  header,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -664,6 +680,7 @@ function ToolbarPopover({
   searchable?: boolean;
   searchLabel?: string;
   noResultsLabel?: (query: string) => string;
+  header?: ReactNode;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [collisionBoundary, setCollisionBoundary] =
@@ -749,6 +766,7 @@ function ToolbarPopover({
           selectionRef.current = false;
         }}
       >
+        {header}
         {searchable && (
           <Input
             type="search"
@@ -1178,6 +1196,10 @@ export const ChatEditor = memo(
       availableModels = [],
       onSelectMode,
       onSelectModel,
+      reasoningControlsSupported = false,
+      reasoningState,
+      reasoningBusy,
+      onSelectReasoningOption,
       workspaces,
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
@@ -1648,8 +1670,11 @@ export const ChatEditor = memo(
         ? t('mode.label.planReview')
         : getModeLabel(currentMode, t);
 
+    const currentModelInfo = availableModels.find(
+      (model) => model.id === currentModel,
+    );
     const currentModelLabel = currentModel
-      ? (availableModels.find((model) => model.id === currentModel)?.label ??
+      ? (currentModelInfo?.label ??
         (currentModel.startsWith('qwen-route:')
           ? ''
           : getModelDisplayName(currentModel)))
@@ -1658,6 +1683,25 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
+    const showReasoningOptions = Boolean(
+      reasoningControlsSupported &&
+        reasoningState &&
+        onSelectReasoningOption &&
+        currentModelInfo?.baseModelId === 'qwen3.8-max',
+    );
+    const reasoningEffortLabel =
+      reasoningState?.effort === 'low'
+        ? t('reasoning.effort.low')
+        : reasoningState?.effort === 'medium'
+          ? t('reasoning.effort.medium')
+          : t('reasoning.effort.xhigh');
+    const modelChipLabel = showReasoningOptions
+      ? `${modelLabel} · ${
+          reasoningState?.thinkingEnabled
+            ? reasoningEffortLabel
+            : t('reasoning.thinkingOff')
+        }`
+      : modelLabel;
     const selectedWorkspace = workspaces?.find((entry) =>
       selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
     );
@@ -2261,6 +2305,65 @@ export const ChatEditor = memo(
                         noResultsLabel={(query) =>
                           t('model.noMatch', { query })
                         }
+                        header={
+                          showReasoningOptions ? (
+                            <div className={styles.reasoningOptions}>
+                              <div className={styles.reasoningSectionTitle}>
+                                {t('reasoning.options')}
+                              </div>
+                              <div className={styles.reasoningThinkingRow}>
+                                <span>{t('reasoning.thinking')}</span>
+                                <Switch
+                                  checked={reasoningState?.thinkingEnabled}
+                                  disabled={reasoningBusy?.thinking}
+                                  aria-label={t('reasoning.thinking')}
+                                  onCheckedChange={(checked) =>
+                                    onSelectReasoningOption?.(
+                                      'thinking',
+                                      checked ? 'on' : 'off',
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div className={styles.reasoningDivider} />
+                              <div className={styles.reasoningSectionTitle}>
+                                {t('reasoning.effort')}
+                              </div>
+                              {(['low', 'medium', 'xhigh'] as const).map(
+                                (effort) => (
+                                  <button
+                                    key={effort}
+                                    type="button"
+                                    className={styles.reasoningEffortRow}
+                                    disabled={
+                                      reasoningBusy?.effort ||
+                                      !reasoningState?.thinkingEnabled
+                                    }
+                                    aria-pressed={
+                                      reasoningState?.effort === effort
+                                    }
+                                    onClick={() =>
+                                      onSelectReasoningOption?.(
+                                        'effort',
+                                        effort,
+                                      )
+                                    }
+                                  >
+                                    <span>
+                                      {t(`reasoning.effort.${effort}`)}
+                                    </span>
+                                    <span className={styles.dropdownItemCheck}>
+                                      {reasoningState?.effort === effort ? (
+                                        <CheckIcon />
+                                      ) : null}
+                                    </span>
+                                  </button>
+                                ),
+                              )}
+                              <div className={styles.reasoningDivider} />
+                            </div>
+                          ) : undefined
+                        }
                         trigger={
                           <button
                             className={`${styles.toolBtn} ${styles.modelToolBtn} ${
@@ -2274,15 +2377,15 @@ export const ChatEditor = memo(
                               core.closeAtMenu();
                               setQuickActionsOpen(false);
                             }}
-                            aria-label={`${t('model.select')}: ${modelLabel}`}
-                            title={modelLabel}
+                            aria-label={`${t('model.select')}: ${modelChipLabel}`}
+                            title={modelChipLabel}
                           >
                             <span className={styles.toolBtnModelIcon}>
                               <ModelIcon />
                             </span>
                             {showModelLabel && (
                               <span className={styles.toolBtnText}>
-                                {modelLabel}
+                                {modelChipLabel}
                               </span>
                             )}
                             <span className={styles.toolBtnArrow}>

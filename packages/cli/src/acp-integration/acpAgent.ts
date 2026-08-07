@@ -92,6 +92,7 @@ import {
   refreshMemoryInstruction,
   extractDaemonTraceContext,
   withDaemonSpan,
+  isQwen38MaxStableWireModel,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -5076,7 +5077,11 @@ class QwenAgent implements Agent {
         `Session not found for id: ${params.sessionId}`,
       );
     }
-    return await session.setModel(params);
+    const response = await session.setModel(params);
+    await session.sendConfigOptionsUpdate(
+      this.buildConfigOptions(session.getConfig()),
+    );
+    return response;
   }
 
   async setSessionConfigOption(
@@ -5110,6 +5115,14 @@ class QwenAgent implements Agent {
         );
         break;
       }
+      case 'thinking': {
+        await session.setThinking(value as string);
+        break;
+      }
+      case 'effort': {
+        await session.setEffort(value as string);
+        break;
+      }
       default:
         throw RequestError.invalidParams(
           undefined,
@@ -5117,9 +5130,9 @@ class QwenAgent implements Agent {
         );
     }
 
-    return {
-      configOptions: this.buildConfigOptions(session.getConfig()),
-    };
+    const configOptions = this.buildConfigOptions(session.getConfig());
+    await session.sendConfigOptionsUpdate(configOptions);
+    return { configOptions };
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -11910,7 +11923,42 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    return [modeConfigOption, modelConfigOption];
+    const configOptions = [modeConfigOption, modelConfigOption];
+    if (isQwen38MaxStableWireModel(rawCurrentModelId)) {
+      const preferredEffort = config.getReasoningEffortPreference();
+      const effort =
+        preferredEffort === 'low' || preferredEffort === 'medium'
+          ? preferredEffort
+          : 'xhigh';
+      configOptions.push(
+        {
+          id: 'thinking',
+          name: 'Thinking',
+          description: 'Enable or disable thinking for qwen3.8-max',
+          category: 'thought_level',
+          type: 'select' as const,
+          currentValue: config.isThinkingEnabled() ? 'on' : 'off',
+          options: [
+            { value: 'on', name: 'On', description: '' },
+            { value: 'off', name: 'Off', description: '' },
+          ],
+        },
+        {
+          id: 'effort',
+          name: 'Effort',
+          description: 'Reasoning effort for qwen3.8-max',
+          category: 'thought_level',
+          type: 'select' as const,
+          currentValue: effort,
+          options: [
+            { value: 'low', name: 'Low', description: '' },
+            { value: 'medium', name: 'Medium', description: '' },
+            { value: 'xhigh', name: 'Extra High', description: '' },
+          ],
+        },
+      );
+    }
+    return configOptions;
   }
 
   private buildSelectableModelOptions(config: Config) {

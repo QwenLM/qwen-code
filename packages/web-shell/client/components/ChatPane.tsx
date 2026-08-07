@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
@@ -579,6 +586,7 @@ export function ChatPane({
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
         id: model.id,
+        baseModelId: model.baseModelId,
         label: getModelDisplayName(model.label || model.id),
       })),
     [connection.models],
@@ -632,6 +640,26 @@ export function ChatPane({
         );
     },
     [actions, reportError],
+  );
+  const [reasoningBusy, setReasoningBusy] = useState<
+    Partial<Record<'thinking' | 'effort', boolean>>
+  >({});
+  const handleSelectReasoningOption = useCallback(
+    (configId: 'thinking' | 'effort', value: string) => {
+      setReasoningBusy((current) => ({ ...current, [configId]: true }));
+      actions
+        .setConfigOption(configId, value)
+        .catch((error: unknown) =>
+          reportError(error, t('reasoning.updateFailed')),
+        )
+        .finally(() =>
+          setReasoningBusy((current) => ({
+            ...current,
+            [configId]: false,
+          })),
+        );
+    },
+    [actions, reportError, t],
   );
 
   const headerLabel =
@@ -887,6 +915,12 @@ export function ChatPane({
           availableModels={availableModels}
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
+          reasoningControlsSupported={workspace.capabilities?.features.includes(
+            'session_reasoning_control',
+          )}
+          reasoningState={connection.reasoning}
+          reasoningBusy={reasoningBusy}
+          onSelectReasoningOption={handleSelectReasoningOption}
           dialogOpen={approvalActive}
           disabled={approvalActive}
           voiceTarget={hidden ? undefined : voiceTarget}

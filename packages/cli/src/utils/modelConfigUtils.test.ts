@@ -1825,5 +1825,64 @@ describe('modelConfigUtils', () => {
         expect(callArgs.env?.['OPENAI_MODEL']).toBeUndefined();
       });
     });
+
+    describe('qwen3.8-max reasoning defaults', () => {
+      function resolveForModel(
+        model: string,
+        modelSettings: Settings['model'],
+      ) {
+        vi.mocked(resolveModelConfig).mockReturnValue({
+          config: { model, apiKey: '', baseUrl: '' },
+          sources: {},
+          warnings: [],
+        });
+
+        return resolveCliGenerationConfig({
+          argv: {},
+          settings: makeMockSettings({ model: modelSettings }),
+          selectedAuthType: AuthType.USE_OPENAI,
+        });
+      }
+
+      it.each([undefined, 'high', 'max'] as const)(
+        'normalizes %s to xhigh for the exact stable model',
+        (reasoningEffort) => {
+          expect(
+            resolveForModel('qwen3.8-max', {
+              name: 'qwen3.8-max',
+              reasoningEffort,
+            }).generationConfig.reasoning,
+          ).toEqual({ effort: 'xhigh' });
+        },
+      );
+
+      it.each(['low', 'medium'] as const)('keeps %s unchanged', (effort) => {
+        expect(
+          resolveForModel('qwen3.8-max', {
+            name: 'qwen3.8-max',
+            reasoningEffort: effort,
+          }).generationConfig.reasoning,
+        ).toEqual({ effort });
+      });
+
+      it('maps Thinking Off to reasoning false', () => {
+        expect(
+          resolveForModel('qwen3.8-max', {
+            name: 'qwen3.8-max',
+            reasoningEffort: 'medium',
+            thinkingEnabled: false,
+          }).generationConfig.reasoning,
+        ).toBe(false);
+      });
+
+      it.each(['qwen3.8-max-preview', 'qwen3.8-max-latest'])(
+        'does not apply stable defaults to %s',
+        (model) => {
+          expect(
+            resolveForModel(model, { name: model }).generationConfig.reasoning,
+          ).toBeUndefined();
+        },
+      );
+    });
   });
 });

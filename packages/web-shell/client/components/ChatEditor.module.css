@@ -1216,6 +1216,54 @@
   background: var(--accent);
 }
 
+.reasoningOptions {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4px;
+}
+
+.reasoningSectionTitle {
+  padding: 4px 9px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.reasoningThinkingRow,
+.reasoningEffortRow {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 9px;
+}
+
+.reasoningEffortRow {
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reasoningEffortRow:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.reasoningEffortRow:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.reasoningDivider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
 .dropdownItemIcon,
 .dropdownItemCheck {
   display: inline-flex;

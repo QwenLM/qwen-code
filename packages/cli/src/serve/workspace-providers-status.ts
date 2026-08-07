@@ -19,8 +19,9 @@ import type {
   ServeWorkspaceProvidersStatus,
 } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
-import { loadSettings } from '../config/settings.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
 import type { Settings } from '../config/settings.js';
+import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
 import {
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
@@ -198,6 +199,10 @@ function buildWorkspaceProvidersStatus(
       acpChannelLive,
       ...(current ? { current } : {}),
       approvalMode,
+      modelConfigScope:
+        getPersistScopeForModelSelection(loaded) === SettingScope.Workspace
+          ? 'workspace'
+          : 'user',
       providers: [...providers.values()],
       ...(resolvedCliConfig.warnings.length > 0
         ? {

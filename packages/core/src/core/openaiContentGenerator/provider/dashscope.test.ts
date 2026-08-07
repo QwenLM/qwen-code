@@ -619,38 +619,73 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['enable_thinking']).toBe(true);
     });
 
-    describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
-      '%s reasoning effort',
-      (model) => {
-        it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
-          'passes %s through as reasoning_effort',
-          (effort) => {
-            const generator = new DashScopeOpenAICompatibleProvider(
-              {
-                ...mockContentGeneratorConfig,
-                model,
-                reasoning: { effort },
-              } as ContentGeneratorConfig,
-              mockCliConfig,
-            );
-            const requestWithReasoning = {
-              ...baseRequest,
-              model,
-              reasoning: { effort },
-            } as unknown as Parameters<typeof generator.buildRequest>[0];
-
-            const result = generator.buildRequest(
-              requestWithReasoning,
-              'test-prompt-id',
-            ) as unknown as Record<string, unknown>;
-
-            expect(result['reasoning_effort']).toBe(effort);
-            expect(result['enable_thinking']).toBeUndefined();
-            expect(result['reasoning']).toBeUndefined();
-          },
+    describe('qwen3.8-max reasoning effort', () => {
+      it.each([
+        ['low', 'low'],
+        ['medium', 'medium'],
+        ['high', 'xhigh'],
+        ['xhigh', 'xhigh'],
+        ['max', 'xhigh'],
+      ] as const)('maps %s to %s', (effort, expected) => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model: 'qwen3.8-max',
+            reasoning: { effort },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
         );
+        const requestWithReasoning = {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          reasoning: { effort },
+        } as unknown as Parameters<typeof generator.buildRequest>[0];
+
+        const result = generator.buildRequest(
+          requestWithReasoning,
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe(expected);
+        expect(result['enable_thinking']).toBeUndefined();
+        expect(result['reasoning']).toBeUndefined();
+      });
+    });
+
+    it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
+      'keeps qwen3.8-max-preview effort %s unchanged',
+      (effort) => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model: 'qwen3.8-max-preview',
+            reasoning: { effort },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const result = generator.buildRequest(
+          { ...baseRequest, model: 'qwen3.8-max-preview' },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+        expect(result['reasoning_effort']).toBe(effort);
       },
     );
+
+    it('does not apply the stable mapping to a differently-cased model id', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'Qwen3.8-Max',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'Qwen3.8-Max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['reasoning_effort']).toBe('high');
+    });
 
     it('lets extra_body override qwen3.8-max reasoning_effort', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
@@ -928,7 +963,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('high');
+      expect(result['reasoning_effort']).toBe('xhigh');
       expect(result['enable_thinking']).toBeUndefined();
       expect(result['thinking_budget']).toBeUndefined();
     });
@@ -972,7 +1007,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('high');
+      expect(result['reasoning_effort']).toBe('xhigh');
       expect(result['thinking_budget']).toBeUndefined();
     });
 

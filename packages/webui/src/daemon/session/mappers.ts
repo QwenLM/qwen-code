@@ -18,6 +18,7 @@ import type {
   DaemonCommandInfo,
   DaemonConnectionState,
   DaemonModelInfo,
+  DaemonReasoningState,
   DaemonTokenUsage,
 } from './types.js';
 
@@ -129,6 +130,34 @@ export function mapSessionContextModels(
 
   if (!currentModel && models.length === 0) return undefined;
   return { models, currentModel, contextWindow };
+}
+
+export function mapReasoningConfigOptions(
+  configOptions: unknown,
+): DaemonReasoningState | undefined {
+  if (!Array.isArray(configOptions)) return undefined;
+  let thinking: string | undefined;
+  let effort: string | undefined;
+  for (const rawOption of configOptions) {
+    const option = getRecord(rawOption);
+    const id = getString(option, 'id');
+    const currentValue = getString(option, 'currentValue');
+    if (id === 'thinking') thinking = currentValue;
+    if (id === 'effort') effort = currentValue;
+  }
+  if (
+    (thinking !== 'on' && thinking !== 'off') ||
+    (effort !== 'low' && effort !== 'medium' && effort !== 'xhigh')
+  ) {
+    return undefined;
+  }
+  return { thinkingEnabled: thinking === 'on', effort };
+}
+
+export function mapSessionContextReasoning(
+  status: DaemonSessionContextStatus | undefined,
+): DaemonReasoningState | undefined {
+  return mapReasoningConfigOptions(status?.state?.configOptions);
 }
 
 export function mapSupportedCommands(
@@ -253,6 +282,10 @@ export function updateConnectionFromDaemonEvent(
         commands,
         skills,
       }));
+    }
+    if (getString(update, 'sessionUpdate') === 'config_option_update') {
+      const reasoning = mapReasoningConfigOptions(update?.['configOptions']);
+      setConnection((current) => ({ ...current, reasoning }));
     }
     return;
   }

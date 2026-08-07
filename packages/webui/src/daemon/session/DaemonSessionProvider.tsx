@@ -54,6 +54,7 @@ import {
   getTokenCountFromUsage,
   mapProviderStatus,
   mapSessionContextModels,
+  mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
@@ -111,6 +112,8 @@ export type {
   DaemonNoticeSeverity,
   DaemonPromptImage,
   DaemonPromptStatus,
+  DaemonReasoningEffort,
+  DaemonReasoningState,
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionNotice,
@@ -1738,6 +1741,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ].filter((warning): warning is string => Boolean(warning));
           const providerModelStatus = mapProviderStatus(providers);
           const contextModelStatus = mapSessionContextModels(context);
+          const reasoning = mapSessionContextReasoning(context);
           const sessionModels =
             contextModelStatus && contextModelStatus.models.length > 0
               ? contextModelStatus.models
@@ -1784,6 +1788,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               skills: supportedCommands !== undefined ? skills : current.skills,
               models: sessionModels.length > 0 ? sessionModels : current.models,
               currentModel: sessionCurrentModel ?? current.currentModel,
+              reasoning,
               currentMode: currentMode ?? current.currentMode,
               displayName:
                 getSessionDisplayName(activeSession.state) ??

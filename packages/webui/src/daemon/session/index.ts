@@ -32,6 +32,8 @@ export type {
   DaemonNoticeSeverity,
   DaemonPromptImage,
   DaemonPromptStatus,
+  DaemonReasoningEffort,
+  DaemonReasoningState,
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionNotice,

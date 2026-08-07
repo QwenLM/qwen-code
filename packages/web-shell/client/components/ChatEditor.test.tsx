@@ -260,10 +260,24 @@ function renderChatEditor(props: {
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
   currentModel?: string;
-  availableModels?: Array<{ id: string; label?: string }>;
+  availableModels?: Array<{
+    id: string;
+    baseModelId?: string;
+    label?: string;
+  }>;
   sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  reasoningControlsSupported?: boolean;
+  reasoningState?: {
+    thinkingEnabled: boolean;
+    effort: 'low' | 'medium' | 'xhigh';
+  };
+  reasoningBusy?: boolean;
+  onSelectReasoningOption?: (
+    configId: 'thinking' | 'effort',
+    value: string,
+  ) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   placeholderText?: string;
   animatePlaceholder?: boolean;
@@ -981,6 +995,69 @@ describe('ChatEditor toolbar popovers', () => {
     );
     expect(button?.textContent).toContain('Provider One');
     expect(button?.textContent).not.toContain(routeId);
+  });
+
+  it('shows qwen3.8-max thinking and three effort options in the model popover', () => {
+    const routeId = 'qwen-route:v1:qwen38max';
+    const onSelectReasoningOption = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: routeId,
+      availableModels: [
+        {
+          id: routeId,
+          baseModelId: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+        },
+      ],
+      reasoningControlsSupported: true,
+      reasoningState: { thinkingEnabled: true, effort: 'xhigh' },
+      onSelectReasoningOption,
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(trigger?.textContent).toContain('Qwen 3.8 Max · Extra High');
+    act(() => trigger?.click());
+
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover?.textContent).toContain('Thinking');
+    expect(popover?.textContent).toContain('Low');
+    expect(popover?.textContent).toContain('Medium');
+    expect(popover?.textContent).toContain('Extra High');
+
+    const medium = Array.from(
+      popover?.querySelectorAll<HTMLButtonElement>('button') ?? [],
+    ).find((button) => button.textContent?.trim() === 'Medium');
+    act(() => medium?.click());
+    expect(onSelectReasoningOption).toHaveBeenCalledWith('effort', 'medium');
+    expect(trigger?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('does not expose reasoning options for qwen3.8-max-preview', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'preview-route',
+      availableModels: [
+        {
+          id: 'preview-route',
+          baseModelId: 'qwen3.8-max-preview',
+          label: 'Qwen 3.8 Max Preview',
+        },
+      ],
+      reasoningControlsSupported: true,
+      reasoningState: { thinkingEnabled: true, effort: 'xhigh' },
+      onSelectReasoningOption: vi.fn(),
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click(),
+    );
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).not.toContain('Thinking');
   });
 
   it('exposes the complete model name on dropdown items for hover', () => {

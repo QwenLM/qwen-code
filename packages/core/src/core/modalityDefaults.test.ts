@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   defaultModalities,
   isQwenFamilyWireModel,
+  isQwen38MaxStableWireModel,
   isTieredEffortWireModel,
 } from './modalityDefaults.js';
 
@@ -333,5 +334,15 @@ describe('isTieredEffortWireModel', () => {
     expect(isTieredEffortWireModel('coder-model')).toBe(false);
     expect(isTieredEffortWireModel('glm-5.2')).toBe(false);
     expect(isTieredEffortWireModel(undefined)).toBe(false);
+  });
+});
+
+describe('isQwen38MaxStableWireModel', () => {
+  it('matches only the exact stable model id', () => {
+    expect(isQwen38MaxStableWireModel('qwen3.8-max')).toBe(true);
+    expect(isQwen38MaxStableWireModel('Qwen3.8-Max')).toBe(false);
+    expect(isQwen38MaxStableWireModel('qwen3.8-max-preview')).toBe(false);
+    expect(isQwen38MaxStableWireModel('qwen3.8-max-latest')).toBe(false);
+    expect(isQwen38MaxStableWireModel('qwen3.8-max-2026-01-15')).toBe(false);
   });
 });

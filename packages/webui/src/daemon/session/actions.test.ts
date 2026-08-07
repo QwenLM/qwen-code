@@ -546,6 +546,25 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('updates reasoning state from a config-option response', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: [
+        { id: 'thinking', currentValue: 'off' },
+        { id: 'effort', currentValue: 'medium' },
+      ],
+    });
+    const { actions, getConnection } = createActionsHarness({ session });
+
+    await actions.setConfigOption('thinking', 'off');
+
+    expect(session.setConfigOption).toHaveBeenCalledWith('thinking', 'off');
+    expect(getConnection().reasoning).toEqual({
+      thinkingEnabled: false,
+      effort: 'medium',
+    });
+  });
+
   it('reports getTasks failures by default', async () => {
     const session = createMockSession('session-a');
     const addNotice = vi.fn((notice) => notice);
@@ -867,6 +886,11 @@ function createMockSession(sessionId: string) {
     cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
+    setConfigOption: vi.fn(
+      async (): Promise<{ configOptions: unknown[] }> => ({
+        configOptions: [],
+      }),
+    ),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
   };
 }

@@ -2063,6 +2063,7 @@ export class Config {
   private visionModel?: string;
   private compactionModel?: string;
   private imageModel?: string;
+  private reasoningEffortPreference?: ReasoningEffort;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
@@ -4204,6 +4205,37 @@ export class Config {
     return reasoning.effort;
   }
 
+  /** Return the last selected effort even while thinking is disabled. */
+  getReasoningEffortPreference(): ReasoningEffort | undefined {
+    return this.getReasoningEffort() ?? this.reasoningEffortPreference;
+  }
+
+  isThinkingEnabled(): boolean {
+    return this.getContentGeneratorConfig()?.reasoning !== false;
+  }
+
+  /** Enable or disable thinking for subsequent requests. */
+  setThinkingEnabled(enabled: boolean, fallbackEffort?: ReasoningEffort): void {
+    const activeEffort = this.getReasoningEffort();
+    if (activeEffort) {
+      this.reasoningEffortPreference = activeEffort;
+    }
+    const effort =
+      fallbackEffort ?? this.reasoningEffortPreference ?? activeEffort;
+    const apply = (
+      cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+    ): void => {
+      if (!cfg) return;
+      cfg.reasoning = enabled ? (effort ? { effort } : undefined) : false;
+    };
+    apply(this.contentGeneratorConfig);
+    const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
+    if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
+      apply(runtimeCfg);
+    }
+    apply(this.modelsConfig?.getGenerationConfig());
+  }
+
   /**
    * Update the reasoning-effort tier at runtime (e.g. `/effort high`). The
    * request pipeline reads `reasoning.effort` per request, so mutating the live
@@ -4215,6 +4247,9 @@ export class Config {
    * cannot silently re-enable it.
    */
   setReasoningEffort(effort: ReasoningEffort | undefined): void {
+    if (effort) {
+      this.reasoningEffortPreference = effort;
+    }
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
     ): void => {

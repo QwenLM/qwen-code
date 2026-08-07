@@ -657,6 +657,10 @@ describe('Session', () => {
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+      getReasoningEffortPreference: vi.fn().mockReturnValue('xhigh'),
+      isThinkingEnabled: vi.fn().mockReturnValue(true),
+      setReasoningEffort: vi.fn(),
+      setThinkingEnabled: vi.fn(),
       getChatRecordingService: vi
         .fn()
         .mockReturnValue(mockChatRecordingService),
@@ -2751,7 +2755,110 @@ describe('Session', () => {
     });
   });
 
+  describe('qwen3.8-max reasoning options', () => {
+    it('restores the persisted effort while thinking starts disabled', () => {
+      currentModel = 'qwen3.8-max';
+      const restoredSettings = {
+        ...mockSettings,
+        merged: {
+          model: { reasoningEffort: 'medium', thinkingEnabled: false },
+        },
+      } as LoadedSettings;
+
+      new Session('restored-session', mockConfig, mockClient, restoredSettings);
+
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith('medium');
+      expect(mockConfig.setThinkingEnabled).toHaveBeenCalledWith(
+        false,
+        'medium',
+      );
+    });
+
+    it('persists thinking off while retaining the normalized effort', async () => {
+      currentModel = 'qwen3.8-max';
+
+      await session.setThinking('off');
+
+      expect(mockConfig.setThinkingEnabled).toHaveBeenCalledWith(
+        false,
+        'xhigh',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.thinkingEnabled',
+        false,
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        'xhigh',
+      );
+    });
+
+    it('accepts only the three stable effort tiers', async () => {
+      currentModel = 'qwen3.8-max';
+
+      await session.setEffort('medium');
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith('medium');
+
+      await expect(session.setEffort('max')).rejects.toThrow(
+        'Unknown qwen3.8-max effort',
+      );
+    });
+
+    it('rejects the preview model', async () => {
+      currentModel = 'qwen3.8-max-preview';
+      await expect(session.setThinking('off')).rejects.toThrow(
+        'only available for qwen3.8-max',
+      );
+    });
+
+    it('does not change thinking state for a non-target model', () => {
+      currentModel = 'qwen3.8-max-preview';
+      vi.mocked(mockConfig.isThinkingEnabled).mockReturnValue(false);
+      vi.mocked(mockConfig.setThinkingEnabled).mockClear();
+      vi.mocked(mockConfig.setReasoningEffort).mockClear();
+
+      new Session('preview-session', mockConfig, mockClient, mockSettings);
+
+      expect(mockConfig.setThinkingEnabled).not.toHaveBeenCalled();
+      expect(mockConfig.setReasoningEffort).not.toHaveBeenCalled();
+    });
+  });
+
   describe('setModel', () => {
+    it('applies persisted stable reasoning settings after a model switch', async () => {
+      const restoredSettings = {
+        ...mockSettings,
+        merged: {
+          model: { reasoningEffort: 'medium', thinkingEnabled: false },
+        },
+      } as LoadedSettings;
+      const restoredSession = new Session(
+        'model-switch-session',
+        mockConfig,
+        mockClient,
+        restoredSettings,
+      );
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]);
+
+      await restoredSession.setModel({
+        sessionId: 'model-switch-session',
+        modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(mockConfig.setThinkingEnabled).toHaveBeenCalledWith(
+        false,
+        'medium',
+      );
+    });
+
     it('sets model via config and returns current model', async () => {
       const requested = `qwen3-coder-plus(${AuthType.USE_OPENAI})`;
       vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([

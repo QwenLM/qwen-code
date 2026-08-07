@@ -114,6 +114,34 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('exposes and persists the WebShell Thinking setting', async () => {
+    const { app, persistSetting } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    expect(
+      read.body.settings.find(
+        (setting: { key?: string }) => setting.key === 'model.thinkingEnabled',
+      ),
+    ).toMatchObject({
+      default: true,
+      requiresRestart: false,
+      values: { effective: true },
+    });
+
+    const write = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'model.thinkingEnabled',
+      value: false,
+    });
+    expect(write.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      expect.any(String),
+      'model.thinkingEnabled',
+      false,
+    );
+  });
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     let generationOpen = true;
     const { app, broadcastSettingsChanged } = makeApp({

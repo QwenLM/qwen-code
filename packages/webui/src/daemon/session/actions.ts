@@ -26,7 +26,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus } from './httpErrors.js';
-import { mapSupportedCommands } from './mappers.js';
+import { mapReasoningConfigOptions, mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
   clearPassiveAssistantDoneTimer,
@@ -537,6 +537,30 @@ export function createDaemonSessionActions({
         throw dispatchActionError(
           addNotice,
           'Set model failed',
+          error,
+          'switch_model',
+        );
+      }
+    },
+
+    async setConfigOption(configId, value) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Update session option failed',
+        'switch_model',
+      );
+      try {
+        const result = await withActionTimeout(
+          session.setConfigOption(configId, value),
+          'Update session option timed out',
+        );
+        const reasoning = mapReasoningConfigOptions(result.configOptions);
+        setConnection((current) => ({ ...current, reasoning }));
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Update session option failed',
           error,
           'switch_model',
         );

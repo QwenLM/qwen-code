@@ -641,6 +641,11 @@
             "max"
           ]
         },
+        "thinkingEnabled": {
+          "description": "Whether qwen3.8-max uses thinking. Only applies to the exact stable model id.",
+          "type": "boolean",
+          "default": true
+        },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
           "type": "integer",

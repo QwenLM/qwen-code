@@ -108,6 +108,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(first).toMatchObject({
       initialized: true,
       acpChannelLive: false,
+      modelConfigScope: 'user',
       current: {
         authType: 'openai',
         modelId: 'model-a(openai)',

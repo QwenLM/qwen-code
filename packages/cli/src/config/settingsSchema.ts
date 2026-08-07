@@ -1464,6 +1464,16 @@ const SETTINGS_SCHEMA = {
           { value: 'max', label: 'Max' },
         ],
       },
+      thinkingEnabled: {
+        type: 'boolean',
+        label: 'Thinking',
+        category: 'Model',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Whether qwen3.8-max uses thinking. Only applies to the exact stable model id.',
+        showInDialog: false,
+      },
       maxSessionTurns: {
         type: 'integer',
         label: 'Max Session Turns',

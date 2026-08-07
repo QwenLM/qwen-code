@@ -2229,6 +2229,12 @@ export class AcpDispatcher {
                 { persist: params['persist'] === true },
                 ctx,
               );
+            } else if (configId === 'thinking' || configId === 'effort') {
+              await this.bridge.setSessionConfigOption(
+                sessionId,
+                { sessionId, configId, value: rawValue },
+                ctx,
+              );
             } else {
               if (id !== undefined) {
                 this.replySession(

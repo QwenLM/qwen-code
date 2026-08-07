@@ -190,6 +190,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
       .parseInvocationContext,
   ),
+  isQwen38MaxStableWireModel: (model: string | undefined) =>
+    model === 'qwen3.8-max',
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
@@ -6201,6 +6203,62 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       context.state.models.availableModels.map((model) => model.modelId),
     ).toEqual(['main-model(api-key)']);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('exposes stable qwen3.8-max reasoning config options', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getReasoningEffortPreference: vi.fn().mockReturnValue('medium'),
+      isThinkingEnabled: vi.fn().mockReturnValue(false),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: 'api-key',
+        },
+      ]),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const created = (await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    })) as {
+      configOptions: Array<{
+        id: string;
+        currentValue: string;
+        options: Array<{ value: string }>;
+      }>;
+    };
+
+    expect(created.configOptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'thinking', currentValue: 'off' }),
+        expect.objectContaining({ id: 'effort', currentValue: 'medium' }),
+      ]),
+    );
+    expect(
+      created.configOptions
+        .find((option) => option.id === 'effort')
+        ?.options.map((option) => option.value),
+    ).toEqual(['low', 'medium', 'xhigh']);
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -12,6 +12,7 @@ import type {
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
+  mapReasoningConfigOptions,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -45,6 +46,37 @@ function applyEvent(
   });
   return next;
 }
+
+describe('reasoning config options', () => {
+  const configOptions = [
+    { id: 'thinking', currentValue: 'off' },
+    { id: 'effort', currentValue: 'medium' },
+  ];
+
+  it('maps the ACP config option snapshot', () => {
+    expect(mapReasoningConfigOptions(configOptions)).toEqual({
+      thinkingEnabled: false,
+      effort: 'medium',
+    });
+  });
+
+  it('updates connection state from config_option_update', () => {
+    const next = applyEvent({ status: 'connected' }, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions,
+        },
+      },
+    } as DaemonEvent);
+    expect(next.reasoning).toEqual({
+      thinkingEnabled: false,
+      effort: 'medium',
+    });
+  });
+});
 
 function usageEvent(
   id: number,

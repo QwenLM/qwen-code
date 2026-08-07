@@ -143,3 +143,8 @@ export function isTieredEffortWireModel(model: string | undefined): boolean {
   }
   return model.toLowerCase().startsWith('qwen3.8-max');
 }
+
+/** True only for the stable qwen3.8-max wire model. */
+export function isQwen38MaxStableWireModel(model: string | undefined): boolean {
+  return model === 'qwen3.8-max';
+}

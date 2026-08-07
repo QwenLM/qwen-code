@@ -97,6 +97,7 @@ export interface MockDaemonController {
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
+  configOptionRequests(): DaemonRequestRecord[];
 }
 
 type ScenarioOverrides = Partial<
@@ -176,6 +177,8 @@ export function createWebShellDaemonScenario(
   const clientId = overrides.clientId ?? 'web-shell-e2e-client';
   const displayName = overrides.displayName ?? 'E2E Harness Session';
   const currentModel = overrides.currentModel ?? 'qwen-test';
+  const currentModelName =
+    currentModel === 'qwen-test' ? 'Qwen Test' : currentModel;
   const currentMode = overrides.currentMode ?? 'default';
   const state: DaemonSessionState = {
     displayName,
@@ -185,7 +188,7 @@ export function createWebShellDaemonScenario(
         {
           modelId: currentModel,
           baseModelId: currentModel,
-          name: 'Qwen Test',
+          name: currentModelName,
           contextLimit: 32_768,
         },
         {
@@ -227,6 +230,7 @@ export function createWebShellDaemonScenario(
     initialized: true,
     acpChannelLive: true,
     approvalMode: currentMode as DaemonWorkspaceProvidersStatus['approvalMode'],
+    modelConfigScope: 'user',
     current: {
       authType: 'qwen-oauth',
       modelId: currentModel,
@@ -242,7 +246,7 @@ export function createWebShellDaemonScenario(
           {
             modelId: currentModel,
             baseModelId: currentModel,
-            name: 'Qwen Test',
+            name: currentModelName,
             contextLimit: 32_768,
             isCurrent: true,
             isRuntime: true,
@@ -426,6 +430,10 @@ export async function installMockDaemon(
       requests.filter((request) =>
         /\/session\/[^/]+\/model$/.test(request.path),
       ),
+    configOptionRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/config-option$/.test(request.path),
+      ),
   };
 }
 
@@ -577,7 +585,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -717,7 +725,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
@@ -1269,6 +1277,25 @@ async function handleDaemonRoute(
       }
       applyScenarioCurrentModel(scenario, modelId);
       await json(route, { sessionId, modelId });
+      return;
+    }
+    if (action === 'config-option') {
+      const configId = readStringField(body, 'configId');
+      const value = readStringField(body, 'value');
+      if (!configId || !value) {
+        await badRequest(route, 'Invalid config option request.');
+        return;
+      }
+      const currentOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions
+        : [];
+      scenario.state.configOptions = currentOptions.map((rawOption) => {
+        if (!isRecord(rawOption) || rawOption['id'] !== configId) {
+          return rawOption;
+        }
+        return { ...rawOption, currentValue: value };
+      });
+      await json(route, { configOptions: scenario.state.configOptions });
       return;
     }
     if (action === 'approval-mode') {

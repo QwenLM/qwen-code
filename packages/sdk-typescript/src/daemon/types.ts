@@ -850,6 +850,10 @@ export interface DaemonSessionState {
   [key: string]: unknown;
 }
 
+export interface DaemonSessionConfigOptionResult {
+  configOptions: unknown[];
+}
+
 /** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
@@ -1629,6 +1633,7 @@ export interface DaemonWorkspaceProvidersStatus {
   acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
   approvalMode?: DaemonApprovalMode;
+  modelConfigScope?: 'workspace' | 'user';
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];
 }

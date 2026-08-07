@@ -74,6 +74,7 @@ export interface DaemonConnectionState {
   skills?: string[];
   models?: DaemonModelInfo[];
   currentModel?: string;
+  reasoning?: DaemonReasoningState;
   currentMode?: string;
   displayName?: string;
   /** Latest main-conversation model usage event. */
@@ -94,6 +95,13 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+}
+
+export type DaemonReasoningEffort = 'low' | 'medium' | 'xhigh';
+
+export interface DaemonReasoningState {
+  thinkingEnabled: boolean;
+  effort: DaemonReasoningEffort;
 }
 
 export interface DaemonTokenUsage {
@@ -331,6 +339,10 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  setConfigOption(
+    configId: 'thinking' | 'effort',
+    value: string,
+  ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean },

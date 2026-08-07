@@ -4532,6 +4532,7 @@ export function App({
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
         id: m.id,
+        baseModelId: m.baseModelId,
         label: getModelDisplayName(m.label || m.id),
       })),
     [connection.models],
@@ -5069,6 +5070,9 @@ export function App({
   // re-creating on every render (and without an exhaustive-deps warning).
   const reloadProviders = providersState.reload;
   const [modelActionBusy, setModelActionBusy] = useState(false);
+  const [reasoningActionBusy, setReasoningActionBusy] = useState<
+    Partial<Record<'thinking' | 'effort', boolean>>
+  >({});
   const {
     settings: workspaceSettings,
     setValue: setWorkspaceSetting,
@@ -5083,6 +5087,19 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
     )?.values.effective === true;
+  const persistedThinkingEnabled =
+    workspaceSettings.find((setting) => setting.key === 'model.thinkingEnabled')
+      ?.values.effective !== false;
+  const persistedReasoningEffort = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'model.reasoningEffort',
+    )?.values.effective;
+    return value === 'low' || value === 'medium' ? value : 'xhigh';
+  })();
+  const composerReasoningState = connection.reasoning ?? {
+    thinkingEnabled: persistedThinkingEnabled,
+    effort: persistedReasoningEffort,
+  };
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -8200,6 +8217,58 @@ export function App({
     [sessionActions, store, reportError, t, setPendingModel],
   );
 
+  const handleReasoningOptionSelect = useCallback(
+    (configId: 'thinking' | 'effort', value: string) => {
+      setReasoningActionBusy((current) => ({
+        ...current,
+        [configId]: true,
+      }));
+      const update = connectionRef.current.sessionId
+        ? sessionActions.setConfigOption(configId, value)
+        : (() => {
+            const scope = providersState.status?.modelConfigScope ?? 'user';
+            const writes: Promise<unknown>[] = [
+              setWorkspaceSetting(
+                scope,
+                configId === 'thinking'
+                  ? 'model.thinkingEnabled'
+                  : 'model.reasoningEffort',
+                configId === 'thinking' ? value === 'on' : value,
+              ),
+            ];
+            if (configId === 'thinking') {
+              writes.push(
+                setWorkspaceSetting(
+                  scope,
+                  'model.reasoningEffort',
+                  composerReasoningState.effort,
+                ),
+              );
+            }
+            return Promise.all(writes).then(() => reloadWorkspaceSettings());
+          })();
+      void update
+        .catch((error: unknown) => {
+          reportError(error, t('reasoning.updateFailed'));
+        })
+        .finally(() =>
+          setReasoningActionBusy((current) => ({
+            ...current,
+            [configId]: false,
+          })),
+        );
+    },
+    [
+      composerReasoningState.effort,
+      reloadWorkspaceSettings,
+      reportError,
+      providersState.status?.modelConfigScope,
+      sessionActions,
+      setWorkspaceSetting,
+      t,
+    ],
+  );
+
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
       setModelActionBusy(true);
@@ -10222,6 +10291,14 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          reasoningControlsSupported={workspace.capabilities?.features.includes(
+                            'session_reasoning_control',
+                          )}
+                          reasoningState={composerReasoningState}
+                          reasoningBusy={reasoningActionBusy}
+                          onSelectReasoningOption={
+                            handleReasoningOptionSelect
+                          }
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId

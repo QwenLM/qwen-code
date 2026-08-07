@@ -9,6 +9,7 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
+  isQwen38MaxStableWireModel,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
   resolveModelConfig,
@@ -435,7 +436,18 @@ export function resolveCliGenerationConfig(
     rawReasoningEffort && !reasoningEffort
       ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
-  if (reasoningEffort && generationConfig.reasoning !== false) {
+  const stableQwen38Max = isQwen38MaxStableWireModel(resolved.config.model);
+  if (stableQwen38Max && settings.model?.thinkingEnabled === false) {
+    generationConfig.reasoning = false;
+  } else if (stableQwen38Max) {
+    generationConfig.reasoning = {
+      ...(generationConfig.reasoning || {}),
+      effort:
+        reasoningEffort === 'low' || reasoningEffort === 'medium'
+          ? reasoningEffort
+          : 'xhigh',
+    };
+  } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),
       effort: reasoningEffort,

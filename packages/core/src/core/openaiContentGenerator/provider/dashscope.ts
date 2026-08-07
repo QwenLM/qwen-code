@@ -19,6 +19,7 @@ import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js'
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import {
+  isQwen38MaxStableWireModel,
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
@@ -337,6 +338,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const reasoning = this.contentGeneratorConfig.reasoning;
     if (!reasoning || reasoning.effort === undefined) {
       return {};
+    }
+    const rawWireModel = model ?? this.contentGeneratorConfig.model ?? '';
+    if (isQwen38MaxStableWireModel(rawWireModel)) {
+      const effort = reasoning.effort;
+      return {
+        reasoning_effort:
+          effort === 'low' || effort === 'medium' ? effort : 'xhigh',
+      };
     }
     const wireModel = this.resolveWireModel(model);
     if (isTieredEffortWireModel(wireModel)) {

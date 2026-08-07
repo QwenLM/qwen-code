@@ -4493,6 +4493,39 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/config-option',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/config-option',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const configId = body['configId'];
+        const value = body['value'];
+        if (
+          typeof configId !== 'string' ||
+          !configId ||
+          typeof value !== 'string' ||
+          !value
+        ) {
+          res.status(400).json({
+            error: '`configId` and `value` must be non-empty strings',
+            code: 'invalid_config_option',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const response = await runtime.bridge.setSessionConfigOption(
+          sessionId,
+          { sessionId, configId, value },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/recap',
     mutate(),
     withOwnerMutableSession(

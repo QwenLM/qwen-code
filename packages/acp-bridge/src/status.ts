@@ -518,6 +518,7 @@ export interface ServeWorkspaceProvidersStatus {
   acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
   approvalMode?: string;
+  modelConfigScope?: 'workspace' | 'user';
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
 }

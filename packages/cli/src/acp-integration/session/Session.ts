@@ -166,6 +166,8 @@ import {
   approxBase64Bytes,
   runWithRuntimeContentGenerator,
   getInvocationContext,
+  isQwen38MaxStableWireModel,
+  normalizeReasoningEffort,
   runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -219,6 +221,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionConfigOption,
   SessionUpdate,
   SetSessionModeRequest,
   SetSessionModeResponse,
@@ -1407,6 +1410,7 @@ export class Session implements SessionContext {
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
+    this.#syncReasoningSettingsForCurrentModel();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -6852,6 +6856,72 @@ export class Session implements SessionContext {
       });
   }
 
+  async setThinking(value: string): Promise<void> {
+    if (!isQwen38MaxStableWireModel(this.config.getModel())) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Thinking controls are only available for qwen3.8-max',
+      );
+    }
+    if (value !== 'on' && value !== 'off') {
+      throw RequestError.invalidParams(
+        undefined,
+        `Unknown thinking value: ${value}`,
+      );
+    }
+    const current = this.config.getReasoningEffortPreference();
+    const effort =
+      current === 'low' || current === 'medium' ? current : 'xhigh';
+    this.config.setThinkingEnabled(value === 'on', effort);
+    const scope = getPersistScopeForModelSelection(this.settings);
+    this.settings.setValue(scope, 'model.thinkingEnabled', value === 'on');
+    this.settings.setValue(scope, 'model.reasoningEffort', effort);
+  }
+
+  #syncReasoningSettingsForCurrentModel(): void {
+    const persistedEffort = normalizeReasoningEffort(
+      this.settings.merged.model?.reasoningEffort,
+    );
+    if (isQwen38MaxStableWireModel(this.config.getModel())) {
+      const effort =
+        persistedEffort === 'low' || persistedEffort === 'medium'
+          ? persistedEffort
+          : 'xhigh';
+      this.config.setReasoningEffort(effort);
+      this.config.setThinkingEnabled(
+        this.settings.merged.model?.thinkingEnabled !== false,
+        effort,
+      );
+    }
+  }
+
+  async setEffort(value: string): Promise<void> {
+    if (!isQwen38MaxStableWireModel(this.config.getModel())) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Effort controls are only available for qwen3.8-max',
+      );
+    }
+    if (value !== 'low' && value !== 'medium' && value !== 'xhigh') {
+      throw RequestError.invalidParams(
+        undefined,
+        `Unknown qwen3.8-max effort: ${value}`,
+      );
+    }
+    this.config.setReasoningEffort(value);
+    const scope = getPersistScopeForModelSelection(this.settings);
+    this.settings.setValue(scope, 'model.reasoningEffort', value);
+  }
+
+  async sendConfigOptionsUpdate(
+    configOptions: SessionConfigOption[],
+  ): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'config_option_update',
+      configOptions,
+    });
+  }
+
   /**
    * Sets the model for the current session.
    * Validates the model ID and switches the model via Config.
@@ -6906,6 +6976,7 @@ export class Session implements SessionContext {
       parsed.modelId,
       switchOptions,
     );
+    this.#syncReasoningSettingsForCurrentModel();
 
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;

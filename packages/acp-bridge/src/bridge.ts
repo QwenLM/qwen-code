@@ -14,6 +14,8 @@ import {
 import type {
   CancelNotification,
   PromptRequest,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
   SessionUpdate,
@@ -7540,6 +7542,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
       return response;
+    },
+
+    async setSessionConfigOption(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      const conn = entry.connection as unknown as {
+        setSessionConfigOption(
+          params: SetSessionConfigOptionRequest,
+        ): Promise<SetSessionConfigOptionResponse>;
+      };
+      return await Promise.race([
+        withTimeout(
+          conn.setSessionConfigOption({ ...req, sessionId }),
+          initTimeoutMs,
+          'setSessionConfigOption',
+        ),
+        getTransportClosedReject(entry),
+      ]);
     },
 
     async setSessionLanguage(sessionId, params, context) {
