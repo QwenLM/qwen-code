@@ -60,6 +60,7 @@ describe('startSpeculation', () => {
     const config = {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(guard),
@@ -124,6 +125,7 @@ describe('startSpeculation', () => {
     const config = {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(guard),
@@ -184,6 +186,7 @@ describe('startSpeculation', () => {
     const config = {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
@@ -245,6 +248,7 @@ describe('startSpeculation', () => {
     const config = {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
@@ -308,6 +312,7 @@ describe('startSpeculation', () => {
     const config = {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolOutputBatchBudget: vi.fn().mockReturnValue(10_000),
@@ -371,6 +376,7 @@ describe('startSpeculation', () => {
     const config = {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
