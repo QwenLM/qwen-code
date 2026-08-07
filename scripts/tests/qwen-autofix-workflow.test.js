@@ -1804,13 +1804,13 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain(
       'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
     );
-    // In-repo PRs are managed only when the bot authored them; forks only
-    // under the scan's takeover rules (allow-edits + bot fork or the label).
+    // In-repo PRs are managed only when the bot authored them. Forks are not
+    // managed from this event at all — it carries no repository secrets, so
+    // nothing downstream of it could authenticate ('declines fork PRs at the
+    // real-time review trigger' replays that).
     expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
-    expect(routeStep).toContain('.maintainerCanModify == true');
-    expect(routeStep).toContain('index($t) != null');
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
     );
@@ -1818,7 +1818,7 @@ describe('qwen-autofix workflow', () => {
       "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
     );
     expect(routeStep).toContain(
-      'review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits',
+      'fork review noted for #${PR_NUMBER_EVENT} — this event carries no repository secrets',
     );
   });
 
@@ -4425,11 +4425,12 @@ exit 1
     expect(routeStep).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
-    // Non-main targets are rejected; forks are admitted only under the scan's
-    // own takeover rules (allow-edits + bot fork or takeover label).
+    // Non-main targets are rejected, and so is every fork — this event holds
+    // no repository secrets, so an admitted fork PR reaches a scan that cannot
+    // authenticate. The scheduled scan owns them instead.
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
-    expect(routeStep).toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
     // Must set ROUTE_PR from the event payload.
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
@@ -4449,13 +4450,18 @@ exit 1
     );
   });
 
-  it('admits managed fork PRs to the real-time review trigger, not just in-repo bot PRs', () => {
-    // The */10 schedule is throttled to 40-70min on this repo, so a takeover PR
-    // that only the scan could pick up waited up to an hour for feedback the
-    // event already carried. Real-time pickup now applies the scan's OWN fork
-    // admission (allow-edits + the bot's own fork or an explicit takeover
-    // label); review-address still re-verifies allow-edits, a live write+
-    // author and a matching head repo before touching the branch.
+  it('declines fork PRs at the real-time review trigger, admits in-repo bot PRs', () => {
+    // Real-time pickup for fork PRs was intended to spare a takeover PR the
+    // 40-70min the throttled */10 schedule really takes — but it could never
+    // work: GitHub gives a run tied to a fork PR NO repository secrets
+    // (`Secret source: None`), so CI_DEV_BOT_PAT was empty and the admitted
+    // PR reached a review-scan that failed three unauthenticated metadata
+    // reads and exited 1 on metadata_fetch_failed. Every review of a fork PR
+    // reddened the workflow while changing nothing.
+    // Route declines here instead, mirroring the pull_request label branch,
+    // which already refuses forks for the same reason. The latency it was
+    // trying to remove comes back until a credentialed lane exists; nothing
+    // that ever functioned is lost.
     const block = routeStep.match(
       /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request_review' \]\]; then[\s\S]*?\n {14}fi/,
     )?.[0];
@@ -4533,41 +4539,80 @@ exit 1
     expect(run({ headRepo: IN_REPO, author: 'someone' })).toContain(
       'DO_REVIEW=false',
     );
-    // NEW: the bot's own fork, and a takeover-labelled human fork, are admitted
-    // in real time and route to that exact PR.
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'DO_REVIEW=true',
-    );
-    expect(
-      run({ headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] }),
-    ).toContain('DO_REVIEW=true');
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'ROUTE_PR=7259',
-    );
-    // Still rejected: no allow-edits, an unlabelled human fork, a non-main
-    // base, and an untrusted sender.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false }),
-    ).toContain('DO_REVIEW=false');
-    expect(run({ headRepo: FORK, author: 'wenshao' })).toContain(
-      'DO_REVIEW=false',
-    );
+    // Every fork shape is declined now — including the two that used to be
+    // admitted. The bot's own fork and a takeover-labelled human fork were the
+    // whole point of the removed branch, so they are the cases that prove it
+    // is gone rather than merely narrowed.
+    for (const forkCase of [
+      { headRepo: FORK, author: 'qwen-code-dev-bot' },
+      { headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] },
+      { headRepo: FORK, author: 'wenshao' },
+      { headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false },
+    ]) {
+      const out = run(forkCase);
+      expect(out).toContain('DO_REVIEW=false');
+      expect(out).toContain('ROUTE_PR=');
+      expect(out).not.toContain('ROUTE_PR=7259');
+    }
+    // Declined without asking the API anything. The removed branch spent a
+    // `gh pr view` and a collaborator-permission call to reach a verdict this
+    // event can never act on; a decline that still paid for them would be the
+    // same waste with a quieter log.
+    expect(routeStep).not.toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
+    // In-repo routing is untouched: a non-main base and an untrusted sender
+    // are still refused, so this change narrowed the fork case alone.
     expect(
       run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', base: 'release' }),
     ).toContain('DO_REVIEW=false');
     expect(
-      run({
-        headRepo: FORK,
-        author: 'wenshao',
-        labels: ['autofix/takeover'],
-        perm: 'read',
-      }),
+      run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', perm: 'read' }),
     ).toContain('DO_REVIEW=false');
-    // A metadata read failure fails CLOSED: the event is ignored rather than
-    // admitting a fork whose allow-edits/labels could not be verified.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
-    ).toContain('DO_REVIEW=false');
+  });
+
+  it('reds an unauthenticated scan instead of reporting an empty fleet', () => {
+    // Route declines the one event GitHub is known to run without secrets, but
+    // no job `if:` can read the `secrets` context, so a deleted or renamed
+    // CI_DEV_BOT_PAT — or a lane nobody has modelled — is invisible until the
+    // step itself looks. It must stop there: unauthenticated `gh pr list`
+    // answers as if the repository held no PRs, and the scan would read that
+    // as a healthy fleet of zero and stay green while the loop is dead.
+    const credGuard = reviewScanJob.match(
+      /(if \[\[ -z "\$\{GITHUB_TOKEN\}" \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(credGuard).toBeTruthy();
+    // Worthless once an API call has already been made and believed.
+    expect(reviewScanJob.indexOf(credGuard)).toBeLessThan(
+      reviewScanJob.indexOf('gh pr view'),
+    );
+
+    const runGuard = (token) =>
+      spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            credGuard.replace(/\n {10}/g, '\n'),
+            // Reached only by a guard that falls through.
+            'echo SCANNED',
+          ].join('\n'),
+        ],
+        {
+          env: { ...process.env, EVENT_NAME: 'schedule', GITHUB_TOKEN: token },
+          encoding: 'utf8',
+        },
+      );
+
+    const missing = runGuard('');
+    expect(missing.status).toBe(1);
+    expect(missing.stdout).toContain('::error::CI_DEV_BOT_PAT is empty');
+    expect(missing.stdout).not.toContain('SCANNED');
+    // Negative control: a present PAT falls straight through, so the guard
+    // cannot swallow a scan that was going to work.
+    const present = runGuard('ghp_stub');
+    expect(present.status).toBe(0);
+    expect(present.stdout).toContain('SCANNED');
   });
 
   it('refuses a takeover on a non-main base out loud instead of only in the job log', () => {
