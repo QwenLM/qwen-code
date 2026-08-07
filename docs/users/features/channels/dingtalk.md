@@ -151,13 +151,14 @@ Every target must set `isGroup` explicitly. For a direct message, `chatId` is th
 
 DingTalk bots work in both DM and group conversations. To enable group support:
 
-1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. Add the bot to a DingTalk group
 3. @mention the bot in the group to trigger a response
+4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
 
-Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Mentioned replies use plain text so the @ is visible; replies without a mention use Markdown formatting.
+Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Replies are sent as DingTalk markdown whether or not they carry a mention; the mention prefix is included in the first message chunk.
 
 ### Finding a Group's Conversation ID
 
@@ -197,7 +198,8 @@ You can send photos and documents to the bot, not just text.
 
 ### Bot doesn't respond in groups
 
-- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- Check that `groupPolicy` is set to `"allowlist"`, `"pairing"`, or `"open"` (default is `"disabled"`)
+- If using `"pairing"`, verify the group's pairing request has been approved
 - Make sure you @mention the bot in the group message
 - Verify the bot has been added to the group
 

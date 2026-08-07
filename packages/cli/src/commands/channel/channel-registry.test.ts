@@ -625,6 +625,11 @@ describe('channel registry', () => {
           required: true,
         }),
       );
+      expect(
+        fields
+          ?.find((field) => field.key === 'groupPolicy')
+          ?.options?.map((option) => option.value),
+      ).toContain('pairing');
       expect(fields).toContainEqual(
         expect.objectContaining({
           key: 'senderPolicy',

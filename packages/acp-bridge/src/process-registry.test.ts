@@ -23,6 +23,46 @@ afterEach(() => {
 });
 
 describe('ProcessRegistry', () => {
+  it('counts unattached reservations, which is what admission must key on', () => {
+    const registry = new ProcessRegistry();
+    expect(registry.committedProcessCount).toBe(0);
+
+    // Two spawns racing: both reserve before either attaches. This is the
+    // invariant an admission check rests on — `activeProcessCount` shows
+    // neither of them yet, so keying off it would let both through.
+    const first = registry.reserve();
+    const second = registry.reserve();
+    expect(registry.activeProcessCount).toBe(0);
+    expect(registry.committedProcessCount).toBe(2);
+
+    first.attach(fakeChild(1));
+    expect(registry.committedProcessCount).toBe(2);
+
+    // A cancelled reservation releases its slot; leaking it would inflate the
+    // count for every later spawn.
+    second.cancel();
+    expect(registry.committedProcessCount).toBe(1);
+    second.cancel();
+    expect(registry.committedProcessCount).toBe(1);
+  });
+
+  it('releases a committed slot on exit, not when terminate starts', async () => {
+    const registry = new ProcessRegistry();
+    const child = fakeChild(4321);
+    const tracked = registry.reserve().attach(child);
+    expect(registry.committedProcessCount).toBe(1);
+
+    // Winding down still occupies the pool: the process is alive and its
+    // memory is still resident, so a swap legitimately counts twice.
+    const terminating = tracked.terminate();
+    await Promise.resolve();
+    expect(registry.committedProcessCount).toBe(1);
+
+    child.emit('exit', 0, null);
+    await terminating;
+    expect(registry.committedProcessCount).toBe(0);
+  });
+
   it('classifies an error without a pid as no process', async () => {
     const registry = new ProcessRegistry();
     const child = fakeChild(undefined);
