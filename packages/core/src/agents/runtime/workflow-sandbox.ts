@@ -1247,15 +1247,19 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // --- Static combinators: observe the aggregate promise ---
       // Promise.all/race/any build their aggregate via the native static;
       // it never passes through the observed then, so a fire-and-forget
-      // aggregate holding a failed dispatch would escape the mirror and
-      // surface as a process-level unhandledRejection (the interactive
-      // CLI's CRITICAL banner, or Node's default
-      // --unhandled-rejections=throw termination in headless hosts).
-      // Wrap the statics so each aggregate inherits the observer:
-      // consumption tracking then works through the aggregate's own
-      // observed then (await / .catch / .then marks it handled), and the
-      // elements still funnel through the then override via the native
-      // static's internal attach, so they stay marked consumed.
+      // aggregate holding a failed dispatch would escape the run-log
+      // mirror. While the run is live the host's adoption-escape hook
+      // (R11-3) still catches and mirrors the process-level
+      // unhandledRejection — a round-14 A/B confirmed that hook, not
+      // this wrap, is the live-run backstop — but only with the coarse
+      // '(rejection not handled)' wording, and once the run's hook is
+      // detached nothing in the sandbox catches the escape. R14-A:
+      // wrapping the statics gives each aggregate its own observer, so
+      // consumption tracking works through the aggregate's own observed
+      // then (await / .catch / .then marks it handled) and the mirror
+      // itself classifies the rejection; the elements still funnel
+      // through the then override via the native static's internal
+      // attach, so they stay marked consumed.
       function observeAggregate(nativeAggregate) {
         const rootId = __b.wfRegisterRoot();
         const observed = new ObservedPromise(function (resolve, reject) {
