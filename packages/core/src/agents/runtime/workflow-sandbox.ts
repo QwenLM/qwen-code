@@ -363,6 +363,7 @@ function isRegexContext(source: string, i: number): boolean {
 
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { timeoutAbortReason } from '../../utils/errors.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
 // instance with the same 'WORKFLOW' namespace). Re-exported so orchestrator
@@ -1151,8 +1152,15 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
           // in-flight subagents see the cancellation and stop. Order
           // matters: rejecting first then aborting would race the
-          // caller's finally block.
-          opts.abortOnTimeout?.abort();
+          // caller's finally block. TimeoutError-shaped reason: this signal
+          // reaches dispatched subagents' model requests, and a bare abort
+          // reads downstream as a user cancel, suppressing the api_error for
+          // a wall-clock kill. User cancels (handle.abort()) stay bare.
+          opts.abortOnTimeout?.abort(
+            timeoutAbortReason(
+              `Workflow execution timed out after ${maxWallClockMs} ms wall clock`,
+            ),
+          );
           reject(
             new Error(
               `Workflow execution timed out after ${maxWallClockMs} ms wall clock. ` +

@@ -355,6 +355,17 @@ describe('isUserCancel', () => {
     expect(isUserCancel(abortShaped(), controller.signal)).toBe(false);
   });
 
+  it('returns false for a non-abort error when a timeout budget fired', async () => {
+    // The remaining truth-table cell: a genuine failure (429, connection
+    // reset) landing at the same tick an internal budget expires. The
+    // timeout branch must return false regardless of error shape — pinning
+    // it with a non-abort error stops a refactor from tucking the branch
+    // behind an isAbortError prefix, which every other test would survive.
+    const signal = await settled(AbortSignal.timeout(1));
+
+    expect(isUserCancel(new Error('rate limited'), signal)).toBe(false);
+  });
+
   it('returns true when the user cancels a signal composed with a timeout', async () => {
     // Same composition, opposite source: the user cancels well before the
     // budget expires, so the reason is the user's AbortError and the cancel is

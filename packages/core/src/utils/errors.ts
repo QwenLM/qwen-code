@@ -91,6 +91,18 @@ export function isUserCancel(error: unknown, signal?: AbortSignal): boolean {
 }
 
 /**
+ * The abort reason an internal deadline must signal so `isUserCancel` can tell
+ * it apart from a user cancel. This is the producer half of that contract:
+ * every budget built from an `AbortController` plus a timer aborts with this
+ * (`AbortSignal.timeout()` produces the same shape natively). A bare `abort()`
+ * or an `Error`-reason abort reads downstream as a user cancel, and the
+ * timed-out request's api_error is silently suppressed.
+ */
+export function timeoutAbortReason(message: string): DOMException {
+  return new DOMException(message, 'TimeoutError');
+}
+
+/**
  * Best-effort one-line description of an error's `cause`, used to surface the
  * underlying syscall behind opaque wrappers like undici's `TypeError: fetch
  * failed` (whose own message carries nothing). Returns `undefined` when there

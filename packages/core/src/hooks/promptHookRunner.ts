@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import { createChildAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { timeoutAbortReason } from '../utils/errors.js';
 import type {
   PromptHookConfig,
   LLMHookResponse,
@@ -237,10 +238,7 @@ export class PromptHookRunner {
         // TimeoutError-shaped so this budget is not mistaken for a user
         // cancel downstream, which would suppress its api_error telemetry.
         internalAbortController.abort(
-          new DOMException(
-            `Prompt hook timed out after ${timeoutMs}ms`,
-            'TimeoutError',
-          ),
+          timeoutAbortReason(`Prompt hook timed out after ${timeoutMs}ms`),
         );
         reject(new Error(`Prompt hook timed out after ${timeoutMs}ms`));
       }, timeoutMs);
