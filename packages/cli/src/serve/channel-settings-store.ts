@@ -142,7 +142,7 @@ function assertSharedField(key: string, value: unknown): boolean {
   const enumValues: Record<string, ReadonlySet<string>> = {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
-    groupPolicy: new Set(['disabled', 'allowlist', 'open']),
+    groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     sessionScope: new Set(['user', 'thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
     blockStreaming: new Set(['on', 'off']),
@@ -386,6 +386,10 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    const crossFieldError = plugin.management.validateConfig?.(nextConfig);
+    if (crossFieldError !== undefined) {
+      throw invalidConfig(crossFieldError);
+    }
 
     const channels = { ...current.channels, [name]: nextConfig };
     const workspaceFile = loadSettings(this.workspaceCwd, {
