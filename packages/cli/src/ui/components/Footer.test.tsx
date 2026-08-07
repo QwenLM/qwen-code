@@ -5,6 +5,8 @@
  */
 
 import { render } from 'ink-testing-library';
+import { render as inkRender } from 'ink';
+import { EventEmitter } from 'node:events';
 import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
@@ -123,6 +125,66 @@ const renderWithWidth = (
   );
 };
 
+const stripAnsi = (s: string): string =>
+  // eslint-disable-next-line no-control-regex
+  s.replace(/\u001b\[[0-9;]*m/g, '');
+
+// ink-testing-library hardcodes a 100-column layout buffer regardless of the
+// mocked useTerminalSize, so width-sensitive layout regressions cannot be
+// reproduced through it. Render through ink directly with a custom stdout so
+// the footer lays out at the requested width (DiffDialog.test.tsx pattern).
+const renderAtLayoutWidth = (columns: number, uiState: UIState) => {
+  useTerminalSizeMock.mockReturnValue({ columns, rows: 24 });
+  let lastFrame = '';
+  const stdout = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 24,
+    write: (frame: string) => {
+      lastFrame = frame;
+    },
+  });
+  const stderr = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 24,
+    write: () => {},
+  });
+  const stdin = Object.assign(new EventEmitter(), {
+    isTTY: true,
+    setRawMode: () => {},
+    setEncoding: () => {},
+    resume: () => {},
+    pause: () => {},
+    ref: () => {},
+    unref: () => {},
+    read: () => null,
+  });
+  const mockSettings = createMockSettings();
+  const instance = inkRender(
+    <SettingsContext.Provider value={mockSettings}>
+      <ConfigContext.Provider value={createMockConfig() as never}>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <VimModeProvider settings={mockSettings}>
+            <UIStateContext.Provider value={uiState}>
+              <Footer />
+            </UIStateContext.Provider>
+          </VimModeProvider>
+        </KeypressProvider>
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
+    {
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      // debug:true writes the full frame synchronously at the true width
+      // instead of throttled cursor-diff output.
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+  return { lastFrame: () => lastFrame, unmount: instance.unmount };
+};
+
 describe('<Footer />', () => {
   beforeEach(() => {
     useStatusLineMock.mockReturnValue({
@@ -203,6 +265,48 @@ describe('<Footer />', () => {
     );
 
     expect(lastFrame()).not.toContain('queued');
+  });
+
+  it.each([ApprovalMode.AUTO, ApprovalMode.DEFAULT])(
+    'keeps the hint row on one line at 80 columns with %s and a queued message',
+    (mode) => {
+      // Regression (R2-1/R2-2 of the #8667 review): with Responding + the
+      // approval-mode indicator + a non-empty queue, the badge had no `wrap`
+      // prop, so the shrinkable hint row wrapped and the badge's tail dangled
+      // on a second footer line, varying the footer height mid-turn.
+      const { lastFrame, unmount } = renderAtLayoutWidth(
+        80,
+        createMockUIState({
+          streamingState: StreamingState.Responding,
+          showAutoAcceptIndicator: mode,
+          messageQueue: ['queued message'],
+        }),
+      );
+      try {
+        const lines = stripAnsi(lastFrame()).replace(/\s+$/u, '').split('\n');
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain('Enter to steer · Ctrl+Q to queue');
+      } finally {
+        unmount();
+      }
+    },
+  );
+
+  it('uses a distinct badge glyph from the DEFAULT approval indicator', () => {
+    // Regression (R2-3 of the #8667 review): the badge reused `⏸`, the
+    // DEFAULT approval-mode icon, so the same row rendered two `⏸` glyphs
+    // with different meanings.
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+        messageQueue: ['waiting'],
+      }),
+    );
+    const frame = stripAnsi(lastFrame()!);
+    expect(frame).toContain('⏸ Ask permissions');
+    expect(frame).toContain('⏳ 1 queued');
+    expect(frame.match(/⏸/gu)).toHaveLength(1);
   });
 
   it('shows mode indicator alongside steering hint during streaming', () => {

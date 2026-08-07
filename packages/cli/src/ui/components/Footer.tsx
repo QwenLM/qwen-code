@@ -274,8 +274,8 @@ export const Footer: React.FC = () => {
           <BackgroundTasksPill />
           <MCPHealthPill />
           {uiState.messageQueue.length > 0 && (
-            <Text color={theme.text.secondary}>
-              {` ⏸ ${t('{{count}} queued', {
+            <Text color={theme.text.secondary} wrap="truncate">
+              {` ⏳ ${t('{{count}} queued', {
                 count: String(uiState.messageQueue.length),
               })}`}
             </Text>
