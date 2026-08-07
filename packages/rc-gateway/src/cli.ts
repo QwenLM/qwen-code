@@ -306,7 +306,15 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const store = await TokenStore.open(
     join(homedir(), '.qwen', 'rc', 'tokens.json'),
   );
-  const pairing = new PairingService();
+  // Owner-bootstrap pairing code TTL. This PairingService mints ONLY the
+  // single owner bootstrap code (below); no guest/device codes flow through
+  // it. The generic 5-min default is far too short for a human first-run
+  // (scan QR → install PWA → type a case-sensitive code on a phone), and
+  // bootstrap.ts already documents an intended distinct bootstrap TTL that was
+  // never wired. Give it a bounded 30-minute window; the code remains
+  // single-use (redeem consumes it) and stays in the 0600 file.
+  const OWNER_BOOTSTRAP_TTL_MS = 30 * 60 * 1000;
+  const pairing = new PairingService(Date.now, OWNER_BOOTSTRAP_TTL_MS);
   const vapid = await VapidStore.open(
     join(homedir(), '.qwen', 'rc', 'vapid.json'),
   );
