@@ -514,9 +514,11 @@ function safeStringifyDisplayPayload(payload: unknown): string {
  * capability half (globals, limits, per-call options) is only half the job:
  * without the policy half, the same runtime reliably produces the naive
  * shape — everything through one `parallel()` barrier, first answer taken at
- * face value. The prose below is therefore load-bearing, not documentation;
+ * face value. The prose below is therefore load-bearing, not documentation.
  * `script`'s own description carries the exact authoring contract (error
- * strings, serialization rules, env overrides) and is not duplicated here.
+ * strings, serialization rules); the limits and env knobs restated below
+ * are a summary of it, not a separate source of truth — when one of them
+ * changes, change both.
  */
 const WORKFLOW_TOOL_DESCRIPTION = `Execute a workflow script that orchestrates subagents deterministically.
 
@@ -526,7 +528,7 @@ Reach for one to be comprehensive (decompose the work and cover every part in pa
 
 **Runtime** — see the \`script\` parameter for the detailed authoring contract.
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Default \`max(1, min(16, cpus-2))\` agents in flight per run, up to 1000 agents total (\`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY\` / \`QWEN_CODE_MAX_WORKFLOW_AGENTS\`). Per-call \`agent({ schema, agentType, model, isolation: 'worktree' })\` covers structured-output contracts, declarative-agent selection, model override, and git-worktree-isolated subagents. \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Default \`max(1, min(16, cpus-2))\` agents in flight per run, up to 1000 agents total (\`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY\` / \`QWEN_CODE_MAX_WORKFLOW_AGENTS\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call rejects and the run ends on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree' })\` covers structured-output contracts, declarative-agent selection, model override, and git-worktree-isolated subagents. \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
 
 **Scout first, then orchestrate**
 

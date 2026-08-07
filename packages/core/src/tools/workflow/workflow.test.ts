@@ -55,20 +55,34 @@ describe('WorkflowTool', () => {
   // would notice — so anchor the load-bearing claims.
   it('description carries both the runtime facts and the orchestration policy', () => {
     const { description } = new WorkflowTool(fakeConfig());
+    // Every env knob the description names is anchored by its exact
+    // spelling: the runtime reads the constant, so a typo here would go
+    // green while the model told users to set a variable nothing reads.
     for (const anchor of [
       'min(16, cpus-2)',
       'QWEN_CODE_MAX_WORKFLOW_AGENTS',
+      'QWEN_CODE_MAX_WORKFLOW_CONCURRENCY',
+      'QWEN_CODE_MAX_WORKFLOW_SECONDS',
       'resumeFromRunId',
       '/workflows',
       'node:vm sandbox',
     ]) {
       expect(description).toContain(anchor);
     }
+    // One anchor per policy section — dropping any whole section has to
+    // turn this test red, which is the regression it exists to catch.
+    expect(description).toMatch(/Parallelism on its own is not a reason/);
+    expect(description).toMatch(/only before the orchestration step/);
+    expect(description).toMatch(/Common single-phase shapes/);
     expect(description).toMatch(/Default to `pipeline\(\)`/);
     expect(description).toMatch(/A barrier is right only when/);
     expect(description).toMatch(/refute/);
     expect(description).toMatch(/against everything already seen/);
     expect(description).toMatch(/log\(\)` what was dropped/);
+    // Limits the model has to plan around rather than discover from a
+    // mid-run failure.
+    expect(description).toMatch(/nests one level only/);
+    expect(description).toMatch(/read `budget\.total`/);
   });
 
   it('rejects build() when script is missing', () => {
