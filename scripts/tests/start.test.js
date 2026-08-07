@@ -117,6 +117,7 @@ describe('scripts/start.js launcher', () => {
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined);
     try {
+      expect(rmSyncMock).not.toHaveBeenCalled();
       close(0, null);
       expect(rmSyncMock).toHaveBeenCalledWith(warningsPath, { force: true });
     } finally {

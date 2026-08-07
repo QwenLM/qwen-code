@@ -62,8 +62,11 @@ describe('scripts/check-build-status.js', () => {
         { cwd, env },
         (err, stdout, stderr) => {
           // The checker may exit non-zero without a spawn failure; the contract
-          // under test is the stream, not the verdict. A genuine spawn failure
-          // carries a string code, while process exit codes are numbers.
+          // under test is the stream, not the verdict. A SPAWN failure must
+          // reject: execFile still hands back an empty-string stdout there, so
+          // resolving would let the empty-stdout assertion pass green on a run
+          // that never happened. Spawn-level errors (a missing node binary)
+          // carry a string code; process exit codes are numbers.
           if (err && typeof err.code === 'string') reject(err);
           else resolve({ stdout, stderr });
         },
