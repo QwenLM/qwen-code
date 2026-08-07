@@ -1,0 +1,17 @@
+{
+  "$comment": "Label-driven issue assignment map. Owners come from .github/CODEOWNERS; areas are keyed on the existing issue label taxonomy. Assignment is a pure function of an issue's labels — no model output is involved. Every candidate is re-checked for push access at write time, so adding a login here cannot grant access to someone who lacks it.",
+  "requireLabels": ["need-discussion"],
+  "skipLabels": [
+    "welcome-pr",
+    "feature/need-help",
+    "good first issue",
+    "help wanted"
+  ],
+  "areas": [
+    {
+      "name": "core",
+      "labels": ["category/core", "scope/core"],
+      "owners": ["wenshao", "tanzhenxin", "yiliang114", "LaZzyMan", "doudouOUC"]
+    }
+  ]
+}
