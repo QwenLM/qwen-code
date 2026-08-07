@@ -2992,6 +2992,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.body // "") | test($bf) | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test($cf) | not) ] | length' \
               "${WORKDIR}/ic.json")"
 
@@ -3775,6 +3776,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3860,6 +3862,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3947,6 +3950,7 @@ jobs:
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
                  + [ ($ic | add)[]
                    | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                   | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                    | select((.body // "") | test("^\\s*@qwen-code /") | not)
                    | select(((.body // "") | contains("**[Critical]**")) | not)
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
@@ -4012,6 +4016,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
                 | select(((.body // "") | contains("**[Critical]**")) | not)
                 | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
@@ -4091,6 +4096,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))

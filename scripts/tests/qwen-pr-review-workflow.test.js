@@ -1233,6 +1233,760 @@ describe('capture-tools step wiring', () => {
   });
 });
 
+describe('docs-only medium gate', () => {
+  // The downgrade logic is inline bash in two steps; these tests extract and
+  // EXECUTE the load-bearing fragments (prompt branch, timeout floor, the
+  // completion-line allowlist) rather than asserting on their text, because
+  // the surviving mutations are behavioral: swapping the if/elif order makes
+  // parse-args force high effort back on AND post inline comments while the
+  // relay still claims medium posted nothing; flipping the floor comparison
+  // caps every size-tiered docs run at 90 minutes.
+  const run = (() => {
+    const doc = parse(workflow);
+    return doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').run;
+  })();
+
+  function promptBranchSource() {
+    const start = run.indexOf('PROMPT="/review ${REVIEW_URL}"');
+    expect(start).toBeGreaterThan(-1);
+    const end = run.indexOf('\nfi', start) + '\nfi'.length;
+    return run.slice(start, end);
+  }
+
+  function buildPrompt({ docsOnlyMedium, reviewMode }) {
+    const script = [
+      'set -euo pipefail',
+      'REVIEW_URL="https://x/pull/1"',
+      `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
+      `REVIEW_MODE=${reviewMode}`,
+      promptBranchSource(),
+      'printf "%s" "$PROMPT"',
+    ].join('\n');
+    return execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+  }
+
+  it('emits --effort medium INSTEAD OF --comment on the docs-only path', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'true',
+      reviewMode: 'comment',
+    });
+    expect(prompt).toContain('--effort medium');
+    expect(prompt).not.toContain('--comment');
+  });
+
+  it('keeps --comment on the non-docs comment path', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'false',
+      reviewMode: 'comment',
+    });
+    expect(prompt).toContain('--comment');
+    expect(prompt).not.toContain('--effort');
+  });
+
+  function floorSource() {
+    const anchor = run.indexOf('# Medium measures at one-third to one-half');
+    expect(anchor).toBeGreaterThan(-1);
+    const start = run.indexOf('EFFECTIVE_TIMEOUT_MINUTES=$((', anchor);
+    // The YAML parser strips the block scalar's base indentation, so the
+    // floor's closing `fi` sits at four spaces in the parsed text.
+    const end = run.indexOf('\n    fi', start) + '\n    fi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  it.each([
+    [360, 180],
+    [180, 90],
+    [100, 90],
+  ])(
+    'halves the size-aware budget with a 90-minute floor (%i → %i)',
+    (input, want) => {
+      const script = [
+        'set -euo pipefail',
+        `EFFECTIVE_TIMEOUT_MINUTES=${input}`,
+        floorSource(),
+        'printf "%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
+      ].join('\n');
+      expect(execFileSync('bash', ['-c', script], { encoding: 'utf8' })).toBe(
+        String(want),
+      );
+    },
+  );
+
+  function completionBlockSource() {
+    const anchor = run.indexOf('machine-readable completion contract');
+    expect(anchor).toBeGreaterThan(-1);
+    const start = run.lastIndexOf(
+      'if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then',
+      anchor,
+    );
+    // Base indentation is stripped by the YAML parser: the block's outer `fi`
+    // sits at column 0, its inner allowlist `fi` at two spaces — so `\nfi`
+    // uniquely anchors the outer close.
+    const end = run.indexOf('\nfi', anchor) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function relayLine(resultText) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-completion-'));
+    try {
+      const gho = join(dir, 'gho');
+      writeFileSync(gho, '');
+      const script = [
+        'set -euo pipefail',
+        'DOCS_ONLY_MEDIUM=true',
+        'PR_NUMBER=123',
+        `GITHUB_OUTPUT="${gho}"`,
+        `RESULT_TEXT=$(cat "${join(dir, 'result')}")`,
+        completionBlockSource(),
+      ].join('\n');
+      writeFileSync(join(dir, 'result'), resultText);
+      execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+      return readFileSync(gho, 'utf8').trim();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('relays only the not-posted disposition shape', () => {
+    expect(
+      relayLine(
+        'prose...\nReview complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)',
+      ),
+    ).toBe(
+      'completion_line=Review complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)',
+    );
+  });
+
+  it.each([
+    // The measured phantom: a posted-form disposition on a path that never posts.
+    'Review complete: pr-123 — APPROVE posted',
+    'Review complete: pr-123 — COMMENT posted (0 Critical, 1 Suggestion inline)',
+    // Reworded/missing completion lines.
+    'The review finished fine, trust me.',
+    '',
+  ])('falls back to the neutral non-scrapable form for %j', (text) => {
+    const line = relayLine(text);
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+    // The fallback must never mint the reserved machine prefix.
+    expect(line).not.toContain('completion_line=Review complete:');
+  });
+
+  it('accepts the Request-changes disposition a Critical-finding medium run emits', () => {
+    // compose-review caps only Approve at medium: a verified Critical still
+    // yields Request changes, and that is exactly the outcome the relay must
+    // not swallow into the neutral fallback.
+    const line =
+      'Review complete: pr-123 — Request changes, not posted (1 Critical, 0 Suggestion)';
+    expect(relayLine(`prose...\n${line}`)).toBe(`completion_line=${line}`);
+  });
+
+  it('relays the LAST completion line, not a stale or injected earlier one', () => {
+    const stale =
+      'Review complete: pr-123 — Comment, not posted (9 Critical, 9 Suggestion)';
+    const valid =
+      'Review complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)';
+    expect(relayLine(`${stale}\nmore prose\n${valid}`)).toBe(
+      `completion_line=${valid}`,
+    );
+  });
+
+  it('rejects the Approve verdict medium can never produce', () => {
+    // Widening the alternation to include Approve must turn this red: an
+    // injection-steered approval must not be republished under the bot's name.
+    const line = relayLine(
+      'Review complete: pr-123 — Approve, not posted (0 Critical, 0 Suggestion)',
+    );
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+  });
+
+  it("rejects another PR's completion line (target binding)", () => {
+    const line = relayLine(
+      'Review complete: pr-999 — Comment, not posted (0 Critical, 2 Suggestion)',
+    );
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+  });
+
+  it('classifies review_requested as an explicit ask, never automatic', () => {
+    const doc = parse(workflow);
+    const context = doc.jobs['review-pr'].steps.find((s) => s.id === 'context');
+    // One assignment site, guarded on both the event and the action.
+    expect(context.run.match(/AUTO_REVIEW=true/g)).toHaveLength(1);
+    // The false DEFAULT is load-bearing too: without it, dispatch,
+    // issue-comment and review-comment triggers inherit whatever the
+    // environment carries and can enter the automatic downgrade path.
+    expect(context.run.match(/AUTO_REVIEW=false/g)).toHaveLength(1);
+    expect(context.run.indexOf('AUTO_REVIEW=false')).toBeLessThan(
+      context.run.indexOf('AUTO_REVIEW=true'),
+    );
+    // Both halves of the guard: the event must be pull_request_target AND the
+    // action must not be review_requested. Pinning only the action half let a
+    // deleted event condition survive — the branch is shared with
+    // pull_request_review(_comment), whose actions are never review_requested,
+    // so a review-body `@qwen-code /review` would have downgraded silently.
+    expect(context.run).toMatch(
+      /= "pull_request_target" \] &&\s*\n\s*\[ "\$\{\{ github\.event\.action \}\}" != "review_requested" \]; then\s*\n\s*AUTO_REVIEW=true/,
+    );
+  });
+
+  it('pins the relay marker producer↔filter contract, author-scoped', () => {
+    // Producer side: the marker literal as the relay step actually posts it.
+    const doc = parse(workflow);
+    const relay = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    const m = relay.run.match(/<!-- qwen-review docs-only-medium -->/);
+    expect(m).not.toBeNull();
+    // Filter side: every autofix exclusion of that marker must carry the
+    // author scope ($rb) — a human quoting the marker stays actionable —
+    // and all six inline copies in qwen-autofix.yml must be present.
+    const autofix = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+    const scoped =
+      autofix.match(
+        /\(\.user\.login \/\/ ""\) == \$rb\)\) and \(\(\.body \/\/ ""\) \| test\("<!-- qwen-review docs-only-medium "\)\)\) \| not\)/g,
+      ) ?? [];
+    expect(scoped.length).toBeGreaterThanOrEqual(6);
+    // No body-only exclusion of the marker may survive anywhere: every
+    // marker test must carry the author scope, and a filter missing
+    // `| not` inverts to keep ONLY the badge — it then drops out of the
+    // scoped count above, so either mutant fails this pin.
+    const markerTests =
+      autofix.match(/test\("<!-- qwen-review docs-only-medium "\)/g) ?? [];
+    expect(markerTests.length).toBe(scoped.length);
+  });
+
+  it('routes classification through the shared classify-pr-profile wrapper', () => {
+    // Both this gate and ci.yml must consume the classifier via the shared
+    // script so its input contract lives in one place.
+    expect(run).toContain('.github/scripts/ci/classify-pr-profile.sh');
+    const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+    expect(ci).toContain('.github/scripts/ci/classify-pr-profile.sh');
+    expect(ci).not.toContain(
+      "--jq '.[] | {filename, status, previous_filename}'",
+    );
+  });
+});
+
+describe('docs-only gate and relay, executed', () => {
+  // R2-4 / R3-4: the classification gate and the relay step are the feature's
+  // two integration boundaries; both are executed here with stubbed
+  // executables rather than asserted as text, because the probed mutants
+  // (flipped PATCH/POST branch, swapped exit-code handling, inverted
+  // docs_only comparison) all stayed green under text-only assertions.
+  const doc = parse(workflow);
+  const runStep = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  ).run;
+  const relayRun = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Report docs-only medium outcome',
+  ).run;
+
+  function gateSource() {
+    const start = runStep.indexOf('DOCS_ONLY_MEDIUM=""');
+    const endAnchor =
+      'echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"';
+    const end = runStep.indexOf(endAnchor) + endAnchor.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return runStep.slice(start, end);
+  }
+
+  function runGate({ autoReview, wrapper }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-gate-'));
+    try {
+      const stub = join(dir, '.github/scripts/ci');
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(join(stub, 'classify-pr-profile.sh'), wrapper);
+      chmodSync(join(stub, 'classify-pr-profile.sh'), 0o755);
+      const gho = join(dir, 'gho');
+      writeFileSync(gho, '');
+      const script = [
+        'set -euo pipefail',
+        `AUTO_REVIEW=${autoReview}`,
+        'REPO=o/r',
+        'PR_NUMBER=42',
+        'EFFECTIVE_TIMEOUT_MINUTES=360',
+        `GITHUB_OUTPUT="${gho}"`,
+        gateSource(),
+        'printf "timeout=%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: dir,
+      });
+      return { stdout, output: readFileSync(gho, 'utf8').trim() };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('downgrades and halves the budget when the classifier says docs_only', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('keeps the full review for a full classification', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('falls back to the full review when the wrapper fails', () => {
+    const r = runGate({ autoReview: 'true', wrapper: '#!/bin/bash\nexit 2\n' });
+    // Empty, not 'false': a failed classification is 'never determined', and
+    // the supersede step must not read it as a positive determination.
+    expect(r.output).toBe('docs_only_medium=');
+    expect(r.stdout).toContain('could not classify');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('keeps the full review for github_ci_only (CI helpers are executable)', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho github_ci_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('never classifies on an explicit (non-automatic) run', () => {
+    const r = runGate({
+      autoReview: 'false',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  function runRelay({ scenario }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-relay-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const write = (name, body) => {
+        writeFileSync(join(bin, name), body);
+        chmodSync(join(bin, name), 0o755);
+      };
+      write('sleep', '#!/bin/bash\nexit 0\n');
+      write(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "$*" >> "$CALLS"',
+          // The head-binding guard runs BEFORE the upsert attempts: pr view
+          // succeeds even in all-fail so that scenario still exercises the
+          // retry loop, while moved-head/closed-pr exercise the guard.
+          'case "$*" in',
+          '  "pr view"*)',
+          '    if [ "$SCENARIO" = "moved-head" ]; then printf "OPEN\\tdeadbeef\\n";',
+          '    elif [ "$SCENARIO" = "closed-pr" ]; then printf "MERGED\\tabc123\\n";',
+          '    else printf "OPEN\\tabc123\\n"; fi',
+          '    exit 0 ;;',
+          'esac',
+          'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
+          'case "$*" in',
+          '  "api user"*) echo \'{"login":"relay-bot"}\' | jq -r .login; exit 0 ;;',
+          '  *"--method GET"*)',
+          '    if [ "$SCENARIO" = "existing" ]; then',
+          '      echo \'[{"id":777,"user":{"login":"relay-bot"},"body":"<!-- qwen-review docs-only-medium --> old"}]\'',
+          '    else echo "[]"; fi ;;',
+          '  *) : ;;',
+          'esac',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      const script = [
+        'set -euo pipefail',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        `RUNNER_TEMP="${dir}"`,
+        'EXPECTED_HEAD_SHA=abc123',
+        'COMPLETION_LINE="Review complete: pr-42 — Comment, not posted (0 Critical, 1 Suggestion)"',
+        'RUN_URL=https://x',
+        relayRun,
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          SCENARIO: scenario,
+          CALLS: calls,
+        },
+      });
+      return { stdout, calls: readFileSync(calls, 'utf8') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('POSTs a fresh relay comment when none exists', () => {
+    const r = runRelay({ scenario: 'fresh' });
+    expect(r.stdout).toContain('relayed to PR #42');
+    expect(r.calls).toContain('api repos/o/r/issues/42/comments -f');
+    expect(r.calls).not.toContain('--method PATCH');
+    // The POSTed body must carry the marker — it is the dedup key both the
+    // upsert lookup and the supersede step match on; a body without it makes
+    // every push stack a new badge and supersede match nothing.
+    expect(r.calls).toContain('<!-- qwen-review docs-only-medium -->');
+    // The badge is bound to the reviewed head: a later push must never be
+    // described by an earlier revision's outcome.
+    expect(r.calls).toContain('Reviewed head: `abc123`');
+  });
+
+  it('PATCHes the existing bot-authored relay comment', () => {
+    const r = runRelay({ scenario: 'existing' });
+    expect(r.stdout).toContain('relayed to PR #42');
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/777',
+    );
+  });
+
+  it('warns and exits 0 when every attempt fails', () => {
+    const r = runRelay({ scenario: 'all-fail' });
+    expect(r.stdout).toContain('::warning::');
+    expect(r.stdout).toContain('the review itself succeeded');
+  });
+
+  it('skips the relay when the head moved before the write', () => {
+    const r = runRelay({ scenario: 'moved-head' });
+    expect(r.stdout).toContain('moved from abc123 to deadbeef');
+    expect(r.calls).not.toContain('api repos/o/r/issues/42/comments');
+  });
+
+  it('skips the relay when the PR closed before the write', () => {
+    const r = runRelay({ scenario: 'closed-pr' });
+    expect(r.stdout).toContain('is MERGED');
+    expect(r.calls).not.toContain('api repos/o/r/issues/42/comments');
+  });
+
+  function normalizedIf(step) {
+    return step.if.replace(/\s+/g, ' ').trim();
+  }
+
+  it('pins the relay if: as the exact reviewed conjunction', () => {
+    // Full-string pin, not substrings: deleting or weakening any conjunct —
+    // or re-grouping them — edits this string, so every truth-table mutant
+    // reduces to a red test here without an Actions-expression evaluator.
+    const doc2 = parse(workflow);
+    const relay = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    expect(normalizedIf(relay)).toBe(
+      "steps.context.outputs.should_run == 'true' && " +
+        "steps.review.outcome == 'success' && " +
+        "steps.review.outputs.review_completed == 'true' && " +
+        "steps.review.outputs.docs_only_medium == 'true' && " +
+        "steps.context.outputs.pr_number != ''",
+    );
+  });
+
+  it('pins the supersede if: including the OR grouping of its three paths', () => {
+    const doc2 = parse(workflow);
+    const supersede = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Supersede stale docs-only badge',
+    );
+    expect(normalizedIf(supersede)).toBe(
+      '!cancelled() && ' +
+        "steps.context.outputs.should_run == 'true' && " +
+        "steps.context.outputs.pr_number != '' && " +
+        "( steps.review.outputs.docs_only_medium == 'false' || " +
+        "( steps.context.outputs.auto_review == 'false' && " +
+        "steps.context.outputs.review_mode == 'comment' && " +
+        "steps.review.outputs.review_completed == 'true' ) || " +
+        "( failure() && steps.review.outputs.docs_only_medium == 'true' ) )",
+    );
+  });
+
+  it('pins the review_completed wiring end to end', () => {
+    // The state/head guards exit 0 without running the review; the relay
+    // must require the dedicated output, and the run step must emit it
+    // AFTER those guards — a hoisted emit would open the relay gate for a
+    // closed/stale PR whose review never ran (position pinned below). The
+    // supersede step deliberately does NOT require it: a failed full review
+    // still owes the badge correction, gated on docs_only_medium == 'false'
+    // (empty on runs that failed before classifying).
+    const emitAt = runStep.indexOf('echo "review_completed=true"');
+    expect(emitAt).toBeGreaterThan(-1);
+    expect(emitAt).toBeGreaterThan(
+      runStep.indexOf('if [ "$PR_STATE" != "OPEN" ]'),
+    );
+    expect(emitAt).toBeGreaterThan(
+      runStep.indexOf('Skipping stale review run'),
+    );
+    const doc2 = parse(workflow);
+    const relay = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    expect(relay.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
+    );
+    const supersede = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Supersede stale docs-only badge',
+    );
+    // Path (1): a POSITIVE not-docs-only determination (three-valued output;
+    // empty = never determined) — deliberately without review success.
+    expect(supersede.if).toContain(
+      "steps.review.outputs.docs_only_medium == 'false'",
+    );
+    // Path (2): an explicit comment-mode review that completed (the badge's
+    // CTA); a dispatch dry-run retires nothing.
+    expect(supersede.if).toContain(
+      "steps.context.outputs.auto_review == 'false'",
+    );
+    expect(supersede.if).toContain(
+      "steps.context.outputs.review_mode == 'comment'",
+    );
+    expect(supersede.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
+    );
+    expect(supersede.if).toContain('!cancelled()');
+  });
+
+  it('pins the supersede invocation shape (update-only, shared marker)', () => {
+    const doc2 = parse(workflow);
+    for (const name of [
+      'Report docs-only medium outcome',
+      'Supersede stale docs-only badge',
+    ]) {
+      const step = doc2.jobs['review-pr'].steps.find((s) => s.name === name);
+      // One marker definition serving both the body and the lookup argument.
+      expect(step.run).toContain(
+        "MARKER='<!-- qwen-review docs-only-medium -->'",
+      );
+      expect(step.run).toContain('"$MARKER"');
+    }
+    const supersede = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Supersede stale docs-only badge',
+    );
+    expect(supersede.run).toContain('--update-only');
+  });
+
+  it('pins the auto_review output→env wiring at both links', () => {
+    const doc2 = parse(workflow);
+    const context = doc2.jobs['review-pr'].steps.find(
+      (s) => s.id === 'context',
+    );
+    expect(context.run).toContain('echo "auto_review=$AUTO_REVIEW"');
+    const review = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    );
+    expect(review.env.AUTO_REVIEW).toBe(
+      '${{ steps.context.outputs.auto_review }}',
+    );
+  });
+});
+
+describe('supersede step and ci.yml rc-handling, executed', () => {
+  const doc = parse(workflow);
+  const supersedeRun = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Supersede stale docs-only badge',
+  ).run;
+
+  function runSupersede({
+    scenario,
+    docsOnlyMedium = 'false',
+    reviewCompleted = 'true',
+    expectedHeadSha = 'abc123',
+  }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-supersede-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const write = (name, body) => {
+        writeFileSync(join(bin, name), body);
+        chmodSync(join(bin, name), 0o755);
+      };
+      write('sleep', '#!/bin/bash\nexit 0\n');
+      write(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "$*" >> "$CALLS"',
+          // The head-binding guard runs BEFORE the upsert attempts: pr view
+          // succeeds even in all-fail so that scenario still exercises the
+          // retry loop.
+          'case "$*" in',
+          '  "pr view"*)',
+          '    if [ "$SCENARIO" = "moved-head" ]; then printf "OPEN\\tdeadbeef\\n";',
+          '    elif [ "$SCENARIO" = "closed-pr" ]; then printf "MERGED\\tabc123\\n";',
+          '    else printf "OPEN\\tabc123\\n"; fi',
+          '    exit 0 ;;',
+          'esac',
+          'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
+          'case "$*" in',
+          '  "api user"*) echo bot ;;',
+          '  *"--method GET"*)',
+          '    echo \'[{"id":31,"user":{"login":"bot"},"body":"<!-- qwen-review docs-only-medium --> badge"}]\' ;;',
+          '  *) : ;;',
+          'esac',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      const script = [
+        'set -euo pipefail',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        `RUNNER_TEMP="${dir}"`,
+        `EXPECTED_HEAD_SHA=${expectedHeadSha}`,
+        `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
+        `REVIEW_COMPLETED=${reviewCompleted}`,
+        'RUN_URL=https://x',
+        supersedeRun,
+        'echo "STEP_EXIT_OK"',
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          SCENARIO: scenario,
+          CALLS: calls,
+        },
+      });
+      return { stdout, calls: readFileSync(calls, 'utf8') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('supersedes an existing bot-authored badge (PATCH, update-only)', () => {
+    const r = runSupersede({ scenario: 'existing' });
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/31',
+    );
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+    // Cause-neutral retired wording: it must hold even when an explicit full
+    // review completes on the SAME head the badge describes, so it may not
+    // claim the badge described an earlier revision.
+    expect(r.calls).toContain('(superseded)');
+    expect(r.calls).toContain(
+      'no longer reflects the current review state of this PR',
+    );
+    expect(r.calls).not.toContain('earlier docs-only revision');
+  });
+
+  it('updates the badge to a failure notice when a docs-only review failed', () => {
+    // The relay only runs on success; without this path the badge would keep
+    // quoting the previous revision's outcome for a head whose own run died.
+    const r = runSupersede({
+      scenario: 'existing',
+      docsOnlyMedium: 'true',
+      reviewCompleted: '',
+    });
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/31',
+    );
+    expect(r.calls).toContain('did not complete');
+    expect(r.calls).toContain('abc123');
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+  });
+
+  it('skips the badge update when the head moved before the write', () => {
+    const r = runSupersede({ scenario: 'moved-head' });
+    expect(r.stdout).toContain('moved from abc123 to deadbeef');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('skips the badge update when the PR closed before the write', () => {
+    const r = runSupersede({ scenario: 'closed-pr' });
+    expect(r.stdout).toContain('is MERGED');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('skips the badge update when the reviewed head SHA is unknown', () => {
+    // A run that failed before "Run review" emitted the SHA has nothing to
+    // bind to — a badge is never updated on ignorance.
+    const r = runSupersede({ scenario: 'existing', expectedHeadSha: '' });
+    expect(r.stdout).toContain('reviewed head SHA is unknown');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('warns and exits 0 when every supersede attempt fails', () => {
+    // The never-fail guard is load-bearing: a failing step here would trip
+    // the post-failure fallback into announcing a review failure that never
+    // happened (the same phantom the relay guard prevents).
+    const r = runSupersede({ scenario: 'all-fail' });
+    expect(r.stdout).toContain('::warning::Could not supersede');
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+  });
+
+  function ciRcFragment() {
+    const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+    const ciDoc = parse(ci);
+    let run;
+    for (const job of Object.values(ciDoc.jobs)) {
+      for (const step of job.steps ?? []) {
+        if ((step.run ?? '').includes('classify-pr-profile.sh')) run = step.run;
+      }
+    }
+    expect(run).toBeTruthy();
+    const start = run.indexOf('set +e');
+    expect(start).toBeGreaterThan(-1);
+    const indent = run.slice(run.lastIndexOf('\n', start) + 1, start);
+    const end = run.indexOf(`\n${indent}fi`, start) + `\n${indent}fi`.length;
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function runCiFragment(wrapper) {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-rc-'));
+    try {
+      const stub = join(dir, '.github/scripts/ci');
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(join(stub, 'classify-pr-profile.sh'), wrapper);
+      chmodSync(join(stub, 'classify-pr-profile.sh'), 0o755);
+      const script = [
+        'set -euo pipefail',
+        'profile=full',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        ciRcFragment(),
+        'printf "profile=%s" "$profile"',
+      ].join('\n');
+      return execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: dir,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('ci.yml consumes the wrapper result on success', () => {
+    expect(runCiFragment('#!/bin/bash\necho docs_only\n')).toContain(
+      'profile=docs_only',
+    );
+  });
+
+  it.each([
+    ['#!/bin/bash\nexit 2\n', 'Unable to list PR changed files'],
+    ['#!/bin/bash\nexit 3\n', 'classifier exited non-zero'],
+  ])('ci.yml falls back to full on wrapper failure (%#)', (wrapper, note) => {
+    // The probed mutant (deleting the rc handling) leaves profile EMPTY on
+    // failure — no downstream matrix bucket matches empty, and a broken PR
+    // would pass CI with zero tests run.
+    const out = runCiFragment(wrapper);
+    expect(out).toContain(note);
+    expect(out).toContain('profile=full');
+  });
+});
+
 describe('upstream-timeout headroom (PR 8507 incident)', () => {
   // Three knobs, three failure modes: the SDK request timeout covers
   // connect+TTFB (three ~120s internal retries produced the 483s visible
