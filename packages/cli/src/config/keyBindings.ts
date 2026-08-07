@@ -39,6 +39,8 @@ export enum Command {
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
   COMPLETION_DOWN = 'completionDown',
+  COMPLETION_TAB_LEFT = 'completionTabLeft',
+  COMPLETION_TAB_RIGHT = 'completionTabRight',
 
   // Text input
   SUBMIT = 'submit',
@@ -79,9 +81,6 @@ export enum Command {
 
   // Thinking expansion
   TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
-
-  // Transcript full-detail screen (Ctrl+O)
-  TOGGLE_TRANSCRIPT = 'toggleTranscript',
 
   // Scroll commands
   SCROLL_UP = 'scrollUp',
@@ -134,7 +133,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Text deletion
   [Command.KILL_LINE_RIGHT]: [{ key: 'k', ctrl: true }],
   [Command.KILL_LINE_LEFT]: [{ key: 'u', ctrl: true }],
-  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true }],
+  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true, shift: false }],
   // Added command (meta/alt/option) for mac compatibility
   [Command.DELETE_WORD_BACKWARD]: [
     { key: 'backspace', ctrl: true },
@@ -185,6 +184,22 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'down', shift: false },
     { key: 'n', ctrl: true },
   ],
+  // Completion category tab switching (for the tabbed @ completion UI).
+  // Bound to Ctrl+arrows rather than plain arrows so the bare arrow keys keep
+  // moving the caret in the editable input buffer (plain arrows only switch
+  // tabs in modal dialogs, which have no text buffer). Alt/Option+arrows still
+  // perform word movement.
+  // Ctrl+←/→ is the primary binding but many terminals intercept it for
+  // word-jump. Ctrl+Tab / Ctrl+Shift+Tab are alternatives that are less
+  // commonly intercepted (#8069).
+  [Command.COMPLETION_TAB_LEFT]: [
+    { key: 'left', shift: false, ctrl: true, command: false },
+    { key: 'tab', shift: true, ctrl: true, command: false },
+  ],
+  [Command.COMPLETION_TAB_RIGHT]: [
+    { key: 'right', shift: false, ctrl: true, command: false },
+    { key: 'tab', shift: false, ctrl: true, command: false },
+  ],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline
@@ -230,7 +245,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // App level bindings
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
-  [Command.QUIT]: [{ key: 'c', ctrl: true }],
+  [Command.QUIT]: [{ key: 'c', ctrl: true, shift: false }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
@@ -248,11 +263,11 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
 
-  // Thinking expansion
-  [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
-
-  // Transcript full-detail screen
-  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
+  // Thinking expansion (Ctrl+O primary, Alt+T legacy)
+  [Command.TOGGLE_THINKING_EXPANDED]: [
+    { key: 'o', ctrl: true },
+    { key: 't', meta: true },
+  ],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

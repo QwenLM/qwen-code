@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
@@ -31,23 +32,44 @@ export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
 }
 
-export function daemonSessionRoutesPath(workspaceCwd: string): string {
+function daemonChannelStatePath(
+  workspaceCwd: string,
+  fileName: string,
+): string {
   return path.join(
     Storage.getGlobalQwenDir(),
     'channels',
     'daemon',
     hashDaemonWorkspace(workspaceCwd),
-    'routes.json',
+    fileName,
   );
 }
 
+export function daemonSessionRoutesPath(workspaceCwd: string): string {
+  return daemonChannelStatePath(workspaceCwd, 'routes.json');
+}
+
 export function daemonObservedContactsPath(workspaceCwd: string): string {
-  return path.join(
-    Storage.getGlobalQwenDir(),
-    'channels',
-    'daemon',
-    hashDaemonWorkspace(workspaceCwd),
-    'observed-contacts.json',
+  return daemonChannelStatePath(workspaceCwd, 'observed-contacts.json');
+}
+
+export function daemonChannelLoopPath(workspaceCwd: string): string {
+  return daemonChannelStatePath(workspaceCwd, 'cron.json');
+}
+
+export function daemonChannelStateDir(
+  workspaceCwd: string,
+  channelName: string,
+): string {
+  const label =
+    channelName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 32) || 'channel';
+  const hash = createHash('sha256')
+    .update(channelName)
+    .digest('hex')
+    .slice(0, 16);
+  return daemonChannelStatePath(
+    workspaceCwd,
+    path.join('instances', `${label}-${hash}`),
   );
 }
 

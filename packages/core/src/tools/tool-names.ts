@@ -21,6 +21,7 @@ export const ToolNames = {
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
+  ZOOM_IMAGE: 'zoom_image',
   GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
@@ -32,6 +33,7 @@ export const ToolNames = {
   ENTER_PLAN_MODE: 'enter_plan_mode',
   WEB_FETCH: 'web_fetch',
   WEB_SEARCH: 'web_search',
+  IMAGE_GEN: 'image_gen',
   LS: 'list_directory',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
@@ -65,6 +67,9 @@ export const ToolNames = {
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  GET_GOAL: 'get_goal',
+  UPDATE_GOAL: 'update_goal',
+  DISPLAY_IMAGE: 'display_image',
 } as const;
 
 /**
@@ -76,6 +81,7 @@ export const ToolDisplayNames = {
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
+  ZOOM_IMAGE: 'ZoomImage',
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
@@ -87,6 +93,7 @@ export const ToolDisplayNames = {
   ENTER_PLAN_MODE: 'EnterPlanMode',
   WEB_FETCH: 'WebFetch',
   WEB_SEARCH: 'WebSearch',
+  IMAGE_GEN: 'ImageGen',
   LS: 'ListFiles',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
@@ -115,6 +122,9 @@ export const ToolDisplayNames = {
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  GET_GOAL: 'Goal',
+  UPDATE_GOAL: 'UpdateGoal',
+  DISPLAY_IMAGE: 'DisplayImage',
 } as const;
 
 // Migration from old tool names to new tool names
@@ -125,6 +135,18 @@ export const ToolNamesMigration = {
   replace: ToolNames.EDIT, // Legacy name from edit tool
   task: ToolNames.AGENT, // Legacy name from agent tool (renamed from task)
 } as const;
+
+/**
+ * Resolve a tool name through the legacy-alias migration map (e.g.
+ * `search_file_content` → `grep_search`) to its canonical form. The single
+ * alias-resolution site: every caller that classifies or keys tool calls by
+ * name — the scheduler, loop detection, plan redaction, memory refresh, the
+ * headless partitioner in nonInteractiveCli, the daemon/ACP session — must
+ * use this so an aliased call is treated identically everywhere.
+ */
+export function canonicalToolName(toolName: string): string {
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
 
 // Migration from old tool display names to new tool display names
 // These legacy display names were used before the tool naming standardization

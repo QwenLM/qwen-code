@@ -169,6 +169,101 @@ describe('SuggestionsDisplay', () => {
     expect(lines[0]).toMatch(/^ {2}pr/);
     expect(lines[1]).toMatch(/^> issue-to-pr/);
   });
+
+  it('keeps slash command names intact when argument hints overflow', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[
+          {
+            label: 'review',
+            value: 'review',
+            argumentHint:
+              '[pr-number|file-path] [--effort low|medium|high] [--comment] [--fix]',
+            sourceBadge: '[Skill]',
+            description: 'Review changed code.',
+          },
+          {
+            label: 'doctor',
+            value: 'doctor',
+            argumentHint:
+              '[memory|cpu-profile|rollback] [--sample] [--snapshot] [--duration]',
+            description: 'Diagnose Qwen Code environment.',
+          },
+        ]}
+        activeIndex={0}
+        isLoading={false}
+        width={120}
+        scrollOffset={0}
+        userInput="/rev"
+        mode="slash"
+      />,
+    );
+
+    const lines = (lastFrame() ?? '').split('\n');
+
+    expect(lines).toContainEqual(expect.stringMatching(/^> review(?: |$)/));
+    expect(lines).toContainEqual(expect.stringMatching(/^ {2}doctor(?: |$)/));
+  });
+});
+
+describe('SuggestionsDisplay tabs', () => {
+  const mixed = [
+    { label: 'a.ts', value: 'a.ts', category: 'file' as const },
+    { label: 'Fix bug', value: 'session:id-1', category: 'session' as const },
+  ];
+
+  it('shows a tab bar when multiple categories are present', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={mixed}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="all"
+        availableCategories={['all', 'file', 'session']}
+      />,
+    );
+    expect(lastFrame()).toContain('Files');
+    expect(lastFrame()).toContain('Sessions');
+  });
+
+  it('filters rows to the active category', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={mixed}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="session"
+        availableCategories={['all', 'file', 'session']}
+      />,
+    );
+    expect(lastFrame()).toContain('Fix bug');
+    expect(lastFrame()).not.toContain('a.ts');
+  });
+
+  it('hides the tab bar for single-category (file-only) completion', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[mixed[0]]}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        activeCategory="all"
+        availableCategories={['all', 'file']}
+      />,
+    );
+    expect(lastFrame()).not.toContain('Files');
+  });
 });
 
 describe('normalizeDescription', () => {

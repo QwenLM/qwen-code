@@ -18,6 +18,7 @@ import {
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { ICON } from '../../constants.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
 function isAgentWithPendingConfirmation(
@@ -42,6 +43,10 @@ function isRunningAgent(
     (rd as AgentResultDisplay).type === 'task_execution' &&
     (rd as AgentResultDisplay).status === 'running'
   );
+}
+
+function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
+  return Boolean(tool.images?.length || tool.omittedImageCount);
 }
 
 /**
@@ -149,7 +154,7 @@ interface ToolGroupMessageProps {
   memoryReadCount?: number;
   isUserInitiated?: boolean;
   /**
-   * Transcript full-detail mode (Ctrl+O). When true, force `forceExpandAll`
+   * Full-detail mode (Ctrl+O). When true, force `forceExpandAll`
    * (skip the type-based partition so every tool renders individually), pass
    * `forceShowResult=true` to each `ToolMessage`, and lift the per-tool
    * terminal-height truncation. Default false (main view keeps the #5661
@@ -282,7 +287,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // header's "N · done/N" honest, and `availableTerminalHeight` is a hard cap
   // backstop for degenerate cases (many agents finishing at once).
   //
-  // Skipped in transcript full-detail mode (fullDetail) so every agent
+  // Skipped in full-detail mode (fullDetail) so every agent
   // falls through to its own full ToolMessage instead of the dense panel.
   if (
     !fullDetail &&
@@ -331,7 +336,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Memory-only groups get their own compact rendering with read/write
   // counts. Check BEFORE the partition logic so they aren't routed through
-  // the collapsible/non-collapsible split. Skipped in transcript full-detail
+  // the collapsible/non-collapsible split. Skipped in full-detail
   // mode (fullDetail) so each memory op renders as its own full ToolMessage
   // rather than collapsing to the "Recalled/Wrote N memories" badge.
   const allMemOpsComplete =
@@ -347,7 +352,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         {readCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
-              {'● '}
+              {ICON.CIRCLE_FILLED + ' '}
               Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
             </Text>
           </Box>
@@ -355,7 +360,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         {writeCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
-              {'● '}
+              {ICON.CIRCLE_FILLED + ' '}
               Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
             </Text>
           </Box>
@@ -366,7 +371,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Force-expand ALL tools individually when the user must interact or
   // must see full details: confirmation prompts, errors, user-initiated
-  // batches, focused shells, terminal subagents. Transcript full-detail
+  // batches, focused shells, terminal subagents. Full-detail
   // mode (fullDetail) also forces it so every tool renders individually
   // instead of collapsing read/search into a partition summary.
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
@@ -387,13 +392,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     ? []
     : inlineToolCalls.filter(
         (t) =>
-          isCollapsibleTool(t.name) && t.status !== ToolCallStatus.Canceled,
+          isCollapsibleTool(t.name) &&
+          t.status !== ToolCallStatus.Canceled &&
+          !hasInlineImageOutput(t),
       );
   const nonCollapsibleTools = forceExpandAll
     ? inlineToolCalls
     : inlineToolCalls.filter(
         (t) =>
-          !isCollapsibleTool(t.name) || t.status === ToolCallStatus.Canceled,
+          !isCollapsibleTool(t.name) ||
+          t.status === ToolCallStatus.Canceled ||
+          hasInlineImageOutput(t),
       );
 
   // Memory badge — shared between all-collapsible and mixed paths.
@@ -405,7 +414,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const memoryBadge = hasMemoryBadge ? (
     <Box paddingLeft={1}>
       <Text dimColor>
-        {'● '}
+        {ICON.CIRCLE_FILLED + ' '}
         {[
           (memoryReadCount ?? 0) > 0 &&
             `Recalled ${memoryReadCount} ${memoryReadCount === 1 ? 'memory' : 'memories'}`,
@@ -440,17 +449,23 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
   const staticHeight =
     /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;
-  const innerWidth = contentWidth - 2;
+  // ToolConfirmationMessage still has its own padding={1}, so it needs
+  // the -2 reservation. ToolMessage no longer pads itself (paddingX was
+  // removed in the icon-alignment PR), so it gets the full contentWidth.
+  const confirmationInnerWidth = contentWidth - 2;
 
   let countToolCallsWithResults = 0;
   for (const tool of nonCollapsibleTools) {
-    if (tool.resultDisplay !== undefined && tool.resultDisplay !== '') {
+    if (
+      (tool.resultDisplay !== undefined && tool.resultDisplay !== '') ||
+      hasInlineImageOutput(tool)
+    ) {
       countToolCallsWithResults++;
     }
   }
   const countOneLineToolCalls =
     nonCollapsibleTools.length - countToolCallsWithResults;
-  // In transcript full-detail mode, lift the per-tool height truncation so
+  // In full-detail mode, lift the per-tool height truncation so
   // each tool's output renders in full (combined with forceShowResult below).
   const availableTerminalHeightPerToolMessage = fullDetail
     ? undefined
@@ -486,7 +501,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
               <ToolMessage
                 {...tool}
                 availableTerminalHeight={availableTerminalHeightPerToolMessage}
-                contentWidth={innerWidth}
+                contentWidth={contentWidth}
                 emphasis={
                   isConfirming
                     ? 'high'
@@ -520,7 +535,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   availableTerminalHeight={
                     availableTerminalHeightPerToolMessage
                   }
-                  contentWidth={innerWidth}
+                  contentWidth={confirmationInnerWidth}
                 />
               )}
           </Box>

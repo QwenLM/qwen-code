@@ -61,6 +61,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/side-task',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/side-task',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/cd',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/cd',
@@ -262,6 +268,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/mid-turn-message',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/mid-turn-message',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/mid-turn-messages/:messageId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/mid-turn-messages/:messageId',
   },
   {
     method: 'GET',

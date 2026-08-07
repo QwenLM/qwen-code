@@ -6,7 +6,7 @@
 
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isAllowedMemoryPath } from './memory-scoped-agent-config.js';
 import {
@@ -30,10 +30,6 @@ const WRITE_TOOL_NAMES = new Set<string>([
   ToolNames.WRITE_FILE,
   ToolNames.EDIT,
 ]);
-
-function canonicalToolName(toolName: string): string {
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
-}
 
 function candidateFilePath(
   args: Record<string, unknown> | undefined,

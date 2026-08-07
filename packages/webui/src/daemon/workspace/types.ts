@@ -13,6 +13,16 @@ import type {
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
+  DaemonChannelMutationResult,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
+  DaemonChannelsSnapshot,
+  DaemonChannelStartupRequest,
+  DaemonChannelTypeCatalog,
+  DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
   DaemonWorkspaceGenerationEvent,
@@ -85,6 +95,7 @@ import type {
   DaemonUsageRange,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonRevisionRequest,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -180,6 +191,24 @@ export interface DaemonGlobOptions {
 
 export interface DaemonGlobResult {
   matches: string[];
+}
+
+export interface DaemonChannelsResource {
+  catalog: DaemonChannelTypeCatalog;
+  snapshot: DaemonChannelsSnapshot;
+}
+
+export interface DaemonChannelPairingActions {
+  list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
+  approve(
+    name: string,
+    code: string,
+  ): Promise<DaemonChannelPairingApprovalResult>;
+  approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revoke(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+  ): Promise<DaemonChannelPairingRevocationResult>;
 }
 
 // ── Scheduled Tasks (durable cron, server-only) ─────────────────────
@@ -312,6 +341,17 @@ export interface DaemonWorkspacePathSuggestions {
   truncated: boolean;
 }
 
+export type DaemonWorkspaceDirectoryPickerResult =
+  | {
+      kind: 'workspace-directory-picker';
+      selected: true;
+      path: string;
+    }
+  | {
+      kind: 'workspace-directory-picker';
+      selected: false;
+    };
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -351,6 +391,25 @@ export interface DaemonWorkspaceActions {
   archiveSession(sessionId: string): Promise<boolean>;
   /** Restore an archived session to the active directory. Idempotent. */
   unarchiveSession(sessionId: string): Promise<boolean>;
+
+  // Channels
+  loadChannels(): Promise<DaemonChannelsResource>;
+  upsertChannel(
+    name: string,
+    request: DaemonChannelUpsertRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  removeChannel(
+    name: string,
+    request: DaemonRevisionRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  setChannelStartup(
+    name: string,
+    request: DaemonChannelStartupRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  startChannel(name: string): Promise<DaemonChannelMutationResult>;
+  stopChannel(name: string): Promise<DaemonChannelMutationResult>;
+  restartChannel(name: string): Promise<DaemonChannelMutationResult>;
+  channelPairing: DaemonChannelPairingActions;
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
@@ -563,6 +622,7 @@ export interface DaemonWorkspaceActions {
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
+  pickWorkspaceDirectory(): Promise<DaemonWorkspaceDirectoryPickerResult>;
   updateWorkspace(
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,

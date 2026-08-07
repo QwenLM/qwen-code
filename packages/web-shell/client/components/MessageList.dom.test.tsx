@@ -28,11 +28,15 @@ vi.mock('./MessageItem', async () => {
       showAssistantActions,
       isLocateFlashing,
       assistantTurnFooterInfo,
+      sendFailed,
+      onRetrySend,
     }: {
       message: Message;
       showAssistantActions?: boolean;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+      sendFailed?: boolean;
+      onRetrySend?: () => void;
     }) => {
       const { renderAssistantTurnFooter } = useWebShellCustomization();
       const assistantTurnFooter = assistantTurnFooterInfo
@@ -44,7 +48,19 @@ vi.mock('./MessageItem', async () => {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
+          'data-send-failed': sendFailed ? 'true' : undefined,
         },
+        sendFailed
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `retry-${message.id}`,
+                onClick: onRetrySend,
+                type: 'button',
+              },
+              'retry',
+            )
+          : null,
         message.role === 'thinking'
           ? React.createElement('button', {
               'aria-expanded': 'false',
@@ -182,6 +198,13 @@ const systemMsg = (id: string): SystemMessage => ({
   variant: 'warning',
   source: 'prompt_cancelled',
 });
+const backgroundNotificationMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'background task completed',
+  variant: 'info',
+  source: 'background_notification',
+});
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
   role: 'thinking',
@@ -203,7 +226,8 @@ function mount(
     hasOlderHistory?: boolean;
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
-    onLoadOlderHistory?: () => Promise<void>;
+    historyPaginationError?: boolean;
+    onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
     transcriptBlockCount?: number;
     transcriptActivity?: {
       getSnapshot(): {
@@ -224,6 +248,8 @@ function mount(
     includeSubagentToolUsageInMetrics?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
+    failedPromptMessageId?: string;
+    onRetryFailedPrompt?: () => void;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -243,6 +269,7 @@ function mount(
             hasOlderHistory={opts.hasOlderHistory}
             loadingOlderHistory={opts.loadingOlderHistory}
             historyCapacityReached={opts.historyCapacityReached}
+            historyPaginationError={opts.historyPaginationError}
             onLoadOlderHistory={opts.onLoadOlderHistory}
             transcriptBlockCount={opts.transcriptBlockCount}
             transcriptActivity={opts.transcriptActivity}
@@ -254,6 +281,8 @@ function mount(
               opts.includeSubagentToolUsageInMetrics
             }
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+            failedPromptMessageId={opts.failedPromptMessageId}
+            onRetryFailedPrompt={opts.onRetryFailedPrompt}
           />
         </WebShellCustomizationProvider>
       </I18nProvider>,
@@ -335,6 +364,34 @@ const simpleTurns = (count: number): Message[] =>
     const turn = index + 1;
     return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
   }).flat();
+
+describe('MessageList — failed prompt retry', () => {
+  it('marks only the matching user message and forwards retry', () => {
+    const onRetry = vi.fn();
+    const container = mount([userMsg('u1'), userMsg('u2')], undefined, {
+      failedPromptMessageId: 'u1',
+      onRetryFailedPrompt: onRetry,
+    });
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-send-failed'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-send-failed'),
+    ).toBeNull();
+
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry-u1"]')
+        ?.click(),
+    );
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('MessageList — turn collapse (DOM)', () => {
   it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
@@ -448,6 +505,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'a1')).toBe(true);
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('collapses a background notification before the final assistant content', () => {
+    const c = mount([
+      userMsg('u1'),
+      backgroundNotificationMsg('bg1'),
+      asstMsg('a1'),
+    ]);
+
+    expect(has(c, 'bg1')).toBe(false);
+    expect(has(c, 'a1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'bg1')).toBe(true);
+  });
+
+  it('keeps a background notification when it is the final content', () => {
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg1'),
+    ]);
+
+    expect(has(c, 'a1')).toBe(false);
+    expect(has(c, 'bg1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'a1')).toBe(true);
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
@@ -1576,6 +1659,71 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('[role="status"]')?.textContent).toBe(
       'History display limit reached. Earlier messages remain saved.',
     );
+  });
+
+  it('shows a persistent error when history pagination fails', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      historyPaginationError: true,
+    });
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Earlier history could not be loaded.',
+    );
+  });
+
+  it('does not auto-load older history when a pagination error is present', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // historyPaginationError is true, hasOlderHistory is true
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      historyPaginationError: true,
+      onLoadOlderHistory,
+    });
+
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    // It should NOT call loadMore because paginationError blocks it
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
+  });
+
+  it('retries loading older history with force when the retry button is clicked', async () => {
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount([userMsg('u1')], undefined, {
+      historyPaginationError: true,
+      onLoadOlderHistory,
+    });
+
+    const button = Array.from(c.querySelectorAll('button')).find(
+      (el) => el.textContent === 'Retry',
+    );
+    expect(button).toBeDefined();
+
+    await act(async () => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    expect(onLoadOlderHistory).toHaveBeenCalledWith({ force: true });
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {

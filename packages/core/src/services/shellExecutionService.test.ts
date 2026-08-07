@@ -42,6 +42,7 @@ const mockSpawnSync = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
+const mockLoadXtermHeadless = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToText = vi.hoisted(() =>
   vi.fn((terminal: pkg.Terminal): string => {
@@ -102,6 +103,9 @@ vi.mock('os', () => ({
 }));
 vi.mock('../utils/getPty.js', () => ({
   getPty: mockGetPty,
+}));
+vi.mock('../utils/load-xterm-headless.js', () => ({
+  loadXtermHeadless: mockLoadXtermHeadless,
 }));
 vi.mock('../utils/terminalSerializer.js', () => ({
   serializeTerminalToObject: mockSerializeTerminalToObject,
@@ -250,6 +254,7 @@ describe('ShellExecutionService', () => {
       module: { spawn: mockPtySpawn },
       name: 'mock-pty',
     });
+    mockLoadXtermHeadless.mockResolvedValue({ Terminal });
 
     onOutputEventMock = vi.fn();
 
@@ -372,6 +377,15 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('normalizes node-pty clean-exit signal 0 to null', async () => {
+      const { result } = await simulateExecution('echo clean', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.signal).toBeNull();
+    });
+
     it('disposes PTY terminal resources on natural exit', async () => {
       const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
@@ -442,6 +456,32 @@ describe('ShellExecutionService', () => {
           chunk: createExpectedAnsiOutput('aredword'),
         }),
       );
+    });
+
+    it('suppresses parser diagnostics for malformed PTY output', async () => {
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      try {
+        const { result } = await simulateExecution(
+          'malformed-output',
+          (pty) => {
+            pty.onData.mock.calls[0][0]('\u001b\xb0');
+            pty.onData.mock.calls[0][0]('recovered');
+            pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+          },
+        );
+
+        expect(
+          consoleErrorSpy.mock.calls.some((args) =>
+            args.some((arg) => String(arg).includes('Parsing error')),
+          ),
+        ).toBe(false);
+        expect(result.output).toContain('recovered');
+      } finally {
+        consoleErrorSpy.mockRestore();
+      }
     });
 
     it('should correctly decode multi-byte characters split across chunks', async () => {
@@ -1020,13 +1060,14 @@ describe('ShellExecutionService', () => {
       );
       expect(result.promoted).toBe(true);
       // After promote, drive the PTY's onExit to simulate natural
-      // completion. The service attaches a new exit listener for
+      // completion with its raw clean-exit signal metadata. The service
+      // attaches a new exit listener for
       // post-promote settle — find the most-recently-registered.
       const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
       expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
       const postPromoteExitHandler =
         onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      postPromoteExitHandler({ exitCode: 0, signal: 0 });
       expect(settleCalls).toHaveLength(1);
       expect(settleCalls[0].exitCode).toBe(0);
       expect(settleCalls[0].signal).toBeNull();
@@ -3503,6 +3544,42 @@ describe('ShellExecutionService execution method selection', () => {
       expect(mockCpSpawn).not.toHaveBeenCalled();
     },
   );
+
+  it('does not spawn when aborted while xterm is loading', async () => {
+    let resolveXterm:
+      | ((value: { Terminal: typeof Terminal }) => void)
+      | undefined;
+    mockLoadXtermHeadless.mockReturnValue(
+      new Promise((resolve) => {
+        resolveXterm = resolve;
+      }),
+    );
+    const abortController = new AbortController();
+    const handlePromise = ShellExecutionService.execute(
+      'test command',
+      '/test/dir',
+      onOutputEventMock,
+      abortController.signal,
+      true,
+      shellExecutionConfig,
+    );
+
+    await vi.waitFor(() => {
+      expect(mockLoadXtermHeadless).toHaveBeenCalledOnce();
+    });
+    abortController.abort();
+    resolveXterm?.({ Terminal });
+
+    const handle = await handlePromise;
+    expect(await handle.result).toMatchObject({
+      aborted: true,
+      pid: undefined,
+      executionMethod: 'none',
+      output: '',
+    });
+    expect(mockPtySpawn).not.toHaveBeenCalled();
+    expect(mockCpSpawn).not.toHaveBeenCalled();
+  });
 
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
     const abortController = new AbortController();

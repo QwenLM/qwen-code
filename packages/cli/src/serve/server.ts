@@ -7,8 +7,13 @@
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
+import {
+  hashDaemonWorkspace,
+  Storage,
+  type DurableCronTask,
+} from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
+import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
 import type {
   DaemonMetricsBucket,
   DaemonPerfSnapshot,
@@ -40,7 +45,11 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
-import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
+import {
+  mountAcpHttp,
+  type AcpHttpHandle,
+  type ExtraWsRoute,
+} from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
   ClientMcpSenderRegistry,
@@ -69,6 +78,7 @@ import {
 } from './workspace-memory.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
+  mountWorkspaceQualifiedMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from './workspace-remember.js';
 import {
@@ -100,6 +110,7 @@ import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
+import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -166,15 +177,23 @@ import {
 } from './server/error-handlers.js';
 import { installRateLimiter } from './server/rate-limiter-setup.js';
 import { createServeFeatures } from './server/serve-features.js';
-import { SessionArchiveCoordinator } from './server/session-archive.js';
+import {
+  deleteDaemonSessionIfOrphan,
+  SessionArchiveCoordinator,
+} from './server/session-archive.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
+  WorkspaceGenerationClosedError,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from './workspace-runtime-storage.js';
 import {
   isScratchRootCompatible,
   type ManagedScratchRoot,
@@ -182,7 +201,10 @@ import {
 } from './managed-scratch-workspace.js';
 import {
   isPortableAbsolutePath,
+  requireTrustedWorkspaceRuntime,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveWorkspaceRuntimeFromParam,
+  sendWorkspaceRuntimeUnavailable,
 } from './workspace-route-runtime.js';
 import {
   registerWorkspaceLifecycleRoutes,
@@ -206,13 +228,20 @@ import {
   registerWorkspaceGitLogRoutes,
   registerWorkspaceQualifiedGitLogRoutes,
 } from './routes/workspace-git-log.js';
+import {
+  registerWorkspaceGitBranchRoutes,
+  registerWorkspaceQualifiedGitBranchRoutes,
+} from './routes/workspace-git-branches.js';
+import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
+import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
 import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
+import type { ChannelManagementService } from './channel-management-service.js';
 import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
@@ -222,12 +251,33 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import type {
+  ChannelDeliveryAccepted,
+  ChannelDeliveryRequest,
+} from '../runtime/channel-delivery-ipc.js';
+import type { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   parseChannelWebhookConfigLenient,
   type parseChannelWebhookConfig,
 } from '../commands/channel/config-utils.js';
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
+import { registerLiveRoutes } from './routes/live.js';
+import { registerLiveSetupRoutes } from './routes/live-setup.js';
+import { LiveHostCoordinator } from './live/live-host-coordinator.js';
+import { LiveHostInstaller } from './live/live-host-installer.js';
+import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
+import { LiveSetupController } from './live/live-setup-controller.js';
+import { LiveTaskService } from './live/live-task-service.js';
+import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import {
+  LiveProviderConfigError,
+  readLiveVoiceConfiguration,
+  resolveLiveProviderCredential,
+  type LiveProviderCredential,
+} from './live/provider-credentials.js';
+import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 
 export {
   createDefaultFsAuditEmit,
@@ -409,6 +459,7 @@ export interface ServeAppDeps {
    */
   installAuthProvider?: (
     req: ServeAuthProviderInstallRequest,
+    assertGenerationOpen?: () => void,
   ) => Promise<ServeAuthProviderInstallResult>;
   /**
    * Optional daemon logger. When provided, `sendBridgeError` routes
@@ -428,6 +479,11 @@ export interface ServeAppDeps {
   ) => Promise<ChannelWorkerSetResult>;
   stopChannelWorker?: () => Promise<ChannelWorkerStopResult>;
   enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
+  deliverChannelMessage?: (
+    workspaceCwd: string,
+    request: ChannelDeliveryRequest,
+  ) => Promise<ChannelDeliveryAccepted>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   channelWebhookConfigSources?: readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigSources?: () => readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigVersion?: () => number;
@@ -438,10 +494,17 @@ export interface ServeAppDeps {
    * `channel_reload` is advertised only while the control state is enabled.
    */
   reloadChannelWorker?: () => Promise<ChannelWorkerSnapshot>;
+  channelManagementService?: (
+    runtime: WorkspaceRuntime,
+  ) =>
+    | ChannelManagementService
+    | undefined
+    | Promise<ChannelManagementService | undefined>;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -461,6 +524,7 @@ export interface ServeAppDeps {
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
+    assertGenerationOpen?: () => void,
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
   persistSettings?: (
     workspace: string,
@@ -469,6 +533,7 @@ export interface ServeAppDeps {
       key: string;
       value: unknown;
     }>,
+    assertGenerationOpen?: () => void,
   ) => Promise<void>;
   sessionArtifactsPersistenceAvailable?: boolean;
   /**
@@ -483,18 +548,34 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
+  workspaceTrustHotReloadAvailable?: boolean;
+  getWorkspaceTrustPolicySnapshot?: () =>
+    | DaemonTrustPolicySnapshot
+    | Promise<DaemonTrustPolicySnapshot>;
   createWorkspaceRuntime?: (
     cwd: string,
     options: { provenance: WorkspaceRuntimeProvenance },
   ) => Promise<WorkspaceRuntime>;
   managedScratchRoot?: ManagedScratchRoot;
+  validateWorkspaceRuntimeForPublication?: (
+    runtime: WorkspaceRuntime,
+  ) => Promise<WorkspaceRuntime>;
+  runWorkspaceTrustOperation?: <T>(operation: () => Promise<T>) => Promise<T>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  runtimePlatform?: NodeJS.Platform;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
+  liveCoordinator?: LiveHostCoordinator;
+  liveHostInstaller?: LiveHostInstaller;
+  liveSessionCoordinator?: LiveSessionCoordinator;
+  liveConversationWorkspace?: LiveConversationWorkspace;
+  validateLiveProviderCredential?: (
+    credential: LiveProviderCredential,
+  ) => Promise<void>;
 }
 
 /**
@@ -553,6 +634,35 @@ export function computeKeepaliveIntervalMs(idleTimeoutMs: number): number {
   return Math.max(1, Math.min(target, Math.floor(idleTimeoutMs / 2)));
 }
 
+function createLiveWorkspaceDelegate<T extends object>(getTarget: () => T): T {
+  return new Proxy({} as T, {
+    get(_target, property) {
+      const target = getTarget();
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+    set(_target, property, value) {
+      return Reflect.set(getTarget(), property, value);
+    },
+    has(_target, property) {
+      return Reflect.has(getTarget(), property);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(getTarget());
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(
+        getTarget(),
+        property,
+      );
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+    getPrototypeOf() {
+      return Reflect.getPrototypeOf(getTarget());
+    },
+  });
+}
+
 export function createServeApp(
   opts: ServeOptions,
   getPort: () => number = () => opts.port,
@@ -567,7 +677,7 @@ export function createServeApp(
   // Forward `maxSessions` into the default-constructed bridge so
   // direct callers of `createServeApp` (tests, embeds) get the same
   // cap they configured via `ServeOptions`. Previously the default
-  // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
+  // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (32) and
   // only the `runQwenServe` path piped the option through.
   //
   // The primary workspace value advertised on `/capabilities`, used for the
@@ -692,6 +802,41 @@ export function createServeApp(
   const primaryRuntimeEnvMetadata =
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
+  const runtimePlatform = deps.runtimePlatform ?? process.platform;
+  const liveVoiceSurfaceAvailable =
+    runtimePlatform === 'darwin' &&
+    opts.serveWebShell !== false &&
+    typeof deps.webShellDir === 'string' &&
+    acpHttpEnabledAtBoot;
+  const primaryRuntimeTrustAuthoritative =
+    deps.workspaceTrustHotReloadAvailable === true ||
+    deps.primaryWorkspaceTrusted !== undefined ||
+    injectedWorkspaceRegistry !== undefined;
+  let primaryTrustRegistry = injectedWorkspaceRegistry;
+  const isPrimaryWorkspaceTrusted = (): boolean => {
+    if (!primaryRuntimeTrustAuthoritative) return true;
+    const entry = primaryTrustRegistry?.primaryEntry;
+    if (entry) {
+      return (
+        entry.state === 'active' && entry.current?.runtime.trusted === true
+      );
+    }
+    return deps.primaryWorkspaceTrusted ?? false;
+  };
+  const capturePrimaryGenerationAssertion = (): (() => void) | undefined => {
+    const registry = primaryTrustRegistry;
+    if (!registry) return undefined;
+    const guard = registry.primaryEntry.current?.guard;
+    if (!guard) {
+      return () => {
+        throw new WorkspaceGenerationClosedError();
+      };
+    }
+    return () => guard.assertOpen();
+  };
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
@@ -708,8 +853,12 @@ export function createServeApp(
           )
         );
       },
-      workspaceGenerationAvailable: () =>
-        primaryBridge.generateWorkspaceContent !== undefined,
+      workspaceGenerationAvailable: () => {
+        const entry = workspaceRegistry.primaryEntry;
+        const runtime =
+          entry.state === 'active' ? entry.current?.runtime : undefined;
+        return runtime?.bridge.generateWorkspaceContent !== undefined;
+      },
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
@@ -718,6 +867,7 @@ export function createServeApp(
         deps.getChannelWorkerControl !== undefined &&
         deps.setChannelWorkerSelection !== undefined &&
         deps.stopChannelWorker !== undefined,
+      channelManagementAvailable: deps.channelManagementService !== undefined,
       channelReloadAvailable: () => {
         if (deps.reloadChannelWorker === undefined) return false;
         const control = deps.getChannelWorkerControl?.();
@@ -735,7 +885,8 @@ export function createServeApp(
         );
       },
       sessionShellCommandEnabled,
-      multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
+      multiWorkspaceSessionsEnabled: () =>
+        workspaceRegistry.listEntries().length > 1,
       dynamicWorkspaceRegistrationAvailable:
         deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
@@ -754,9 +905,29 @@ export function createServeApp(
               deps.managedScratchRoot!.canonicalRoot,
             ),
           ),
+      realtimeVoiceEnabled: () =>
+        (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
+        true,
+      acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
-      ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
+      workspaceTrustHotReloadAvailable:
+        deps.workspaceTrustHotReloadAvailable === true,
+      isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
+      ...(deps.workspaceTrustHotReloadAvailable === true
+        ? {
+            getEnv: () => {
+              const entry = primaryTrustRegistry?.primaryEntry;
+              const runtimeEnv =
+                entry?.state === 'active'
+                  ? entry.current?.runtime.env
+                  : undefined;
+              return getRuntimeEffectiveEnv(runtimeEnv) ?? daemonEnv;
+            },
+          }
+        : primaryEffectiveEnv
+          ? { env: primaryEffectiveEnv }
+          : {}),
     });
   (
     app.locals as {
@@ -797,6 +968,8 @@ export function createServeApp(
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
+      maxJournalEvents: opts.maxJournalEvents,
+      maxJournalBytes: opts.maxJournalBytes,
       initializeTimeoutMs: opts.initializeTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
@@ -804,8 +977,9 @@ export function createServeApp(
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider,
-      // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
-      // readTextFile pick up trust / TOCTOU / audit.
+      delegateReadTextFileToClient: false,
+      // Final ACP text writes remain delegated through WorkspaceFileSystem.
+      // Unexpected delegated reads still fail closed at the WFS boundary.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
@@ -815,6 +989,21 @@ export function createServeApp(
     defaultBridgeForAdmission = bridge;
   }
   const archiveCoordinator = new SessionArchiveCoordinator();
+  (
+    app.locals as {
+      sessionArchiveCoordinator?: SessionArchiveCoordinator;
+    }
+  ).sessionArchiveCoordinator = archiveCoordinator;
+
+  const cleanupSession = (runtime: WorkspaceRuntime, sessionId: string) =>
+    runWithWorkspaceRuntimeStorage(runtime, () =>
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service: createWorkspaceRuntimeSessionService(runtime),
+        bridge: runtime.bridge,
+        coordinator: archiveCoordinator,
+      }),
+    );
 
   installSelfOriginStripMiddleware(app, getPort);
 
@@ -844,7 +1033,7 @@ export function createServeApp(
         if (!reg) return [bridge];
         return reg
           .list()
-          .filter((rt) => rt.primary || rt.trusted)
+          .filter((rt) => rt.trusted)
           .map((rt) => rt.bridge);
       },
     });
@@ -864,12 +1053,16 @@ export function createServeApp(
     deps.workspace ??
     createDaemonWorkspaceService({
       boundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider,
-      workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider(
-        primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
-      ),
-      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
+      workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider({
+        ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+      }),
+      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider({
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+      }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
       isChannelLive: () => bridge.isChannelLive(),
@@ -914,6 +1107,7 @@ export function createServeApp(
       {
         workspaceId: hashDaemonWorkspace(boundWorkspace),
         workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
         primary: true,
         trusted: deps.primaryWorkspaceTrusted ?? false,
         env: primaryRuntimeEnvMetadata ?? {
@@ -926,21 +1120,393 @@ export function createServeApp(
         clientMcpSenderRegistry,
       },
       defaultSessionOwnerIndex
-        ? { sessionOwnerIndex: defaultSessionOwnerIndex }
+        ? {
+            sessionOwnerIndex: defaultSessionOwnerIndex,
+            scanUnindexedOwners: deps.bridge !== undefined,
+          }
         : {},
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
-  const primaryRuntime = workspaceRegistry.primary;
-  const daemonEnv = deps.daemonEnv ?? process.env;
-  const primaryRuntimeEffectiveEnv =
-    getRuntimeEffectiveEnv(primaryRuntime.env) ?? daemonEnv;
+  primaryTrustRegistry = workspaceRegistry;
+  const primaryRuntime = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary,
+  );
+  const primaryRuntimeEffectiveEnv = createLiveWorkspaceDelegate(
+    () => getRuntimeEffectiveEnv(workspaceRegistry.primary.env) ?? daemonEnv,
+  );
   const voiceCoordinator =
     deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
+  const acquirePrimaryVoiceLease = () => {
+    const entry = workspaceRegistry.primaryEntry;
+    const runtime =
+      entry.state === 'active' ? entry.current?.runtime : undefined;
+    return runtime
+      ? voiceCoordinator.acquire(runtime)
+      : ({ kind: 'rejected', reason: 'draining' } as const);
+  };
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
-  const primaryBridge = primaryRuntime.bridge;
-  const primaryWorkspace = primaryRuntime.workspaceService;
-  const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const primaryBridge = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.bridge,
+  );
+  const primaryWorkspace = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.workspaceService,
+  );
+  const primaryRouteFileSystemFactory = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.routeFileSystemFactory,
+  );
+  const loadLiveSettings = () =>
+    loadSettings(primaryBoundWorkspace, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: true,
+      workspaceTrusted: false,
+    }).merged;
+  const liveSettingsAtBoot = (() => {
+    try {
+      return loadLiveSettings();
+    } catch {
+      return undefined;
+    }
+  })();
+  const liveConfigAtBoot = liveSettingsAtBoot
+    ? readLiveVoiceConfiguration(liveSettingsAtBoot)
+    : undefined;
+  let liveVoiceEnabled =
+    liveVoiceSurfaceAvailable && liveConfigAtBoot?.enabled === true;
+  (
+    app.locals as {
+      liveVoiceEnabled?: boolean;
+      liveVoiceSurfaceAvailable?: boolean;
+    }
+  ).liveVoiceEnabled = liveVoiceEnabled;
+  (
+    app.locals as {
+      liveVoiceEnabled?: boolean;
+      liveVoiceSurfaceAvailable?: boolean;
+    }
+  ).liveVoiceSurfaceAvailable = liveVoiceSurfaceAvailable;
+  const resolveLiveCredential = () => {
+    let settings;
+    try {
+      settings = loadLiveSettings();
+    } catch {
+      throw new LiveProviderConfigError(
+        'Live provider settings could not be loaded.',
+      );
+    }
+    return resolveLiveProviderCredential(settings);
+  };
+  const liveCoordinator =
+    deps.liveCoordinator ??
+    new LiveHostCoordinator({
+      shortcut: liveConfigAtBoot?.shortcut,
+      getProviderReadiness: () => {
+        try {
+          resolveLiveCredential();
+          return { state: 'ready' };
+        } catch (error) {
+          return {
+            state: 'unavailable',
+            blocker: 'provider_config',
+            message:
+              error instanceof LiveProviderConfigError &&
+              error.message === 'Live Voice is disabled.'
+                ? 'Live Voice is disabled in settings.'
+                : 'Live provider configuration is incomplete.',
+          };
+        }
+      },
+    });
+  liveCoordinator.setAppshotReadiness(
+    liveVoiceEnabled && deps.liveConversationWorkspace
+      ? {
+          state: 'checking',
+          message: 'Checking the dedicated Live Appshot channel.',
+        }
+      : {
+          state: 'unavailable',
+          message: 'The Live Appshot channel is unavailable.',
+        },
+  );
+  let liveRuntime: WorkspaceRuntime | undefined;
+  let liveRuntimePromise: Promise<WorkspaceRuntime> | undefined;
+  let liveRuntimeBootPromise: Promise<void> | undefined;
+  let liveAppshotChannelPromise: Promise<void> | undefined;
+  let liveCoordinatorSealed = false;
+  const bindLiveAppshotHandler = (runtime: WorkspaceRuntime): void => {
+    if (liveCoordinatorSealed) {
+      throw new Error('Live Voice is shutting down.');
+    }
+    const setHandler = runtime.bridge.setLiveScreenContextCaptureHandler;
+    if (!setHandler) {
+      throw new Error('Live conversation runtime has no Appshot channel.');
+    }
+    setHandler.call(runtime.bridge, ({ callerSessionId }) =>
+      liveCoordinator.captureScreenContext(callerSessionId),
+    );
+    const setTaskHandler = runtime.bridge.setLiveTaskToolRequestHandler;
+    if (!setTaskHandler) {
+      throw new Error('Live conversation runtime has no task-tool channel.');
+    }
+    setTaskHandler.call(runtime.bridge, (info) => liveTaskService.handle(info));
+    const setSpeakHandler = runtime.bridge.setLiveSpeakToUserHandler;
+    if (!setSpeakHandler) {
+      throw new Error('Live conversation runtime has no speech channel.');
+    }
+    setSpeakHandler.call(runtime.bridge, ({ callerSessionId, message }) =>
+      liveSessionCoordinator.speakToUser(callerSessionId, message),
+    );
+  };
+  const ensureLiveConversationRuntime = (): Promise<WorkspaceRuntime> => {
+    if (liveCoordinatorSealed) {
+      return Promise.reject(new Error('Live Voice is shutting down.'));
+    }
+    if (liveRuntimePromise) return liveRuntimePromise;
+    const pending = (async (): Promise<WorkspaceRuntime> => {
+      const conversationWorkspace = deps.liveConversationWorkspace;
+      const runtimePublisher = workspaceManagementHandle;
+      if (!conversationWorkspace || !runtimePublisher) {
+        throw new Error('Live conversation runtime is unavailable.');
+      }
+      const root = await conversationWorkspace.revalidate();
+      if (liveRuntime) {
+        await conversationWorkspace.assertExactRoot(liveRuntime.workspaceCwd);
+        const entry = workspaceRegistry.getEntryByWorkspaceCwd(
+          root.canonicalRoot,
+        );
+        if (
+          entry?.state !== 'active' ||
+          entry.current?.runtime !== liveRuntime ||
+          liveRuntime.provenance !== 'live-conversation' ||
+          !liveRuntime.trusted ||
+          liveRuntime.removable !== false
+        ) {
+          throw new Error(
+            'Live conversation runtime is no longer an active owned runtime.',
+          );
+        }
+        bindLiveAppshotHandler(liveRuntime);
+        return liveRuntime;
+      }
+      const existing = workspaceRegistry.getByWorkspaceCwd(root.canonicalRoot);
+      if (existing) {
+        if (
+          existing.provenance !== 'live-conversation' ||
+          !existing.trusted ||
+          existing.removable !== false
+        ) {
+          throw new Error(
+            'Live conversation root is already registered without Live provenance.',
+          );
+        }
+        await conversationWorkspace.assertExactRoot(existing.workspaceCwd);
+        liveRuntime = existing;
+        bindLiveAppshotHandler(existing);
+        return existing;
+      }
+      const created = await runtimePublisher.publishOwnedRuntime(
+        root.canonicalRoot,
+        'live-conversation',
+        async (candidate) => {
+          await conversationWorkspace.assertExactRoot(candidate.workspaceCwd);
+          if (
+            candidate.provenance !== 'live-conversation' ||
+            !candidate.trusted ||
+            candidate.removable !== false
+          ) {
+            throw new Error(
+              'Live conversation runtime failed its ownership gate.',
+            );
+          }
+        },
+      );
+      liveRuntime = created;
+      bindLiveAppshotHandler(created);
+      invalidateServeFeaturesCache();
+      return created;
+    })().finally(() => {
+      if (liveRuntimePromise === pending) liveRuntimePromise = undefined;
+    });
+    liveRuntimePromise = pending;
+    return pending;
+  };
+  const verifyLiveAppshotChannel = (): Promise<void> => {
+    if (liveAppshotChannelPromise) return liveAppshotChannelPromise;
+    const pending = ensureLiveConversationRuntime()
+      .then(() => {
+        if (!liveCoordinatorSealed) {
+          liveCoordinator.setAppshotReadiness({ state: 'ready' });
+        }
+      })
+      .catch(() => {
+        if (!liveCoordinatorSealed) {
+          liveCoordinator.setAppshotReadiness({
+            state: 'unavailable',
+            message: 'The dedicated Live Appshot channel is unavailable.',
+          });
+        }
+      })
+      .finally(() => {
+        if (liveAppshotChannelPromise === pending) {
+          liveAppshotChannelPromise = undefined;
+        }
+      });
+    liveAppshotChannelPromise = pending;
+    return pending;
+  };
+  const liveTaskService = new LiveTaskService({
+    workspaceRegistry,
+    ensureConversationRuntime: ensureLiveConversationRuntime,
+    materializeConversationDirectory: async (sessionId) => {
+      const conversationWorkspace = deps.liveConversationWorkspace;
+      if (!conversationWorkspace) {
+        throw new Error('Live conversation workspace is unavailable.');
+      }
+      return conversationWorkspace.materializeConversationDirectory(sessionId);
+    },
+    discardEmptyConversationDirectory: async (sessionId) => {
+      const conversationWorkspace = deps.liveConversationWorkspace;
+      if (!conversationWorkspace) return false;
+      return conversationWorkspace.discardEmptyConversationDirectory(sessionId);
+    },
+  });
+  const liveSessionCoordinator =
+    deps.liveSessionCoordinator ??
+    new LiveSessionCoordinator({
+      host: liveCoordinator,
+      ensureConversationRuntime: ensureLiveConversationRuntime,
+      workspaceRegistry,
+      getProviderCredential: resolveLiveCredential,
+      materializeConversationDirectory: async (sessionId) => {
+        const conversationWorkspace = deps.liveConversationWorkspace;
+        if (!conversationWorkspace) {
+          throw new Error('Live conversation workspace is unavailable.');
+        }
+        return conversationWorkspace.materializeConversationDirectory(
+          sessionId,
+        );
+      },
+      discardEmptyConversationDirectory: async (sessionId) => {
+        const conversationWorkspace = deps.liveConversationWorkspace;
+        if (!conversationWorkspace) return false;
+        return conversationWorkspace.discardEmptyConversationDirectory(
+          sessionId,
+        );
+      },
+      interruptTaskWaits: (callerSessionId) =>
+        liveTaskService.interruptWait(callerSessionId),
+    });
+  liveCoordinator.setHandlers({
+    onHostReady: () => {
+      if (!liveVoiceEnabled) return;
+      void verifyLiveAppshotChannel();
+    },
+    onStart: (call) => liveSessionCoordinator.start(call),
+    onStop: (call) => liveSessionCoordinator.stop(call),
+    onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
+  });
+  const publishLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
+    const updateDiscovery = (
+      app.locals as {
+        setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
+      }
+    ).setLiveDiscoveryEnabled;
+    if (!updateDiscovery) return;
+    await updateDiscovery(enabled).catch((error) => {
+      daemonLog?.warn(
+        `failed to update Live Host discovery: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  };
+  const setLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
+    if (enabled && !liveVoiceSurfaceAvailable) {
+      throw new Error('Live Voice is available only in WebShell on macOS.');
+    }
+    if (enabled === liveVoiceEnabled) return;
+    if (enabled) {
+      await ensureLiveConversationRuntime();
+      liveVoiceEnabled = true;
+      (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = true;
+      liveCoordinator.setAppshotReadiness({
+        state: 'checking',
+        message: 'Checking the dedicated Live Appshot channel.',
+      });
+      invalidateServeFeaturesCache();
+      await publishLiveVoiceEnabled(true);
+      void verifyLiveAppshotChannel();
+      return;
+    }
+    liveVoiceEnabled = false;
+    (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = false;
+    invalidateServeFeaturesCache();
+    try {
+      await liveCoordinator.deactivate();
+    } catch (error) {
+      liveVoiceEnabled = true;
+      (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled = true;
+      invalidateServeFeaturesCache();
+      throw error;
+    }
+    liveCoordinator.setAppshotReadiness({
+      state: 'unavailable',
+      message: 'The Live Appshot channel is unavailable.',
+    });
+    await publishLiveVoiceEnabled(false);
+  };
+  (
+    app.locals as {
+      setLiveVoiceEnabled?: (enabled: boolean) => Promise<void>;
+    }
+  ).setLiveVoiceEnabled = setLiveVoiceEnabled;
+  (
+    app.locals as {
+      liveCoordinator?: LiveHostCoordinator;
+      liveSessionCoordinator?: LiveSessionCoordinator;
+      stopLiveCoordinator?: () => void;
+      sealAndWaitLiveCoordinator?: () => Promise<void>;
+    }
+  ).liveCoordinator = liveCoordinator;
+  (
+    app.locals as {
+      liveCoordinator?: LiveHostCoordinator;
+      liveSessionCoordinator?: LiveSessionCoordinator;
+      stopLiveCoordinator?: () => void;
+      sealAndWaitLiveCoordinator?: () => Promise<void>;
+    }
+  ).liveSessionCoordinator = liveSessionCoordinator;
+  let liveCoordinatorStopped = false;
+  const stopLiveCoordinator = () => {
+    liveCoordinatorSealed = true;
+    if (liveCoordinatorStopped) return;
+    liveCoordinatorStopped = true;
+    liveRuntime?.bridge.setLiveScreenContextCaptureHandler?.(undefined);
+    liveRuntime?.bridge.setLiveTaskToolRequestHandler?.(undefined);
+    liveRuntime?.bridge.setLiveSpeakToUserHandler?.(undefined);
+    liveSessionCoordinator.dispose();
+    liveCoordinator.dispose();
+  };
+  (
+    app.locals as {
+      stopLiveCoordinator?: () => void;
+    }
+  ).stopLiveCoordinator = stopLiveCoordinator;
+  (
+    app.locals as {
+      sealAndWaitLiveCoordinator?: () => Promise<void>;
+    }
+  ).sealAndWaitLiveCoordinator = async () => {
+    stopLiveCoordinator();
+    await Promise.all([
+      liveRuntimePromise?.catch(() => undefined),
+      liveAppshotChannelPromise?.catch(() => undefined),
+    ]);
+  };
+  if (deps.workspaceTrustHotReloadAvailable === true) {
+    (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
+      primaryRouteFileSystemFactory;
+  }
   const workspaceGitState = new WorkspaceGitState();
   (app.locals as { stopWorkspaceGitState?: () => void }).stopWorkspaceGitState =
     () => workspaceGitState.dispose();
@@ -950,7 +1516,7 @@ export function createServeApp(
     }
   ).stopWorkspaceGitStateForWorkspace = (workspaceCwd) =>
     workspaceGitState.disposeWorkspace(workspaceCwd);
-  const workspaceQualifiedAcpEnabled = resolveAcpHttpEnabled();
+  const workspaceQualifiedAcpEnabled = acpHttpEnabledAtBoot;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -1005,7 +1571,9 @@ export function createServeApp(
   // API calls still carry the bearer (getDaemonAuthHeaders) and every API
   // route below stays token-gated. The SPA deep-link fallback is registered
   // LATER (after all API routes, see mountWebShellSpaFallback) so authed
-  // routes win over the shell. The assets dir is resolved by the caller
+  // routes win over the shell. Exact `/session/:id` document navigations are
+  // mounted here too because a browser refresh cannot attach the bearer header
+  // before the shell loads. The assets dir is resolved by the caller
   // (runQwenServe) and injected via deps.webShellDir; `--no-web` sets
   // opts.serveWebShell=false to opt out.
   const webShellDir =
@@ -1158,8 +1726,14 @@ export function createServeApp(
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
+    getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
   });
 
+  if (liveVoiceEnabled) {
+    app.use('/capabilities', (_req, _res, next) => {
+      void (liveRuntimeBootPromise ?? Promise.resolve()).then(() => next());
+    });
+  }
   registerCapabilitiesRoutes(app, {
     qwenCodeVersion: deps.qwenCodeVersion,
     mode: opts.mode,
@@ -1173,12 +1747,78 @@ export function createServeApp(
     languageCodes,
   });
 
+  if (liveVoiceSurfaceAvailable) {
+    registerLiveRoutes(app, {
+      coordinator: liveCoordinator,
+      mutate,
+      ...(deps.persistSetting
+        ? {
+            persistShortcut: async (shortcut: string) => {
+              const assertGenerationOpen =
+                capturePrimaryGenerationAssertion?.() ?? (() => {});
+              await deps.persistSetting!(
+                primaryBoundWorkspace,
+                SettingScope.User,
+                'experimental.liveVoice.shortcut',
+                shortcut,
+                assertGenerationOpen,
+              );
+            },
+          }
+        : {}),
+    });
+    const liveHostInstaller =
+      deps.liveHostInstaller ??
+      new LiveHostInstaller({ platform: runtimePlatform });
+    const liveSetupController = new LiveSetupController({
+      loadSettings: loadLiveSettings,
+      coordinator: liveCoordinator,
+      installer: liveHostInstaller,
+      getEnabled: () => liveVoiceEnabled,
+      setEnabled: setLiveVoiceEnabled,
+      ...(deps.persistSettings
+        ? {
+            persistSettings: async (writes) => {
+              const assertGenerationOpen =
+                capturePrimaryGenerationAssertion?.() ?? (() => {});
+              await deps.persistSettings!(
+                primaryBoundWorkspace,
+                writes,
+                assertGenerationOpen,
+              );
+            },
+          }
+        : {}),
+      ...(deps.validateLiveProviderCredential
+        ? {
+            validateCredential: deps.validateLiveProviderCredential,
+          }
+        : {}),
+    });
+    (
+      app.locals as { liveSetupController?: LiveSetupController }
+    ).liveSetupController = liveSetupController;
+    registerLiveSetupRoutes(app, {
+      controller: liveSetupController,
+      mutate,
+    });
+  }
+
+  registerChannelNotifyRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    deliverChannelMessage: deps.deliverChannelMessage,
+  });
+
   registerWorkspaceStatusRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
     mutate,
     sendBridgeError,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
@@ -1189,6 +1829,8 @@ export function createServeApp(
     bridge: primaryBridge,
     gitState: workspaceGitState,
     sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedGitRoutes(app, {
     workspaceRegistry,
@@ -1198,6 +1840,8 @@ export function createServeApp(
   registerWorkspaceGitDiffRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedGitDiffRoutes(app, {
     workspaceRegistry,
@@ -1211,6 +1855,23 @@ export function createServeApp(
     workspaceRegistry,
     sendBridgeError,
   });
+  registerWorkspaceGitBranchRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitBranchRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
 
   // Workspace memory + agents CRUD routes.
   mountWorkspaceMemoryRoutes(app, {
@@ -1219,6 +1880,8 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   mountWorkspaceQualifiedMemoryRoutes(app, {
     workspaceRegistry,
@@ -1232,6 +1895,64 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  mountWorkspaceQualifiedMemoryRememberRoutes(app, {
+    mutate,
+    resolveRouteDeps: (req, res, { creating, kind }) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res))
+        return null;
+      // The primary lane is owned locally (the same instance the ACP handle
+      // uses), so the qualified route stays available for the primary even when
+      // ACP HTTP is disabled. Secondary lanes live inside the ACP handle; reads
+      // use a non-creating lookup so a status poll never allocates a mount.
+      const handle = acpHandleRef.current;
+      const lane = runtime.primary
+        ? workspaceRememberLane
+        : creating
+          ? handle?.ensureWorkspaceRememberLane(runtime.workspaceId)
+          : handle?.getWorkspaceRememberLane(runtime.workspaceId);
+      if (!lane) {
+        if (!handle) {
+          // ACP HTTP disabled: no secondary lane can ever exist, so report a
+          // permanent failure instead of a retryable 503 + Retry-After.
+          res.status(501).json({
+            error: 'Workspace-qualified memory is not enabled on this daemon.',
+            code: 'workspace_memory_unavailable',
+            workspaceCwd: runtime.workspaceCwd,
+            workspaceId: runtime.workspaceId,
+          });
+        } else if (!creating) {
+          // No mount means no tasks: answer like the per-kind GET handler.
+          res.status(404).json({
+            error: `Workspace memory ${kind} task not found`,
+            code: `${kind}_task_not_found`,
+          });
+        } else {
+          // Handle present but the lane is unavailable (disposed/draining):
+          // a retry may succeed.
+          sendWorkspaceRuntimeUnavailable(res, runtime);
+        }
+        return null;
+      }
+      return {
+        bridge: runtime.bridge,
+        lane,
+        parseClientId: parseClientIdHeader,
+        safeBody,
+        isWorkspaceTrusted: () => runtime.trusted,
+        captureGenerationAssertion: () => {
+          const guard = runtime.generationGuard;
+          return guard ? () => guard.assertOpen() : undefined;
+        },
+      };
+    },
   });
   mountWorkspaceAgentsRoutes(app, {
     bridge: primaryBridge,
@@ -1239,6 +1960,8 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   mountWorkspaceGenerationRoutes(app, {
     bridge: primaryBridge,
@@ -1259,6 +1982,7 @@ export function createServeApp(
     workspace: primaryWorkspace,
     mutate,
     sendBridgeError,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedDiagnosticStatusRoutes(app, {
     workspaceRegistry,
@@ -1273,6 +1997,10 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
     workspaceRegistry,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     ...(deps.maxExtensionOperationHistory === undefined
       ? {}
       : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
@@ -1303,6 +2031,10 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     env: primaryRuntimeEffectiveEnv,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -1310,6 +2042,14 @@ export function createServeApp(
   registerWorkspaceTrustRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,
+    workspaceRegistry,
+    workspaceTrustHotReloadAvailable:
+      deps.workspaceTrustHotReloadAvailable === true,
+    ...(deps.getWorkspaceTrustPolicySnapshot
+      ? {
+          getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+        }
+      : {}),
     mutate,
     safeBody,
     parseAndValidateClientId: (req, res) =>
@@ -1317,6 +2057,13 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedTrustRoutes(app, {
     workspaceRegistry,
+    workspaceTrustHotReloadAvailable:
+      deps.workspaceTrustHotReloadAvailable === true,
+    ...(deps.getWorkspaceTrustPolicySnapshot
+      ? {
+          getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+        }
+      : {}),
     mutate,
     safeBody,
   });
@@ -1328,6 +2075,9 @@ export function createServeApp(
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
     managedScratchRoot: deps.managedScratchRoot,
+    validateWorkspaceRuntimeForPublication:
+      deps.validateWorkspaceRuntimeForPublication,
+    runWorkspaceTrustOperation: deps.runWorkspaceTrustOperation,
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
@@ -1335,6 +2085,15 @@ export function createServeApp(
   (
     app.locals as { workspaceManagementHandle?: WorkspaceManagementHandle }
   ).workspaceManagementHandle = workspaceManagementHandle;
+  if (liveVoiceEnabled) {
+    // Publish the daemon-owned runtime at boot so persisted Live sessions are
+    // visible in the Web Shell even before the native Host connects. Runtime
+    // construction is lazy with respect to ACP/Appshot/provider initialization;
+    // Host readiness remains the only path that starts those probes.
+    liveRuntimeBootPromise = ensureLiveConversationRuntime()
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
   (
     app.locals as {
       workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
@@ -1359,6 +2118,8 @@ export function createServeApp(
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+      captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
@@ -1367,6 +2128,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      includeLiveVoice: liveVoiceSurfaceAvailable,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -1380,6 +2142,8 @@ export function createServeApp(
   }
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     mutate,
     safeBody,
     workspace: primaryWorkspace,
@@ -1398,8 +2162,12 @@ export function createServeApp(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.voiceTranscriber,
-    env: getRuntimeEffectiveEnv(primaryRuntime.env),
-    acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
+    env: primaryRuntimeEffectiveEnv,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    acquireVoiceLease: acquirePrimaryVoiceLease,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
@@ -1419,6 +2187,8 @@ export function createServeApp(
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+      captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,
       safeBody,
       persistSettings: deps.persistSettings,
@@ -1435,7 +2205,9 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
-    env: getRuntimeEffectiveEnv(primaryRuntime.env),
+    env: primaryRuntimeEffectiveEnv,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     // UI-server discovery uses the daemon's workspace MCP status, which
     // includes servers registered at runtime.
     getMcpServers: async () => {
@@ -1457,9 +2229,11 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     allowPrivateAuthBaseUrl: opts.allowPrivateAuthBaseUrl === true,
     installAuthProvider: deps.installAuthProvider,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
   const virtualSubagentSessions = new VirtualSubagentSessions();
+  const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
 
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -1469,10 +2243,21 @@ export function createServeApp(
     mutate,
     sendBridgeError,
     daemonLog,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
     languageCodes,
     virtualSubagentSessions,
+    isLiveSessionActive: (sessionId: string) =>
+      liveCoordinator.isActiveSession(sessionId),
+    ...(liveConversationWorkspaceForRoutes
+      ? {
+          materializeLiveConversationDirectory: (sessionId: string) =>
+            liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+              sessionId,
+            ),
+        }
+      : {}),
   });
 
   registerWorkspaceMcpControlRoutes(app, {
@@ -1482,6 +2267,8 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
@@ -1537,9 +2324,22 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
     });
   }
+  if (deps.channelManagementService) {
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime,
+      workspaceRegistry,
+      resolveService: deps.channelManagementService,
+      mutate,
+      safeBody,
+      parseAndValidateClientId: (req, res, runtime) =>
+        parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+    });
+  }
   registerWorkspaceChannelObservedContactRoutes(app, {
     primaryWorkspace: primaryBoundWorkspace,
     workspaceRegistry,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceLifecycleRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -1548,6 +2348,8 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
     invalidateServeFeaturesCache,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
@@ -1561,6 +2363,8 @@ export function createServeApp(
   registerWorkspaceToolsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     mutate,
     safeBody,
     sendBridgeError,
@@ -1603,7 +2407,13 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
-    bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
+    bridge: deps.manageScheduledTaskSessions ? primaryBridge : undefined,
+    getRuntime: () =>
+      workspaceRegistry.primaryEntry.state === 'active'
+        ? workspaceRegistry.primaryEntry.current?.runtime
+        : undefined,
+    cleanupSession,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
   // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
@@ -1612,6 +2422,8 @@ export function createServeApp(
   registerGoalsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
@@ -1623,6 +2435,8 @@ export function createServeApp(
     mutate,
     safeBody,
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+    cleanupSession,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -1633,6 +2447,25 @@ export function createServeApp(
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
+    const registerScheduledTaskAuthorizations = (
+      workspaceCwd: string,
+      tasks: readonly DurableCronTask[],
+    ) => {
+      const authorizations = deps.channelDeliveryAuthorizations;
+      if (!authorizations) return;
+      for (const task of tasks) {
+        if (!task.delivery || !task.sessionId) continue;
+        authorizations.registerScheduledTask(workspaceCwd, {
+          sessionId: task.sessionId,
+          taskId: task.id,
+          target: task.delivery.target,
+          recurring: task.recurring,
+          ...(typeof task.lastFiredAt === 'number'
+            ? { lastFiredAt: task.lastFiredAt }
+            : {}),
+        });
+      }
+    };
     // Keepalive: keep task sessions resident so their in-child schedulers keep
     // ticking rather than being idle-reaped, AND revive a re-enabled bound
     // session the reaper already let go. The revive loop is needed even when the
@@ -1647,26 +2480,27 @@ export function createServeApp(
     // restart (a bound task fires only in its own session, which nothing else
     // reloads). Fire-and-forget so it never delays the server coming up; a
     // no-op when there are no bound tasks. Deliberately not awaited.
-    const rehydrateWorkspace = (
-      taskBridge: AcpSessionBridge,
-      workspaceCwd: string,
-    ) => {
-      void rehydrateScheduledTaskSessions({
-        bridge: taskBridge,
-        boundWorkspace: workspaceCwd,
-        onError: (sessionId, err) => {
-          process.stderr.write(
-            `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            }\n`,
-          );
-        },
-        // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
-        // catches readCronTasks failures and per-session load errors internally
-        // (returning { loaded, failed }), so this only guards an unexpected throw
-        // from the function entry itself. Log rather than swallow it — a silent
-        // failure here leaves every bound task dormant with no diagnostic.
-      }).catch((err) => {
+    const rehydrateWorkspace = (runtime: WorkspaceRuntime) => {
+      void runWithWorkspaceRuntimeStorage(runtime, () =>
+        rehydrateScheduledTaskSessions({
+          bridge: runtime.bridge,
+          boundWorkspace: runtime.workspaceCwd,
+          onTasksRead: (tasks) =>
+            registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
+          onError: (sessionId, err) => {
+            process.stderr.write(
+              `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
+            );
+          },
+          // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+          // catches readCronTasks failures and per-session load errors internally
+          // (returning { loaded, failed }), so this only guards an unexpected throw
+          // from the function entry itself. Log rather than swallow it — a silent
+          // failure here leaves every bound task dormant with no diagnostic.
+        }),
+      ).catch((err) => {
         process.stderr.write(
           `qwen serve: unexpected scheduled-task rehydration failure: ${
             err instanceof Error ? err.message : String(err)
@@ -1675,20 +2509,26 @@ export function createServeApp(
       });
     };
 
-    // Every registered workspace gets its own keepalive + rehydration against
-    // its own cron file + bridge, so a bound task created through the
-    // workspace-qualified route fires (and survives a restart) exactly like a
-    // primary-workspace one — otherwise a secondary workspace's tasks would be
-    // written to disk but silently never revived.
+    // Every trusted workspace gets its own keepalive + rehydration against its
+    // own cron file + bridge.
     const keepaliveStops = new Map<string, () => void>();
     const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
+      if (runtime.provenance === 'live-conversation') return;
+      const trusted = runtime.primary
+        ? isPrimaryWorkspaceTrusted()
+        : runtime.trusted;
+      if (!trusted) return;
       if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
+        onTasksRead: (tasks) =>
+          registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
-      rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
+      rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
     for (const runtime of workspaceRegistry.list()) {
@@ -1747,11 +2587,13 @@ export function createServeApp(
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
+    enabled: acpHttpEnabledAtBoot,
     boundWorkspace: primaryBoundWorkspace,
-    daemonEnv,
+    daemonEnv: daemonEnvAtBoot,
     // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
     // mounts a per-runtime ACP dispatcher for each registered workspace.
     workspaceRegistry,
+    isPrimaryWorkspaceTrusted,
     archiveCoordinator,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,
@@ -1767,6 +2609,18 @@ export function createServeApp(
     hostname: opts.hostname,
     sessionShellCommandEnabled,
     workspaceRememberLane,
+    ...(liveConversationWorkspaceForRoutes
+      ? {
+          liveSessionIsolation: {
+            materializeConversationDirectory: (sessionId: string) =>
+              liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+                sessionId,
+              ),
+            isSessionActive: (sessionId: string) =>
+              liveCoordinator.isActiveSession(sessionId),
+          },
+        }
+      : {}),
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
@@ -1792,17 +2646,37 @@ export function createServeApp(
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.
     extraWsRoutes: [
+      ...(liveVoiceSurfaceAvailable
+        ? [
+            {
+              path: '/live/host',
+              onConnection: (ws, req) => {
+                if (!liveVoiceEnabled) {
+                  ws.close(4003, 'Live Voice is disabled.');
+                  return;
+                }
+                const header = req.headers['x-qwen-live-nonce'];
+                liveCoordinator.attachHost(
+                  ws,
+                  typeof header === 'string' ? header : undefined,
+                );
+              },
+            } satisfies ExtraWsRoute,
+          ]
+        : []),
       {
         path: '/voice/stream',
         onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
-          env: getRuntimeEffectiveEnv(primaryRuntime.env),
-          acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
+          env: primaryRuntimeEffectiveEnv,
+          isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+          acquireVoiceLease: acquirePrimaryVoiceLease,
         }),
       },
     ],
     workspaceVoiceConnection: (runtime, ws, req) =>
       createVoiceWsConnectionHandler(runtime.workspaceCwd, {
         env: getRuntimeEffectiveEnv(runtime.env),
+        isWorkspaceTrusted: () => runtime.trusted,
         acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
       })(ws, req),
   });

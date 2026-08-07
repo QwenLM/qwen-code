@@ -418,6 +418,39 @@ describe('MemoryManager', () => {
       await expect(fs.access(skillFilePath)).rejects.toThrow();
     });
 
+    it('stages a new skill whose name exists only in the archive', async () => {
+      const archivedManifest = path.join(
+        projectRoot,
+        '.qwen',
+        'archived-skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await fs.mkdir(path.dirname(archivedManifest), { recursive: true });
+      await fs.writeFile(archivedManifest, 'archived');
+      const mgr = new MemoryManager();
+      const record = await mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      }).promise!;
+
+      const pendingSkills = record.metadata?.['pendingSkills'] as Array<{
+        stagedManifestPath: string;
+      }>;
+      expect(pendingSkills).toHaveLength(1);
+      await expect(fs.access(skillFilePath)).rejects.toThrow();
+      await expect(
+        fs.access(pendingSkills[0]!.stagedManifestPath),
+      ).resolves.toBeUndefined();
+      await expect(fs.access(archivedManifest)).resolves.toBeUndefined();
+    });
+
     it('leaves the skill in place and sets no pendingSkills when confirmBeforePersist is false', async () => {
       const mgr = new MemoryManager();
       const result = mgr.scheduleSkillReview({
@@ -1635,20 +1668,18 @@ describe('MemoryManager', () => {
     });
   });
 
-  describe('appendToUserMemory', () => {
+  describe('buildAutoMemoryPrompt', () => {
     it('forwards options to buildManagedAutoMemoryPrompt', () => {
       const mgr = new MemoryManager();
 
       // Without forceFullProtocol (all indexes empty → condensed path)
-      const condensed = mgr.appendToUserMemory(
-        '',
+      const condensed = mgr.buildAutoMemoryPrompt(
         '/project/.qwen/memory',
         null,
       );
 
       // With forceFullProtocol → full verbose path
-      const full = mgr.appendToUserMemory(
-        '',
+      const full = mgr.buildAutoMemoryPrompt(
         '/project/.qwen/memory',
         null,
         undefined,

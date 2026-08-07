@@ -163,6 +163,336 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `extensions-manager-${theme}`);
     });
 
+    test(`Channel manager`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'dingtalk',
+            displayName: 'DingTalk',
+            manageable: true,
+            fields: [
+              {
+                key: 'clientId',
+                label: 'Client ID',
+                kind: 'string',
+                required: true,
+                envResolvable: true,
+              },
+              {
+                key: 'clientSecret',
+                label: 'Client Secret',
+                kind: 'secret',
+                required: true,
+                envResolvable: true,
+              },
+            ],
+          },
+          {
+            type: 'wecom',
+            displayName: 'WeCom',
+            manageable: true,
+            fields: [
+              {
+                key: 'botId',
+                label: 'Bot ID',
+                kind: 'string',
+                required: true,
+              },
+              {
+                key: 'secret',
+                label: 'Bot Secret',
+                kind: 'secret',
+                required: true,
+              },
+              {
+                key: 'wsUrl',
+                label: 'WebSocket URL',
+                kind: 'string',
+                required: false,
+                envResolvable: true,
+              },
+            ],
+          },
+          {
+            type: 'feishu',
+            displayName: 'Feishu',
+            manageable: true,
+            fields: [
+              {
+                key: 'clientId',
+                label: 'App ID',
+                kind: 'string',
+                required: true,
+              },
+              {
+                key: 'clientSecret',
+                label: 'App Secret',
+                kind: 'secret',
+                required: true,
+              },
+            ],
+          },
+          {
+            type: 'telegram',
+            displayName: 'Telegram',
+            manageable: true,
+            fields: [],
+          },
+        ],
+        channels: {
+          revision: '1',
+          instances: {
+            dingtalk: {
+              name: 'dingtalk',
+              config: {
+                type: 'dingtalk',
+                clientId: 'ding-visual-app',
+                senderPolicy: 'pairing',
+              },
+              secrets: {
+                clientSecret: { present: true, source: 'literal' },
+              },
+              startsWithServe: true,
+              runtime: { state: 'connected' },
+            },
+            feishu: {
+              name: 'release-notifier',
+              config: { type: 'feishu' },
+              secrets: {
+                clientSecret: { present: true, source: 'environment' },
+              },
+              startsWithServe: false,
+              runtime: {
+                state: 'error',
+                lastError: 'The app credentials were rejected.',
+              },
+            },
+            hidden: {
+              name: 'hidden-telegram',
+              config: { type: 'telegram' },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+        pairingRequests: {
+          dingtalk: [
+            {
+              senderId: 'user-42',
+              senderName: 'Ada',
+              code: 'ABCD1234',
+              createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
+            },
+            {
+              senderId: 'user-91',
+              senderName: 'Lin',
+              code: 'WXYZ5678',
+              createdAt: Date.parse('2026-07-28T00:04:00.000Z'),
+            },
+          ],
+        },
+        pairingApprovals: {
+          dingtalk: ['user-18', 'release-manager'],
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channels', level: 1 }),
+      ).toBeVisible();
+      const configuredChannels = page.getByLabel('Configured channels');
+      await expect(
+        configuredChannels.getByText('dingtalk', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        configuredChannels.getByText('release-notifier', { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText('hidden-telegram')).toHaveCount(0);
+      await captureScreenshot(page, `channel-manager-${theme}`);
+      await page.getByRole('button', { name: 'Configure DingTalk' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Configure DingTalk' }),
+      ).toBeVisible();
+      await captureScreenshot(page, `channel-editor-${theme}`);
+      await page.keyboard.press('Escape');
+      await page.getByRole('button', { name: 'Edit dingtalk' }).click();
+      const editHeading = page.getByRole('heading', {
+        name: 'Edit DingTalk',
+      });
+      await expect(editHeading).toBeVisible();
+      await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
+      await expect(page.getByText('user-18', { exact: true })).toBeVisible();
+      await expect(
+        page.getByText('release-manager', { exact: true }),
+      ).toBeVisible();
+      await editHeading.click();
+      await page
+        .getByRole('heading', { name: 'Pairing approvals' })
+        .scrollIntoViewIfNeeded();
+      await captureScreenshot(page, `channel-editor-existing-${theme}`);
+    });
+
+    test(`GitHub channel editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: { revision: '1', instances: {} },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channels', level: 1 }),
+      ).toBeVisible();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `github-channel-editor-${theme}`);
+      await page.getByLabel('Instance name').fill('github-bot');
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `github-channel-editor-credential-${theme}`,
+      );
+      await page
+        .getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        })
+        .click();
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toHaveCount(0);
+      await expect
+        .poll(() =>
+          daemon.requests.filter(
+            (request) =>
+              request.method === 'PUT' &&
+              request.path.endsWith('/channels/github-bot'),
+          ),
+        )
+        .toEqual([
+          expect.objectContaining({
+            body: expect.objectContaining({
+              config: expect.objectContaining({
+                type: 'github',
+                useLocalGh: true,
+              }),
+            }),
+          }),
+        ]);
+    });
+
     test(`mermaid diagram`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
@@ -394,12 +724,14 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
-    test(`worktree empty state`, async ({ page }, testInfo) => {
-      // The new-session empty state offers worktree isolation only when the
-      // workspace the next session would use is trusted AND a git repo (the
-      // daemon rejects worktree creation otherwise). Every other scenario lands
-      // on /session/:id, so this is the suite's only view of the empty state —
-      // without it the toggle is invisible to the before/after preview.
+    test(`git mode selector`, async ({ page }, testInfo) => {
+      // The new-session composer offers a git-mode selector (current branch /
+      // new branch / worktree) only when the workspace the next session would
+      // use is trusted AND a git repo, and App.tsx wires the intent props only
+      // while no session is loaded. So this empty state is the suite's only
+      // view of the popover — without a scenario the whole selector (and the
+      // empty-state composer around it) is invisible to the before/after
+      // preview.
       const workspaceCwd = '/tmp/qwen-web-shell-e2e';
       const scenario = createWebShellDaemonScenario({
         workspaceCwd,
@@ -413,19 +745,39 @@ for (const theme of THEMES) {
       await installScenario(page, scenario, resolveBaseURL(testInfo));
       await gotoNewSession(page, theme);
 
-      const toggle = page.locator('[data-testid="worktree-welcome-toggle"]');
-      await expect(toggle).toBeVisible();
-      await captureScreenshot(page, `worktree-empty-state-${theme}`);
+      // Closed: the composer chip advertising the current git mode.
+      const chip = page.locator('[data-testid="git-mode-chip"]');
+      await expect(chip).toBeVisible();
+      await captureScreenshot(page, `git-mode-chip-${theme}`);
 
-      // Enabling it swaps the toggle for the pending-worktree badge — the state
-      // the next session would be created in — with a cancel affordance. Assert
-      // the swap so a regression that drops the enabled state fails here, not
-      // only in the (visually reviewed) screenshot.
-      await toggle.click();
+      // Open: the three-mode popover (current / new branch / worktree). Assert
+      // an option is visible (not just the chip's aria-label) so a regression
+      // that fails to open the popover fails here, not only in the visually
+      // reviewed screenshot.
+      await chip.click();
       await expect(
-        page.locator('[data-testid="worktree-welcome-cancel"]'),
+        page.getByText('Current branch', { exact: true }),
       ).toBeVisible();
-      await captureScreenshot(page, `worktree-empty-state-enabled-${theme}`);
+      await captureScreenshot(page, `git-mode-popover-${theme}`);
+
+      // #7668 keeps this sub-state open. Match the option by role — its label
+      // spans a name + description span, so getByText is ambiguous.
+      const popover = page.locator('[data-slot="popover-content"]');
+      await popover.getByRole('radio', { name: /New branch/ }).click();
+      const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
+      await expect(branchInput).toBeVisible();
+      await branchInput.fill('feat/my-feature');
+      // Regression guard for #7668: the input flashes visible on click, but the
+      // pre-fix dismissal landed ~100ms later, so an immediate assertion still
+      // passed. Settle past that window and re-assert, so a re-dismissal hard-fails
+      // here — mirroring the functional web-shell.git-mode.spec.ts.
+      await page.waitForTimeout(300);
+      await expect(popover).toBeVisible();
+      await expect(branchInput).toBeVisible();
+      await expect(
+        page.locator('[data-testid="git-mode-confirm-branch"]'),
+      ).toBeEnabled();
+      await captureScreenshot(page, `git-mode-branch-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {
@@ -485,6 +837,163 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-permission-panel]'),
       ).toBeVisible();
       await captureScreenshot(page, `permission-panel-${theme}`);
+    });
+
+    test(`code review artifact`, async ({ page }, testInfo) => {
+      // The dedicated code-review renderer is gated three ways: the
+      // `session_artifacts` capability, an artifact whose metadata marks it
+      // `code_review`, and a readable workspace file behind it. Without a
+      // scenario seeding all three, the whole detail view stays invisible to
+      // the before/after preview.
+      const reviewPath = '.qwen/reviews/pr-1234.json';
+      const reviewDocument = {
+        schemaVersion: 1,
+        target: 'local',
+        effort: 'high',
+        verdict: {
+          event: 'REQUEST_CHANGES',
+          verdictLine: 'Verdict: Request changes (1 Critical, 1 Suggestion)',
+          baseEvent: 'REQUEST_CHANGES',
+          cappedBy: ['Critical finding f-critical is unresolved'],
+          downgraded: false,
+          downgradedFrom: null,
+        },
+        findings: [
+          {
+            id: 'f-critical',
+            severity: 'Critical',
+            confidence: 'high',
+            source: 'review',
+            summary:
+              'Review verdict is reported even when the child process times out',
+            shortSummary: 'timeout treated as success',
+            failureScenario:
+              'When `review run` times out, the CLI still prints a verdict as if the review completed.',
+            suggestedFix:
+              'Fail closed when timedOut is true instead of reporting the verdict.',
+            category: 'correctness',
+            locations: [
+              { file: 'packages/cli/src/commands/review.ts', line: 412 },
+            ],
+            outcome: 'fixed',
+            outcomeNote: 'Timeouts now surface as incomplete.',
+          },
+          {
+            id: 'f-suggestion',
+            severity: 'Suggestion',
+            confidence: 'low',
+            source: 'lint',
+            summary:
+              'Artifact evidence links should render their file name only',
+            shortSummary: 'verbose evidence labels',
+            failureScenario:
+              'Long asset URLs overflow the finding card in narrow panels.',
+            locations: [
+              {
+                file: 'packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx',
+                line: 540,
+              },
+            ],
+            assets: [
+              'https://assets.example.com/reviews/pr-1234/f-suggestion.png',
+            ],
+          },
+        ],
+        counts: {
+          total: 2,
+          bySeverity: { Critical: 1, Suggestion: 1, 'Nice to have': 0 },
+          byConfidence: { high: 1, low: 1 },
+          byOutcome: { fixed: 1, skipped: 0, no_change_needed: 0 },
+          held: 0,
+        },
+        outcomesRecorded: true,
+        markdownReportPath: '.qwen/reviews/pr-1234.md',
+      };
+      const reviewDocumentJson = JSON.stringify(reviewDocument);
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'session_artifacts',
+          ],
+        },
+        events: [
+          userTextEvent('Review my changes and save the report.', { id: 1 }),
+          {
+            id: 2,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-record-review',
+                toolName: 'record_artifact',
+                title: 'record_artifact',
+                kind: 'other',
+                status: 'completed',
+                rawInput: {
+                  title: 'Code review result',
+                  workspacePath: reviewPath,
+                },
+                rawOutput: { recorded: true },
+              },
+            },
+          },
+          assistantTextEvent('Review saved to the workspace.', { id: 3 }),
+          turnCompleteEvent('prompt-review', { id: 4 }),
+        ],
+        artifacts: [
+          {
+            id: 'artifact-code-review',
+            kind: 'other',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Code review result',
+            workspacePath: reviewPath,
+            mimeType: 'application/json',
+            sizeBytes: reviewDocumentJson.length,
+            metadata: { artifactType: 'code_review', schemaVersion: 1 },
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            toolCallId: 'call-record-review',
+            toolName: 'record_artifact',
+          },
+        ],
+        workspaceFiles: { [reviewPath]: reviewDocumentJson },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // Open the artifact card the turn outputs render for the recorded
+      // artifact; the right panel then loads the workspace file and renders
+      // the dedicated detail view instead of the generic file preview.
+      await page
+        .locator('[data-web-shell-message-list]')
+        .getByRole('button', { name: 'Open', exact: true })
+        .click();
+      await expect(page.getByText('Authoritative verdict')).toBeVisible();
+      await expect(
+        page.getByText('Verdict: Request changes (1 Critical, 1 Suggestion)'),
+      ).toBeVisible();
+      await expect(
+        page.getByText(
+          'Review verdict is reported even when the child process times out',
+        ),
+      ).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-${theme}`);
     });
   });
 }

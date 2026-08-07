@@ -16,6 +16,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -33,6 +34,7 @@ import type {
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
+  DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
   PermissionResponse,
@@ -62,6 +64,12 @@ export interface DaemonConnectionState {
   workspaceCwd?: string;
   /** Current Git branch, short detached-HEAD hash, or undefined outside Git. */
   gitBranch?: string;
+  /**
+   * Last enriched working-tree summary for the current workspace, pushed by
+   * the daemon via `git_status_changed` (only set when the event's
+   * workspaceCwd matches this connection's workspace).
+   */
+  gitStatus?: DaemonWorkspaceGitStatus;
   commands?: DaemonCommandInfo[];
   skills?: string[];
   models?: DaemonModelInfo[];
@@ -272,6 +280,10 @@ export interface PendingPromptActionOptions {
   sessionId?: string;
 }
 
+export interface GetTasksActionOptions {
+  silent?: boolean;
+}
+
 export interface DaemonPromptImage {
   data: string;
   mimeType?: string;
@@ -287,6 +299,7 @@ export interface DaemonTodoItem {
   content: string;
   status: DaemonTodoStatus;
   priority?: DaemonTodoPriority;
+  blockedBy?: string[];
 }
 
 export interface DaemonTodoList {
@@ -294,6 +307,8 @@ export interface DaemonTodoList {
   toolCallId: string;
   title: string;
   status: string;
+  planId?: string;
+  sourceCallId?: string;
   items: DaemonTodoItem[];
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
 }
@@ -341,7 +356,11 @@ export interface DaemonSessionActions {
     sessionId: string,
     options?: { workspaceCwd?: string },
   ): Promise<void>;
-  reloadSession(signal: AbortSignal): Promise<void>;
+  /** `memory` replay is reserved for the provider's live-journal repair. */
+  reloadSession(
+    signal: AbortSignal,
+    options?: { replaySource?: 'configured' | 'memory' },
+  ): Promise<void>;
   resumeSession(
     sessionId: string,
     options?: { workspaceCwd?: string },
@@ -364,6 +383,8 @@ export interface DaemonSessionActions {
     workspaceCwd?: string;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
+    worktree?: { slug?: string };
+    branch?: { name: string };
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(): Promise<void>;
@@ -400,6 +421,10 @@ export interface DaemonSessionActions {
     message: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonMidTurnMessageResult>;
+  removeMidTurnMessage(
+    messageId: string,
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonRemoveMidTurnMessageResult>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonPendingPromptsResult>;
@@ -408,7 +433,7 @@ export interface DaemonSessionActions {
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
-  getTasks(): Promise<DaemonSessionTasksStatus>;
+  getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
   cancelTask(
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
@@ -475,4 +500,5 @@ export interface PendingSessionLoad {
   resolve: () => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;
+  replaySource?: 'configured' | 'memory';
 }

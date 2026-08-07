@@ -6,8 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  assembleSystemPrompt,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
@@ -165,6 +167,12 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('Keep it short and outcome-oriented');
     expect(prompt).toContain(
       'rather than one item per error, file, command, or minor edit',
+    );
+    expect(prompt).toContain(
+      'When an active Todo plan covers work delegated through top-level Agent calls',
+    );
+    expect(prompt).not.toContain(
+      'For complex work delegated through top-level Agent calls, create the relevant todo first',
     );
     expect(prompt).not.toContain('VERY frequently');
     expect(prompt).not.toContain('EXTREMELY helpful');
@@ -566,6 +574,35 @@ describe('Model-specific tool call formats', () => {
     vi.stubEnv('SANDBOX', undefined);
   });
 
+  it.each([
+    ['generic', 'gpt-4'],
+    ['qwen-coder', 'qwen3-coder-7b'],
+    ['qwen-vl', 'qwen-vl-max'],
+    ['gemma4', 'gemma-4'],
+  ])(
+    'reads the write target before establishing absence in the %s tool-call example',
+    (_style, model) => {
+      vi.mocked(isGitRepository).mockReturnValue(false);
+      const prompt = getCoreSystemPrompt(undefined, model);
+      const exampleStart = prompt.indexOf('user: Write tests for someFile.ts');
+      const exampleEnd = prompt.indexOf('</example>', exampleStart);
+      const example = prompt.slice(exampleStart, exampleEnd);
+      const targetPath = example.indexOf('/path/to/someFile.test.ts');
+      const targetReadCall = example.lastIndexOf('read_file', targetPath);
+      const absenceResult = example.indexOf(
+        'After read_file reports that /path/to/someFile.test.ts does not exist',
+      );
+      const writeCall = example.indexOf('write_file');
+
+      expect(exampleStart).toBeGreaterThanOrEqual(0);
+      expect(exampleEnd).toBeGreaterThan(exampleStart);
+      expect(targetReadCall).toBeGreaterThanOrEqual(0);
+      expect(targetPath).toBeGreaterThan(targetReadCall);
+      expect(absenceResult).toBeGreaterThan(targetPath);
+      expect(writeCall).toBeGreaterThan(absenceResult);
+    },
+  );
+
   it('should use XML format for qwen3-coder model', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const prompt = getCoreSystemPrompt(undefined, 'qwen3-coder-7b');
@@ -783,6 +820,27 @@ describe('getPlanModeSystemReminder', () => {
     const result2 = getPlanModeSystemReminder();
 
     expect(result1).toBe(result2);
+  });
+});
+
+describe('getManualPlanExitSystemReminder', () => {
+  it('should name the new mode and forbid exit_plan_mode', () => {
+    const result = getManualPlanExitSystemReminder('default');
+
+    expect(result).toBe(`<system-reminder>
+The approval mode changed outside the approved exit_plan_mode flow.
+The current approval mode is: default.
+Plan mode is no longer active. This notice supersedes any earlier reminder that Plan mode is active. Do not call exit_plan_mode; no plan approval is pending. Continue under the current mode's permissions and confirmation requirements.
+</system-reminder>`);
+  });
+
+  it('should render whichever mode the user switched to', () => {
+    expect(getManualPlanExitSystemReminder('yolo')).toContain(
+      'current approval mode is: yolo',
+    );
+    expect(getManualPlanExitSystemReminder('auto-edit')).toContain(
+      'current approval mode is: auto-edit',
+    );
   });
 });
 
@@ -1060,5 +1118,72 @@ describe('resolveInteractionMode', () => {
         isInteractive: () => false,
       }),
     ).toBe('headless');
+  });
+});
+
+describe('assembleSystemPrompt', () => {
+  it('joins all layers in stable -> context -> volatile order', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      contextFiles: 'CONTEXT_FILES',
+      appendPrompt: 'APPEND',
+      gitStatus: 'GIT_STATUS',
+      autoMemory: 'AUTO_MEMORY',
+    });
+
+    expect(result).toBe(
+      'BASE\n\n---\n\nCONTEXT_FILES\n\n---\n\nAPPEND\n\nGIT_STATUS\n\n---\n\nAUTO_MEMORY',
+    );
+  });
+
+  it('returns only the base when every other layer is empty', () => {
+    expect(assembleSystemPrompt({ base: 'BASE' })).toBe('BASE');
+    expect(
+      assembleSystemPrompt({
+        base: 'BASE',
+        contextFiles: '',
+        appendPrompt: '   ',
+        gitStatus: null,
+        autoMemory: '',
+      }),
+    ).toBe('BASE');
+  });
+
+  it('skips empty slots without leaving separators behind', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      appendPrompt: 'APPEND',
+      autoMemory: 'AUTO_MEMORY',
+    });
+
+    expect(result).toBe('BASE\n\n---\n\nAPPEND\n\n---\n\nAUTO_MEMORY');
+  });
+
+  it('keeps the volatile auto-memory slot last even after git status', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      gitStatus: 'GIT_STATUS',
+      autoMemory: 'AUTO_MEMORY',
+    });
+
+    expect(result.endsWith('\n\n---\n\nAUTO_MEMORY')).toBe(true);
+    expect(result.indexOf('GIT_STATUS')).toBeLessThan(
+      result.indexOf('AUTO_MEMORY'),
+    );
+  });
+
+  it('matches the composition getCoreSystemPrompt produces for the same inputs', () => {
+    // getCoreSystemPrompt(userMemory, ..., appendInstruction) must be
+    // byte-identical to assembling its base with the same context slots —
+    // both paths go through assembleSystemPrompt.
+    const base = getCoreSystemPrompt(undefined, undefined, undefined);
+    const viaParams = getCoreSystemPrompt('MEMORY', undefined, 'APPEND');
+    const viaAssembler = assembleSystemPrompt({
+      base,
+      contextFiles: 'MEMORY',
+      appendPrompt: 'APPEND',
+    });
+
+    expect(viaParams).toBe(viaAssembler);
   });
 });

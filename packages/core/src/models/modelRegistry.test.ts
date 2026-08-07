@@ -1016,6 +1016,21 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
   });
 
+  it('should propagate imageOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'qwen-image-2.0',
+          imageOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_OPENAI)[0]?.imageOnly,
+    ).toBe(true);
+  });
+
   it('should warn when both fastOnly and voiceOnly are set', () => {
     const config: ModelProvidersConfig = {
       openai: [
@@ -1030,6 +1045,36 @@ describe('fastOnly and voiceOnly flags', () => {
     const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
     expect(models).toHaveLength(1);
     expect(models[0].fastOnly).toBe(true);
+    expect(models[0].voiceOnly).toBe(true);
+  });
+
+  it('should propagate visionOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'vision-bridge', name: 'Vision Bridge', visionOnly: true },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.visionOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'vision-bridge')?.visionOnly).toBe(true);
+  });
+
+  it('should warn when visionOnly conflicts with another selector-only flag', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'unreachable-vision',
+          visionOnly: true,
+          voiceOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models).toHaveLength(1);
+    expect(models[0].visionOnly).toBe(true);
     expect(models[0].voiceOnly).toBe(true);
   });
 });

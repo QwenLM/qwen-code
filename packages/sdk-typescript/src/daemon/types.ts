@@ -34,6 +34,8 @@ export interface DaemonWorkspaceCapability {
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+  /** Daemon-owned Live conversation runtime. */
+  kind?: 'live';
 }
 
 export interface DaemonWorkspaceUpdate {
@@ -215,6 +217,106 @@ export interface DaemonGitCommitDetail {
   linesAdded?: number;
   linesRemoved?: number;
   hiddenCount?: number;
+}
+
+/** A single branch entry in the branch listing. */
+export interface DaemonGitBranchInfo {
+  name: string;
+  isHead: boolean;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  /** Unix epoch seconds of the branch tip commit. */
+  commitDate: number;
+  commitSubject: string;
+}
+
+/** A single tag entry in the branch listing. */
+export interface DaemonGitTagInfo {
+  name: string;
+  /** Unix epoch seconds. */
+  date: number;
+  subject: string;
+}
+
+/** Response from `GET /workspaces/:workspace/git/branches`. */
+export interface DaemonGitBranchesResult {
+  v: 1;
+  workspaceCwd: string;
+  available: boolean;
+  local: DaemonGitBranchInfo[];
+  remote: DaemonGitBranchInfo[];
+  tags: DaemonGitTagInfo[];
+  recent: string[];
+  head: string;
+  detached: boolean;
+}
+
+/** Response from `POST /workspaces/:workspace/git/checkout`. */
+export interface DaemonGitCheckoutResult {
+  branch: string;
+  detached: boolean;
+}
+
+/** Response from `POST /workspaces/:workspace/git/push`. */
+export interface DaemonGitPushResult {
+  success: boolean;
+  output: string;
+}
+
+/** Response from `POST /workspaces/:workspace/git/pull`. */
+export interface DaemonGitPullResult {
+  success: boolean;
+  output: string;
+}
+
+/** Response from `POST /workspaces/:workspace/git/commit`. */
+export interface DaemonGitCommitResult {
+  sha: string;
+  subject: string;
+}
+
+/** Review decision for an open pull request, lowercased from GitHub's enum. */
+export type DaemonGitHubPullRequestReviewDecision =
+  | 'approved'
+  | 'changes_requested'
+  | 'review_required';
+
+/** Aggregated CI rollup state for an open pull request. */
+export type DaemonGitHubPullRequestChecks =
+  | 'passing'
+  | 'failing'
+  | 'pending'
+  | 'none';
+
+/** A single open pull request in the list. */
+export interface DaemonGitHubPullRequest {
+  number: number;
+  title: string;
+  url: string;
+  /** Author login, or empty when the account was deleted. */
+  author: string;
+  headRefName: string;
+  state: 'open' | 'draft';
+  reviewDecision: DaemonGitHubPullRequestReviewDecision | null;
+  checks: DaemonGitHubPullRequestChecks;
+  /** Unix timestamp in seconds. */
+  updatedAt: number;
+}
+
+/** Response from `GET /workspaces/:workspace/github/prs`. */
+export interface DaemonGitHubPullRequestList {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  pullRequests: DaemonGitHubPullRequest[];
+}
+
+/** Response from `POST /workspaces/:workspace/github/prs/create`. */
+export interface DaemonGitHubPullRequestCreateResult {
+  url: string;
+  number: number | null;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */
@@ -519,6 +621,55 @@ export interface DaemonStatusReport {
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
     compactedReplayMaxBytes: number;
+    maxJournalEvents: number;
+    maxJournalBytes: number;
+    /**
+     * The daemon's resolved memory figures, observed and reported only.
+     * Additive — older daemons omit it, and it is `null` on paths that resolve
+     * none.
+     */
+    memory?: {
+      /** False, and required: nothing in this section is applied to a process. */
+      enforced: false;
+      /**
+       * The per-child heap partition the daemon models but does not apply.
+       * `null` when no policy was built; absent on daemons predating it.
+       */
+      childHeap?: {
+        mode: 'off' | 'observe';
+        /**
+         * `null` under `off`, which models nothing — distinct from `0`,
+         * a computed answer meaning the pool hosts no child.
+         */
+        maxConcurrentChildren: number | null;
+        /**
+         * Never 0 and never below `modeled.minChildHeapMb`; `null` instead,
+         * under `off` and wherever no partition fits within that floor.
+         */
+        perChildCeilingMb: number | null;
+        /**
+         * Admission pressure only. 0 does not mean the partition is safe to
+         * apply: children still run on the host-derived ceiling. A channel
+         * swap at full occupancy also books one, and on a host too small to
+         * model a partition this equals the total ACP spawn count.
+         */
+        refusals: number;
+      } | null;
+      configuredBudgetMb: number;
+      effectiveBudgetMb: number;
+      budgetSource: 'flag' | 'derived';
+      availableMemoryMb: number;
+      availableMemorySource: 'constrained' | 'host';
+      insufficientMemory: boolean;
+      /** Derived figures for a capacity policy that has not shipped. */
+      modeled: {
+        rootReserveMb: number;
+        childPoolMb: number;
+        minChildHeapMb: number;
+        maxChildHeapMb: number;
+        legacyChildCeilingMb: number;
+      };
+    } | null;
   };
   capabilities: {
     protocolVersions: DaemonProtocolVersions;
@@ -554,6 +705,90 @@ export interface DaemonStatusReport {
     rateLimit: {
       enabled: boolean;
       rejectedSinceStart: Record<string, number>;
+    };
+    /**
+     * Live counts against the resolved memory budget, with advisory per-child
+     * shares. Additive and observation-only; absent when no budget resolved.
+     * Each share is capped at the legacy child ceiling, and floored at the
+     * minimum child heap only when the ceiling allows — on a small host the
+     * ceiling sits below the floor, so share x count can exceed the child
+     * pool. Read a share as advisory, not a partition of the pool.
+     */
+    memory?: {
+      /**
+       * Registration count: non-removed workspace entries, including draining,
+       * transitioning, or blocked ones. Not a live-child count.
+       */
+      registeredWorkspaces: number;
+      /**
+       * Daemon-managed ACP children with a live (non-dying) channel, including
+       * transitioning or blocked entries. Excludes a workspace whose kill has
+       * started even if the child has not exited. Not a process-tree count.
+       */
+      activeAcpChildren: number;
+      /**
+       * Which children the daemon's RSS sampling covers, and only while an
+       * SSE/WS watcher is active; with no client observing, nothing is
+       * sampled. After the last watcher detaches, each reading persists until
+       * it ages out (~30s).
+       *
+       * A union, unlike the daemon's own type: `primary_only` is what daemons
+       * before the aggregate send, and this mirror describes every version.
+       */
+      childRssCoverage: 'primary_only' | 'active_children';
+      /**
+       * Aggregate RSS across the children `childRssCoverage` names. Both an
+       * over-count (summed per-process RSS double-counts shared pages) and a
+       * floor (each child reports only its own process, so its MCP descendants
+       * and all channel workers are missing). Not the daemon tree's memory.
+       *
+       * Optional because it is additive within an existing block: a daemon
+       * that shipped `runtime.memory` before it exists sends the block without
+       * it, and a daemon reporting `primary_only` never sends it at all.
+       */
+      children?: {
+        /** A floor rather than a total whenever `sampled < activeAcpChildren`. */
+        rssBytes: number;
+        /** Contributors. The denominator is the sibling `activeAcpChildren`. */
+        sampled: number;
+        /**
+         * Age of the oldest reading in the sum. `null` when nothing was
+         * sampled, and also when every contributor predates the field — so
+         * `null` never means "fresh".
+         */
+        oldestReadingAgeMs: number | null;
+      };
+      modeled: {
+        /** `null` when no workspace is registered. */
+        recommendedShareAtRegisteredMb: number | null;
+        /** `null` when no ACP child is active. */
+        recommendedShareAtActiveMb: number | null;
+      };
+      /**
+       * The daemon root's own memory pressure. Reported in both modes; only
+       * `observe` also raises a status issue from it, so `off` leaves the
+       * top-level `status` rollup unaffected. Root process only: these are
+       * this process's own figures, so children growing does not move them —
+       * compare against `children.rssBytes` for that.
+       *
+       * Optional because it is additive *within* an existing block: a daemon
+       * that shipped `runtime.memory` before this field exists and sends the
+       * block without it. Typing it as required would make this mirror lie
+       * about those daemons.
+       */
+      pressure?: {
+        mode: 'off' | 'observe';
+        level: 'normal' | 'soft' | 'hard' | 'critical';
+        /** `unknown` means neither denominator was usable, not that all is well. */
+        source: 'rss' | 'heap' | 'unknown';
+        ratio: number;
+        rssBytes: number;
+        rssRatio: number;
+        availableBytes: number;
+        heapUsedBytes: number;
+        heapRatio: number;
+        heapLimitBytes: number;
+      };
     };
     /** Optional daemon-process performance counters. */
     perf?: {
@@ -622,10 +857,19 @@ export interface DaemonWorktreeInfo {
   branch: string;
 }
 
+/** Branch metadata returned when a session is created with a new branch. */
+export interface DaemonBranchInfo {
+  name: string;
+  baseBranch: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
+  /** Immutable runtime ownership root used for daemon routing. */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from `workspaceCwd`. */
+  currentCwd?: string;
   /** True when an existing session was reused under sessionScope:single. */
   attached: boolean;
   /**
@@ -651,6 +895,8 @@ export interface DaemonSession {
   sourcePersisted?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
+  /** Present when the session was created with a new branch. */
+  branch?: DaemonBranchInfo;
 }
 
 /**
@@ -688,6 +934,18 @@ export interface DaemonRestoredSession extends DaemonSession {
   liveJournal?: DaemonEvent[];
   /** True when older persisted records precede this load replay page. */
   historyHasMore?: boolean;
+  /**
+   * Fallback pagination anchor: the oldest `qwen.session.recordId` in
+   * the last persisted transcript page the daemon could read when the replay
+   * snapshot's `history_truncated` marker carries none. Live sessions
+   * whose in-flight turn pushed the journal past its cap before any
+   * turn boundary fired have no recordId-bearing `session_update` in
+   * the retained window, so the marker ships without an anchor; the
+   * daemon backfills this field from the transcript so clients can
+   * still page backward via `beforeRecordId`. Absent when no anchor
+   * was needed or none could be read.
+   */
+  historyAnchorRecordId?: string;
   /** Event bus watermark — used as initial SSE cursor. */
   lastEventId?: number;
   /**
@@ -714,6 +972,15 @@ export interface BranchSessionRequest {
 export interface DaemonBranchedSession extends DaemonRestoredSession {
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface SideTaskSessionRequest {
+  name?: string;
+}
+
+export interface DaemonSideTaskSession extends DaemonRestoredSession {
+  displayName: string;
+  parentSessionId: string;
 }
 
 export interface ForkSessionRequest {
@@ -811,6 +1078,8 @@ export interface DaemonSessionSummary {
   color?: DaemonSessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
+  /** Present when the session was created with a new branch. */
+  branch?: DaemonBranchInfo;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -1366,6 +1635,8 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   description: string;
   level: DaemonSkillLevel;
   modelInvocable: boolean;
+  disabledReason?: 'hard' | 'default' | 'inactive_extension';
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
   userInvocable?: false;
   installedPath?: string;
   argumentHint?: string;
@@ -1618,6 +1889,14 @@ export interface DaemonWorkspaceFile {
   hash?: DaemonContentHash;
   matchedIgnore: 'file' | 'directory' | null;
   originalLineCount: number | null;
+  /**
+   * Resume token for the next page, or `null` at the end. Optional in the type
+   * because a daemon older than `workspace_file_read_cursor` sends neither
+   * this nor `hasMore` — same reason `hash` is optional.
+   */
+  nextCursor?: string | null;
+  /** Whether content remains beyond what was returned. */
+  hasMore?: boolean;
 }
 
 export interface DaemonWorkspaceFileBytes {
@@ -2044,6 +2323,7 @@ export interface DaemonSessionMonitorTaskStatus {
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;
+  toolUseId?: string;
 }
 
 export type DaemonSessionTaskStatus =
@@ -2402,6 +2682,115 @@ export interface DaemonWorkspaceVoiceTranscriptionResult {
   transport: DaemonVoiceTransport;
 }
 
+export type DaemonLiveState =
+  | 'unavailable'
+  | 'idle'
+  | 'starting'
+  | 'listening'
+  | 'thinking'
+  | 'speaking'
+  | 'stopping'
+  | 'error';
+
+export type DaemonLiveBlocker =
+  | 'host_missing'
+  | 'host_disconnected'
+  | 'host_version'
+  | 'microphone_permission'
+  | 'accessibility_permission'
+  | 'screen_recording_permission'
+  | 'audio_input'
+  | 'audio_output'
+  | 'global_shortcut'
+  | 'appshot'
+  | 'provider_config'
+  | 'provider_unreachable';
+
+export type DaemonLiveRequirementState =
+  | 'ready'
+  | 'missing'
+  | 'denied'
+  | 'unavailable'
+  | 'checking';
+
+/** Process-global Live Voice state. It never contains provider credentials. */
+export interface DaemonLiveStatus {
+  v: 1;
+  available: boolean;
+  state: DaemonLiveState;
+  shortcut: string;
+  blocker?: DaemonLiveBlocker;
+  message?: string;
+  callId?: string;
+  inputMuted?: boolean;
+  outputMuted?: boolean;
+  transcript?: string;
+  caption?: string;
+  statusText?: string;
+  requirements?: Partial<
+    Record<
+      | 'host'
+      | 'microphone'
+      | 'accessibility'
+      | 'screenRecording'
+      | 'audioInput'
+      | 'audioOutput'
+      | 'globalShortcut'
+      | 'appshot'
+      | 'provider',
+      DaemonLiveRequirementState
+    >
+  >;
+  host?: {
+    version?: string;
+    protocolVersion?: number;
+  };
+}
+
+export type DaemonLiveHostInstallState =
+  | 'missing'
+  | 'checking'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'launching'
+  | 'installed'
+  | 'error';
+
+export interface DaemonLiveHostInstallStatus {
+  state: DaemonLiveHostInstallState;
+  version?: string;
+  progress?: number;
+  message?: string;
+  retryable?: boolean;
+}
+
+/** WebShell-only Live onboarding state. Provider credentials are never returned. */
+export interface DaemonLiveSetupStatus {
+  v: 1;
+  enabled: boolean;
+  keyConfigured: boolean;
+  model: string;
+  shortcut: string;
+  install: DaemonLiveHostInstallStatus;
+  live: DaemonLiveStatus;
+}
+
+export type DaemonLiveSetupApiKeyMutation =
+  | { operation: 'replace'; value: string }
+  | { operation: 'clear' };
+
+export interface DaemonLiveSetupUpdate {
+  enabled?: boolean;
+  shortcut?: string;
+  apiKey?: DaemonLiveSetupApiKeyMutation;
+}
+
+export interface DaemonLiveMuteUpdate {
+  inputMuted?: boolean;
+  outputMuted?: boolean;
+}
+
 export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
 
 export type DaemonWorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
@@ -2422,6 +2811,42 @@ export interface DaemonWorkspaceTrustStatus {
   explicitTrustLevel: DaemonWorkspaceTrustLevel | null;
   requiresDaemonRestartForChanges: true;
 }
+
+export type DaemonWorkspaceTrustReconciliationState =
+  | 'stable'
+  | 'applying'
+  | 'failed';
+
+export interface DaemonWorkspaceTrustStatusV2 {
+  v: 2;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  configured: {
+    state: DaemonWorkspaceTrustState | 'error';
+    source: DaemonWorkspaceTrustSource;
+    explicitTrustLevel: DaemonWorkspaceTrustLevel | null;
+  };
+  effective:
+    | { state: 'trusted'; trusted: true }
+    | { state: 'untrusted'; trusted: false }
+    | { state: 'unavailable'; trusted: null };
+  reconciliation: {
+    state: DaemonWorkspaceTrustReconciliationState;
+    revision: string;
+    appliedRevision: string | null;
+    error?: {
+      code:
+        | 'trust_policy_invalid'
+        | 'trust_policy_unreadable'
+        | 'runtime_rebuild_failed';
+    };
+  };
+  requiresDaemonRestartForChanges: false;
+}
+
+export type DaemonWorkspaceTrustStatusResponse =
+  | DaemonWorkspaceTrustStatus
+  | DaemonWorkspaceTrustStatusV2;
 
 export type DaemonWorkspaceTrustDesiredState = 'trusted' | 'untrusted';
 
@@ -2566,6 +2991,11 @@ export interface DaemonSessionBtwResult {
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
+  messageId?: string;
+}
+
+export interface DaemonRemoveMidTurnMessageResult {
+  removed: boolean;
 }
 
 /**
@@ -2664,6 +3094,25 @@ export type DaemonChannelSelection =
   | { mode: 'all' }
   | { mode: 'names'; names: string[] };
 
+export interface DaemonChannelDelivery {
+  kind: 'channel';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+}
+
+export interface DaemonChannelNotifyRequest {
+  text: string;
+  delivery: DaemonChannelDelivery;
+}
+
+export interface DaemonChannelNotifyResult {
+  delivered: true;
+  deliveryId: string;
+}
+
 export type DaemonChannelControlTransition =
   | 'idle'
   | 'starting'
@@ -2718,6 +3167,195 @@ export interface DaemonChannelWorkerStartErrorResponse {
 export interface DaemonChannelReloadResult {
   reloaded: boolean;
   worker: DaemonChannelWorkerSnapshot;
+}
+
+export type DaemonChannelConfigFieldKind =
+  | 'string'
+  | 'secret'
+  | 'boolean'
+  | 'number'
+  | 'enum'
+  | 'string-list'
+  | 'record'
+  | 'object';
+
+interface DaemonChannelConfigFieldDescriptorBase {
+  key: string;
+  label: string;
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  default?: string;
+  description?: string;
+}
+
+export interface DaemonChannelConfigValueFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'string' | 'secret';
+  required?: boolean;
+  envResolvable?: boolean;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigPlainValueFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'boolean' | 'string-list' | 'record';
+  required?: boolean;
+  envResolvable?: never;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigEnumFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'enum';
+  required?: boolean;
+  envResolvable?: never;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigNumberFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'number';
+  required?: boolean;
+  envResolvable?: never;
+  exclusiveMinimum?: number;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigObjectFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'object';
+  required?: false;
+  envResolvable?: never;
+  properties: readonly DaemonChannelConfigNestedFieldDescriptor[];
+}
+
+export type DaemonChannelConfigNestedFieldDescriptor =
+  | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: Exclude<
+        DaemonChannelConfigFieldKind,
+        'secret' | 'enum' | 'number' | 'object'
+      >;
+      envResolvable?: never;
+    })
+  | (Omit<DaemonChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'enum';
+      envResolvable?: never;
+    })
+  | (Omit<
+      DaemonChannelConfigNumberFieldDescriptor,
+      'kind' | 'envResolvable'
+    > & {
+      kind: 'number';
+      envResolvable?: never;
+    })
+  | DaemonChannelConfigObjectFieldDescriptor;
+
+export type DaemonChannelConfigFieldDescriptor =
+  | DaemonChannelConfigValueFieldDescriptor
+  | DaemonChannelConfigPlainValueFieldDescriptor
+  | DaemonChannelConfigEnumFieldDescriptor
+  | DaemonChannelConfigNumberFieldDescriptor
+  | DaemonChannelConfigObjectFieldDescriptor;
+
+export interface DaemonChannelTypeDescriptor {
+  type: string;
+  displayName: string;
+  manageable: boolean;
+  fields: readonly DaemonChannelConfigFieldDescriptor[];
+}
+
+export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];
+
+export interface DaemonChannelRuntimeState {
+  state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
+  lastError?: string;
+}
+
+export interface DaemonChannelSecretState {
+  present: boolean;
+  source?: 'literal' | 'environment';
+}
+
+export interface DaemonChannelInstanceSnapshot {
+  name: string;
+  config: Record<string, unknown>;
+  secrets: Record<string, DaemonChannelSecretState>;
+  startsWithServe: boolean;
+  runtime: DaemonChannelRuntimeState;
+}
+
+export interface DaemonChannelsSnapshot {
+  revision: string;
+  instances: Record<string, DaemonChannelInstanceSnapshot>;
+}
+
+export type DaemonChannelSecretUpdate =
+  | { operation: 'preserve' }
+  | { operation: 'replace'; value: string }
+  | { operation: 'clear' };
+
+export interface DaemonRevisionRequest {
+  expectedRevision: string;
+}
+
+export interface DaemonChannelUpsertRequest extends DaemonRevisionRequest {
+  config: Record<string, unknown> & { type: string };
+  secrets?: Record<string, DaemonChannelSecretUpdate>;
+}
+
+export interface DaemonChannelStartupRequest extends DaemonRevisionRequest {
+  enabled: boolean;
+}
+
+export interface DaemonChannelMutationResult {
+  snapshot: DaemonChannelsSnapshot;
+  instance: DaemonChannelInstanceSnapshot;
+}
+
+export interface DaemonChannelPairingRequest {
+  senderId: string;
+  senderName: string;
+  subject?: DaemonChannelPairingSubject;
+  code: string;
+  createdAt: number;
+}
+
+export interface DaemonChannelPairingSubject {
+  type: 'user' | 'group';
+  id: string;
+  name: string;
+}
+
+export interface DaemonChannelPairingRequestsSnapshot {
+  requests: DaemonChannelPairingRequest[];
+}
+
+export interface DaemonChannelPairingApprovalRequest {
+  code: string;
+}
+
+export interface DaemonChannelPairingApprovalResult
+  extends DaemonChannelPairingRequestsSnapshot {
+  approved: DaemonChannelPairingRequest;
+}
+
+export interface DaemonChannelPairingApprovalsSnapshot {
+  senderIds: string[];
+  groupIds?: string[];
+}
+
+export type DaemonChannelPairingRevocationRequest =
+  | { senderId: string; groupId?: never }
+  | { senderId?: never; groupId: string };
+
+export interface DaemonChannelPairingRevocationResult
+  extends DaemonChannelPairingApprovalsSnapshot {
+  revoked: string;
+}
+
+export interface DaemonChannelManagementOptions {
+  clientId?: string;
+  timeoutMs?: number;
 }
 
 export type DaemonMcpRestartResult =

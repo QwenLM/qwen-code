@@ -35,17 +35,22 @@ import {
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 
-const { logSlashCommand, recordSkillInvocationMock, debugLoggerMock } =
-  vi.hoisted(() => ({
-    logSlashCommand: vi.fn(),
-    recordSkillInvocationMock: vi.fn(),
-    debugLoggerMock: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
-  }));
+const {
+  logSlashCommand,
+  recordSkillInvocationMock,
+  recordAutoSkillUsageMock,
+  debugLoggerMock,
+} = vi.hoisted(() => ({
+  logSlashCommand: vi.fn(),
+  recordSkillInvocationMock: vi.fn(),
+  recordAutoSkillUsageMock: vi.fn(),
+  debugLoggerMock: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -54,6 +59,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...original,
     logSlashCommand,
     recordSkillInvocation: recordSkillInvocationMock,
+    recordAutoSkillUsage: recordAutoSkillUsageMock,
     createDebugLogger: () => debugLoggerMock,
     getIdeInstaller: vi.fn().mockReturnValue(null),
   };
@@ -139,6 +145,7 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
+  const mockClearPendingState = vi.fn();
 
   const mockConfig = makeFakeConfig({});
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -175,6 +182,7 @@ describe('useSlashCommandProcessor', () => {
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
     openRewindSelector: vi.fn(),
+    clearPendingState: mockClearPendingState,
   });
 
   beforeEach(() => {
@@ -205,6 +213,7 @@ describe('useSlashCommandProcessor', () => {
     setIsProcessing = vi.fn(),
     settings: LoadedSettings = mockSettings,
     extensionRefreshState?: ExtensionRefreshState,
+    isIdleRef = { current: true },
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -222,7 +231,7 @@ describe('useSlashCommandProcessor', () => {
         vi.fn(), // toggleVimEnabled
         false, // isProcessing
         setIsProcessing,
-        { current: true }, // isIdleRef
+        isIdleRef,
         vi.fn(), // setGeminiMdFileCount
         createMockActions(),
         new Map(), // extensionsUpdateState
@@ -448,6 +457,167 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('renders an idle Goal control response as a Goal state item', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: 'goal-ui',
+          revision: 1,
+          objective: 'Ship the TUI',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-ui' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'set', objective: 'Ship the TUI' },
+          response: { snapshot },
+          cause: 'create',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal Ship the TUI');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.GOAL_STATE,
+          snapshot,
+          cause: 'create',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('leaves a mid-turn Goal control response to the active stream', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: null,
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'clear' },
+          response: { snapshot },
+          cause: 'clear',
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal clear');
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.GOAL_STATE }),
+        expect.any(Number),
+      );
+    });
+
+    it('renders a mid-turn /goal status card since it emits no broadcast', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-status',
+          revision: 2,
+          objective: 'Ship the TUI',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-status' },
+          turnCount: 1,
+          activeTimeMs: 5,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'status' },
+          response: { snapshot },
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.GOAL_STATE,
+          snapshot,
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('renders a mid-turn causeless /goal clear with no active goal', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: null,
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'clear' },
+          response: { snapshot },
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal clear');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.INFO, text: 'No Goal set.' },
+        expect.any(Number),
+      );
+    });
+
     it('should correctly find and execute a nested subcommand', async () => {
       const childAction = vi.fn();
       const parentCommand: SlashCommand = {
@@ -615,6 +785,44 @@ describe('useSlashCommandProcessor', () => {
 
       expect(mockOpenModelDialog).toHaveBeenCalledWith({
         visionModelMode: true,
+      });
+    });
+
+    it('should handle "dialog: image-model" action', async () => {
+      const command = createTestCommand({
+        name: 'imagemodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'image-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/imagemodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        imageModelMode: true,
+      });
+    });
+
+    it('should handle "dialog: compaction-model" action', async () => {
+      const command = createTestCommand({
+        name: 'compactionmodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'compaction-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/compactionmodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        compactionModelMode: true,
       });
     });
 
@@ -2240,9 +2448,17 @@ describe('useSlashCommandProcessor', () => {
     });
 
     it('records successful skill slash commands when they submit a prompt', async () => {
+      vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValueOnce(
+        '/test/project',
+      );
       const skillCmd = createTestCommand(
         {
           name: 'review-skill',
+          skillDetail: {
+            name: 'review-skill',
+            level: 'project',
+            filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+          },
           action: vi.fn().mockResolvedValue({
             type: 'submit_prompt',
             content: [{ text: 'skill body' }],
@@ -2262,6 +2478,11 @@ describe('useSlashCommandProcessor', () => {
       expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
         skillName: 'review-skill',
         success: true,
+      });
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'review-skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
       });
     });
 
@@ -2286,6 +2507,7 @@ describe('useSlashCommandProcessor', () => {
         skillName: 'review-skill',
         success: false,
       });
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
     });
 
     it('records blocked skill slash commands as failures', async () => {
@@ -2319,9 +2541,13 @@ describe('useSlashCommandProcessor', () => {
         skillName: 'review-skill',
         success: false,
       });
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
     });
 
     it('records confirmed skill slash commands only once', async () => {
+      vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValueOnce(
+        '/test/project',
+      );
       const action = vi
         .fn()
         .mockResolvedValueOnce({
@@ -2336,6 +2562,11 @@ describe('useSlashCommandProcessor', () => {
       const skillCmd = createTestCommand(
         {
           name: 'review-skill',
+          skillDetail: {
+            name: 'review-skill',
+            level: 'project',
+            filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+          },
           action,
         },
         CommandKind.SKILL,
@@ -2360,6 +2591,7 @@ describe('useSlashCommandProcessor', () => {
         expect(action).toHaveBeenCalledTimes(2);
       });
       expect(recordSkillInvocation).toHaveBeenCalledTimes(1);
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledTimes(1);
       expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
         skillName: 'review-skill',
         success: true,
@@ -2402,6 +2634,18 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('ui.clear and /btw dialog', () => {
+    it('should discard pending Gemini state when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.commandContext).toBeDefined());
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      expect(mockClearPendingState).toHaveBeenCalledTimes(1);
+      expect(mockClearItems).toHaveBeenCalledTimes(1);
+    });
+
     it('should dismiss an active btw dialog when ui.clear is called', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.commandContext).toBeDefined());
@@ -2568,6 +2812,45 @@ describe('useSlashCommandProcessor', () => {
       );
       expect(recordedNames).toContain('feat-dev');
       expect(recordedNames).toContain('bugfix');
+    });
+
+    it('records successful stacked project auto-skills as used', async () => {
+      vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const skillA = {
+        ...createSkillCommand('feat-dev', 'a'),
+        skillDetail: {
+          name: 'feat-dev',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+        },
+      };
+      const skillB = {
+        ...createSkillCommand('review', 'b'),
+        skillDetail: {
+          name: 'review',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+        },
+      };
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      recordAutoSkillUsageMock.mockClear();
+      await act(async () => {
+        await result.current.handleSlashCommand('/feat-dev /review do stuff');
+      });
+
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledTimes(2);
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'feat-dev',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+      });
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'review',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      });
     });
 
     it('appends remaining text after all skill bodies', async () => {

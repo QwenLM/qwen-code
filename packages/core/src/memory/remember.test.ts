@@ -47,6 +47,7 @@ function createConfig(
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+    getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     ...overrides,
   } as unknown as Config;
 }
@@ -151,6 +152,11 @@ describe('remember memory helper', () => {
       'edit',
     ]);
     expect(params.config.getUserMemory()).toBe('');
+    // The remember system prompt already embeds the full auto-memory section;
+    // the forked-agent config must report an empty auto-memory prompt so
+    // AgentCore does not append it a second time (duplication / blank-slate
+    // leak). See buildChatSystemPrompt in agent-core.ts.
+    expect(params.config.getAutoMemoryPrompt()).toBe('');
     expect(params.config.getDisableAllHooks()).toBe(true);
     expect(params.config.getHookSystem()).toBeUndefined();
     expect(params.config.getMessageBus()).toBeUndefined();
@@ -199,6 +205,13 @@ describe('remember memory helper', () => {
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ maxTimeMinutes: 30 }),
     );
+    // Non-clean mode still suppresses the duplicate auto-memory append while
+    // keeping the session's context files (QWEN.md/AGENTS.md) intact.
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+    };
+    expect(params.config.getAutoMemoryPrompt()).toBe('');
+    expect(params.config.getUserMemory()).toBe('QWEN/AGENTS guidance');
   });
 
   it('keeps the built-in 5-minute default when no timeout is configured', async () => {
@@ -218,6 +231,50 @@ describe('remember memory helper', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ maxTimeMinutes: 5 }),
+    );
+  });
+
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValue(25);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValue(0);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
     );
   });
 

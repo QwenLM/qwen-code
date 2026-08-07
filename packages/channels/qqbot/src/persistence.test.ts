@@ -1,4 +1,5 @@
 import { writeFileSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
@@ -111,11 +112,18 @@ function makeChannel(): QQChannelClass {
   return ch;
 }
 
-const statePath = '/tmp/test-qwen/channels/test-bot-state.json';
-const sessionsPath = '/tmp/test-qwen/channels/test-bot-sessions.json';
-const globalSessionsPath = '/tmp/test-qwen/channels/sessions.json';
-const sessionsBackupPath =
-  '/tmp/test-qwen/channels/test-bot-sessions-backup.json';
+const statePath = join('/tmp/test-qwen', 'channels', 'test-bot-state.json');
+const sessionsPath = join(
+  '/tmp/test-qwen',
+  'channels',
+  'test-bot-sessions.json',
+);
+const globalSessionsPath = join('/tmp/test-qwen', 'channels', 'sessions.json');
+const sessionsBackupPath = join(
+  '/tmp/test-qwen',
+  'channels',
+  'test-bot-sessions-backup.json',
+);
 
 beforeEach(() => {
   vi.useFakeTimers();

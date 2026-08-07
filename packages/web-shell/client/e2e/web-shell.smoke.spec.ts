@@ -40,6 +40,30 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Hello from fake daemon',
   );
+
+  // #8214: pin the explicit ::selection rule on message content. This
+  // asserts the rule is present and matches every [data-user-selectable]
+  // wrapper row (user and assistant alike), not just the first one; it
+  // does not verify the Firefox paint effect itself (this repo's Playwright
+  // projects are chromium-only).
+  const selectionBackgrounds = await page.evaluate(() => {
+    // Match the wrapper rows themselves, not their descendants - a single
+    // row renders many descendant elements, so counting descendants does
+    // not enforce the "both roles present" invariant.
+    const rows = document.querySelectorAll('[data-user-selectable]');
+    return Array.from(rows, (row) => {
+      // ::selection applies to the element's text content; sample the first
+      // text-bearing descendant (or the row itself if it has none).
+      const target = row.querySelector('*') ?? row;
+      return getComputedStyle(target, '::selection').backgroundColor;
+    });
+  });
+  // The fixture renders both a user and an assistant message, so there must
+  // be at least two selectable rows and every one must carry the rule.
+  expect(selectionBackgrounds.length).toBeGreaterThanOrEqual(2);
+  for (const bg of selectionBackgrounds) {
+    expect(bg).toBe('rgba(0, 128, 255, 0.3)');
+  }
 });
 
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
@@ -66,6 +90,32 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
 
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Pong from fake SSE',
+  );
+});
+
+test('pastes long plain text as editable composer content @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const pasted = `${'original '.repeat(151)}end`;
+  const edited = `${pasted} edited`;
+
+  await gotoSession(page, scenario, daemon);
+  await pasteComposerText(page, pasted);
+
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expect(editor).toHaveText(pasted);
+  await expect(editor).not.toContainText('Pasted Content');
+
+  await page.keyboard.type(' edited');
+  await expect(editor).toHaveText(edited);
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expectPromptBodyToContainText(
+    requestBodyRecord(firstRequest(daemon.promptRequests())),
+    edited,
   );
 });
 
@@ -354,6 +404,61 @@ test('gates voice dictation on the workspace voice setting @smoke', async ({
   await expect(voiceButton).toBeVisible();
 });
 
+test('loads Voice status from the active secondary workspace @smoke', async ({
+  page,
+}, testInfo) => {
+  const secondaryCwd = '/work/secondary';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: secondaryCwd,
+    capabilities: {
+      workspaceCwd: '/work/primary',
+      features: [
+        'session_events',
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: secondaryCwd,
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    voice: { enabled: true, workspaceCwd: secondaryCwd },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await expect(
+    page.getByRole('button', { name: 'Start voice dictation' }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) =>
+            request.method === 'GET' &&
+            request.path === '/workspaces/secondary/voice',
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === 'GET' && request.path === '/workspace/voice',
+    ),
+  ).toBe(false);
+});
+
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
   test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
     page,
@@ -626,6 +731,20 @@ async function replaceComposerText(page: Page, text: string): Promise<void> {
     process.platform === 'darwin' ? 'Meta+A' : 'Control+A',
   );
   await page.keyboard.insertText(text);
+}
+
+async function pasteComposerText(page: Page, text: string): Promise<void> {
+  const origin = new URL(page.url()).origin;
+  await page
+    .context()
+    .grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+  await page.evaluate((clipboardText) => {
+    return navigator.clipboard.writeText(clipboardText);
+  }, text);
+  await page.locator('[data-web-shell-composer-editor] .cm-content').click();
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+V' : 'Control+V',
+  );
 }
 
 async function pasteComposerImages(page: Page, count: number): Promise<void> {

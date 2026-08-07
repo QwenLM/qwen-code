@@ -7,7 +7,7 @@ import {
 } from './shadowDom';
 
 describe('isPluginShadowPanel', () => {
-  it.each(['plugins', 'extensions', 'mcp', 'skills', 'agents'])(
+  it.each(['plugins', 'extensions', 'mcp', 'skills', 'agents', 'channels'])(
     'includes the %s management surface',
     (panel) => {
       expect(isPluginShadowPanel(panel)).toBe(true);

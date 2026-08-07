@@ -235,6 +235,8 @@ export class ModelRegistry {
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,
+      visionOnly: model.visionOnly,
+      imageOnly: model.imageOnly,
     }));
   }
 
@@ -284,7 +286,7 @@ export class ModelRegistry {
   /**
    * Get default model for an authType.
    * For qwen-oauth, returns the coder model.
-   * For others, returns the first configured model.
+   * For others, returns the first configured primary-capable model.
    */
   getDefaultModelForAuthType(
     authType: AuthType,
@@ -294,7 +296,7 @@ export class ModelRegistry {
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
-    return Array.from(models.values())[0];
+    return Array.from(models.values()).find((model) => !model.imageOnly);
   }
 
   /**
@@ -338,9 +340,15 @@ export class ModelRegistry {
         `Model config in authType '${authType}' missing required field: id`,
       );
     }
-    if (config.fastOnly && config.voiceOnly) {
+    const selectorOnlyCount = [
+      config.fastOnly,
+      config.voiceOnly,
+      config.visionOnly,
+      config.imageOnly,
+    ].filter(Boolean).length;
+    if (selectorOnlyCount > 1) {
       debugLogger.warn(
-        `Model "${config.id}" in authType "${authType}" has both fastOnly and voiceOnly set. It will be unreachable in all model selectors.`,
+        `Model "${config.id}" in authType "${authType}" has multiple selector-only flags. It will be unreachable in at least one model selector.`,
       );
     }
   }

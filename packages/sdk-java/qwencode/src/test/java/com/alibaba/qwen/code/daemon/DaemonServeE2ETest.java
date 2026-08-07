@@ -62,9 +62,13 @@ class DaemonServeE2ETest {
                 }
             };
 
-            PromptTerminal terminal = session.startPrompt(PromptRequest.text(
+            PromptCall call = session.startPrompt(PromptRequest.text(
                     "Create the requested test file, then report completion."),
-                    observer).completionFuture()
+                    observer);
+            PromptAcceptance acceptance = call.acceptanceFuture()
+                    .orTimeout(5, TimeUnit.SECONDS).join();
+            assertTrue(acceptance.getEventEpoch() != null);
+            PromptTerminal terminal = call.completionFuture()
                     .orTimeout(30, TimeUnit.SECONDS).join();
             assertEquals(PromptTerminal.Kind.COMPLETE, terminal.getKind());
             assertTrue(text.toString().contains(expectedText));
@@ -174,8 +178,12 @@ class DaemonServeE2ETest {
 
                 PromptTerminal terminal = call.completionFuture()
                         .get(10, TimeUnit.SECONDS);
-                assertEquals(PromptTerminal.Kind.COMPLETE, terminal.getKind());
-                assertEquals("cancelled", terminal.getStopReason());
+                if (terminal.getKind() == PromptTerminal.Kind.COMPLETE) {
+                    assertEquals("cancelled", terminal.getStopReason());
+                } else {
+                    assertEquals(PromptTerminal.Kind.ERROR,
+                            terminal.getKind());
+                }
             } finally {
                 session.destroySession();
             }

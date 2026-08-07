@@ -33,7 +33,11 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
-import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import {
+  promptRecordDir,
+  briefPath,
+  findingsFilePath,
+} from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import { checkCoverageCommand } from './check-coverage.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -151,6 +155,12 @@ function transcript(
      * that wants an agent which ignored its brief passes `opens: []`.
      */
     opens?: string[];
+    /**
+     * Paths the agent's only contact with is NAMING them in a successful
+     * non-read tool's args — a search, not an open. Models the agent that
+     * clears a path-shaped floor without reading the file.
+     */
+    mentions?: string[];
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
@@ -222,6 +232,40 @@ function transcript(
               functionResponse: {
                 name: 'read_file',
                 response: { output: 'brief' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+  }
+  for (const path of opts.mentions ?? []) {
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'search_file_content',
+                args: { path, pattern: 'Critical' },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'search_file_content',
+                response: { output: '1 match' },
               },
             },
           ],
@@ -868,6 +912,43 @@ describe('the roster — who should have been here', () => {
     expect(gap).not.toContain('every dimension');
   });
 
+  it('reads the effort from the plan: medium drops the personas, high still requires them', () => {
+    // coverageFromTranscripts passes the WHOLE plan to requiredAgents, which reads
+    // plan.effort. A medium run that launched the reduced set (no 6a/6b/6c) must
+    // pass; the SAME records under a high plan must fail for the missing personas.
+    // Drop the effort read and the medium case demands the personas too and exits 3,
+    // halting every medium review — this A/B is what would redden.
+    const p = join(dir, 'plan.json');
+    const base = {
+      diffPathAbsolute: DIFF,
+      srcDiffLines: 200,
+      diffLines: 300,
+      prNumber: '6766',
+      ownerRepo: 'QwenLM/qwen-code',
+      worktreePath: '.qwen/tmp/review-pr-6766',
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    };
+    const backdate = () =>
+      utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    // Medium: satisfyRoster launches exactly the reduced roster (personas dropped).
+    writeFileSync(p, JSON.stringify({ ...base, effort: 'medium' }));
+    satisfyRoster(p);
+    backdate();
+    expect(coverageFromTranscripts(p, ENV).missingRoles).toEqual([]);
+
+    // The SAME records, now a high plan: the personas are required and were never
+    // launched, so they are missing — proving the medium pass was the effort, not luck.
+    writeFileSync(p, JSON.stringify({ ...base, effort: 'high' }));
+    backdate();
+    const high = coverageFromTranscripts(p, ENV).missingRoles.join(' ');
+    expect(high).toMatch(/mindset|Undirected audit/);
+  });
+
   it('tells the operator where it looked, so a wrong --plan is not a missing file', () => {
     // "The builder never ran" and "the builder ran against a different --plan" reach
     // this check as the same thing: an absent record. They are fixed differently, so
@@ -1276,6 +1357,105 @@ describe('the prompt the CLI built, against the prompt the agent got', () => {
   });
 });
 
+describe('a drifted launch whose payload provably arrived', () => {
+  it('notes a near-verbatim chunk launch instead of demanding a relaunch', () => {
+    // Measured on a real run: asked to copy twelve blocks, the model normalized
+    // one word in every block's tail ("you" → "it"), every launch failed the
+    // verbatim match, and the repair relaunched the entire fan-out — the most
+    // expensive step in the pipeline, redelivering text the agents had already
+    // acted on. The payload had arrived: the brief was opened and the diff was
+    // read, and both facts are the harness's records, not the run's prose.
+    const p = plan();
+    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+      calls: 3,
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.driftedLaunches).toHaveLength(1);
+    expect(r.driftedLaunches[0]).toContain('chunk 1');
+    expect(r.driftedLaunches[0]).toContain('delivery stands');
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('does not rescue a drift that never opened the brief', () => {
+    const p = plan();
+    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+      calls: 3,
+      opens: [],
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    expect(r.rewrittenPrompts).toHaveLength(1);
+    expect(r.ok).toBe(false);
+  });
+
+  it('requires the diff read, not brief-open alone', () => {
+    // A drifted launch that dropped the read list is not rescued on the
+    // brief-open by itself: the diff read is the other half of the payload.
+    const p = plan();
+    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+      calls: 0,
+      opens: [chunkBrief(1)],
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    expect(r.rewrittenPrompts).toHaveLength(1);
+    expect(r.ok).toBe(false);
+  });
+
+  it('rescues a drifted dimension launch on brief-open plus the diff read', () => {
+    const p = planPr();
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    const builtPrompt = readFileSync(
+      join(promptRecordDir(p), '1c.txt'),
+      'utf8',
+    );
+    transcript(
+      'r-1c-drift',
+      builtPrompt.replace('You are 1c.', 'You are Agent 1c.'),
+      { calls: 2 },
+    );
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toEqual([]);
+    expect(r.unreadBriefs).toEqual([]);
+    expect(r.driftedLaunches).toHaveLength(1);
+    expect(r.driftedLaunches[0]).toContain('Cross-file tracer');
+    expect(r.ok).toBe(true);
+  });
+
+  it('one drifted transcript cannot certify two roles', () => {
+    // The verbatim matching is injective — one transcript, one requirement —
+    // or pasting the whole roster to a single agent certifies an N-agent
+    // fan-out with one reader. The rescue inherits the same rule.
+    const p = planPr();
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-2.jsonl'), { force: true });
+    transcript(
+      'r-both-drift',
+      `You are neither role, exactly.\n` +
+        `read_file(file_path="${briefPath(p, '1c')}")\n` +
+        `read_file(file_path="${briefPath(p, '2')}")\n` +
+        `read_file(file_path="${DIFF}")`,
+      { calls: 2 },
+    );
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toHaveLength(1);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.ok).toBe(false);
+  });
+});
+
 describe('an agent that paged its chunk still read it', () => {
   it('merges paged reads before asking whether a chunk was covered', () => {
     // The prompt tells an agent to page when a read comes back `isTruncated` — and
@@ -1361,18 +1541,33 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
   // `opensBrief: false` — launched with the built prompt, never opened the brief;
   // `rewritten: true` — an agent ran and opened the brief, but the orchestrator
   // wrote the launch itself (the real 3A run this precision exists for). To model a
-  // step skipped wholesale, do not set the key up at all.
+  // step skipped wholesale, do not set the key up at all. `findings: true` bakes
+  // the #8597 pointer into the recorded prompt — the block points at a
+  // digest-named list file — and `opensFindings: false` models the agent that
+  // opened its brief but skipped the one instructed findings read.
   function step45(
     planPath: string,
     key: string,
-    opts: { launch?: boolean; opensBrief?: boolean; rewritten?: boolean } = {},
+    opts: {
+      launch?: boolean;
+      opensBrief?: boolean;
+      rewritten?: boolean;
+      findings?: boolean;
+      opensFindings?: boolean;
+      mentionsFindings?: boolean;
+    } = {},
   ): void {
     const d = promptRecordDir(planPath);
     mkdirSync(d, { recursive: true });
     const brief = briefPath(planPath, key);
     writeFileSync(brief, `The ${key} brief.`);
+    const findings = findingsFilePath(planPath, key);
+    if (opts.findings) {
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+    }
     const prompt =
       `You are review agent \`${key}\`.\n` +
+      (opts.findings ? `read_file(file_path="${findings}")\n` : '') +
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
@@ -1390,10 +1585,11 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
       );
       return;
     }
-    transcript(id, prompt, {
-      calls: 2,
-      opens: opts.opensBrief === false ? [] : [brief],
-    });
+    const opens = opts.opensBrief === false ? [] : [brief];
+    if (opts.findings && opts.opensFindings !== false) opens.push(findings);
+    const mentions =
+      opts.findings && opts.mentionsFindings ? [findings] : undefined;
+    transcript(id, prompt, { calls: 2, opens, mentions });
   }
 
   it('passes when the reverse audit ran on a review with nothing to verify', () => {
@@ -1412,10 +1608,11 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
   });
 
   it('a verifier launched without its findings prefix no longer clears the gate', () => {
-    // The record now IS the printed prompt — findings folded, digest-keyed. The
-    // old findings-free record was a receipt a partial delivery could satisfy:
-    // launch the agent with only the recorded tail, let it open the brief, and
-    // verification read as ok while no verifier ever saw a finding.
+    // The record now IS the printed prompt — findings section included,
+    // digest-keyed. The old findings-free record was a receipt a partial
+    // delivery could satisfy: launch the agent with only the recorded tail,
+    // let it open the brief, and verification read as ok while no verifier
+    // ever saw a finding.
     const p = plan();
     step45(p, 'reverse-audit'); // Step 5 compliant; verification is the subject
     const d = promptRecordDir(p);
@@ -1524,7 +1721,11 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // the dogfooded failure was the orchestrator hand-appending `(round N)` to
     // the identity line because the CLI gave it nowhere else to put it.
     expect(fix).toMatch(/no hand-added round number/);
-    expect(fix).toContain('[--round <k>]');
+    // UNBRACKETED: `agent-prompt` refuses a round-less reverse-audit call, so
+    // a paste-and-run repair that bracketed --round as optional handed the
+    // orchestrator a first attempt the validation rejects.
+    expect(fix).toContain('--round <k>');
+    expect(fix).not.toContain('[--round <k>]');
   });
 
   it('names a rewritten verifier launch as itself too', () => {
@@ -1544,6 +1745,9 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // told apart by their findings digest, not by that flag.
     expect(fix).toMatch(/no hand-added shard number,/);
     expect(fix).not.toContain('shard number (--round bakes it in)');
+    // For verify the flag stays BRACKETED — only a repeat verification round
+    // passes one, unlike reverse-audit where the CLI refuses without it.
+    expect(fix).toContain('[--round <k>]');
   });
 
   it('flags a reverse audit built but whose agent never opened its brief', () => {
@@ -1609,6 +1813,86 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(gapText(r)).toMatch(
       /verification — its prompt was built, but no agent was launched with it/,
     );
+  });
+
+  it('flags a verifier that opened its brief but skipped the findings file', () => {
+    // Since #8597 the findings list rides a digest-named file the block points
+    // at; the brief's read receipt does not cover it. An instruction-skipping
+    // verifier that opens the brief but never reads the list must not clear
+    // the floor — it would otherwise rule on findings it was never shown (the
+    // probe shape: a skip arm indistinguishable from the compliant one).
+    const p = plan();
+    step45(p, 'reverse-audit'); // Step 5 compliant; verification is the subject
+    step45(p, 'verify--abc123def456', {
+      findings: true,
+      opensFindings: false,
+    });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.unverifiedFindings).toBe(true);
+    expect(gapText(r)).toMatch(
+      /verification — it was launched with the built prompt and opened its brief, but never read the findings file/,
+    );
+    // The fix names the findings read as part of the receipt.
+    expect(r.remediation.join(' ')).toContain('read the findings file');
+  });
+
+  it('clears the floor when the verifier reads the findings file its block points at', () => {
+    const p = plan();
+    step45(p, 'reverse-audit');
+    step45(p, 'verify--abc123def456', { findings: true });
+    expect(verificationGaps(p, { postsFindings: true }, ENV).ok).toBe(true);
+  });
+
+  it('does not credit a non-read tool that merely names the findings path', () => {
+    // Every tool serializes its args, so a `search_file_content` over the
+    // findings file carries the same stringified path as a read of it —
+    // without reading a line. The floor certifies the list was OPENED; a
+    // mention is not an open, and only read_file counts.
+    const p = plan();
+    step45(p, 'reverse-audit'); // Step 5 compliant; verification is the subject
+    step45(p, 'verify--abc123def456', {
+      findings: true,
+      opensFindings: false,
+      mentionsFindings: true,
+    });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.unverifiedFindings).toBe(true);
+    expect(gapText(r)).toMatch(
+      /verification — it was launched with the built prompt and opened its brief, but never read the findings file/,
+    );
+  });
+
+  it('flags a reverse auditor that opened its brief but skipped the findings file', () => {
+    const p = plan();
+    step45(p, 'reverse-audit--round-1--abc123def456', {
+      findings: true,
+      opensFindings: false,
+    });
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.ok).toBe(false);
+    expect(gapText(r)).toMatch(
+      /reverse audit — it was launched with the built prompt and opened its brief, but never read the findings file/,
+    );
+  });
+
+  it('merges both steps into one gap when both skipped the findings file', () => {
+    const p = plan();
+    step45(p, 'reverse-audit--round-1--abc123def456', {
+      findings: true,
+      opensFindings: false,
+    });
+    step45(p, 'verify--abc123def456', {
+      findings: true,
+      opensFindings: false,
+    });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps).toHaveLength(1);
+    expect(r.gaps[0].subject).toBe('verification and reverse audit');
+    expect(r.gaps[0].reason).toMatch(/never read the findings file/);
+    expect(r.unverifiedFindings).toBe(true);
   });
 
   it('merges both steps into one gap when they failed the same way', () => {

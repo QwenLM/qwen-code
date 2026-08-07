@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -47,6 +48,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
@@ -77,6 +79,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
@@ -107,11 +110,15 @@ describe('collectContextData (contextCommand)', () => {
     // per-session value and must win.
     mockGetLastPromptTokenCount.mockReturnValue(999_000); // wrong session's global value
     const getLastPromptTokenCount = vi.fn().mockReturnValue(50_000);
+    const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
     const config = {
       ...makeMockConfig(200_000),
       getGeminiClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
-        getChat: vi.fn().mockReturnValue({ getLastPromptTokenCount }),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount,
+          isLastPromptTokenCountEstimated,
+        }),
       }),
     } as unknown as Config;
 
@@ -121,6 +128,28 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.totalTokens).toBe(50_000);
     // 50K < warn(150K); if the 999K global had leaked through it would be `hard`.
     expect(data.breakdown.currentTier).toBe('safe');
+  });
+
+  it('reports a nonzero compression-derived count as estimated', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount: vi.fn().mockReturnValue(50_000),
+          isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(true),
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.isEstimated).toBe(true);
+    expect(data.totalTokens).toBe(50_000);
+    expect(data.breakdown.freeSpace).toBeLessThan(150_000);
+    const text = formatContextUsageText(data);
+    expect(text).toContain('Token usage is estimated');
+    expect(text).not.toContain('No API response yet');
   });
 
   it('falls back to the global singleton when the session chat is not initialized', async () => {
@@ -172,6 +201,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
@@ -216,6 +246,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
@@ -229,6 +260,26 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(data.builtinTools).toHaveLength(1);
     expect(data.builtinTools[0].name).toBe('web_fetch');
+  });
+
+  it('lists the auto-memory section as a separate memory entry (#7651)', async () => {
+    // The managed auto-memory section is no longer part of getUserMemory(); its
+    // tokens are surfaced via getAutoMemoryPrompt(). Exercise the non-empty
+    // branch so a regression that drops the "auto memory" row from /context
+    // fails here instead of silently under-counting the memory breakdown.
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi
+        .fn()
+        .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(1);
+    expect(data.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
   });
 });
 

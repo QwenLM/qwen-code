@@ -208,9 +208,6 @@ export default {
   'Unknown Step': '不明なステップ',
   'Esc to close': 'Esc で閉じる',
   Transcript: 'トランスクリプト',
-  'to close': '閉じる',
-  'to scroll': 'スクロール',
-  'Failed to render transcript.': 'トランスクリプトの描画に失敗しました。',
   'Read {{count}} file': '{{count}} 件のファイルを読み込みました',
   'Read {{count}} files': '{{count}} 件のファイルを読み込みました',
   'Reading {{count}} file': '{{count}} 件のファイルを読み込み中',
@@ -584,8 +581,8 @@ export default {
     'コマンドへの入力は tool_name、tool_input、tool_use_id、error、error_type、is_interrupt、is_timeout を持つ JSON です。',
   'Input to command is JSON with notification message and type.':
     'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
-  'Input to command is JSON with original user prompt text.':
-    'コマンドへの入力は元のユーザープロンプトテキストを持つ JSON です。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'コマンド入力は、"prompt"（現在のモデル向けプロンプト）と、オプションの "submitted_prompt"（サポート対象の対話型 TUI で入力されたテキストの投影）を含む JSON です。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'コマンドへの入力は command_name、command_args、展開後のプロンプトテキストを持つ JSON です。',
   'Input to command is JSON with session start source.':
@@ -766,6 +763,14 @@ export default {
   'Already generating summary, wait for previous request to complete':
     'サマリー生成中です。前のリクエストの完了をお待ちください',
   'No conversation found to summarize.': '要約する会話が見つかりません',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'サマリーパスは既に存在し、生成されたサマリーではありません: {{path}}',
+  'Summary path must be within the project root.':
+    'サマリーパスはプロジェクトルート内にある必要があります',
+  'Summary path resolves to an existing directory: {{path}}':
+    'サマリーパスは既存のディレクトリに解決されます: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'サマリーパスは区切り文字で終わっていますが、既存のファイルです: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'プロジェクトコンテキストサマリーの生成に失敗: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1200,6 +1205,11 @@ export default {
   reviewed: 'レビュー済み',
   'Code Changes:': 'コード変更:',
   Performance: 'パフォーマンス',
+  'Generation Metrics': '生成メトリクス',
+  'Latest Request': '最新のリクエスト',
+  'Generation Time': '生成時間',
+  'Average TTFT': '平均 TTFT',
+  'Session TPS': 'セッション TPS',
   'Wall Time:': '経過時間:',
   'Agent Active:': 'エージェント稼働時間:',
   'API Time:': 'API時間:',
@@ -1444,7 +1454,7 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  'to view transcript': 'トランスクリプトを表示',
+  'to expand details': '詳細を展開',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -1488,6 +1498,7 @@ export default {
   'to paste images': '画像を貼り付け',
   'for external editor': '外部エディタ用',
   '? for shortcuts': '? でショートカット表示',
+  'Pasting…': '貼り付け中…',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     '無効な承認モード "{{arg}}" です。有効なモード: {{modes}}',
   'Approval mode set to "{{mode}}"': '承認モードを "{{mode}}" に設定しました',
@@ -2002,4 +2013,64 @@ export default {
     '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、新しいセッションを開始して記録を再開してください。詳細はデバッグログを確認してください。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、`/clear` を実行して記録可能な新しいセッションを開始してください。詳細はデバッグログを確認してください。',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    '最近の使用状況に基づいてプロジェクトの自動スキルを管理します。',
+  'Show project auto-skill lifecycle status.':
+    'プロジェクトの自動スキルのライフサイクル状態を表示します。',
+  'Run project auto-skill lifecycle maintenance.':
+    'プロジェクトの自動スキルのライフサイクル保守を実行します。',
+  'Restore an archived project auto-skill.':
+    'アーカイブ済みのプロジェクト自動スキルを復元します。',
+  'Auto-skill curator': '自動スキル管理',
+  'Last run: {{time}}': '前回の実行：{{time}}',
+  'Active: {{count}}': '有効：{{count}}',
+  'Stale: {{count}}': '非アクティブ：{{count}}',
+  'Archived: {{count}}': 'アーカイブ済み：{{count}}',
+  'Stale skills:': '非アクティブなスキル：',
+  'Pinned skills:': '固定済みのスキル：',
+  'Archived skills:': 'アーカイブ済みのスキル：',
+  'Dry run complete.': 'ドライランが完了しました。',
+  'Curator run complete.': '自動スキル管理の実行が完了しました。',
+  'Checked: {{count}}': '確認済み：{{count}}',
+  'First observed: {{count}}': '初回検出：{{count}}',
+  'Marked stale: {{count}}': '非アクティブ化：{{count}}',
+  'Reactivated: {{count}}': '再有効化：{{count}}',
+  'Skipped archive collisions: {{count}}':
+    'スキップしたアーカイブ先の競合：{{count}}',
+  'Archive candidates:': 'アーカイブ候補：',
+  'Skipped archive collisions:': 'スキップしたアーカイブ先の競合：',
+  'Skipped rename errors: {{count}}': 'スキップした名前変更エラー：{{count}}',
+  'Skipped rename errors:': 'スキップした名前変更エラー：',
+  '{{verb}}: {{count}}': '{{verb}}：{{count}}',
+  'Would archive': 'アーカイブ予定',
+  Archived: 'アーカイブ済み',
+  'Failed to read auto-skill curator status: {{message}}':
+    '自動スキル管理の状態を読み取れませんでした：{{message}}',
+  'Usage: /curator run [--dry-run]': '使用方法：/curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    '自動スキル管理を実行できませんでした：{{message}}',
+  'Usage: /curator restore <directory>':
+    '使用方法：/curator restore <ディレクトリ>',
+  'Restored auto-skill: {{name}}': '自動スキルを復元しました：{{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    '自動スキルを復元できませんでした：{{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    '自動スキルを自動保守の対象外にします。',
+  'Return a pinned auto-skill to automatic maintenance.':
+    '固定済みの自動スキルを自動保守の対象に戻します。',
+  'Usage: /curator pin <directory>': '使用方法：/curator pin <ディレクトリ>',
+  'Usage: /curator unpin <directory>':
+    '使用方法：/curator unpin <ディレクトリ>',
+  'Pinned auto-skill: {{name}}': '自動スキルを固定しました：{{name}}',
+  'Unpinned auto-skill: {{name}}': '自動スキルの固定を解除しました：{{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    '自動スキルの固定状態を更新できませんでした：{{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'セーフモードでは自動スキル管理による変更は無効です。',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
 };

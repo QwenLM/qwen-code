@@ -11,10 +11,14 @@ import { spawn as cpSpawn, spawnSync } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
+import type { Terminal } from '@xterm/headless';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
-import pkg from '@xterm/headless';
+import {
+  loadXtermHeadless,
+  type XtermHeadlessModule,
+} from '../utils/load-xterm-headless.js';
 import {
   serializeTerminalToObject,
   serializeTerminalToText,
@@ -26,7 +30,6 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
-const { Terminal } = pkg;
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
 
@@ -147,6 +150,18 @@ export type ShellAbortReason =
   | { kind: 'cancel' }
   | { kind: 'background'; shellId?: string };
 
+/**
+ * Returns true only for a real process-signal termination.
+ * node-pty reports signal 0 for a clean exit; the service normalizes that
+ * value to null at its boundary, while this predicate remains defensive for
+ * legacy or mocked result objects.
+ */
+export function isSignalTermination(
+  signal: number | NodeJS.Signals | null,
+): boolean {
+  return signal !== null && signal !== 0;
+}
+
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
   /**
@@ -158,9 +173,15 @@ export interface ShellExecutionResult {
   rawOutput: Buffer;
   /** The combined, decoded output as a string. */
   output: string;
-  /** The process exit code, or null if terminated by a signal. */
+  /**
+   * The process exit code. Child-process signal termination reports null;
+   * PTY signal termination may still carry a numeric exit code.
+   */
   exitCode: number | null;
-  /** The signal that terminated the process, if any. */
+  /**
+   * The non-zero signal that terminated the process, if any. A node-pty
+   * clean-exit signal of 0 is normalized to null at the service boundary.
+   */
   signal: number | null;
   /** An error object if the process failed to spawn. */
   error: Error | null;
@@ -293,8 +314,11 @@ export interface ShellPostPromoteHandlers {
   onData?: (event: ShellOutputEvent) => void;
   /**
    * Fired exactly once when the post-promote child settles — natural
-   * exit (`exitCode` set, `signal: null`), signal kill (`exitCode:
-   * null`, `signal` set), or spawn-side error (`error` set). NOT
+   * child-process exit (`exitCode` set, `signal: null`), natural PTY
+   * exit (`exitCode` set, clean-exit signal normalized to `null`), signal kill (which may carry
+   * `exitCode: 0` with a non-zero signal on PTY, or `exitCode: null`
+   * with a string signal from `child_process`), or spawn-side error
+   * (`error` set). NOT
    * fired for the promote-time resolve itself (that's the
    * `result.promoted` Promise resolution). Callers wire this to the
    * registry's `complete` / `fail` transitions.
@@ -347,7 +371,7 @@ export type ShellOutputEvent =
 
 interface ActivePty {
   ptyProcess: IPty;
-  headlessTerminal: pkg.Terminal;
+  headlessTerminal: Terminal;
 }
 
 const getErrnoCode = (error: unknown): string | undefined => {
@@ -388,6 +412,7 @@ const replayTerminalOutput = async (
   output: string,
   cols: number,
   rows: number,
+  Terminal: XtermHeadlessModule['Terminal'],
 ): Promise<string> => {
   const replayTerminal = new Terminal({
     allowProposedApi: true,
@@ -395,6 +420,8 @@ const replayTerminalOutput = async (
     rows,
     scrollback: 10000,
     convertEol: true,
+    // This headless terminal only captures output, so suppress parser diagnostics.
+    logLevel: 'off',
   });
 
   try {
@@ -470,7 +497,7 @@ const createPlainAnsiLine = (text: string) => [
 ];
 
 const serializePlainViewportToAnsiOutput = (
-  terminal: pkg.Terminal,
+  terminal: Terminal,
   unwrapWrappedLines = false,
 ): AnsiOutput => {
   const buffer = terminal.buffer.active;
@@ -708,6 +735,10 @@ export class ShellExecutionService {
       const ptyInfo = ptyOutcome.value;
       if (ptyInfo) {
         try {
+          const { Terminal } = await loadXtermHeadless();
+          if (abortSignal.aborted) {
+            return createPreSpawnAbortedHandle();
+          }
           return this.executeWithPty(
             commandToExecute,
             cwd,
@@ -715,6 +746,7 @@ export class ShellExecutionService {
             abortSignal,
             shellExecutionConfig,
             ptyInfo,
+            Terminal,
             options.postPromote,
           );
         } catch (_e) {
@@ -1435,6 +1467,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shellExecutionConfig: ShellExecutionConfig,
     ptyInfo: PtyImplementation,
+    Terminal: XtermHeadlessModule['Terminal'],
     postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     if (!ptyInfo) {
@@ -1486,6 +1519,8 @@ export class ShellExecutionService {
           cols,
           rows,
           scrollback: MAX_LIVE_TERMINAL_SCROLLBACK_LINES,
+          // This headless terminal only captures output, so suppress parser diagnostics.
+          logLevel: 'off',
         });
         headlessTerminal.scrollToTop();
 
@@ -1851,6 +1886,7 @@ export class ShellExecutionService {
                       decodedOutput,
                       cols,
                       rows,
+                      Terminal,
                     );
                   } else {
                     fullOutput = serializeTerminalToText(headlessTerminal);
@@ -1873,7 +1909,7 @@ export class ShellExecutionService {
                   rawOutput: finalBuffer,
                   output: fullOutput,
                   exitCode,
-                  signal: signal ?? null,
+                  signal: signal === 0 ? null : (signal ?? null),
                   error,
                   aborted: abortSignal.aborted,
                   pid: ptyProcess.pid,
@@ -2117,7 +2153,7 @@ export class ShellExecutionService {
                 }) => {
                   firePostSettle({
                     exitCode,
-                    signal: signal ?? null,
+                    signal: signal === 0 ? null : (signal ?? null),
                     endTime: Date.now(),
                   });
                 },
@@ -2201,7 +2237,12 @@ export class ShellExecutionService {
               const decodedOutput = new TextDecoder(finalEncoding).decode(
                 finalBuffer,
               );
-              snapshot = await replayTerminalOutput(decodedOutput, cols, rows);
+              snapshot = await replayTerminalOutput(
+                decodedOutput,
+                cols,
+                rows,
+                Terminal,
+              );
             } else {
               snapshot = serializeTerminalToText(headlessTerminal) ?? '';
             }

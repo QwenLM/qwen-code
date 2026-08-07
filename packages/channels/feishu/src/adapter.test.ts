@@ -20,8 +20,11 @@ vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
 import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
+  ChannelBaseOptions,
   ChannelConfig,
+  ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
+  ObservedChannelContactGraph,
   SessionTarget,
 } from '@qwen-code/channel-base';
 
@@ -76,9 +79,103 @@ function createTestableChannel(
   return new TestableFeishuChannel('test', config, bridge);
 }
 
+class ObservedContactFeishuChannel extends FeishuChannel {
+  protected override onPromptStart(): void {}
+
+  protected override onPromptEnd(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+function createObservedContactChannel(
+  observe: NonNullable<ChannelBaseOptions['observedContacts']>['observe'],
+  list?: NonNullable<ChannelBaseOptions['observedContacts']>['list'],
+): {
+  channel: ObservedContactFeishuChannel;
+  bridge: ChannelAgentBridge;
+} {
+  const bridge = createMockBridge();
+  const channel = new ObservedContactFeishuChannel(
+    'test',
+    createConfig({
+      blockStreaming: 'on',
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: false } },
+    }),
+    bridge,
+    { observedContacts: { observe, ...(list ? { list } : {}) } },
+  );
+  Object.assign(channel as unknown as Record<string, unknown>, {
+    tokenCache: {
+      token: 'test_token',
+      expiresAt: Date.now() + 3_600_000,
+    },
+  });
+  return { channel, bridge };
+}
+
+function feishuGroupMessage(messageId: string): Record<string, unknown> {
+  return {
+    message: {
+      message_id: messageId,
+      chat_id: 'oc_group',
+      chat_type: 'group',
+      message_type: 'text',
+      content: JSON.stringify({ text: 'hello' }),
+    },
+    sender: {
+      sender_id: {
+        union_id: 'on_user',
+        user_id: 'user_1',
+        open_id: 'ou_user',
+      },
+      sender_type: 'user',
+      tenant_key: 'tenant_1',
+    },
+  };
+}
+
+function feishuDmMessage(messageId: string): Record<string, unknown> {
+  return {
+    message: {
+      message_id: messageId,
+      chat_id: 'oc_dm',
+      chat_type: 'p2p',
+      message_type: 'text',
+      content: JSON.stringify({ text: 'hello' }),
+    },
+    sender: {
+      sender_id: {
+        union_id: 'on_user',
+        user_id: 'user_1',
+        open_id: 'ou_user',
+      },
+      sender_type: 'user',
+      tenant_key: 'tenant_1',
+    },
+  };
+}
+
 // Access private methods for unit testing
 function getPrivateMethod<T>(instance: unknown, method: string): T {
   return (instance as Record<string, unknown>)[method] as T;
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+    status,
+  });
 }
 
 describe('FeishuChannel', () => {
@@ -255,6 +352,1102 @@ describe('FeishuChannel', () => {
     it('handles empty content', () => {
       const result = extractContent('text', JSON.stringify({}));
       expect(result.text).toBe('');
+    });
+  });
+
+  describe('observed contact enrichment', () => {
+    it('resolves labels once and reuses them on later observations', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return new Response(
+              JSON.stringify({
+                code: 0,
+                msg: 'success',
+                data: {
+                  users: [{ user_id: 'ou_user', name: 'Alice' }],
+                },
+              }),
+              { status: 200 },
+            );
+          }
+          if (url.includes('/im/v1/chats/oc_group')) {
+            return new Response(
+              JSON.stringify({
+                code: 0,
+                msg: 'success',
+                data: { name: 'Project Group' },
+              }),
+              { status: 200 },
+            );
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(observe).toHaveBeenNthCalledWith(2, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(fetchSpy).toHaveBeenCalledWith(
+          expect.stringContaining('user_id_type=open_id'),
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ user_ids: ['ou_user'] }),
+          }),
+        );
+        expect(fetchSpy).toHaveBeenCalledWith(
+          expect.stringContaining('/im/v1/chats/oc_group'),
+          expect.objectContaining({
+            headers: expect.objectContaining({
+              Authorization: 'Bearer test_token',
+            }),
+          }),
+        );
+
+        onMessage(feishuGroupMessage('message_2'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not block inbound processing and silently caches lookup failures', async () => {
+      const observe = vi.fn();
+      const { channel, bridge } = createObservedContactChannel(observe);
+      let rejectLookup: (reason: Error) => void = () => {};
+      const lookup = new Promise<Response>((_resolve, reject) => {
+        rejectLookup = reject;
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(() => lookup);
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+        rejectLookup(new Error('private lookup failure'));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        onMessage(feishuGroupMessage('message_2'));
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(2);
+          expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        });
+
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('repairs labels from a delayed message with a stale snapshot', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const userLookup = deferred<Response>();
+      const chatLookup = deferred<Response>();
+      const quotedMessage = deferred<Response>();
+      const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+        const url = String(input);
+        if (url.includes('/contact/v3/users/basic_batch')) {
+          return userLookup.promise;
+        }
+        if (url.includes('/im/v1/chats/oc_group')) {
+          return chatLookup.promise;
+        }
+        if (url.includes('/im/v1/messages/om_parent')) {
+          return quotedMessage.promise;
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+        await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+
+        const reply = feishuGroupMessage('message_2');
+        (reply['message'] as Record<string, unknown>)['parent_id'] =
+          'om_parent';
+        onMessage(reply);
+        await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(3));
+
+        userLookup.resolve(
+          jsonResponse({
+            code: 0,
+            data: { users: [{ name: 'Alice' }] },
+          }),
+        );
+        chatLookup.resolve(
+          jsonResponse({ code: 0, data: { name: 'Project Group' } }),
+        );
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+
+        quotedMessage.resolve(
+          jsonResponse({
+            data: {
+              items: [
+                {
+                  msg_type: 'text',
+                  body: { content: JSON.stringify({ text: 'quoted' }) },
+                  sender: { sender_type: 'user' },
+                },
+              ],
+            },
+          }),
+        );
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(4));
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(observe).toHaveBeenLastCalledWith('test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/contact/v3/users/basic_batch'),
+          ),
+        ).toHaveLength(1);
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/im/v1/chats/oc_group'),
+          ),
+        ).toHaveLength(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('retries a label lookup when token acquisition fails before the request', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: undefined,
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(jsonResponse('unavailable', 503))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            tenant_access_token: 'fresh_token',
+            expire: 3600,
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            code: 0,
+            data: { users: [{ name: 'Alice' }] },
+          }),
+        );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_user')).resolves.toBeUndefined();
+        await expect(observedUserName('ou_user')).resolves.toBe('Alice');
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('refreshes the token after a label lookup returns 401', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.includes('/tenant_access_token/internal')) {
+            return jsonResponse({
+              tenant_access_token: 'fresh_token',
+              expire: 3600,
+            });
+          }
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            const authorization = new Headers(init?.headers).get(
+              'Authorization',
+            );
+            if (authorization === 'Bearer test_token') {
+              return jsonResponse('unauthorized', 401);
+            }
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Bob' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_first')).resolves.toBeUndefined();
+        await expect(observedUserName('ou_second')).resolves.toBe('Bob');
+        await expect(observedUserName('ou_first')).resolves.toBe('Bob');
+        expect(fetchSpy).toHaveBeenCalledTimes(4);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('retries a chat lookup when token acquisition fails before the request', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: undefined,
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(jsonResponse('unavailable', 503))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            tenant_access_token: 'fresh_token',
+            expire: 3600,
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({ code: 0, data: { name: 'Project Group' } }),
+        );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const observedChatName = getPrivateMethod<
+        (chatId: string) => Promise<string | undefined>
+      >(channel, 'observedChatName').bind(channel);
+
+      try {
+        await expect(observedChatName('oc_group')).resolves.toBeUndefined();
+        await expect(observedChatName('oc_group')).resolves.toBe(
+          'Project Group',
+        );
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('retries a 401 lookup for the same ID once the token refreshes', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.includes('/tenant_access_token/internal')) {
+            return jsonResponse({
+              tenant_access_token: 'fresh_token',
+              expire: 3600,
+            });
+          }
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            const authorization = new Headers(init?.headers).get(
+              'Authorization',
+            );
+            if (authorization === 'Bearer test_token') {
+              return jsonResponse('unauthorized', 401);
+            }
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Bob' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_first')).resolves.toBeUndefined();
+        await expect(observedUserName('ou_first')).resolves.toBe('Bob');
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('sanitizes resolved display names before caching them', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Evil\rName' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_user')).resolves.toBe('Evil Name');
+        expect(
+          (channel as unknown as Record<string, unknown>)['observedUserNames'],
+        ).toEqual(new Map([['ou_user', 'Evil Name']]));
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('reuses a cached label without a new lookup after lookup entries evict', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Alice' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_user')).resolves.toBe('Alice');
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+        // Simulate FIFO eviction of the resolved lookup entry while the
+        // cached label survives.
+        (
+          (channel as unknown as Record<string, unknown>)[
+            'observedUserLookups'
+          ] as Map<string, unknown>
+        ).clear();
+
+        await expect(observedUserName('ou_user')).resolves.toBe('Alice');
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('keeps the ID label when a resolved name sanitizes to unknown', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: '\u200b\u200c\u200d' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_user')).resolves.toBeUndefined();
+        expect(
+          (channel as unknown as Record<string, unknown>)['observedUserNames'],
+        ).toEqual(new Map());
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('writes an enriched observation when only the user lookup resolves', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Alice' }] },
+            });
+          }
+          if (url.includes('/im/v1/chats/oc_group')) {
+            return jsonResponse({ code: 99991672, msg: 'no permission' });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(observe).toHaveBeenNthCalledWith(2, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+
+        onMessage(feishuGroupMessage('message_2'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('enriches direct-chat senders without issuing chat lookups', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Alice' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuDmMessage('dm_1'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+        });
+        expect(observe).toHaveBeenNthCalledWith(2, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+        });
+
+        onMessage(feishuDmMessage('dm_2'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(
+          fetchSpy.mock.calls.some(([input]) =>
+            String(input).includes('/im/v1/chats/'),
+          ),
+        ).toBe(false);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('maps non-open_id senders to the matching user_id_type', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Named' }] },
+            });
+          }
+          if (url.includes('/im/v1/chats/oc_group')) {
+            return jsonResponse({
+              code: 0,
+              data: { name: 'Project Group' },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        const unionOnly = feishuGroupMessage('message_union');
+        (unionOnly['sender'] as Record<string, unknown>)['sender_id'] = {
+          union_id: 'on_user',
+        };
+        onMessage(unionOnly);
+        await vi.waitFor(() =>
+          expect(fetchSpy).toHaveBeenCalledWith(
+            expect.stringContaining('user_id_type=union_id'),
+            expect.objectContaining({
+              body: JSON.stringify({ user_ids: ['on_user'] }),
+            }),
+          ),
+        );
+
+        const userIdOnly = feishuGroupMessage('message_user');
+        (userIdOnly['sender'] as Record<string, unknown>)['sender_id'] = {
+          user_id: 'user_1',
+        };
+        onMessage(userIdOnly);
+        await vi.waitFor(() =>
+          expect(fetchSpy).toHaveBeenCalledWith(
+            expect.stringContaining('user_id_type=user_id'),
+            expect.objectContaining({
+              body: JSON.stringify({ user_ids: ['user_1'] }),
+            }),
+          ),
+        );
+        expect(
+          fetchSpy.mock.calls.some(([input]) =>
+            String(input).includes('user_id_type=open_id'),
+          ),
+        ).toBe(false);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('shares one in-flight lookup across concurrent messages', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const userLookup = deferred<Response>();
+      const chatLookup = deferred<Response>();
+      const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+        const url = String(input);
+        if (url.includes('/contact/v3/users/basic_batch')) {
+          return userLookup.promise;
+        }
+        if (url.includes('/im/v1/chats/oc_group')) {
+          return chatLookup.promise;
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+        onMessage(feishuGroupMessage('message_2'));
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(2);
+          expect(fetchSpy).toHaveBeenCalledTimes(2);
+        });
+
+        userLookup.resolve(
+          jsonResponse({ code: 0, data: { users: [{ name: 'Alice' }] } }),
+        );
+        chatLookup.resolve(
+          jsonResponse({ code: 0, data: { name: 'Project Group' } }),
+        );
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
+        expect(observe).toHaveBeenLastCalledWith('test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/contact/v3/users/basic_batch'),
+          ),
+        ).toHaveLength(1);
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/im/v1/chats/oc_group'),
+          ),
+        ).toHaveLength(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('hydrates label caches from persisted observations after a restart', async () => {
+      const observe = vi.fn();
+      const list = vi.fn(
+        (): ObservedChannelContactGraph => ({
+          users: [],
+          groups: [
+            {
+              channelName: 'test',
+              id: 'oc_group',
+              label: 'Project Group',
+              lastObservedAt: '2026-01-01T00:00:00.000Z',
+              users: [
+                {
+                  id: 'ou_user',
+                  label: 'Alice',
+                  lastObservedAt: '2026-01-01T00:00:00.000Z',
+                },
+              ],
+              topics: [],
+            },
+            {
+              channelName: 'other',
+              id: 'oc_foreign',
+              label: 'Foreign Group',
+              lastObservedAt: '2026-01-01T00:00:00.000Z',
+              users: [
+                {
+                  id: 'ou_foreign',
+                  label: 'Foreign User',
+                  lastObservedAt: '2026-01-01T00:00:00.000Z',
+                },
+              ],
+              topics: [],
+            },
+          ],
+        }),
+      );
+      const { channel, bridge } = createObservedContactChannel(observe, list);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(jsonResponse('rate limited', 429));
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+
+        onMessage(feishuGroupMessage('message_2'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+        expect(observe).toHaveBeenNthCalledWith(2, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(list).toHaveBeenCalledTimes(1);
+        // Hydrated labels short-circuit the enrichment lookups.
+        expect(fetchSpy).toHaveBeenCalledTimes(0);
+
+        // Labels persisted by another channel instance must not hydrate into
+        // this channel's caches.
+        const foreign = feishuGroupMessage('message_3');
+        (foreign['message'] as Record<string, unknown>)['chat_id'] =
+          'oc_foreign';
+        (foreign['sender'] as Record<string, unknown>)['sender_id'] = {
+          open_id: 'ou_foreign',
+        };
+        onMessage(foreign);
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(3);
+          expect(bridge.prompt).toHaveBeenCalledTimes(3);
+        });
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_foreign', label: 'ou_foreign' },
+          group: { id: 'oc_foreign', label: 'oc_foreign' },
+        });
+        expect(bridge.prompt).toHaveBeenNthCalledWith(
+          3,
+          expect.any(String),
+          expect.stringContaining('[ou_foreign]'),
+          expect.anything(),
+        );
+        expect(list).toHaveBeenCalledTimes(1);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('still processes messages when persisted observations cannot be listed', async () => {
+      const observe = vi.fn();
+      const list = vi.fn((): ObservedChannelContactGraph => {
+        throw new Error('Invalid observed contact registry.');
+      });
+      const { channel, bridge } = createObservedContactChannel(observe, list);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(jsonResponse('rate limited', 429));
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+        expect(list).toHaveBeenCalledTimes(1);
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('attaches cached labels to later envelopes and prompts', async () => {
+      const observe = vi.fn();
+      const { channel, bridge } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Alice' }] },
+            });
+          }
+          if (url.includes('/im/v1/chats/oc_group')) {
+            return jsonResponse({
+              code: 0,
+              data: { name: 'Project Group' },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+
+        onMessage(feishuGroupMessage('message_2'));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+        expect(bridge.prompt).toHaveBeenNthCalledWith(
+          1,
+          expect.any(String),
+          expect.stringContaining('[ou_user]'),
+          expect.anything(),
+        );
+        expect(bridge.prompt).toHaveBeenNthCalledWith(
+          2,
+          expect.any(String),
+          expect.stringContaining('[Alice]'),
+          expect.anything(),
+        );
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('keeps enrichment silent when tenant token acquisition fails', async () => {
+      const observe = vi.fn();
+      const { channel, bridge } = createObservedContactChannel(observe);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: undefined,
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/auth/v3/tenant_access_token/internal')) {
+            throw new Error('token endpoint unavailable');
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('logs token errors for core callers that join a silent-initiated refresh', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: undefined,
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(jsonResponse('unavailable', 503));
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const getTenantAccessToken = getPrivateMethod<
+        (options?: { silent?: boolean }) => Promise<string | undefined>
+      >(channel, 'getTenantAccessToken').bind(channel);
+
+      try {
+        const results = await Promise.all([
+          getTenantAccessToken({ silent: true }),
+          getTenantAccessToken(),
+        ]);
+
+        expect(results).toEqual([undefined, undefined]);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(stderrSpy).toHaveBeenCalledTimes(1);
+        expect(String(stderrSpy.mock.calls[0][0])).toContain('HTTP 503');
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('prefers the newest persisted label when hydrating overlapping contacts', async () => {
+      const observe = vi.fn();
+      const list = vi.fn(
+        (): ObservedChannelContactGraph => ({
+          users: [
+            {
+              channelName: 'test',
+              id: 'ou_user',
+              label: 'New Name',
+              lastObservedAt: '2026-02-01T00:00:00.000Z',
+            },
+          ],
+          groups: [
+            {
+              channelName: 'test',
+              id: 'oc_group',
+              label: 'Project Group',
+              lastObservedAt: '2026-01-01T00:00:00.000Z',
+              users: [
+                {
+                  id: 'ou_user',
+                  label: 'Old Name',
+                  lastObservedAt: '2026-01-01T00:00:00.000Z',
+                },
+              ],
+              topics: [],
+            },
+          ],
+        }),
+      );
+      const { channel, bridge } = createObservedContactChannel(observe, list);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(jsonResponse('rate limited', 429));
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining('[New Name]'),
+          expect.anything(),
+        );
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'New Name' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('bounds runtime label caches to the observed-contact retention cap', () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const capObservedCache = getPrivateMethod<
+        (cache: Map<string, unknown>) => void
+      >(channel, 'capObservedCache').bind(channel);
+      const cache = new Map<string, string>();
+      for (let i = 0; i < 525; i++) {
+        cache.set(`id_${i}`, `label_${i}`);
+      }
+
+      capObservedCache(cache);
+
+      expect(cache.size).toBe(500);
+      expect(cache.has('id_0')).toBe(false);
+      expect(cache.has('id_24')).toBe(false);
+      expect(cache.has('id_25')).toBe(true);
+      expect(cache.has('id_524')).toBe(true);
+    });
+
+    it('re-hydrates persisted labels after in-lifetime cache eviction', async () => {
+      const observe = vi.fn();
+      const list = vi.fn(
+        (): ObservedChannelContactGraph => ({
+          users: [
+            {
+              channelName: 'test',
+              id: 'ou_user',
+              label: 'Alice',
+              lastObservedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          groups: [],
+        }),
+      );
+      const { channel, bridge } = createObservedContactChannel(observe, list);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            if (String(init?.body).includes('ou_new')) {
+              return jsonResponse({
+                code: 0,
+                data: { users: [{ name: 'New User' }] },
+              });
+            }
+            return jsonResponse('rate limited', 429);
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        onMessage(feishuDmMessage('dm_1'));
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+        });
+
+        // Churn the label cache past the cap so the hydrated entry evicts
+        // when the next successful lookup is cached.
+        const names = (channel as unknown as Record<string, unknown>)[
+          'observedUserNames'
+        ] as Map<string, string>;
+        for (let i = 0; i < 500; i++) {
+          names.set(`ou_filler_${i}`, `User ${i}`);
+        }
+        await expect(observedUserName('ou_new')).resolves.toBe('New User');
+        expect(names.has('ou_user')).toBe(false);
+
+        onMessage(feishuDmMessage('dm_2'));
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(2);
+          expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        });
+        expect(observe).toHaveBeenNthCalledWith(2, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+        });
+        expect(list).toHaveBeenCalledTimes(2);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 
@@ -1284,12 +2477,41 @@ describe('FeishuChannel', () => {
           },
           'hello',
         ),
-      ).rejects.toThrow('Feishu sendMessage failed: HTTP 500');
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: HTTP 500',
+        }),
+      );
 
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('sendMessage failed: HTTP 500'),
       );
       stderrSpy.mockRestore();
+    });
+
+    it('classifies non-retryable proactive HTTP failures as permanent', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('permission denied', { status: 403 }),
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'permanent',
+          message: 'Feishu sendMessage failed: HTTP 403',
+        }),
+      );
     });
 
     it('sends proactive loop output to direct chats', async () => {
@@ -1322,6 +2544,77 @@ describe('FeishuChannel', () => {
         }),
       );
       fetchSpy.mockRestore();
+    });
+
+    it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'chat', id: 'oc_group' },
+        'group result',
+      );
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'user', id: 'ou_user' },
+        'direct result',
+      );
+
+      expect(fetchSpy.mock.calls[0]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+      );
+      expect(fetchSpy.mock.calls[1]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
+      );
+    });
+
+    it('classifies proactive network failures as transient', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockRejectedValueOnce(
+        new Error('socket token=secret'),
+      );
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: network error',
+        }),
+      );
+    });
+
+    it('classifies unexpected proactive delivery failures as transient', async () => {
+      const channel = createTestableChannel();
+      const failure = new Error('unexpected token lookup failure');
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        getTenantAccessToken: vi.fn().mockRejectedValue(failure),
+      });
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'unexpected token lookup failure',
+          cause: failure,
+        }),
+      );
     });
   });
 
@@ -1511,6 +2804,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
+      expect(updateCard.mock.calls[0]![1]).toContain('partial answer');
       expect(updateCard.mock.calls[0]![4]).toBe('已失败，请重试');
     });
 
@@ -1556,6 +2850,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
+      expect(updateCard.mock.calls[0]![1]).toContain('partial answer');
       expect(updateCard.mock.calls[0]![4]).toBe('已取消');
     });
 

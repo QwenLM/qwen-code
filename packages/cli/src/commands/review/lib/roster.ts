@@ -24,7 +24,9 @@
 // Nothing here is supplied by the caller. A roster the caller could shrink is a
 // roster that gets shrunk.
 
-import type { RoleId } from './agent-briefs.js';
+import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
+import { repositoryContextOf } from './repository-context.js';
+import { pathTool } from '../script-lint.js';
 
 /**
  * How this review's diff was captured — which decides what can be asked of it.
@@ -51,13 +53,27 @@ export interface RosterPlan {
     path?: unknown;
     kind?: unknown;
     heavy?: unknown;
+    addedLines?: unknown;
     removedLines?: unknown;
+    /** Lines in the post-change file; 0 for a true deletion (see report.ts). */
+    fileLines?: unknown;
   }>;
   srcDiffLines?: unknown;
   diffLines?: unknown;
   worktreePath?: unknown;
   prNumber?: unknown;
   untrackedFiles?: unknown;
+  /**
+   * The review's effort, as the capturing command recorded it (`--effort`).
+   * `'medium'` is the balanced tier and drops the adversarial personas; anything
+   * else — including absent — keeps the full roster. It lives in the plan, not in
+   * a caller argument, on purpose: the roster this file computes must not be
+   * shrinkable by whoever calls `requiredAgents`, or the shrink is what gets
+   * called. `check-coverage`, `agent-prompt --roster` and `compose-review`'s
+   * recomputation then all read the same value and cannot disagree.
+   */
+  effort?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -106,11 +122,40 @@ function hasDeletions(plan: RosterPlan): boolean {
 
 /** A PR number the plan actually resolved: a positive integer, as a number or the
  *  string `fetch-pr` writes. `null`, `0`, `''` and non-numeric junk are 'no PR'. */
-function isPositivePrNumber(value: unknown): boolean {
+export function isPositivePrNumber(value: unknown): boolean {
   if (typeof value === 'number') return Number.isInteger(value) && value > 0;
   if (typeof value === 'string')
     return /^\d+$/.test(value) && Number(value) > 0;
   return false;
+}
+
+/**
+ * Does the diff touch a file a linter owns by path — a shell script, a workflow,
+ * a Dockerfile? Detected by path alone (`pathTool`), the same detector the command
+ * uses, because here only the plan's file paths are in hand, not the files. A
+ * shebang-only extensionless script does not trip this — the roster cannot read it.
+ *
+ * `compose-review`'s deterministic script-lint gate reads this to decide whether a
+ * script-lint report was OWED — a diff that carries such a file but produced no
+ * report fails closed to unreviewed. It is the one predicate both the orchestrator's
+ * `qwen review script-lint` step and the gate that checks its output share, so they
+ * cannot disagree about what counts as an executable script.
+ */
+export function hasExecutableScript(plan: RosterPlan): boolean {
+  const files = Array.isArray(plan.files) ? plan.files : [];
+  // `fileLines` distinguishes a TRUE deletion (0, no post-image, exempt) from a
+  // surviving file (>0, still owed) ONLY in pr-worktree, where the report resolves
+  // real post-image line counts. In local/diff-only NO post-image is available and
+  // the report builder writes `fileLines: 0` for EVERY file — there 0 means
+  // "unknown", not "deleted", so keying on it would read a surviving `deploy.sh` as
+  // deleted and let a missing script-lint report pass uncapped. Trust it only where
+  // it is real; elsewhere fail safe and owe any path-detected script.
+  const trustsFileLines = reviewMode(plan) === 'pr-worktree';
+  return files.some((f) => {
+    if (typeof f?.path !== 'string' || pathTool(f.path) === null) return false;
+    if (!trustsFileLines) return true;
+    return Number(f.fileLines ?? 1) > 0;
+  });
 }
 
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
@@ -175,12 +220,26 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     // Step 3A: every dimension, each walking the whole diff.
     add('1a');
     add('2');
-    add('3');
+    // Code quality is three checklist slices, not one agent (see agent-briefs).
+    // All three are required at every effort: the split exists because a single
+    // agent holding the whole list finishes one item, so dropping two slices at
+    // medium would not save a lens — it would restore the failure the split fixed.
+    add('3a');
+    add('3b');
+    add('3c');
     add('4');
     add('5');
-    add('6a');
-    add('6b');
-    add('6c');
+    // The three adversarial personas are a high-effort dimension. A `medium`
+    // (balanced) review deliberately skips them, so they must not be *required*
+    // either — otherwise `check-coverage` flags them missing and exits 3, and a
+    // medium review of every small (3A) diff halts before Step 4. Only high
+    // requires them. The effort is read from the plan the capturing command
+    // wrote, never from a caller argument (see `RosterPlan.effort`).
+    if (plan.effort !== 'medium') {
+      add('6a');
+      add('6b');
+      add('6c');
+    }
   }
 
   // Both topologies. 1b owns the deleted side; 1c owns the cross-file walk and
@@ -189,6 +248,10 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   if (mode !== 'diff-only') {
     add('1c');
     add('7');
+    // The executable-script lint is NOT an agent: the orchestrator runs
+    // `qwen review script-lint` deterministically and `compose-review` reads its
+    // report as the sole authority (see hasExecutableScript). There is no role to
+    // require here — the gate enforces itself from the report, model out of the loop.
   }
 
   // A largely-rewritten file is not reviewable as a diff: the two ends of an
@@ -212,5 +275,47 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     }
   }
 
+  const repositoryContext = repositoryContextOf(plan);
+  for (const role of repositoryContext?.requiredAgents ?? []) {
+    if (!contextRoleRunsInThisReview(role, plan, mode)) continue;
+    if (!out.some((agent) => agent.role === role && agent.file === undefined)) {
+      add(role);
+    }
+  }
+
   return out;
+}
+
+/**
+ * A repository context may REQUIRE an agent this review's policy already runs;
+ * it may not override the policy. The effort gate, the topology split, and the
+ * mode are cost and capability decisions the roster owns — a manifest naming a
+ * role they exclude would otherwise silently inflate a medium review with the
+ * adversarial personas, re-add whole-diff walkers to a chunked 3B fan-out, or
+ * demand a tree-grepping tracer from a review that has no tree.
+ */
+function contextRoleRunsInThisReview(
+  role: RepositoryContextRoleId,
+  plan: RosterPlan,
+  mode: ReviewMode,
+): boolean {
+  const fanOut = isTerritoryFanOut(plan);
+  switch (role) {
+    case '6a':
+    case '6b':
+    case '6c':
+      return !fanOut && plan.effort !== 'medium';
+    case 'test-matrix':
+      return fanOut;
+    case '1c':
+      return mode !== 'diff-only';
+    case '1b':
+      // Both topologies run the removed-behavior audit; whether it has work is
+      // the diff's business (hasDeletions), not the policy's.
+      return true;
+    default:
+      // Whole-diff dimension walkers exist only in Step 3A; a 3B chunk agent
+      // already owns every dimension for its own lines.
+      return !fanOut;
+  }
 }
