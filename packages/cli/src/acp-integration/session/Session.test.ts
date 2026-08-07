@@ -19,6 +19,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import type { DaemonToolLoopState } from './Session.js';
 import type {
   Content,
   FunctionCall,
@@ -7064,6 +7065,85 @@ describe('Session', () => {
         );
       });
 
+      it('reports the cap loop type when a batch also trips the duplicate check', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        // Opt in so the gated global-duplicate check is live alongside the
+        // always-on cap: a batch that is simultaneously past the cap and at
+        // the duplicate threshold must still halt on the cap loop type,
+        // pinning the cap-first evaluation order (core's always-on tier
+        // evaluates the cap before the gated duplicate check).
+        mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+        const toolLoopState = {
+          totalToolCalls: 99,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        const calls = [
+          {
+            id: 'read_other',
+            name: 'read_file',
+            args: { file_path: 'other.ts' },
+          },
+          ...Array.from({ length: 6 }, (_, index) => ({
+            id: `read_${index}`,
+            name: 'read_file',
+            args: { file_path: 'same.ts' },
+          })),
+        ];
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'read_file'
+            ? {
+                name: 'read_file',
+                kind: core.Kind.Read,
+                displayName: 'Read',
+                description: 'Read',
+                build: vi.fn().mockImplementation((args) => ({
+                  params: args,
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('read'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: vi.fn().mockResolvedValue({
+                    llmContent: 'ok',
+                    returnDisplay: 'ok',
+                  }),
+                })),
+                canUpdateOutput: false,
+                isOutputMarkdown: false,
+              }
+            : undefined,
+        );
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: unknown[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-adaptive-cap-stuck-opted-in',
+          calls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(result.parts).toHaveLength(7);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after 106 tool calls in one turn.',
+          ),
+        );
+      });
+
       it('stops a diverse turn at the adaptive hard backstop', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         // Adaptive (non-explicit) cap: diverse calls run through the soft
@@ -7143,94 +7223,110 @@ describe('Session', () => {
       });
 
       it('detects invalid parameter loops in concurrent Agent batches and skips the calls after the batch', async () => {
-        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-        const build = vi.fn().mockImplementation(() => {
-          throw new Error('Invalid subagent_type: bad');
-        });
-        mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.AGENT
-            ? {
-                name: core.ToolNames.AGENT,
-                kind: core.Kind.Think,
-                displayName: 'Agent',
-                description: 'Agent',
-                build,
-                canUpdateOutput: false,
-                isOutputMarkdown: true,
-              }
-            : undefined,
-        );
-        const functionCalls: FunctionCall[] = Array.from(
-          { length: 5 },
-          (_, index) => ({
-            id: `agent_${index}`,
-            name: core.ToolNames.AGENT,
-            args: { subagent_type: `bad_${index}` },
-          }),
-        );
-        functionCalls.push({
-          id: 'read_after_loop',
-          name: 'read_file',
-          args: { file_path: 'after-loop.ts' },
-        });
-        const toolLoopState = {
-          totalToolCalls: 0,
-          invalidToolParamErrors: new Map<string, number>(),
-          toolCallKeyCounts: new Map<string, number>(),
-          maxToolCallKeyRepeat: 0,
-          loopDetected: false,
-        };
-        const result = await (
-          session as unknown as {
-            runToolCalls: (
-              abortSignal: AbortSignal,
-              promptId: string,
-              calls: FunctionCall[],
-              loopState: typeof toolLoopState,
-            ) => Promise<{
-              parts: Part[];
-              stopAfterPermissionCancel: boolean;
-              loopDetected?: boolean;
-            }>;
-          }
-        ).runToolCalls(
-          new AbortController().signal,
-          'prompt-agent-invalid-loop',
-          functionCalls,
-          toolLoopState,
-        );
+        const previousMaxConcurrency =
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        try {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const build = vi.fn().mockImplementation(() => {
+            throw new Error('Invalid subagent_type: bad');
+          });
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            name === core.ToolNames.AGENT
+              ? {
+                  name: core.ToolNames.AGENT,
+                  kind: core.Kind.Think,
+                  displayName: 'Agent',
+                  description: 'Agent',
+                  build,
+                  canUpdateOutput: false,
+                  isOutputMarkdown: true,
+                }
+              : undefined,
+          );
+          const functionCalls: FunctionCall[] = Array.from(
+            { length: 5 },
+            (_, index) => ({
+              id: `agent_${index}`,
+              name: core.ToolNames.AGENT,
+              args: { subagent_type: `bad_${index}` },
+            }),
+          );
+          functionCalls.push({
+            id: 'read_after_loop',
+            name: 'read_file',
+            args: { file_path: 'after-loop.ts' },
+          });
+          const toolLoopState = {
+            totalToolCalls: 0,
+            invalidToolParamErrors: new Map<string, number>(),
+            toolCallKeyCounts: new Map<string, number>(),
+            maxToolCallKeyRepeat: 0,
+            loopDetected: false,
+          };
+          const result = await (
+            session as unknown as {
+              runToolCalls: (
+                abortSignal: AbortSignal,
+                promptId: string,
+                calls: FunctionCall[],
+                loopState: typeof toolLoopState,
+              ) => Promise<{
+                parts: Part[];
+                stopAfterPermissionCancel: boolean;
+                loopDetected?: boolean;
+              }>;
+            }
+          ).runToolCalls(
+            new AbortController().signal,
+            'prompt-agent-invalid-loop',
+            functionCalls,
+            toolLoopState,
+          );
 
-        expect(result.loopDetected).toBe(true);
-        // Agent-only batches run fully concurrent (no serial prefix), so
-        // every build() throws; the loop is detected on the third failure
-        // and only the calls AFTER the batch stay skipped.
-        expect(
-          result.parts
-            .slice(0, 5)
-            .map((part) => part.functionResponse?.response?.['error']),
-        ).toEqual(
-          Array.from({ length: 5 }, () => 'Invalid subagent_type: bad'),
-        );
-        expect(
-          result.parts
-            .slice(5)
-            .map((part) => part.functionResponse?.response?.['error']),
-        ).toEqual([
-          'Skipped because loop detection stopped the current turn before this tool call could run.',
-        ]);
-        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
-          'agent_0',
-          'agent_1',
-          'agent_2',
-          'agent_3',
-          'agent_4',
-          'read_after_loop',
-        ]);
-        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Stopping ACP turn after repeated tool parameter errors',
-          ),
-        );
+          expect(result.loopDetected).toBe(true);
+          // Agent-only batches run fully concurrent (no serial prefix), so
+          // every build() throws; the loop is detected on the third failure
+          // and only the calls AFTER the batch stay skipped.
+          expect(
+            result.parts
+              .slice(0, 5)
+              .map((part) => part.functionResponse?.response?.['error']),
+          ).toEqual(
+            Array.from({ length: 5 }, () => 'Invalid subagent_type: bad'),
+          );
+          expect(
+            result.parts
+              .slice(5)
+              .map((part) => part.functionResponse?.response?.['error']),
+          ).toEqual([
+            'Skipped because loop detection stopped the current turn before this tool call could run.',
+          ]);
+          expect(result.parts.map((part) => part.functionResponse?.id)).toEqual(
+            [
+              'agent_0',
+              'agent_1',
+              'agent_2',
+              'agent_3',
+              'agent_4',
+              'read_after_loop',
+            ],
+          );
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Stopping ACP turn after repeated tool parameter errors',
+            ),
+          );
+        } finally {
+          if (previousMaxConcurrency === undefined) {
+            delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          } else {
+            process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+              previousMaxConcurrency;
+          }
+        }
       });
 
       it('detects invalid parameter loops in small concurrent Agent batches', async () => {
@@ -17388,126 +17484,138 @@ describe('Session', () => {
       it.each([core.ToolNames.AGENT, 'task'])(
         'starts every %s call of a fan-out concurrently, past the loop-detection threshold',
         async (callName) => {
-          // Regression: the daemon once serialized the first three calls of a
-          // large batch before widening concurrency, which stretched /review
-          // fan-outs into several serial multi-minute agent runs. All five
-          // calls here must reach execute() before any result resolves; under
-          // the old serial prefix the fourth would not start until one of the
-          // first three finished, and the race below reports that regression
-          // with a named assertion instead of an opaque vitest timeout. The
-          // `task` variant pins the legacy-alias branch of the agent
-          // classifier: an aliased fan-out must still land in one concurrent
-          // batch, not drop back onto the serial path.
-          type Deferred<T> = {
-            promise: Promise<T>;
-            resolve: (v: T) => void;
-          };
-          const makeDeferred = <T>(): Deferred<T> => {
-            let resolve!: (v: T) => void;
-            const promise = new Promise<T>((r) => {
-              resolve = r;
-            });
-            return { promise, resolve };
-          };
+          const previousMaxConcurrency =
+            process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+          try {
+            // Regression: the daemon once serialized the first three calls of a
+            // large batch before widening concurrency, which stretched /review
+            // fan-outs into several serial multi-minute agent runs. All five
+            // calls here must reach execute() before any result resolves; under
+            // the old serial prefix the fourth would not start until one of the
+            // first three finished, and the race below reports that regression
+            // with a named assertion instead of an opaque vitest timeout. The
+            // `task` variant pins the legacy-alias branch of the agent
+            // classifier: an aliased fan-out must still land in one concurrent
+            // batch, not drop back onto the serial path.
+            type Deferred<T> = {
+              promise: Promise<T>;
+              resolve: (v: T) => void;
+            };
+            const makeDeferred = <T>(): Deferred<T> => {
+              let resolve!: (v: T) => void;
+              const promise = new Promise<T>((r) => {
+                resolve = r;
+              });
+              return { promise, resolve };
+            };
 
-          const ids = ['call-a', 'call-b', 'call-c', 'call-d', 'call-e'];
-          const called: Record<string, Deferred<void>> = {};
-          const result: Record<string, Deferred<core.ToolResult>> = {};
-          for (const id of ids) {
-            called[id] = makeDeferred<void>();
-            result[id] = makeDeferred<core.ToolResult>();
-          }
+            const ids = ['call-a', 'call-b', 'call-c', 'call-d', 'call-e'];
+            const called: Record<string, Deferred<void>> = {};
+            const result: Record<string, Deferred<core.ToolResult>> = {};
+            for (const id of ids) {
+              called[id] = makeDeferred<void>();
+              result[id] = makeDeferred<core.ToolResult>();
+            }
 
-          const agentTool = {
-            name: core.ToolNames.AGENT,
-            kind: core.Kind.Think,
-            build: vi
-              .fn()
-              .mockImplementation((args: Record<string, unknown>) => {
-                const id = args['_test_id'] as string;
-                return {
-                  params: args,
-                  eventEmitter: undefined,
-                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-                  getDescription: vi.fn().mockReturnValue(`agent ${id}`),
-                  toolLocations: vi.fn().mockReturnValue([]),
-                  execute: vi.fn().mockImplementation(() => {
-                    called[id].resolve();
-                    return result[id].promise;
-                  }),
-                };
-              }),
-          };
+            const agentTool = {
+              name: core.ToolNames.AGENT,
+              kind: core.Kind.Think,
+              build: vi
+                .fn()
+                .mockImplementation((args: Record<string, unknown>) => {
+                  const id = args['_test_id'] as string;
+                  return {
+                    params: args,
+                    eventEmitter: undefined,
+                    getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                    getDescription: vi.fn().mockReturnValue(`agent ${id}`),
+                    toolLocations: vi.fn().mockReturnValue([]),
+                    execute: vi.fn().mockImplementation(() => {
+                      called[id].resolve();
+                      return result[id].promise;
+                    }),
+                  };
+                }),
+            };
 
-          mockToolRegistry.getTool.mockImplementation((name: string) =>
-            name === callName ? agentTool : undefined,
-          );
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.DEFAULT);
-          mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
-
-          const sendMessageStream = vi
-            .fn()
-            .mockResolvedValueOnce(
-              createStreamWithChunks([
-                {
-                  type: core.StreamEventType.CHUNK,
-                  value: {
-                    functionCalls: ids.map((id) => ({
-                      id,
-                      name: callName,
-                      args: { _test_id: id, subagent_type: 'explore' },
-                    })),
-                  },
-                },
-              ]),
-            )
-            .mockResolvedValueOnce(createEmptyStream());
-          mockChat.sendMessageStream = sendMessageStream;
-
-          const promptPromise = session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'spawn five agents' }],
-          });
-
-          let fanOutTimer: ReturnType<typeof setTimeout> | undefined;
-          const fanOutDeadline = new Promise<never>((_, reject) => {
-            fanOutTimer = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    'Agent fan-out did not start concurrently ' +
-                      '(serial-prefix regression).',
-                  ),
-                ),
-              10_000,
+            mockToolRegistry.getTool.mockImplementation((name: string) =>
+              name === callName ? agentTool : undefined,
             );
-          });
-          await Promise.race([
-            Promise.all(ids.map((id) => called[id].promise)),
-            fanOutDeadline,
-          ]);
-          clearTimeout(fanOutTimer);
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.DEFAULT);
+            mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
 
-          for (const id of ids) {
-            result[id].resolve({
-              llmContent: `${id}-done`,
-              returnDisplay: id,
+            const sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      functionCalls: ids.map((id) => ({
+                        id,
+                        name: callName,
+                        args: { _test_id: id, subagent_type: 'explore' },
+                      })),
+                    },
+                  },
+                ]),
+              )
+              .mockResolvedValueOnce(createEmptyStream());
+            mockChat.sendMessageStream = sendMessageStream;
+
+            const promptPromise = session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'spawn five agents' }],
             });
+
+            let fanOutTimer: ReturnType<typeof setTimeout> | undefined;
+            const fanOutDeadline = new Promise<never>((_, reject) => {
+              fanOutTimer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      'Agent fan-out did not start concurrently ' +
+                        '(serial-prefix regression).',
+                    ),
+                  ),
+                10_000,
+              );
+            });
+            await Promise.race([
+              Promise.all(ids.map((id) => called[id].promise)),
+              fanOutDeadline,
+            ]);
+            clearTimeout(fanOutTimer);
+
+            for (const id of ids) {
+              result[id].resolve({
+                llmContent: `${id}-done`,
+                returnDisplay: id,
+              });
+            }
+
+            await promptPromise;
+
+            expect(sendMessageStream).toHaveBeenCalledTimes(2);
+            const followUp = sendMessageStream.mock.calls[1][1] as {
+              message: Array<{ functionResponse?: { id?: string } }>;
+            };
+            expect(
+              followUp.message
+                .filter((p) => p.functionResponse)
+                .map((p) => p.functionResponse?.id),
+            ).toEqual(ids);
+          } finally {
+            if (previousMaxConcurrency === undefined) {
+              delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+            } else {
+              process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+                previousMaxConcurrency;
+            }
           }
-
-          await promptPromise;
-
-          expect(sendMessageStream).toHaveBeenCalledTimes(2);
-          const followUp = sendMessageStream.mock.calls[1][1] as {
-            message: Array<{ functionResponse?: { id?: string } }>;
-          };
-          expect(
-            followUp.message
-              .filter((p) => p.functionResponse)
-              .map((p) => p.functionResponse?.id),
-          ).toEqual(ids);
         },
       );
 
@@ -18146,11 +18254,7 @@ describe('Session', () => {
         abortSignal: AbortSignal,
         promptId: string,
         functionCalls: FunctionCall[],
-        toolLoopState?: {
-          totalToolCalls: number;
-          invalidToolParamErrors: Map<string, number>;
-          loopDetected: boolean;
-        },
+        toolLoopState?: DaemonToolLoopState,
         onFullTurnModel?: (model: string) => boolean,
       ) => Promise<{
         parts: Part[];
@@ -20981,99 +21085,111 @@ describe('Session', () => {
     });
 
     it('lets sibling Agent calls in a small batch finish when loop detection fires', async () => {
-      let firstSiblingSignal: AbortSignal | undefined;
-      let secondSiblingSignal: AbortSignal | undefined;
-      const firstSiblingExecute = vi
-        .fn()
-        .mockImplementation(async (signal: AbortSignal) => {
-          firstSiblingSignal = signal;
-          await waitForAbortOrTick(signal);
-          return {
-            llmContent: 'first sibling stopped',
-            returnDisplay: 'first sibling stopped',
-          };
+      const previousMaxConcurrency =
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      try {
+        let firstSiblingSignal: AbortSignal | undefined;
+        let secondSiblingSignal: AbortSignal | undefined;
+        const firstSiblingExecute = vi
+          .fn()
+          .mockImplementation(async (signal: AbortSignal) => {
+            firstSiblingSignal = signal;
+            await waitForAbortOrTick(signal);
+            return {
+              llmContent: 'first sibling stopped',
+              returnDisplay: 'first sibling stopped',
+            };
+          });
+        const secondSiblingExecute = vi
+          .fn()
+          .mockImplementation(async (signal: AbortSignal) => {
+            secondSiblingSignal = signal;
+            await waitForAbortOrTick(signal);
+            return {
+              llmContent: 'second sibling stopped',
+              returnDisplay: 'second sibling stopped',
+            };
+          });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            if (args['_test_id'] === 'invalid') {
+              throw new Error('Invalid subagent_type: bad');
+            }
+            const isFirstSibling = args['_test_id'] === 'sibling_1';
+            return {
+              params: { subagent_type: 'explore', ...args },
+              eventEmitter: new EventEmitter(),
+              execute: isFirstSibling
+                ? firstSiblingExecute
+                : secondSiblingExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Agent'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            };
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
         });
-      const secondSiblingExecute = vi
-        .fn()
-        .mockImplementation(async (signal: AbortSignal) => {
-          secondSiblingSignal = signal;
-          await waitForAbortOrTick(signal);
-          return {
-            llmContent: 'second sibling stopped',
-            returnDisplay: 'second sibling stopped',
-          };
-        });
-      mockToolRegistry.getTool.mockReturnValue({
-        name: core.ToolNames.AGENT,
-        kind: core.Kind.Think,
-        displayName: 'Agent',
-        description: 'Agent',
-        build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
-          if (args['_test_id'] === 'invalid') {
-            throw new Error('Invalid subagent_type: bad');
-          }
-          const isFirstSibling = args['_test_id'] === 'sibling_1';
-          return {
-            params: { subagent_type: 'explore', ...args },
-            eventEmitter: new EventEmitter(),
-            execute: isFirstSibling
-              ? firstSiblingExecute
-              : secondSiblingExecute,
-            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-            getDescription: vi.fn().mockReturnValue('Agent'),
-            toolLocations: vi.fn().mockReturnValue([]),
-          };
-        }),
-        canUpdateOutput: false,
-        isOutputMarkdown: true,
-      });
-      const toolLoopState = {
-        totalToolCalls: 0,
-        invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
-        toolCallKeyCounts: new Map<string, number>(),
-        maxToolCallKeyRepeat: 0,
-        loopDetected: false,
-      };
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
 
-      const result = await (
-        session as unknown as ToolCallInternals
-      ).runToolCalls(
-        new AbortController().signal,
-        'prompt-agent-loop-abort',
-        [
-          {
-            id: 'agent_invalid',
-            name: core.ToolNames.AGENT,
-            args: { _test_id: 'invalid', subagent_type: 'bad' },
-          },
-          {
-            id: 'agent_sibling_1',
-            name: core.ToolNames.AGENT,
-            args: { _test_id: 'sibling_1', subagent_type: 'explore' },
-          },
-          {
-            id: 'agent_sibling_2',
-            name: core.ToolNames.AGENT,
-            args: { _test_id: 'sibling_2', subagent_type: 'explore' },
-          },
-        ],
-        toolLoopState,
-      );
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-loop-abort',
+          [
+            {
+              id: 'agent_invalid',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'invalid', subagent_type: 'bad' },
+            },
+            {
+              id: 'agent_sibling_1',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'sibling_1', subagent_type: 'explore' },
+            },
+            {
+              id: 'agent_sibling_2',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'sibling_2', subagent_type: 'explore' },
+            },
+          ],
+          toolLoopState,
+        );
 
-      expect(result.loopDetected).toBe(true);
-      expect(firstSiblingExecute).toHaveBeenCalledOnce();
-      expect(secondSiblingExecute).toHaveBeenCalledOnce();
-      // Agent-only batches run at full width (no serial prefix), so a batch
-      // this size never hits the capped race branch: the loop fired by the
-      // invalid call stops the turn without aborting mid-flight siblings —
-      // they finish and their results are kept instead of being killed.
-      expect(firstSiblingSignal?.aborted).toBe(false);
-      expect(secondSiblingSignal?.aborted).toBe(false);
-      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
-        'agent_invalid',
-        'agent_sibling_1',
-        'agent_sibling_2',
-      ]);
+        expect(result.loopDetected).toBe(true);
+        expect(firstSiblingExecute).toHaveBeenCalledOnce();
+        expect(secondSiblingExecute).toHaveBeenCalledOnce();
+        // Agent-only batches run at full width (no serial prefix), so a batch
+        // this size never hits the capped race branch: the loop fired by the
+        // invalid call stops the turn without aborting mid-flight siblings —
+        // they finish and their results are kept instead of being killed.
+        expect(firstSiblingSignal?.aborted).toBe(false);
+        expect(secondSiblingSignal?.aborted).toBe(false);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_invalid',
+          'agent_sibling_1',
+          'agent_sibling_2',
+        ]);
+      } finally {
+        if (previousMaxConcurrency === undefined) {
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        } else {
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+            previousMaxConcurrency;
+        }
+      }
     });
 
     it('lets in-flight Agent calls of a wide batch finish when loop detection fires', async () => {

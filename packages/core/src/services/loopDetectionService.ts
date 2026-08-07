@@ -91,9 +91,8 @@ export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 // varies its arguments on every call (which no repetition signal catches) is
 // still bounded. With the default soft cap of 100 this is 1000 — high enough
 // that modern models making hundreds of legitimate calls per task are not
-// false-positived, while still bounding a pathological runaway. Exported for
-// the daemon's turn-loop guard, same as GLOBAL_DUPLICATE_THRESHOLD above.
-export const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
+// false-positived, while still bounding a pathological runaway.
+const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
 
 /**
  * Recursively canonicalizes a JSON-compatible value for stable hashing: object

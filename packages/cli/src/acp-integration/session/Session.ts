@@ -455,7 +455,7 @@ type QueueToolResultRecord = (
   record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
 ) => void;
 
-type DaemonToolLoopState = {
+export type DaemonToolLoopState = {
   totalToolCalls: number;
   invalidToolParamErrors: Map<string, number>;
   /** Per-turn counts of identical (tool, args) calls, by repeat key. */
