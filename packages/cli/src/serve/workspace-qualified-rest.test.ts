@@ -1056,6 +1056,58 @@ describe('workspace-qualified core REST', () => {
       expect(
         h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
       ).toHaveBeenCalledTimes(1);
+
+      const badBatchBody = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: [], enabled: false });
+      expect(badBatchBody.status).toBe(400);
+      expect(badBatchBody.body.code).toBe('invalid_skill_names');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(1);
+
+      const enableBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: true });
+      expect(enableBatch.status).toBe(200);
+      expect(enableBatch.body).toMatchObject({
+        enabled: true,
+        results: [{ skillName: 'review', enabled: true, changed: true }],
+      });
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        ['review'],
+        true,
+      );
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(2);
+
+      vi.mocked(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).mockRejectedValueOnce(new Error('disk full'));
+      const failedBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: false });
+      expect(failedBatch.status).toBe(500);
+      expect(failedBatch.body.error).toBe('disk full');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(3);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

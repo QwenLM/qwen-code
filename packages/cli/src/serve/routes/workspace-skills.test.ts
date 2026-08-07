@@ -273,6 +273,13 @@ describe('workspace Skill management routes', () => {
         enabled: false,
       });
 
+    const missingNames = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ enabled: false });
+    const nonArrayNames = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ skillNames: 'review', enabled: false });
+
     expect(empty.status).toBe(400);
     expect(empty.body.code).toBe('invalid_skill_names');
     expect(tooMany.status).toBe(400);
@@ -283,6 +290,10 @@ describe('workspace Skill management routes', () => {
     expect(invalidFlag.body.code).toBe('invalid_enabled_flag');
     expect(nonString.status).toBe(400);
     expect(nonString.body.code).toBe('invalid_skill_names');
+    expect(missingNames.status).toBe(400);
+    expect(missingNames.body.code).toBe('invalid_skill_names');
+    expect(nonArrayNames.status).toBe(400);
+    expect(nonArrayNames.body.code).toBe('invalid_skill_names');
     expect(tooLong.status).toBe(400);
     expect(tooLong.body.code).toBe('invalid_skill_name');
     expect(exactLimit.status).toBe(200);

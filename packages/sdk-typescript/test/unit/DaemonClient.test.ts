@@ -4102,6 +4102,35 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-2');
     });
 
+    it('POSTs enabled:true unchanged on the primary and qualified helpers', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.setWorkspaceSkillsEnabled(['review', 'deploy'], true);
+      await client
+        .workspaceByCwd('/tmp/work space')
+        .setWorkspaceSkillsEnabled(['review', 'deploy'], true);
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/enable',
+        method: 'POST',
+        body: JSON.stringify({
+          skillNames: ['review', 'deploy'],
+          enabled: true,
+        }),
+      });
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/skills/enable',
+        method: 'POST',
+        body: JSON.stringify({
+          skillNames: ['review', 'deploy'],
+          enabled: true,
+        }),
+      });
+    });
+
     it('passes request-level errors through', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(400, {

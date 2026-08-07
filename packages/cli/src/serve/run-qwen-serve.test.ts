@@ -860,6 +860,17 @@ describe('workspace skill settings persistence', () => {
     ]);
     expect(setValues).toHaveBeenCalledOnce();
 
+    const noopResult = await persistDisabledSkillsBatch!(
+      workspace,
+      ['review'],
+      false,
+    );
+    expect(noopResult.outcomes).toEqual([
+      { skillName: 'review', changed: false },
+    ]);
+    expect(noopResult.settingsChanges).toEqual([]);
+    expect(setValues).toHaveBeenCalledOnce();
+
     const savedAfterDisable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[]; enabled?: string[] } };
@@ -901,6 +912,25 @@ describe('workspace skill settings persistence', () => {
       'alpha',
     ]);
     expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
+
+    const guard = vi.fn();
+    await persistDisabledSkillsBatch!(workspace, ['guarded'], false, guard);
+    expect(setValues.mock.calls.at(-1)?.[2]).toBe(guard);
+    expect(guard).toHaveBeenCalled();
+
+    const blockingGuard = vi.fn(() => {
+      throw new Error('generation closed');
+    });
+    const writesBefore = setValues.mock.calls.length;
+    await expect(
+      persistDisabledSkillsBatch!(
+        workspace,
+        ['guarded-too'],
+        false,
+        blockingGuard,
+      ),
+    ).rejects.toThrow('generation closed');
+    expect(setValues.mock.calls).toHaveLength(writesBefore);
   });
 });
 
