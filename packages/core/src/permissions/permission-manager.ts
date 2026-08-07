@@ -189,13 +189,18 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
-    if (
+    // Inspect the RAW monitor command before normalization: it rewrites the
+    // command to its safety form, hiding wrapper substitutions (e.g.
+    // `bash -o $(evil) -c 'tail -f ...'`) from this check. Such commands must
+    // at least ask even when a `Monitor(...)` allow rule matches the
+    // normalized form. Merge via DECISION_PRIORITY below so this verdict can
+    // only ESCALATE — an explicit deny rule must still win (#8590).
+    const rawSubstitutionDecision: PermissionDecision =
       ctx.toolName === 'monitor' &&
       ctx.command !== undefined &&
       hasShellSubstitution(ctx.command)
-    ) {
-      return 'ask';
-    }
+        ? 'ask'
+        : 'default';
 
     ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
@@ -251,18 +256,22 @@ export class PermissionManager {
       bashDecision = this.evaluateSingle(ctx);
     }
 
-    // ── Merge: virtual-op verdict can ESCALATE the bash verdict (to ask /
-    // deny) but a 'default' virtual result means "shell semantics have no
-    // opinion" and must never override an explicit allow from a Bash
-    // rule. (DECISION_PRIORITY.default > DECISION_PRIORITY.allow so the
-    // guard is load-bearing.)
-    if (
-      virtualDecision !== 'default' &&
-      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[bashDecision]
-    ) {
-      return virtualDecision;
+    // ── Merge: virtual-op and raw-substitution verdicts can ESCALATE the
+    // bash verdict (to ask / deny) but a 'default' result means "no opinion"
+    // and must never override an explicit allow from a Bash rule.
+    // (DECISION_PRIORITY.default > DECISION_PRIORITY.allow so the guard is
+    // load-bearing.) Escalation-only merging keeps a user's explicit deny
+    // winning over the monitor substitution gate (#8590).
+    let decision = bashDecision;
+    for (const candidate of [virtualDecision, rawSubstitutionDecision]) {
+      if (
+        candidate !== 'default' &&
+        DECISION_PRIORITY[candidate] > DECISION_PRIORITY[decision]
+      ) {
+        decision = candidate;
+      }
     }
-    return bashDecision;
+    return decision;
   }
 
   /**

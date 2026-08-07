@@ -1975,6 +1975,58 @@ describe('PermissionManager', () => {
       ).toBe('ask');
     });
 
+    // Regression for #8590: the raw-substitution gate in evaluate() must only
+    // ESCALATE the verdict. It used to return 'ask' before any rule matching,
+    // which downgraded a user's explicit deny rule to 'ask' — and 'ask' is
+    // auto-approved under YOLO, so appending a harmless `$(true)` to a monitor
+    // command bypassed every configured deny rule.
+    it('deny rules still block substitution-bearing monitor commands (#8590)', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'rm -rf / $(true)',
+        }),
+      ).toBe('deny');
+    });
+
+    it('Monitor(...) deny rules still block wrapped substitution commands (#8590)', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Monitor(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: `bash -c 'rm -rf /' && echo $(true)`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('virtual-op deny rules still block substitution-bearing monitor commands (#8590)', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'monitor',
+          command: 'echo "$(date)" > .qwen/settings.json',
+        }),
+      ).toBe('deny');
+    });
+
     it('asks by default for wrapped commands with environment prefixes', async () => {
       const pm2 = new PermissionManager(makeConfig({}));
       pm2.initialize();
