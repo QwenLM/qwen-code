@@ -297,6 +297,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       ),
     ]);
 
+    expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
       tools: [{ callId: 'agent-call', status: 'completed', endTime: 2 }],

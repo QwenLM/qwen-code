@@ -640,7 +640,9 @@ describe('MessageList — turn collapse (DOM)', () => {
       'false',
     );
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
-    expect(parallelAgentsSummary(c)?.hasAttribute('disabled')).toBe(true);
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-disabled')).toBe(
+      'true',
+    );
     click(parallelAgentsSummary(c)!);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
 
@@ -1204,7 +1206,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     act(() => vi.advanceTimersByTime(180));
     // The turn itself stays open for the monitor notification's reply.
     expect(c.querySelector('[data-agent-collapse-exit="true"]')).toBeNull();
-    expect(parallelAgentsSummary(c)?.hasAttribute('disabled')).toBe(false);
+    expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
   });
 
   it('defers every latest-turn group while the response awaits the agent summary', () => {

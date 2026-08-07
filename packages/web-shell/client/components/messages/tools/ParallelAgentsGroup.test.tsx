@@ -219,7 +219,9 @@ describe('ParallelAgentsGroup activity rendering', () => {
           .querySelector('[data-agent-collapse-exit="true"]')
           ?.hasAttribute('inert'),
       ).toBe(true);
-      expect(groupSummary(container).disabled).toBe(true);
+      expect(groupSummary(container).getAttribute('aria-disabled')).toBe(
+        'true',
+      );
       expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(2);
       expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(true);
 
@@ -690,7 +692,7 @@ describe('ParallelAgentsGroup activity rendering', () => {
       expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
         'false',
       );
-      expect(groupSummary(container).disabled).toBe(false);
+      expect(groupSummary(container).hasAttribute('aria-disabled')).toBe(false);
       expect(
         container.querySelector('[data-agent-collapse-exit="true"]'),
       ).toBeNull();
@@ -700,7 +702,7 @@ describe('ParallelAgentsGroup activity rendering', () => {
       expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
         'false',
       );
-      expect(groupSummary(container).disabled).toBe(false);
+      expect(groupSummary(container).hasAttribute('aria-disabled')).toBe(false);
       expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
     } finally {
       vi.useRealTimers();
@@ -857,7 +859,8 @@ describe('ParallelAgentsGroup activity rendering', () => {
         onAutomaticExpansionChange,
       });
       // The collapse keeps retrying while the approval holds the group open;
-      // nothing may drop the panel without its exit animation.
+      // while the approval is pending, nothing may drop the panel without its
+      // exit animation.
       act(() => vi.advanceTimersByTime(4_500));
       expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
         'true',
@@ -982,13 +985,107 @@ describe('ParallelAgentsGroup activity rendering', () => {
       expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
         'true',
       );
-      expect(groupSummary(container).disabled).toBe(false);
+      expect(groupSummary(container).hasAttribute('aria-disabled')).toBe(false);
       expect(
         container.querySelector('[data-agent-collapse-exit="true"]'),
       ).toBeNull();
       expect(viewport?.hasAttribute('aria-hidden')).toBe(false);
       expect(viewport?.hasAttribute('inert')).toBe(false);
       expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('removes the panel outright when the approval that interrupted the exit resolves', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+      const approval: PermissionRequest = {
+        id: 'approval',
+        toolCallId: 'a1',
+        content: [],
+        options: [],
+      };
+      const onAutomaticExpansionChange = vi.fn();
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        onAutomaticExpansionChange,
+      });
+
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        onAutomaticExpansionChange,
+      });
+      act(() => vi.advanceTimersByTime(400));
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).not.toBeNull();
+
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        pendingApproval: approval,
+        onAutomaticExpansionChange,
+      });
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+
+      // The takeover handed visibility to the approval and already released
+      // automatic expansion, so resolving it drops the panel without an exit
+      // animation — there is no automatic expansion left to animate out.
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        pendingApproval: null,
+        onAutomaticExpansionChange,
+      });
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(0);
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hands focus to the summary when the automatic exit starts under a focused row', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'in_progress' }),
+      ];
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+      });
+
+      const row = container.querySelector(
+        '[data-agent-status="active"]',
+      ) as HTMLButtonElement;
+      row.focus();
+      expect(document.activeElement).toBe(row);
+
+      render(active.map((item) => ({ ...item, status: 'completed' as const })));
+      act(() => vi.advanceTimersByTime(400));
+
+      expect(document.activeElement).toBe(groupSummary(container));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
     } finally {
       vi.useRealTimers();
     }

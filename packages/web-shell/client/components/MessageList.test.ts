@@ -1671,6 +1671,29 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(collapseItems(items), 'u2')?.collapsed).toBe(false);
   });
 
+  it('does not pin the final turn open for a lost agent from an older turn', () => {
+    const monitorNotification = makeBackgroundNotification(
+      'notification-monitor',
+    );
+    monitorNotification.data = { kind: 'monitor', status: 'completed' };
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundAgentToolGroup('a1', 'completed'),
+      makeBackgroundAgentToolGroup('a2', 'completed'),
+      makeAssistantMessage('launched'),
+      makeBackgroundNotification('notification-a1', 'call-a1'),
+      makeAssistantMessage('summarized'),
+      makeUserMessage('u2'),
+      monitorNotification,
+      makeAssistantMessage('final-answer'),
+    ]);
+
+    // a2's notification never arrives, but the non-agent notification in the
+    // answered final turn must not sweep in the older turn's launches.
+    expect(collapseOf(collapseItems(items), 'u2')?.collapsed).toBe(true);
+    expect(collapseOf(collapseItems(items), 'u1')?.collapsed).toBe(true);
+  });
+
   it('lets a newer background notification supersede an earlier cancellation', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),

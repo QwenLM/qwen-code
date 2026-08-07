@@ -1472,7 +1472,11 @@ function turnAwaitsBackgroundSummary(
       }
     }
   }
-  for (let i = end; i >= 0; i--) {
+  // A notification can land turns after its launch, so the callId-correlated
+  // scan above may cross turns. The anonymous fallback must stay inside this
+  // turn: sweeping older turns would let a launch whose notification was lost
+  // pin this turn open forever.
+  for (let i = end; i >= start; i--) {
     if (latestAgentLaunchIndex >= 0) break;
     if (backgroundAgentCallIds(items[i]).length > 0) {
       latestAgentLaunchIndex = i;
@@ -2567,14 +2571,17 @@ export const MessageList = memo(
       }
       return 0;
     }, [displayItems]);
-    const latestTurnAwaitsAgentSummary =
-      backgroundSummaryGraceActive &&
-      turnAwaitsBackgroundSummary(
-        displayItems,
-        latestTurnStartIndex,
-        displayItems.length - 1,
-        true,
-      );
+    const latestTurnAwaitsAgentSummary = useMemo(
+      () =>
+        backgroundSummaryGraceActive &&
+        turnAwaitsBackgroundSummary(
+          displayItems,
+          latestTurnStartIndex,
+          displayItems.length - 1,
+          true,
+        ),
+      [backgroundSummaryGraceActive, displayItems, latestTurnStartIndex],
+    );
     const latestTurnParallelAgentKeys = useMemo(() => {
       const keys = new Set<string>();
       for (let i = latestTurnStartIndex; i < displayItems.length; i += 1) {

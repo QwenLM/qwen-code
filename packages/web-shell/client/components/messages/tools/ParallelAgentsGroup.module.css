@@ -18,23 +18,23 @@
   font: inherit;
 }
 
-.summary:not(:disabled):hover,
-.summary:not(:disabled):focus-visible {
+.summary:not([aria-disabled='true']):hover,
+.summary:not([aria-disabled='true']):focus-visible {
   color: var(--primary);
   outline: none;
 }
 
-.summary:disabled {
+.summary[aria-disabled='true'] {
   cursor: default;
 }
 
-.summary:disabled .chevronRight,
-.summary:disabled .chevronDown {
+.summary[aria-disabled='true'] .chevronRight,
+.summary[aria-disabled='true'] .chevronDown {
   opacity: 0;
 }
 
-.summary:not(:disabled):hover .summaryTextActive,
-.summary:not(:disabled):focus-visible .summaryTextActive {
+.summary:not([aria-disabled='true']):hover .summaryTextActive,
+.summary:not([aria-disabled='true']):focus-visible .summaryTextActive {
   background-image: none;
   -webkit-text-fill-color: currentColor;
 }
@@ -152,10 +152,10 @@
   border-radius: 1px;
 }
 
-.summary:not(:disabled):hover .chevronRight,
-.summary:not(:disabled):hover .chevronDown,
-.summary:not(:disabled):focus-visible .chevronRight,
-.summary:not(:disabled):focus-visible .chevronDown {
+.summary:not([aria-disabled='true']):hover .chevronRight,
+.summary:not([aria-disabled='true']):hover .chevronDown,
+.summary:not([aria-disabled='true']):focus-visible .chevronRight,
+.summary:not([aria-disabled='true']):focus-visible .chevronDown {
   opacity: 1;
 }
 

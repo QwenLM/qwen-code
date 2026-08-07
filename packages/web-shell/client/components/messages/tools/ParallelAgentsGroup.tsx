@@ -156,6 +156,12 @@ export function ParallelAgentsGroup({
   const hasApprovalAgent = !!approvalAgent;
   const approvalAgentRef = useRef(approvalAgent);
   approvalAgentRef.current = approvalAgent;
+  const deferAutomaticCollapseRef = useRef(deferAutomaticCollapse);
+  deferAutomaticCollapseRef.current = deferAutomaticCollapse;
+  const autoManageExpansionRef = useRef(autoManageExpansion);
+  autoManageExpansionRef.current = autoManageExpansion;
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const summaryRef = useRef<HTMLButtonElement | null>(null);
 
   const wasActiveRef = useRef(false);
   const wasAutoManageExpansionRef = useRef(autoManageExpansion);
@@ -202,6 +208,9 @@ export function ParallelAgentsGroup({
       automaticCollapseAnimating &&
       expansionOwnerRef.current === 'automatic'
     ) {
+      // The approval takes over visibility and releases automatic expansion;
+      // resolving it later removes the panel outright because there is no
+      // automatic expansion left to animate out.
       clearTimeout(autoCollapseAnimationTimerRef.current);
       autoCollapseAnimationTimerRef.current = undefined;
       expansionOwnerRef.current = 'none';
@@ -229,6 +238,14 @@ export function ParallelAgentsGroup({
         expansionOwnerRef.current === 'automatic'
       ) {
         autoCollapseTimerRef.current = setTimeout(function attemptCollapse() {
+          // The timer can fire between the parent's commit and the effect
+          // that clears it; only the render-time refs reflect the new props.
+          if (
+            deferAutomaticCollapseRef.current ||
+            !autoManageExpansionRef.current
+          ) {
+            return;
+          }
           if (
             !wasActiveRef.current &&
             expansionOwnerRef.current === 'automatic'
@@ -250,6 +267,16 @@ export function ParallelAgentsGroup({
                 automaticCollapseDelayMs,
               );
               return;
+            }
+            const focusedElement = document.activeElement;
+            if (
+              wrapRef.current &&
+              focusedElement instanceof HTMLElement &&
+              wrapRef.current.contains(focusedElement)
+            ) {
+              // The exit neutralizes every focusable element in the group;
+              // hand focus to the summary so it is not silently lost.
+              summaryRef.current?.focus();
             }
             setGroupExpanded(false);
             const animationMs = automaticCollapseAnimationMs();
@@ -330,11 +357,13 @@ export function ParallelAgentsGroup({
       : 'completed';
 
   return (
-    <div className={styles.wrap}>
+    <div className={styles.wrap} ref={wrapRef}>
       <button
         type="button"
+        ref={summaryRef}
         className={styles.summary}
         onClick={() => {
+          if (automaticCollapseClosing) return;
           clearTimeout(autoCollapseTimerRef.current);
           autoCollapseTimerRef.current = undefined;
           clearTimeout(autoCollapseAnimationTimerRef.current);
@@ -348,7 +377,7 @@ export function ParallelAgentsGroup({
           setAutomaticCollapseAnimating(false);
           setGroupExpanded((value) => !value);
         }}
-        disabled={automaticCollapseClosing}
+        aria-disabled={automaticCollapseClosing || undefined}
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
