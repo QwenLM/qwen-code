@@ -190,6 +190,16 @@ const mockWt = vi.hoisted(() => ({
   readSidecar: undefined as (() => Promise<unknown>) | undefined,
   realpath: undefined as ((p: string) => string) | undefined,
 }));
+const mockTmpdir = vi.hoisted(() => ({
+  value: undefined as string | undefined,
+}));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    tmpdir: () => mockTmpdir.value ?? actual.tmpdir(),
+  };
+});
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
   const wrapped = ((p: fs.PathLike) =>
@@ -5128,6 +5138,18 @@ describe('createServeApp', () => {
 
         const boundary = await upload(Buffer.alloc(10 * 1024 * 1024));
         expect(boundary.status).toBe(202);
+        await vi.waitFor(
+          async () => {
+            const poll = await request(app)
+              .get(
+                `/workspace/extensions/operations/${boundary.body.operationId}`,
+              )
+              .set('Host', `127.0.0.1:${tokenOpts.port}`)
+              .set('Authorization', 'Bearer secret');
+            expect(poll.body.status).toBe('succeeded');
+          },
+          { timeout: 10_000 },
+        );
 
         const oversized = await upload(Buffer.alloc(10 * 1024 * 1024 + 1));
         expect(oversized.status).toBe(413);
@@ -5202,8 +5224,7 @@ describe('createServeApp', () => {
 
     it('redacts temporary upload directory creation failures', async () => {
       const restore = mockExtensionManagerMethods();
-      const previousTmpdir = process.env['TMPDIR'];
-      process.env['TMPDIR'] = '/private/upload-root';
+      mockTmpdir.value = '/private/upload-root';
       try {
         const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
         const app = createServeApp(
@@ -5236,11 +5257,7 @@ describe('createServeApp', () => {
           );
         });
       } finally {
-        if (previousTmpdir === undefined) {
-          delete process.env['TMPDIR'];
-        } else {
-          process.env['TMPDIR'] = previousTmpdir;
-        }
+        mockTmpdir.value = undefined;
         restore();
       }
     });

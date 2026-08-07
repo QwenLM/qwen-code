@@ -8,6 +8,7 @@ export {
   DaemonClient,
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
   WorkspaceDaemonClient,
   isDaemonTurnError,
   isNonBlockingAccepted,

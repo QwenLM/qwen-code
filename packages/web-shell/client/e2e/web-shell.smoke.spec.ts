@@ -253,6 +253,9 @@ test('uploads an Extension archive from the manager @smoke', async ({
   await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
 
+  uploadUrl = '';
+  uploadHeaders = {};
+  uploadBody = null;
   rejectUpload = false;
   await page.getByRole('button', { name: 'Install' }).click();
 

@@ -466,7 +466,7 @@ export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
 
-const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
+export const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
 
 export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   return (

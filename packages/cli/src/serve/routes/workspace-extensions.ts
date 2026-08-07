@@ -739,7 +739,7 @@ export function registerWorkspaceExtensionRoutes(
             res.status(400).json({ error: 'Extension archive is empty' });
             return;
           }
-          const archive = req.body;
+          let archive: Buffer | undefined = req.body;
           const source = `upload:v1:${crypto.randomUUID()}:${archiveName.filename}`;
 
           ctrl.runQueuedExtensionMutation(
@@ -784,7 +784,8 @@ export function registerWorkspaceExtensionRoutes(
                   uploadDir,
                   `extension${archiveName.suffix}`,
                 );
-                await fs.writeFile(archivePath, archive);
+                await fs.writeFile(archivePath, archive!);
+                archive = undefined;
                 const prepared = await context!.prepare(async (signal) => {
                   supersedeActiveInstallOperations(ctrl, operationId!);
                   return await extensionManager.prepareExtensionInstall({

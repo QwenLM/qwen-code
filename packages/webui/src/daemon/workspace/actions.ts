@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import {
+  EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
+  type DaemonClient,
+} from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
@@ -17,7 +20,6 @@ import type {
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
-const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
 
 export interface CreateDaemonWorkspaceActionsArgs {
   getClient: () => DaemonClient | undefined;
