@@ -4,7 +4,6 @@
   "rules": [
     {
       "paths": ["packages/cli/src/commands/review/**"],
-      "relatedPaths": ["packages/cli/src/commands/review/**"],
       "domains": ["cli", "review"],
       "recommendedTests": ["review"],
       "requiredConfigurations": ["node22"]
