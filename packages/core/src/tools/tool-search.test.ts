@@ -1200,6 +1200,37 @@ describe('ToolSearchTool', () => {
     expect(result.error?.message).toBe('provider rejected tools');
     expect(registry.isDeferredToolRevealed(oversized.name)).toBe(false);
     expect(registry.isDeferredToolRevealed(alreadyRevealed.name)).toBe(true);
+    // The schema whose reveal was rolled back must not leak into the
+    // result — otherwise the model believes it is callable and the next
+    // turn surfaces an "unknown tool" API error.
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"oversized_deferred"',
+    );
+  });
+
+  it('rolls back the oversized reveal when the client is not initialised yet', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_no_client',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue(
+      null as unknown as ReturnType<typeof config.getGeminiClient>,
+    );
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:oversized_no_client' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('not initialised');
+    // No orphaned reveal: the tool must stay hidden until it is actually
+    // declared to the provider.
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(false);
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"oversized_no_client"',
+    );
   });
 
   it('preserves missing and truncated diagnostics after an oversized direct declaration', async () => {

@@ -3780,6 +3780,10 @@ describe('Gemini Client (client.ts)', () => {
       // state must survive (no clear()); only the one blanked file's
       // fast-path is disarmed via markReadEvictedFromHistory.
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const clearProxySchemaPresentations = vi.mocked(
+        mockConfig.getToolRegistry,
+      )().clearProxySchemaPresentations;
+      vi.mocked(clearProxySchemaPresentations).mockClear();
 
       const { history } = await makeReadFileResponses(6);
       const setHistory = vi.fn();
@@ -3806,6 +3810,9 @@ describe('Gemini Client (client.ts)', () => {
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
       // fast-path disarmed.
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      // Microcompaction calls setHistory directly on the chat, so this
+      // explicit clear is the only fail-closed enforcement on this path.
+      expect(clearProxySchemaPresentations).toHaveBeenCalledOnce();
     });
 
     it('does not abort the turn when microcompaction cleanup fails', async () => {
@@ -4651,6 +4658,10 @@ describe('Gemini Client (client.ts)', () => {
 
     it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const clearProxySchemaPresentations = vi.mocked(
+        mockConfig.getToolRegistry,
+      )().clearProxySchemaPresentations;
+      vi.mocked(clearProxySchemaPresentations).mockClear();
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 1000,
@@ -4679,6 +4690,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(clear).toHaveBeenCalledOnce();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      // Presentations must not survive a fast compression that evicted tool
+      // results.
+      expect(clearProxySchemaPresentations).toHaveBeenCalledOnce();
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -4871,6 +4885,7 @@ describe('Gemini Client (client.ts)', () => {
       const registry = vi.mocked(mockConfig.getToolRegistry)();
       vi.mocked(registry.getPresentedProxySchemas).mockReturnValue([schema]);
       vi.mocked(registry.markProxySchemaPresented).mockClear();
+      vi.mocked(registry.clearProxySchemaPresentations).mockClear();
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
@@ -4889,6 +4904,17 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(client.getHistory()[0]?.parts?.[1]?.text).toContain(
         formatFunctionSchemaBlocks([schema]),
+      );
+      // The clear must fire before the restore re-marks; deleting it would
+      // keep proxy authorization alive across a compression that removed
+      // the schema from context.
+      expect(registry.clearProxySchemaPresentations).toHaveBeenCalled();
+      expect(
+        vi.mocked(registry.clearProxySchemaPresentations).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(registry.markProxySchemaPresented).mock
+          .invocationCallOrder[0],
       );
       expect(registry.markProxySchemaPresented).toHaveBeenCalledWith({
         name: schema.name,
@@ -5365,6 +5391,7 @@ describe('Gemini Client (client.ts)', () => {
       const registry = vi.mocked(mockConfig.getToolRegistry)();
       vi.mocked(registry.getPresentedProxySchemas).mockReturnValue([schema]);
       vi.mocked(registry.markProxySchemaPresented).mockClear();
+      vi.mocked(registry.clearProxySchemaPresentations).mockClear();
       let history: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
@@ -5402,6 +5429,16 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(history[0]?.parts?.[1]?.text).toContain(
         formatFunctionSchemaBlocks([schema]),
+      );
+      // The clear must fire (it is also the only drop of pending resumed
+      // presentations) and must happen before the restore re-marks.
+      expect(registry.clearProxySchemaPresentations).toHaveBeenCalled();
+      expect(
+        vi.mocked(registry.clearProxySchemaPresentations).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(registry.markProxySchemaPresented).mock
+          .invocationCallOrder[0],
       );
       expect(registry.markProxySchemaPresented).toHaveBeenCalledWith({
         name: schema.name,

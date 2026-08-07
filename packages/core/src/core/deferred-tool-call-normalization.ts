@@ -104,6 +104,21 @@ export async function normalizeDeferredToolCallRequest(
     return { ok: true, request };
   }
 
+  // The discovery/proxy pair is registered or removed together. With it gone
+  // there is no tool_search to fetch schemas, so reject before touching the
+  // target and route the model back to direct calls instead of advertising a
+  // discovery tool that is not registered.
+  if (!toolRegistry.isDeferredProxyPairRegistered()) {
+    return {
+      ok: false,
+      error: new Error(
+        '`deferred_tool_call` is not available in this session. Call the intended tool directly by its real name.',
+      ),
+      providerName: ToolNames.DEFERRED_TOOL_CALL,
+      errorType: ToolErrorType.TOOL_NOT_REGISTERED,
+    };
+  }
+
   const fail = (
     message: string,
     errorType: ToolErrorType = ToolErrorType.INVALID_TOOL_PARAMS,

@@ -3550,8 +3550,7 @@ export const useGeminiStream = (
                 event.type === ServerGeminiEventType.Thought ||
                 event.type === ServerGeminiEventType.ToolCallRequest ||
                 event.type === ServerGeminiEventType.Finished ||
-                event.type === ServerGeminiEventType.Citation ||
-                event.type === ServerGeminiEventType.LoopDetected;
+                event.type === ServerGeminiEventType.Citation;
               if (terminalRejection) {
                 reportDeliveryFailure();
               } else if (provesAcceptance && !accepted) {

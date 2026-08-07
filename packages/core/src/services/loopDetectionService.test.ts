@@ -1917,6 +1917,23 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
+    it('does not fire for repeated deferred proxy calls to the same target with different arguments', () => {
+      // The unwrap must keep the target arguments in the key: six proxy
+      // calls to one deferred tool with pairwise-different args are
+      // productive work, not a loop, even though they share a target name.
+      service.reset('');
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD; i++) {
+        const isLoop = service.addAndCheckHeuristicLoops(
+          createToolCallRequestEvent(ToolNames.DEFERRED_TOOL_CALL, {
+            name: 'crm_update',
+            arguments: { record_id: `record-${i}` },
+          }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
     it('global-duplicate also fires for a consecutive identical run', () => {
       // checkGlobalDuplicate runs on every ToolCallRequest independently of the
       // always-on consecutive guard (which lives in checkAlwaysOnSafeties, not

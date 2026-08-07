@@ -293,8 +293,14 @@ export class ToolRegistry {
         // Only Qwen's provider-facing wrapper owns the reserved bare name.
         tool = tool.asFullyQualifiedTool();
       } else {
-        debugLogger.warn(
-          `Tool "${ToolNames.DEFERRED_TOOL_CALL}" skipped: reserved Qwen Code tool name.`,
+        // Command-discovered tools have no server qualifier to preserve them
+        // under, and renaming would break the `toolCallCommand <name>`
+        // contract. Drop the tool, but visibly: debug logging is usually off,
+        // and a silently vanished user-configured tool would otherwise be
+        // undiagnosable.
+        // eslint-disable-next-line no-console -- operator-facing diagnostic; debug file logging is usually off
+        console.warn(
+          `Discovered tool "${ToolNames.DEFERRED_TOOL_CALL}" was skipped: the name is reserved for Qwen Code's deferred-tool proxy. Rename the tool in your tool discovery command output to keep it.`,
         );
         return;
       }
@@ -812,6 +818,23 @@ export class ToolRegistry {
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
   isDeferredToolRevealed(name: string): boolean {
     return this.revealedDeferred.has(name);
+  }
+
+  /**
+   * Whether the discovery/proxy pair (tool_search + deferred_tool_call) is
+   * registered. The pair is registered or removed together (see Config tool
+   * registration); the normalization boundary uses this to reject wrapper
+   * calls in sessions where on-demand discovery is disabled.
+   */
+  isDeferredProxyPairRegistered(): boolean {
+    const registered = new Set([
+      ...this.tools.keys(),
+      ...this.factories.keys(),
+    ]);
+    return (
+      registered.has(ToolNames.TOOL_SEARCH) &&
+      registered.has(ToolNames.DEFERRED_TOOL_CALL)
+    );
   }
 
   isProxyEligibleDeferredTool(name: string): boolean {

@@ -833,6 +833,7 @@ describe('CoreToolScheduler', () => {
       getAllTools: () => [...options.toolsByName.values()],
       getToolsByServer: () => [],
       getAllToolNames: () => [...options.toolsByName.keys()],
+      isDeferredProxyPairRegistered: () => true,
       isProxyEligibleDeferredTool: (name: string) => {
         const tool = options.toolsByName.get(name);
         return !!(tool && tool.shouldDefer && !tool.alwaysLoad);
@@ -2398,8 +2399,14 @@ describe('CoreToolScheduler', () => {
         }),
       ],
     ]);
+    let committedAtCallbackTime: boolean | undefined;
     const onAllToolCallsComplete = vi.fn().mockImplementation(async () => {
-      expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+      // Capture instead of asserting in-callback: the scheduler swallows
+      // callback rejections, so an in-callback assertion cannot fail the
+      // test when the commit ordering regresses.
+      committedAtCallbackTime = presentedProxySchemas.has(
+        ToolNames.CRON_CREATE,
+      );
     });
     const { scheduler } = createSchedulerForLegacyToolTests({
       toolsByName,
@@ -2420,6 +2427,7 @@ describe('CoreToolScheduler', () => {
     );
 
     expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    expect(committedAtCallbackTime).toBe(false);
     expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
     expect(recordToolResult).toHaveBeenCalledWith(
       expect.any(Array),
@@ -3684,11 +3692,13 @@ describe('CoreToolScheduler', () => {
         }),
       ],
     ]);
+    const recordToolResult = vi.fn();
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
         toolsByName,
         presentedProxySchemas,
         toolOutputBatchBudget: 10_000,
+        chatRecordingService: { recordToolResult },
       });
 
     await scheduler.schedule(
@@ -3719,6 +3729,15 @@ describe('CoreToolScheduler', () => {
       'Tool output truncated.',
     );
     expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    // Recording runs after the budget pass, so the offloaded search result
+    // must not carry resume-reauthorization metadata.
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'tool-search-offloaded-schema',
+        deferredToolPresentations: undefined,
+      }),
+    );
   });
 
   it('offloads timeout error detail while preserving failure metadata', async () => {
@@ -14604,6 +14623,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       discoverTools: async () => {},
       getAllTools: () => [],
       getToolsByServer: () => [],
+      isDeferredProxyPairRegistered: () => true,
       isProxyEligibleDeferredTool: () => true,
       hasPresentedProxySchema: () => true,
     } as unknown as ToolRegistry;
@@ -17243,6 +17263,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       getAllTools: () => [],
       getAllToolNames: () => [StrictStringTool.Name],
       getToolsByServer: () => [],
+      isDeferredProxyPairRegistered: () => true,
       isProxyEligibleDeferredTool: (name: string) =>
         name === StrictStringTool.Name,
       hasPresentedProxySchema: (name: string) => name === StrictStringTool.Name,

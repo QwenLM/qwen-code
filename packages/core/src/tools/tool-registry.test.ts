@@ -196,6 +196,28 @@ describe('ToolRegistry', () => {
       ).toBeDefined();
     });
 
+    it('warns visibly when a command-discovered tool uses the reserved deferred_tool_call name', () => {
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+      vi.spyOn(config, 'getToolCallCommand').mockReturnValue('my-call-command');
+      const warnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => undefined);
+
+      toolRegistry.registerTool(
+        new DiscoveredTool(
+          config,
+          ToolNames.DEFERRED_TOOL_CALL,
+          'a discovered tool with the reserved name',
+          { type: 'object', properties: {} },
+        ),
+      );
+
+      expect(
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+      ).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('reserved'));
+    });
+
     it('rejects ordinary factories that try to use the reserved deferred_tool_call name', () => {
       expect(() =>
         toolRegistry.registerFactory(

@@ -375,7 +375,12 @@ return model-visible schemas for `deferred_tool_call` instead.
 ## Tool Search Flow
 
 In the main session, `tool_search` continues to resolve lazy factories and
-render real target schemas, but no longer calls `GeminiClient.setTools()`.
+render real target schemas, and does not call `GeminiClient.setTools()` on the
+normal path. The one exception is the oversized escape hatch: when a single
+schema still exceeds the inline output budget even when requested alone,
+`tool_search` reveals that target and calls `GeminiClient.setTools()` so the
+model can call it directly, because the schema can never fit in a
+`deferred_tool_call` presentation.
 
 ```mermaid
 sequenceDiagram
@@ -394,7 +399,9 @@ sequenceDiagram
   S->>H: append successful tool result
   H->>R: commit presented schema fingerprint
   H-->>M: next request contains the schema result
-  Note over R,P: No setTools call. API declarations remain byte-stable
+  Note over R,P: Normal path makes no setTools call; API declarations stay
+  Note over R,P: byte-stable. Only the oversized escape hatch reveals a target
+  Note over R,P: and calls setTools() when one schema cannot fit inline.
   M->>S: deferred_tool_call(name=cron_create, arguments=...)
   S->>R: resolve and retain current tool; verify current fingerprint
   S->>S: normalize to cron_create with the verified tool instance
@@ -430,9 +437,12 @@ Detailed behavior:
   after that message enters active model history. Tool execution failure,
   cancellation, PostToolUse stop, delivery failure, or history rollback must
   not unlock the proxy.
-- Remove `setTools()` and its reveal/API-sync rollback. If result construction
-  fails, do not retain pending metadata; if delivery fails, do not commit it to
-  live presentation state.
+- Do not call `setTools()` on the normal path, and keep the direct
+  reveal/API-sync flow only as the oversized escape hatch (a single schema
+  that still exceeds the inline budget when requested alone is revealed and
+  declared directly instead; a failed declaration rolls the reveal back). If
+  result construction fails, do not retain pending metadata; if delivery
+  fails, do not commit it to live presentation state.
 - Explicitly tell the model to use `deferred_tool_call` on a later turn.
 
 The same response cannot both present and invoke a new target. The scheduler
@@ -551,19 +561,22 @@ Subagents and teammates keep the current behavior:
 
 ### Compression
 
-Compression invalidates proxy presentation state conservatively. Automatic,
-micro, and fast compression clear the fingerprint ledger, so the model must use
-`tool_search` again before another proxied call. Manual full compression routes
-the compressed history through the resume logic below: if complete successful
-proxy call/response pairs survive, their current schemas are appended as a
-user-role runtime reminder and only matching fingerprints are restored.
+Every compaction path first clears the fingerprint ledger, because the
+schema-bearing history entries may no longer be active. Micro and fast
+compression stop there, so the model must use `tool_search` again before
+another proxied call.
 
-This deliberately accepts the post-compression rediscovery tradeoff for the
-first implementation. Snapshotting valid presentation names before compression
-and re-injecting current schemas afterward is a possible follow-up optimization,
-but it needs separate evaluation of token cost and authorization semantics. It
-must remain a history suffix and must not modify the stable tools or system
-prefix.
+Automatic (event-driven) and manual full compression additionally snapshot the
+currently presented schemas before compacting. After the compressed chat is
+rebuilt, their current schemas are re-injected as a `<system-reminder>` block
+embedded in the startup-context entry (the first history entry, alongside the
+rebuilt prelude), and each snapshot is re-authorized with
+`markProxySchemaPresented`, which compares the stored fingerprint against the
+current registry schema — schemas that changed while compacting are not
+restored. The restore embeds into the startup context rather than appending a
+history suffix so Retry cleanup cannot strip it as an orphaned user turn and
+so the compacted turn sequence stays intact; it still never modifies the
+stable API tool declarations or the system instruction prefix.
 
 ### Session resume
 
@@ -634,7 +647,8 @@ tool_search presents cron_create
   -> return pending { name, schemaFingerprint } metadata
   -> after the result enters active history, compare pending fingerprint with
      the current registry schema and commit only if they still match
-  -> no setTools()
+  -> no setTools() on the normal path (only the oversized escape hatch
+     declares a too-large schema directly and calls setTools())
 
 Request 2 tools:
 [read_file, edit, tool_search, deferred_tool_call, exit_plan_mode]
@@ -658,7 +672,8 @@ functionResponse({ name: "deferred_tool_call", id: originalCallId, ... })
   schema validation happens inside Qwen Code. Compared with sending the real
   target schema as an API declaration, this may increase invalid-parameter
   retries.
-- Compression and resume may re-append schemas as tail context.
+- Compression restore embeds current schemas into the rebuilt startup-context
+  entry; resume re-appends them as a user-role reminder entry.
 - The scheduler request identity model becomes slightly richer.
 
 ### Merge gates
@@ -729,22 +744,22 @@ schema necessarily yields a net benefit.
 
 ## Source Change Map
 
-| Source area                                                      | Required change                                                                                                                                                                                                                                           |
-| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core/src/tools/tool-names.ts`                          | Add the reserved proxy name and display name.                                                                                                                                                                                                             |
-| `packages/core/src/config/config.ts`                             | Register `tool_search` and the proxy atomically for the main registry, rolling search back if proxy registration fails; keep the proxy out of `forSubAgent` registries.                                                                                   |
-| `packages/core/src/tools/tool-registry.ts`                       | Separate committed proxy presentations from direct declaration visibility, compare pending and current schema fingerprints at commit, preserve `includeDeferred` behavior, reserve the proxy name, and invalidate fingerprints on tool lifecycle changes. |
-| `packages/core/src/tools/tool-search.ts`                         | Render a captured schema and return its name plus fingerprint as pending presentation metadata without calling `setTools()`.                                                                                                                              |
-| `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, instance binding, presentation gating, and provider-facing response naming.                                                                                     |
-| `packages/core/src/core/turn.ts`                                 | Explicitly represent provider identity and execution identity.                                                                                                                                                                                            |
-| `packages/core/src/core/coreToolScheduler.ts`                    | Reuse the shared helper to normalize proxy calls before target authorization, execute the retained target instance, show target plus route in permission denials, centralize provider response naming, and forward pending presentation metadata.         |
-| `packages/core/src/core/client.ts`                               | Require the complete discovery/proxy capability before resume restoration; restore only active recorded presentations; protect restored schema context from Retry stripping; invalidate presentation state on compaction and broad history mutation.      |
-| `packages/cli/src/acp-integration/session/Session.ts`            | Reuse the shared helper and retained target instance in ACP's independent `runTool()` path; show target plus route in permission denials; commit presentations after their response message enters active history; keep response names provider-facing.   |
-| `packages/cli/src/ui/hooks/useGeminiStream.ts`                   | Report whether the prepared tool-result context was accepted so the scheduler commits presentations only after a model request crosses the active-history boundary.                                                                                       |
-| `packages/cli/src/nonInteractiveCli.ts`                          | Defer presentation commits until the complete headless provider batch has executed and final output budgeting has preserved the schema-bearing response.                                                                                                  |
-| `packages/core/src/tools/enterPlanMode.ts` and `exitPlanMode.ts` | Remove dynamic exit-tool reveal and keep the exit tool on the stable direct main-session surface.                                                                                                                                                         |
-| `packages/core/src/agents/runtime/agent-core.ts`                 | Preserve real-name agent filtering and defensively reject hallucinated proxy names.                                                                                                                                                                       |
-| Provider converter tests                                         | Verify Gemini, OpenAI, and Anthropic call/result pairing; if scheduler response normalization is complete, converter production code does not need proxy-specific routing.                                                                                |
+| Source area                                                      | Required change                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core/src/tools/tool-names.ts`                          | Add the reserved proxy name and display name.                                                                                                                                                                                                                                                                                      |
+| `packages/core/src/config/config.ts`                             | Register `tool_search` and the proxy atomically for the main registry, rolling search back if proxy registration fails; keep the proxy out of `forSubAgent` registries.                                                                                                                                                            |
+| `packages/core/src/tools/tool-registry.ts`                       | Separate committed proxy presentations from direct declaration visibility, compare pending and current schema fingerprints at commit, preserve `includeDeferred` behavior, reserve the proxy name, and invalidate fingerprints on tool lifecycle changes.                                                                          |
+| `packages/core/src/tools/tool-search.ts`                         | Render a captured schema and return its name plus fingerprint as pending presentation metadata; keep `setTools()` only for the oversized escape hatch that declares a single too-large schema directly (with reveal rollback on failure).                                                                                          |
+| `packages/core/src/core/deferred-tool-call-normalization.ts`     | Provide the shared normalization helper for proxy envelope validation, target resolution, instance binding, presentation gating, and provider-facing response naming.                                                                                                                                                              |
+| `packages/core/src/core/turn.ts`                                 | Explicitly represent provider identity and execution identity.                                                                                                                                                                                                                                                                     |
+| `packages/core/src/core/coreToolScheduler.ts`                    | Reuse the shared helper to normalize proxy calls before target authorization, execute the retained target instance, show target plus route in permission denials, centralize provider response naming, and forward pending presentation metadata.                                                                                  |
+| `packages/core/src/core/client.ts`                               | Require the complete discovery/proxy capability before resume restoration; restore only active recorded presentations; protect restored schema context from Retry stripping; invalidate presentation state on compaction and broad history mutation; snapshot and restore current schemas across automatic and manual compression. |
+| `packages/cli/src/acp-integration/session/Session.ts`            | Reuse the shared helper and retained target instance in ACP's independent `runTool()` path; show target plus route in permission denials; commit presentations after their response message enters active history; keep response names provider-facing.                                                                            |
+| `packages/cli/src/ui/hooks/useGeminiStream.ts`                   | Report whether the prepared tool-result context was accepted so the scheduler commits presentations only after a model request crosses the active-history boundary.                                                                                                                                                                |
+| `packages/cli/src/nonInteractiveCli.ts`                          | Defer presentation commits until the complete headless provider batch has executed and final output budgeting has preserved the schema-bearing response.                                                                                                                                                                           |
+| `packages/core/src/tools/enterPlanMode.ts` and `exitPlanMode.ts` | Remove dynamic exit-tool reveal and keep the exit tool on the stable direct main-session surface.                                                                                                                                                                                                                                  |
+| `packages/core/src/agents/runtime/agent-core.ts`                 | Preserve real-name agent filtering and defensively reject hallucinated proxy names.                                                                                                                                                                                                                                                |
+| Provider converter tests                                         | Verify Gemini, OpenAI, and Anthropic call/result pairing; if scheduler response normalization is complete, converter production code does not need proxy-specific routing.                                                                                                                                                         |
 
 ## Implementation Plan
 
@@ -753,9 +768,10 @@ schema necessarily yields a net benefit.
 2. Split proxy schema presentation from direct declaration visibility in
    `ToolRegistry`; preserve `includeDeferred` behavior.
 3. Update `tool_search` so it returns schemas and pending
-   `{ name, schemaFingerprint }` metadata without calling `setTools()`; after
-   active-history append, commit only if the current registry schema still
-   matches the displayed fingerprint.
+   `{ name, schemaFingerprint }` metadata without calling `setTools()` on the
+   normal path (the oversized escape hatch may still reveal and declare a
+   single too-large schema directly); after active-history append, commit only
+   if the current registry schema still matches the displayed fingerprint.
 4. Add a shared core normalization helper and reuse it from both
    `CoreToolScheduler` and ACP `Session.runTool()` before target permission
    evaluation. Return and execute the same resolved target instance rather than
@@ -841,9 +857,10 @@ schema necessarily yields a net benefit.
   to the model; failure, cancellation, PostToolUse stop, or non-delivery does
   not unlock it.
 - Subagents preserve their direct effective tool declarations.
-- Compression clears proxy eligibility; manual full compression may restore
-  current schemas only from complete successful proxy calls that survive in the
-  compressed history, while other compression paths require another search.
+- Compression clears proxy eligibility first; automatic and manual compression
+  then restore the snapshotted current schemas (re-authorized only when their
+  fingerprint still matches the current registry schema), while micro and fast
+  compression require another search.
 - Resume restores proxy presentation state only when both `tool_search` and
   `deferred_tool_call` are registered; otherwise it uses direct declarations.
 - Resume schema context is a safely escaped pure system-reminder entry. Retry
@@ -870,8 +887,9 @@ schema necessarily yields a net benefit.
 - Both provider identity and execution identity are recorded.
 - Proxy eligibility is bound to the current presented schema fingerprint, not
   permanently granted by name alone.
-- New-format resume restores current schema context before eligibility; most
-  compression paths intentionally require rediscovery.
+- New-format resume restores current schema context before eligibility;
+  automatic and manual compression restore snapshotted schemas, while micro and
+  fast compression intentionally require rediscovery.
 - Old direct histories keep direct declarations in the resumed chat.
 - `exit_plan_mode` is directly and stably visible.
 - When `tool_search` is unavailable, deferred tools are exposed directly from

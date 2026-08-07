@@ -562,6 +562,16 @@ describe('useGeminiStream', () => {
           })(),
       },
       {
+        caseName: 'a locally generated loop-detection event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.LoopDetected,
+              value: { loopType: 'consecutive_identical_tool_calls' },
+            };
+          })(),
+      },
+      {
         caseName: 'a thrown stream error',
         createStream: () =>
           // eslint-disable-next-line require-yield
@@ -1950,6 +1960,113 @@ describe('useGeminiStream', () => {
       ...keptParts,
       ...replacedParts,
     ]);
+  });
+
+  it('does not commit staged deferred schemas when delivery is rejected', async () => {
+    const recordToolResult = vi.fn();
+    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+    mockConfig.getChatRecordingService = vi.fn(() => ({
+      recordToolResult,
+    })) as Config['getChatRecordingService'];
+    mockConfig.getToolRegistry = vi.fn(
+      () =>
+        ({
+          getToolSchemaList: vi.fn(() => []),
+          markProxySchemaPresented,
+        }) as any,
+    );
+
+    const searchParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'search-rejected',
+          name: 'tool_search',
+          response: { output: '<functions>never delivered</functions>' },
+        },
+      },
+    ];
+    const stagedPresentation = {
+      name: 'mcp__weather__forecast',
+      schemaFingerprint: 'undelivered-schema',
+    };
+    const completedToolCalls = [
+      {
+        request: {
+          callId: 'search-rejected',
+          name: 'tool_search',
+          args: { query: 'forecast' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-deferred-rejected',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'search-rejected',
+          responseParts: searchParts,
+          deferredToolPresentations: [stagedPresentation],
+        },
+        tool: { displayName: 'Tool Search' },
+        invocation: {
+          getDescription: () => 'search for forecast',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    mockFinalizeToolResponses.mockResolvedValueOnce([
+      { responseParts: searchParts },
+    ]);
+    // The provider rejected the request, so the schema-bearing tool result
+    // never entered active history; the staged presentation must not be
+    // committed.
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Error,
+          value: { error: { message: 'provider error' } },
+        };
+      })(),
+    );
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let accepted: boolean | void;
+    await act(async () => {
+      if (capturedOnComplete) {
+        accepted = await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    expect(accepted).toBe(false);
+    expect(markProxySchemaPresented).not.toHaveBeenCalled();
   });
 
   it('forwards one exact Goal context across a ToolResult batch', async () => {

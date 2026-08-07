@@ -18,6 +18,7 @@ import {
   formatPermissionToolIdentity,
   normalizeDeferredToolCallRequest,
   providerToolName,
+  unwrapDeferredToolCallShape,
   withPermissionToolIdentity,
 } from './deferred-tool-call-normalization.js';
 
@@ -33,10 +34,23 @@ const baseConfigParams = {
   approvalMode: ApprovalMode.DEFAULT,
 };
 
-function createRegistry(): ToolRegistry {
+function createRegistry(options?: {
+  withoutProxyPair?: boolean;
+}): ToolRegistry {
   const config = new Config(baseConfigParams);
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+  if (!options?.withoutProxyPair) {
+    registry.registerFactory(
+      ToolNames.TOOL_SEARCH,
+      async () => new MockTool({ name: ToolNames.TOOL_SEARCH }),
+    );
+    registry.registerFactory(
+      ToolNames.DEFERRED_TOOL_CALL,
+      async () => new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+      { allowReservedName: true },
+    );
+  }
   return registry;
 }
 
@@ -281,6 +295,106 @@ describe('normalizeDeferredToolCallRequest', () => {
       expect(result.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
       expect(result.error.message).toContain('has not been fetched');
     }
+  });
+
+  it('rejects a wrapper call when the discovery/proxy pair is unregistered', async () => {
+    const registry = createRegistry({ withoutProxyPair: true });
+    const ensureTool = vi.spyOn(registry, 'ensureTool');
+    registry.registerTool(
+      new MockTool({ name: ToolNames.CRON_CREATE, shouldDefer: true }),
+    );
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+      registry,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+      expect(result.errorType).toBe(ToolErrorType.TOOL_NOT_REGISTERED);
+      expect(result.error.message).toContain('not available in this session');
+      expect(result.error.message).toContain('directly by its real name');
+      expect(result.error.message).not.toContain(ToolNames.TOOL_SEARCH);
+    }
+    // The rejection must happen before any target resolution side effect.
+    expect(ensureTool).not.toHaveBeenCalled();
+  });
+
+  it('keeps Object.prototype-colliding target names intact for diagnostics', async () => {
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: 'constructor',
+        arguments: {},
+      }),
+      createRegistry(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.targetName).toBe('constructor');
+      expect(result.errorType).toBe(ToolErrorType.TOOL_NOT_REGISTERED);
+      expect(result.error.message).toContain('"constructor"');
+    }
+  });
+});
+
+describe('unwrapDeferredToolCallShape', () => {
+  it('passes non-wrapper requests through unchanged', () => {
+    const ordinary = request(ToolNames.READ_FILE, { path: 'README.md' });
+
+    expect(unwrapDeferredToolCallShape(ordinary)).toBe(ordinary);
+  });
+
+  it.each([
+    ['missing name', { arguments: {} }],
+    ['blank name', { name: '  ', arguments: {} }],
+    ['non-string name', { name: 42, arguments: {} }],
+    ['missing arguments', { name: ToolNames.CRON_CREATE }],
+    ['string arguments', { name: ToolNames.CRON_CREATE, arguments: 'bad' }],
+    ['array arguments', { name: ToolNames.CRON_CREATE, arguments: [] }],
+  ])('returns malformed wrapper request unchanged: %s', (_label, args) => {
+    const malformed = request(ToolNames.DEFERRED_TOOL_CALL, args);
+
+    expect(unwrapDeferredToolCallShape(malformed)).toBe(malformed);
+  });
+
+  it('unwraps a well-formed wrapper call to the canonical target', () => {
+    const unwrapped = unwrapDeferredToolCallShape(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: 'task',
+        arguments: { description: 'legacy alias call' },
+      }),
+    );
+
+    expect(unwrapped.name).toBe(ToolNames.AGENT);
+    expect(unwrapped.args).toEqual({ description: 'legacy alias call' });
+    expect(unwrapped.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    expect(unwrapped.callId).toBe('call-1');
+  });
+
+  it('preserves the target arguments of repeated calls to the same target', () => {
+    const first = unwrapDeferredToolCallShape(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 9 * * *' },
+      }),
+    );
+    const second = unwrapDeferredToolCallShape(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: ToolNames.CRON_CREATE,
+        arguments: { schedule: '0 18 * * *' },
+      }),
+    );
+
+    expect(first.name).toBe(ToolNames.CRON_CREATE);
+    expect(second.name).toBe(ToolNames.CRON_CREATE);
+    expect(first.args).toEqual({ schedule: '0 9 * * *' });
+    expect(second.args).toEqual({ schedule: '0 18 * * *' });
+    expect(first.args).not.toEqual(second.args);
   });
 });
 

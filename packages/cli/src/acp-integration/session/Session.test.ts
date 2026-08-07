@@ -427,6 +427,7 @@ describe('Session', () => {
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
+    isDeferredProxyPairRegistered: ReturnType<typeof vi.fn>;
     isProxyEligibleDeferredTool: ReturnType<typeof vi.fn>;
     hasPresentedProxySchema: ReturnType<typeof vi.fn>;
     markProxySchemaPresented: ReturnType<typeof vi.fn>;
@@ -629,6 +630,7 @@ describe('Session', () => {
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
+      isDeferredProxyPairRegistered: vi.fn().mockReturnValue(true),
       isProxyEligibleDeferredTool: vi.fn().mockReturnValue(false),
       hasPresentedProxySchema: vi.fn().mockReturnValue(false),
       markProxySchemaPresented: vi.fn().mockReturnValue(false),
@@ -20473,6 +20475,21 @@ describe('Session', () => {
       expect(proxyResult.parts[0]?.functionResponse?.name).toBe(
         core.ToolNames.DEFERRED_TOOL_CALL,
       );
+      // The successful search record must carry the presentation metadata —
+      // resume re-authorization consumes exactly this field.
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        expect.objectContaining({
+          status: 'success',
+          deferredToolPresentations: [
+            {
+              name: core.ToolNames.CRON_CREATE,
+              schemaFingerprint: 'schema',
+            },
+          ],
+        }),
+      );
       expect(
         mockChatRecordingService.recordToolResult,
       ).toHaveBeenLastCalledWith(
@@ -20534,11 +20551,12 @@ describe('Session', () => {
     });
 
     it('shows the target and provider route when ACP hard-denies a proxy call', async () => {
+      const execute = vi.fn();
       const targetTool = mockAllowedToolWithBuild(
         core.ToolNames.CRON_CREATE,
         vi.fn().mockReturnValue({
           params: {},
-          execute: vi.fn(),
+          execute,
           getDefaultPermission: vi.fn().mockResolvedValue('deny'),
           getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
           toolLocations: vi.fn().mockReturnValue([]),
@@ -20570,6 +20588,9 @@ describe('Session', () => {
             'Tool "cron_create" is denied: the tool\'s default permission is \'deny\'. (tool "cron_create" via "deferred_tool_call")',
         },
       });
+      // The hard-deny gate must reject before execution, not merely return
+      // the error-response shape.
+      expect(execute).not.toHaveBeenCalled();
     });
 
     it('executes the deferred tool instance authorized by normalization', async () => {

@@ -3484,7 +3484,7 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  this.#getCurrentChat().addHistory(nextMessage);
+                  this.#preserveUnsentMessageHistory(nextMessage, true);
                   return { stopReason: 'cancelled' };
                 }
 
@@ -4469,10 +4469,13 @@ export class Session implements SessionContext {
           const preservedParts = (messageForPreservation.parts ?? []).filter(
             (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
           );
-          this.#preserveUnsentMessageHistory(
+          const preservedMessage =
             preservedParts.length > 0
               ? { ...messageForPreservation, parts: preservedParts }
-              : null,
+              : null;
+          this.reattachDeferredToolPresentations(nextMessage, preservedMessage);
+          this.#preserveUnsentMessageHistory(
+            preservedMessage,
             sendResult.stopReason === 'cancelled' ||
               preservePreparedMessageOnSkippedSend,
           );
@@ -7779,6 +7782,33 @@ export class Session implements SessionContext {
     state.committed = true;
     delete stagedMessage[DEFERRED_TOOL_PRESENTATIONS];
     this.commitDeferredToolPresentations(state.presentations);
+  }
+
+  /**
+   * The skipped-send preserve path rebuilds the preserved message from its
+   * parts, which drops the presentation symbol staged on the original
+   * message. Reattach it so the commit inside #preserveUnsentMessageHistory
+   * fires — but only when the preserved message still carries the staged
+   * message's functionResponse parts, so a path that drops the tool results
+   * keeps the schema fail-closed instead of authorizing it.
+   */
+  private reattachDeferredToolPresentations(
+    stagedMessage: Content | null,
+    preservedMessage: Content | null,
+  ): void {
+    if (!stagedMessage || !preservedMessage) return;
+    const state = (stagedMessage as ContentWithDeferredToolPresentations)[
+      DEFERRED_TOOL_PRESENTATIONS
+    ];
+    if (!state || state.committed) return;
+    const stagedParts = stagedMessage.parts ?? [];
+    const carriesStagedToolResult = (preservedMessage.parts ?? []).some(
+      (part) => 'functionResponse' in part && stagedParts.includes(part),
+    );
+    if (!carriesStagedToolResult) return;
+    (preservedMessage as ContentWithDeferredToolPresentations)[
+      DEFERRED_TOOL_PRESENTATIONS
+    ] = state;
   }
 
   /**
