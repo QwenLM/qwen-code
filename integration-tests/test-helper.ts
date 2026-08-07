@@ -27,7 +27,11 @@ function sanitizeTestName(name: string) {
 // Helper to create detailed error messages
 export function createToolCallErrorMessage(
   expectedTools: string | string[],
-  foundTools: string[],
+  // Callers build this by mapping `toolRequest.name` over the parsed
+  // telemetry, where the name is optional. This is a failure message, so a
+  // missing entry should print as `undefined` rather than force every call
+  // site to filter first.
+  foundTools: Array<string | undefined>,
   result: string,
 ) {
   const expectedStr = Array.isArray(expectedTools)
@@ -170,6 +174,10 @@ interface ParsedLog {
     duration_ms?: number;
     status?: string;
     'error.message'?: string;
+    // Telemetry carries far more attributes than the tool-call subset named
+    // above; callers reach them by key (`attributes['request_text']`). Every
+    // value is `unknown` because nothing validates the payload shape.
+    [key: string]: unknown;
   };
   scopeMetrics?: {
     metrics: {
@@ -227,7 +235,7 @@ export class TestRig {
         otlpEndpoint: '',
         outfile: telemetryPath,
       },
-      sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
+      sandbox: env['QWEN_SANDBOX'] !== 'false' ? env['QWEN_SANDBOX'] : false,
       ...options.settings, // Allow tests to override/add settings
     };
     writeFileSync(
@@ -261,7 +269,7 @@ export class TestRig {
     initialArgs: string[];
   } {
     const isNpmReleaseTest =
-      process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
+      process.env['INTEGRATION_TEST_USE_INSTALLED_GEMINI'] === 'true';
     const command = isNpmReleaseTest ? 'qwen' : 'node';
     const initialArgs = isNpmReleaseTest
       ? ['--no-chat-recording', ...extraInitialArgs]
@@ -442,14 +450,14 @@ export class TestRig {
 
     child.stdout!.on('data', (data: Buffer) => {
       stdout += data;
-      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
+      if (env['KEEP_OUTPUT'] === 'true' || env['VERBOSE'] === 'true') {
         process.stdout.write(data);
       }
     });
 
     child.stderr!.on('data', (data: Buffer) => {
       stderr += data;
-      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
+      if (env['KEEP_OUTPUT'] === 'true' || env['VERBOSE'] === 'true') {
         process.stderr.write(data);
       }
     });
@@ -777,7 +785,7 @@ export class TestRig {
         logs.push(logData);
       } catch (e) {
         // Skip objects that aren't valid JSON
-        if (env.VERBOSE === 'true') {
+        if (env['VERBOSE'] === 'true') {
           console.error('Failed to parse telemetry object:', e);
         }
       }
@@ -816,12 +824,17 @@ export class TestRig {
     }
 
     const parsedLogs = this._readAndParseTelemetryLog();
+    // Every field is optional because it is copied straight out of the
+    // telemetry attributes, which nothing validates. The stdout fallback above
+    // reconstructs the same fields from a regex and can promise them; this
+    // branch cannot, and claiming otherwise just moved the `undefined` past
+    // the type checker into the assertions.
     const logs: {
       toolRequest: {
-        name: string;
-        args: string;
-        success: boolean;
-        duration_ms: number;
+        name?: string;
+        args?: string;
+        success?: boolean;
+        duration_ms?: number;
         status?: string;
         error?: string;
       };
@@ -850,7 +863,9 @@ export class TestRig {
     return logs;
   }
 
-  readLastApiRequest(): Record<string, unknown> | null {
+  // Returns the parsed log, not a bare record: callers want `.attributes`,
+  // and `Record<string, unknown>` hid that the value already has a shape.
+  readLastApiRequest(): ParsedLog | null {
     const logs = this._readAndParseTelemetryLog();
     const apiRequests = logs.filter(
       (logData) =>
@@ -909,7 +924,7 @@ export class TestRig {
 
     ptyProcess.onData((data) => {
       this._interactiveOutput += data;
-      if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
+      if (env['KEEP_OUTPUT'] === 'true' || env['VERBOSE'] === 'true') {
         process.stdout.write(data);
       }
     });

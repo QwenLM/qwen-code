@@ -316,7 +316,7 @@ describe('HTTP Hooks Integration', () => {
 
       const requestLogs = mockServer.getRequestLogs();
       if (requestLogs.length > 0) {
-        expect(requestLogs[0].body.hook_event_name).toBe('UserPromptSubmit');
+        expect(requestLogs[0].body['hook_event_name']).toBe('UserPromptSubmit');
       }
     });
 
@@ -398,7 +398,7 @@ describe('HTTP Hooks Integration', () => {
 
       const requestLogs = mockServer.getRequestLogs();
       if (requestLogs.length > 0) {
-        expect(requestLogs[0].body.hook_event_name).toBe('PostToolUse');
+        expect(requestLogs[0].body['hook_event_name']).toBe('PostToolUse');
       }
     });
   });
@@ -441,7 +441,7 @@ describe('HTTP Hooks Integration', () => {
 
       const requestLogs = mockServer.getRequestLogs();
       if (requestLogs.length > 0) {
-        expect(requestLogs[0].body.hook_event_name).toBe('SessionStart');
+        expect(requestLogs[0].body['hook_event_name']).toBe('SessionStart');
       }
     });
   });

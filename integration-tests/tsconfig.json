@@ -3,12 +3,57 @@
   "compilerOptions": {
     "noEmit": true,
     "allowJs": true,
+    // Nothing references this project and it emits nothing, but the root
+    // config turns `composite` on for the packages that do. Composite demands
+    // that every file in the program appear in `include`, and these tests
+    // import package sources across the repo by relative path, so inheriting
+    // it produced 300+ TS6307 "not listed within the file list" errors.
+    "composite": false,
+    // Matches packages/cli. The suite drives browser-side code in
+    // `terminal-capture/` and pulls SDK sources that reference `WebSocket` /
+    // `HeadersInit`, none of which exist in the root's ES2023-only lib.
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
     "baseUrl": ".",
+    // Resolve `@qwen-code/sdk` types from source rather than dist so `tsc -p`
+    // here does not require a fresh `npm run build` of the SDK package before
+    // checking integration tests. The runtime vitest alias
+    // (`integration-tests/vitest.config.ts`) still points at the built
+    // `dist/index.mjs` to exercise the published-bundle shape; this entry only
+    // affects type resolution.
+    //
+    // Keep notes like this OUT of `paths` itself: every value there must be an
+    // array, so a `"//"` string key makes tsc abort with TS5063 before it type
+    // checks a single file — which is how this project silently went unchecked.
     "paths": {
-      "//": "Resolve types from SDK source rather than dist so `tsc -p` here does not require a fresh `npm run build` of the SDK package before checking integration tests. The runtime vitest alias (`integration-tests/vitest.config.ts`) still points at the built `dist/index.mjs` to exercise the published-bundle shape; this paths entry only affects type resolution.",
-      "@qwen-code/sdk": ["../packages/sdk-typescript/src/index.ts"]
+      // Mirrors packages/cli. These tests import package sources by relative
+      // path (`../../packages/cli/src/...`), so those files get checked here
+      // too and must resolve their own imports the same way packages/cli does.
+      // Going through `packages/core/dist` instead made the result depend on
+      // whether someone had built core recently — and with core unbuilt it
+      // reported a dozen "does not exist on type Storage" errors for members
+      // that are right there in the source.
+      "@qwen-code/qwen-code-core": ["../packages/core/src/index.ts"],
+      "@qwen-code/qwen-code-core/transcriptRecords": [
+        "../packages/core/src/utils/transcript-records.ts"
+      ],
+      "@qwen-code/qwen-code-core/*": ["../packages/core/src/*"],
+      "@qwen-code/sdk": ["../packages/sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/daemon/ui/transcript": [
+        "../packages/sdk-typescript/src/daemon/ui/transcript.ts"
+      ],
+      "@qwen-code/sdk/daemon/types": [
+        "../packages/sdk-typescript/src/daemon/types.ts"
+      ],
+      "@qwen-code/sdk/*": ["../packages/sdk-typescript/src/*"],
+      "@qwen-code/acp-bridge": ["../packages/acp-bridge/src/index.ts"],
+      "@qwen-code/acp-bridge/*": ["../packages/acp-bridge/src/*"],
+      // node-pty declares `types` at the top level but its `exports` map is a
+      // bare string with no `types` condition, so nodenext resolution never
+      // reaches the declarations and every pty handle degrades to `any` —
+      // which is what silently untyped the `data` / `exitCode` callbacks in
+      // test-helper.ts. Point at the shipped .d.ts directly.
+      "@lydell/node-pty": ["../node_modules/@lydell/node-pty/node-pty.d.ts"]
     }
   },
-  "include": ["**/*.ts"],
-  "references": [{ "path": "../packages/core" }]
+  "include": ["**/*.ts"]
 }

@@ -46,6 +46,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
+import type { NonBlockingPromptAccepted } from '@qwen-code/sdk/daemon';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -134,6 +135,18 @@ function findExternalReadBase(): string | undefined {
 }
 
 const externalReadBase = findExternalReadBase();
+
+// `promptNonBlocking` returns `NonBlockingPromptAccepted | PromptResult`, and
+// `PromptResult` carries an index signature — so `'promptId' in accepted` does
+// not narrow the union, and every field read after that check comes back as
+// `unknown`. Narrow once, here.
+function asAccepted(
+  result: Awaited<ReturnType<DaemonClient['promptNonBlocking']>>,
+): NonBlockingPromptAccepted | undefined {
+  return 'promptId' in result
+    ? (result as NonBlockingPromptAccepted)
+    : undefined;
+}
 
 let daemon: ChildProcess;
 let port = 0;
@@ -619,11 +632,13 @@ describePOSIX('qwen serve — same-host external text reads', () => {
     const requestStart = fakeServer.requests.length;
     try {
       await new Promise((resolve) => setTimeout(resolve, 200));
-      const accepted = await client.promptNonBlocking(session.sessionId, {
-        prompt: [{ type: 'text', text: marker }],
-      });
-      expect('promptId' in accepted).toBe(true);
-      if (!('promptId' in accepted)) return;
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
       promptId = accepted.promptId;
 
       await expect.poll(findReadPermission, { timeout: 30_000 }).toBeDefined();
@@ -766,11 +781,13 @@ describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
     });
     const requestStart = fakeServer.requests.length;
     const guardMarker = `todo-guard-e2e-${requestStart}`;
-    const accepted = await client.promptNonBlocking(session.sessionId, {
-      prompt: [{ type: 'text', text: guardMarker }],
-    });
-    expect('promptId' in accepted).toBe(true);
-    if (!('promptId' in accepted)) return;
+    const accepted = asAccepted(
+      await client.promptNonBlocking(session.sessionId, {
+        prompt: [{ type: 'text', text: guardMarker }],
+      }),
+    );
+    expect(accepted).toBeDefined();
+    if (!accepted) return;
 
     await expect
       .poll(
