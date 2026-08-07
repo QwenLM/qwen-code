@@ -88,7 +88,12 @@ async function refreshConnectInfo(url: string): Promise<void> {
   const code = await window.launcher.pairingCode();
   pairingCodeEl.textContent = code ?? '(none)';
   try {
-    qrImage.src = await QRCode.toDataURL(url);
+    // Embed the pairing code in the URL *fragment* so a scanned QR auto-fills
+    // and pairs the phone (the /ui/ page reads `#code=`, then scrubs it). The
+    // fragment never reaches server logs/Referer. Code stays in-image only —
+    // never logged or persisted (secret hygiene).
+    const qrTarget = code ? `${url}#code=${encodeURIComponent(code)}` : url;
+    qrImage.src = await QRCode.toDataURL(qrTarget);
   } catch {
     qrImage.removeAttribute('src');
   }
