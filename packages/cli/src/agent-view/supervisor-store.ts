@@ -236,7 +236,9 @@ export async function listAgentViewSessionSnapshots(
         await readAgentViewLaunch(state.sessionId, options),
       ),
       activity: await readAgentViewActivity(state.sessionId, options),
-      worker: await readAgentViewWorker(state.sessionId, options),
+      worker: redactAgentViewWorker(
+        await readAgentViewWorker(state.sessionId, options),
+      ),
       rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
     })),
   );
@@ -531,18 +533,19 @@ function normalizeLaunch(
   const projectCwd = stringValue(raw['projectCwd']);
   const activeCwd = stringValue(raw['activeCwd']);
   if (!sessionId || !entrypoint || !projectCwd || !activeCwd) return undefined;
-  return {
+  return stripUndefined({
     ...raw,
     schemaVersion: 1,
     sessionId,
     argv: stringArrayValue(raw['argv']),
     env: stringMapValue(raw['env']),
     entrypoint,
+    initialPrompt: stringValue(raw['initialPrompt']),
     projectCwd: path.resolve(projectCwd),
     activeCwd: path.resolve(activeCwd),
     includeDirectories: stringArrayValue(raw['includeDirectories']),
     terminal: terminalValue(raw['terminal']),
-  };
+  }) as AgentViewLaunchFile;
 }
 
 function redactAgentViewLaunch(
@@ -561,33 +564,35 @@ function normalizeActivity(
   if (!raw) return undefined;
   const lastActivityAt = stringValue(raw['lastActivityAt']);
   if (!lastActivityAt) return undefined;
-  return {
+  return stripUndefined({
     ...raw,
     schemaVersion: 1,
-    ...(stringValue(raw['summary'])
-      ? { summary: stringValue(raw['summary']) }
-      : {}),
-    ...(stringValue(raw['waitingFor'])
-      ? { waitingFor: stringValue(raw['waitingFor']) }
-      : {}),
-    ...(inputKindValue(raw['inputKind'])
-      ? { inputKind: inputKindValue(raw['inputKind']) }
-      : {}),
-    ...(stringValue(raw['lastResult'])
-      ? { lastResult: stringValue(raw['lastResult']) }
-      : {}),
-    ...(numberValue(raw['queuedPromptCount'])
-      ? { queuedPromptCount: numberValue(raw['queuedPromptCount']) }
-      : {}),
-    ...(stringValue(raw['queuedPromptPreview'])
-      ? { queuedPromptPreview: stringValue(raw['queuedPromptPreview']) }
-      : {}),
-    ...(stringValue(raw['lastQueuedPromptAt'])
-      ? { lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']) }
-      : {}),
+    summary: stringValue(raw['summary']),
+    waitingFor: stringValue(raw['waitingFor']),
+    inputKind: inputKindValue(raw['inputKind']),
+    lastResult: stringValue(raw['lastResult']),
+    queuedPromptCount: numberValue(raw['queuedPromptCount']),
+    queuedPromptPreview: stringValue(raw['queuedPromptPreview']),
+    lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
-  };
+  }) as AgentViewActivityFile;
+}
+
+function redactAgentViewWorker(
+  worker: AgentViewWorkerFile | undefined,
+): AgentViewWorkerFile | undefined {
+  if (!worker) return undefined;
+  return stripUndefined({
+    ...worker,
+    hostAuthToken: undefined,
+  }) as AgentViewWorkerFile;
+}
+
+function stripUndefined(value: JsonRecord): JsonRecord {
+  return Object.fromEntries(
+    Object.entries(value).filter((entry) => entry[1] !== undefined),
+  );
 }
 
 function normalizeWorker(

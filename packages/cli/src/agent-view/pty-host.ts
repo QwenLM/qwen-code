@@ -356,7 +356,7 @@ function buildWorkerPtyEnv(
   return {
     ...env,
     ...launchEnv,
-    TERM: launchEnv['TERM'] ?? 'xterm-256color',
+    TERM: launchEnv['TERM'] || 'xterm-256color',
   };
 }
 
@@ -367,8 +367,6 @@ const COLOR_ENV_KEYS = [
   'CLICOLOR',
   'CLICOLOR_FORCE',
   'TERM',
-  'CODEX_CI',
-  'CI',
 ];
 
 async function importPty(

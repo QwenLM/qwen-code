@@ -50,7 +50,22 @@ describe('deriveAgentViewPresentation', () => {
     expect(
       deriveAgentViewPresentation({
         state: session({ sessionState: 'needs_input' }),
-        activity: activity({ waitingFor: 'response', inputKind: 'soft' }),
+        activity: activity({ waitingFor: 'response' }),
+      }),
+    ).toMatchObject({
+      taskState: 'waiting',
+      inputState: 'soft_question',
+      actions: {
+        canReply: true,
+        canHibernate: true,
+        needsBlockingAnswer: false,
+      },
+    });
+
+    expect(
+      deriveAgentViewPresentation({
+        state: session({ sessionState: 'needs_input' }),
+        activity: activity({ waitingFor: 'question', inputKind: 'soft' }),
       }),
     ).toMatchObject({
       taskState: 'waiting',
