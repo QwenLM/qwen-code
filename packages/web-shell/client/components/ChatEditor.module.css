@@ -108,6 +108,11 @@
   overflow: hidden;
 }
 
+:global([data-web-shell-model-submenu]) {
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
+  min-width: min(280px, var(--radix-popover-content-available-width));
+}
+
 .slashPanel {
   max-height: min(
     460px,
@@ -1216,8 +1221,7 @@
   background: var(--accent);
 }
 
-.dropdownSubmenuTrigger,
-.dropdownSubmenuBack {
+.dropdownSubmenuTrigger {
   display: flex;
   min-height: 34px;
   align-items: center;
@@ -1225,17 +1229,16 @@
   gap: 10px;
 }
 
-.dropdownSubmenuTrigger svg,
-.dropdownSubmenuBack svg {
+.dropdownSubmenuTrigger svg {
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
   color: var(--muted-foreground);
 }
 
-.dropdownSubmenuBack {
-  justify-content: flex-start;
-  color: var(--muted-foreground);
+.dropdownSubmenuSection {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
 }
 
 .reasoningOptions {

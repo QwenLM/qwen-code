@@ -1086,29 +1086,36 @@ describe('ChatEditor toolbar popovers', () => {
       );
     });
     const search = document.querySelector<HTMLInputElement>(
-      '[data-web-shell-toolbar-popover] input[type="search"]',
+      '[data-web-shell-model-submenu] input[type="search"]',
     );
     expect(search).not.toBeNull();
     expect(document.activeElement).toBe(search);
     expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).toContain('Thinking');
+    expect(
       document.querySelector('[data-web-shell-model-submenu-back]'),
-    ).not.toBeNull();
+    ).toBeNull();
 
-    act(() =>
-      document
-        .querySelector<HTMLButtonElement>('[data-web-shell-model-submenu-back]')
-        ?.click(),
-    );
+    act(() => {
+      search?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowLeft',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
     const reopenedSubmenuTrigger = document.querySelector<HTMLButtonElement>(
       '[data-web-shell-model-submenu-trigger]',
     );
-    expect(document.querySelector('input[type="search"]')).toBeNull();
+    expect(document.querySelector('[data-web-shell-model-submenu]')).toBeNull();
     expect(document.activeElement).toBe(reopenedSubmenuTrigger);
     act(() => reopenedSubmenuTrigger?.click());
 
     const plus = Array.from(
       document.querySelectorAll<HTMLButtonElement>(
-        '[data-web-shell-toolbar-popover] button',
+        '[data-web-shell-model-submenu] button',
       ),
     ).find((button) => button.textContent?.trim() === 'Qwen Plus');
     act(() => plus?.click());

@@ -122,6 +122,45 @@ describe('reasoning config options', () => {
     expect(next.currentModel).toBe('next-model');
     expect(next.reasoning).toBeUndefined();
   });
+
+  it('preserves the target reasoning update when the model switch event follows it', () => {
+    const afterConfigUpdate = applyEvent(
+      {
+        status: 'connected',
+        currentModel: 'previous-model',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_reasoning_control'],
+          modelServices: [],
+        },
+      },
+      {
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions,
+          },
+        },
+      } as DaemonEvent,
+    );
+    const next = applyEvent(afterConfigUpdate, {
+      v: 1,
+      type: 'model_switched',
+      data: { modelId: 'next-model' },
+    } as DaemonEvent);
+
+    expect(next.currentModel).toBe('next-model');
+    expect(next.reasoning).toEqual({
+      thinking: { enabled: false },
+      effort: {
+        value: 'medium',
+        options: ['low', 'medium', 'xhigh'],
+      },
+    });
+  });
 });
 
 function usageEvent(

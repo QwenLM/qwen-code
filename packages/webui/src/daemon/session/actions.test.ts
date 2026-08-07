@@ -594,6 +594,42 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().reasoning).toBeUndefined();
   });
 
+  it('preserves target reasoning state received before the model response', async () => {
+    const session = createMockSession('session-a');
+    const targetReasoning = {
+      thinking: { enabled: true },
+      effort: {
+        value: 'xhigh' as const,
+        options: ['low', 'medium', 'xhigh'] as const,
+      },
+    };
+    const { actions, getConnection, setConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        currentModel: 'previous-model',
+      },
+    });
+    session.setModel.mockImplementationOnce(async () => {
+      setConnection((current) => ({
+        ...current,
+        currentModel: 'next-model',
+        reasoning: {
+          thinking: targetReasoning.thinking,
+          effort: {
+            value: targetReasoning.effort.value,
+            options: [...targetReasoning.effort.options],
+          },
+        },
+      }));
+      return { modelId: 'next-model' };
+    });
+
+    await actions.setModel('next-model');
+
+    expect(getConnection().reasoning).toEqual(targetReasoning);
+  });
+
   it('reports getTasks failures by default', async () => {
     const session = createMockSession('session-a');
     const addNotice = vi.fn((notice) => notice);
@@ -855,6 +891,11 @@ function createActionsHarness(
     appendLocalUserMessage: vi.fn(),
     dispatch: vi.fn(),
   };
+  const setConnection: Parameters<
+    typeof createDaemonSessionActions
+  >[0]['setConnection'] = (update) => {
+    connection = typeof update === 'function' ? update(connection) : update;
+  };
   const actions = createDaemonSessionActions({
     store: store as never,
     sessionRef,
@@ -880,9 +921,7 @@ function createActionsHarness(
     restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
-    setConnection: (update) => {
-      connection = typeof update === 'function' ? update(connection) : update;
-    },
+    setConnection,
     setPromptStatus: vi.fn(),
     setRestoreSessionId: vi.fn(),
     setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
@@ -896,6 +935,7 @@ function createActionsHarness(
     activePromptsRef,
     getConnection: () => connection,
     pendingSessionLoadRef,
+    setConnection,
     sessionRef,
     store,
   };

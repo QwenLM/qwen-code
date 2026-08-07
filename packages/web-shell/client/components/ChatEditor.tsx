@@ -70,7 +70,6 @@ import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
-  ChevronLeftIcon,
   ChevronRightIcon,
   FolderClosedIcon,
 } from 'lucide-react';
@@ -690,7 +689,7 @@ function ToolbarPopover({
   submenu?: {
     triggerLabel: string;
     triggerAriaLabel: string;
-    backLabel: string;
+    sectionLabel: string;
   };
 }) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -727,13 +726,81 @@ function ToolbarPopover({
     }
   }, [open, submenuOpen]);
 
-  const closeSubmenu = () => {
-    returningFromSubmenuRef.current = true;
-    setSearchQuery('');
-    setSubmenuOpen(false);
-  };
-
   const hasCheckItems = hasRichItems || showCheck;
+  const dropdownItems = (
+    <div
+      className={`${styles.dropdownList} ${
+        hasRichItems
+          ? styles.dropdownRich
+          : showCheck
+            ? styles.dropdownCheck
+            : ''
+      } ${searchable ? styles.dropdownListConstrained : ''}`}
+    >
+      {visibleItems.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={`${styles.dropdownItem} ${
+            item.id === activeId ? styles.dropdownItemActive : ''
+          }`}
+          title={item.label}
+          onClick={() => {
+            selectionRef.current = true;
+            onSelect(item.id);
+          }}
+        >
+          {hasCheckItems ? (
+            <>
+              {hasRichItems && (
+                <span className={styles.dropdownItemIcon}>{item.icon}</span>
+              )}
+              <span className={styles.dropdownItemContent}>
+                <span className={styles.dropdownItemLabel}>{item.label}</span>
+                {item.description && (
+                  <span className={styles.dropdownItemDesc}>
+                    {item.description}
+                  </span>
+                )}
+              </span>
+              <span className={styles.dropdownItemCheck}>
+                {item.id === activeId ? <CheckIcon /> : null}
+              </span>
+            </>
+          ) : (
+            item.label
+          )}
+        </button>
+      ))}
+      {visibleItems.length === 0 && noResultsLabel && (
+        <div className={styles.dropdownEmpty} role="status">
+          {noResultsLabel(searchQuery)}
+        </div>
+      )}
+    </div>
+  );
+  const searchableItems = (
+    <>
+      {searchable && (
+        <Input
+          ref={searchInputRef}
+          type="search"
+          value={searchQuery}
+          aria-label={searchLabel}
+          placeholder={searchLabel}
+          autoComplete="off"
+          onChange={(event) => setSearchQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowLeft' || searchQuery) return;
+            event.preventDefault();
+            returningFromSubmenuRef.current = true;
+            setSubmenuOpen(false);
+          }}
+        />
+      )}
+      {dropdownItems}
+    </>
+  );
 
   return (
     <Popover
@@ -800,108 +867,58 @@ function ToolbarPopover({
           selectionRef.current = false;
         }}
       >
-        {submenu && !submenuOpen ? (
+        {submenu ? (
           <>
             {header}
-            <button
-              type="button"
-              ref={submenuTriggerRef}
-              className={`${styles.dropdownItem} ${styles.dropdownSubmenuTrigger}`}
-              data-web-shell-model-submenu-trigger
-              aria-haspopup="menu"
-              aria-expanded="false"
-              aria-label={submenu.triggerAriaLabel}
-              onClick={() => setSubmenuOpen(true)}
-              onKeyDown={(event) => {
-                if (event.key !== 'ArrowRight') return;
-                event.preventDefault();
-                setSubmenuOpen(true);
-              }}
-            >
-              <span>{submenu.triggerLabel}</span>
-              <ChevronRightIcon aria-hidden="true" />
-            </button>
+            <div className={styles.dropdownSubmenuSection}>
+              <div className={styles.reasoningSectionTitle}>
+                {submenu.sectionLabel}
+              </div>
+              <Popover
+                open={submenuOpen}
+                onOpenChange={(nextOpen) => {
+                  setSubmenuOpen(nextOpen);
+                  if (!nextOpen) setSearchQuery('');
+                }}
+              >
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    ref={submenuTriggerRef}
+                    className={`${styles.dropdownItem} ${styles.dropdownSubmenuTrigger}`}
+                    data-web-shell-model-submenu-trigger
+                    aria-haspopup="dialog"
+                    aria-expanded={submenuOpen}
+                    aria-label={submenu.triggerAriaLabel}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'ArrowRight') return;
+                      event.preventDefault();
+                      setSubmenuOpen(true);
+                    }}
+                  >
+                    <span>{submenu.triggerLabel}</span>
+                    <ChevronRightIcon aria-hidden="true" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  side="right"
+                  align="end"
+                  sideOffset={24}
+                  collisionPadding={8}
+                  collisionBoundary={collisionBoundary ?? undefined}
+                  data-web-shell-toolbar-popover
+                  data-web-shell-model-submenu
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {searchableItems}
+                </PopoverContent>
+              </Popover>
+            </div>
           </>
         ) : (
           <>
-            {submenu ? (
-              <button
-                type="button"
-                className={`${styles.dropdownItem} ${styles.dropdownSubmenuBack}`}
-                data-web-shell-model-submenu-back
-                onClick={closeSubmenu}
-              >
-                <ChevronLeftIcon aria-hidden="true" />
-                <span>{submenu.backLabel}</span>
-              </button>
-            ) : (
-              header
-            )}
-            {searchable && (
-              <Input
-                ref={searchInputRef}
-                type="search"
-                value={searchQuery}
-                aria-label={searchLabel}
-                placeholder={searchLabel}
-                autoComplete="off"
-                onChange={(event) => setSearchQuery(event.target.value)}
-              />
-            )}
-            <div
-              className={`${styles.dropdownList} ${
-                hasRichItems
-                  ? styles.dropdownRich
-                  : showCheck
-                    ? styles.dropdownCheck
-                    : ''
-              } ${searchable ? styles.dropdownListConstrained : ''}`}
-            >
-              {visibleItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`${styles.dropdownItem} ${
-                    item.id === activeId ? styles.dropdownItemActive : ''
-                  }`}
-                  title={item.label}
-                  onClick={() => {
-                    selectionRef.current = true;
-                    onSelect(item.id);
-                  }}
-                >
-                  {hasCheckItems ? (
-                    <>
-                      {hasRichItems && (
-                        <span className={styles.dropdownItemIcon}>
-                          {item.icon}
-                        </span>
-                      )}
-                      <span className={styles.dropdownItemContent}>
-                        <span className={styles.dropdownItemLabel}>
-                          {item.label}
-                        </span>
-                        {item.description && (
-                          <span className={styles.dropdownItemDesc}>
-                            {item.description}
-                          </span>
-                        )}
-                      </span>
-                      <span className={styles.dropdownItemCheck}>
-                        {item.id === activeId ? <CheckIcon /> : null}
-                      </span>
-                    </>
-                  ) : (
-                    item.label
-                  )}
-                </button>
-              ))}
-              {visibleItems.length === 0 && noResultsLabel && (
-                <div className={styles.dropdownEmpty} role="status">
-                  {noResultsLabel(searchQuery)}
-                </div>
-              )}
-            </div>
+            {header}
+            {searchableItems}
           </>
         )}
       </PopoverContent>
@@ -2385,7 +2402,7 @@ export const ChatEditor = memo(
                             ? {
                                 triggerLabel: modelLabel,
                                 triggerAriaLabel: `${t('model.select')}: ${modelLabel}`,
-                                backLabel: t('model.backToOptions'),
+                                sectionLabel: t('model.section'),
                               }
                             : undefined
                         }
@@ -2458,7 +2475,6 @@ export const ChatEditor = memo(
                                   )}
                                 </>
                               ) : null}
-                              <div className={styles.reasoningDivider} />
                             </div>
                           ) : undefined
                         }

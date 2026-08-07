@@ -395,11 +395,17 @@ export function updateConnectionFromDaemonEvent(
     case 'model_switched': {
       const modelId = getString(getRecord(event.data), 'modelId');
       if (modelId) {
-        setConnection((current) => ({
-          ...current,
-          currentModel: modelId,
-          reasoning: undefined,
-        }));
+        setConnection((current) => {
+          const supportsReasoningControl =
+            current.capabilities?.features.includes(
+              'session_reasoning_control',
+            );
+          return {
+            ...current,
+            currentModel: modelId,
+            reasoning: supportsReasoningControl ? current.reasoning : undefined,
+          };
+        });
       }
       break;
     }

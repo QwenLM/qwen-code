@@ -59,6 +59,29 @@ function createReasoningScenario(
         })),
       }),
     );
+    const sessionModels = scenario.state.models as
+      | {
+          currentModelId?: string;
+          availableModels?: Array<Record<string, unknown>>;
+        }
+      | undefined;
+    if (sessionModels?.availableModels) {
+      scenario.state.models = {
+        ...sessionModels,
+        availableModels: sessionModels.availableModels.map((model) => ({
+          ...model,
+          ...(model['baseModelId'] === currentModel
+            ? {
+                _meta: {
+                  ...((model['_meta'] as Record<string, unknown> | undefined) ??
+                    {}),
+                  reasoningControls,
+                },
+              }
+            : {}),
+        })),
+      };
+    }
     scenario.settings.settings.push({
       key: 'model.reasoningPreferences',
       type: 'object',
@@ -110,10 +133,31 @@ test('updates qwen3.8-max Thinking and Effort through the mock daemon', async ({
     page.locator('[data-web-shell-toolbar-popover] input[type="search"]'),
   ).toHaveCount(0);
   await page.locator('[data-web-shell-model-submenu-trigger]').click();
-  await expect(
-    page.locator('[data-web-shell-toolbar-popover] input[type="search"]'),
-  ).toBeFocused();
-  await page.locator('[data-web-shell-model-submenu-back]').click();
+  const modelSearch = page.locator(
+    '[data-web-shell-model-submenu] input[type="search"]',
+  );
+  await expect(modelSearch).toBeFocused();
+  await expect(page.locator('[data-web-shell-model-submenu]')).toHaveAttribute(
+    'data-side',
+    'right',
+  );
+  await expect
+    .poll(async () => {
+      const [optionsBox, modelsBox] = await Promise.all([
+        page
+          .locator(
+            '[data-web-shell-toolbar-popover]:not([data-web-shell-model-submenu])',
+          )
+          .boundingBox(),
+        page.locator('[data-web-shell-model-submenu]').boundingBox(),
+      ]);
+      if (!optionsBox || !modelsBox) return -1;
+      return modelsBox.x - (optionsBox.x + optionsBox.width);
+    })
+    .toBeGreaterThan(0);
+  await expect(page.getByRole('switch', { name: 'Thinking' })).toBeVisible();
+  await modelSearch.press('ArrowLeft');
+  await expect(page.locator('[data-web-shell-model-submenu]')).toHaveCount(0);
 
   if (process.env['PLAYWRIGHT_INTERACTIVE_DEMO'] === '1') {
     testInfo.setTimeout(0);
@@ -139,6 +183,28 @@ test('updates qwen3.8-max Thinking and Effort through the mock daemon', async ({
 
   await thinking.click();
   await expect(modelButton).toContainText('Medium');
+});
+
+test('restores reasoning controls after switching away and back', async ({
+  page,
+}, testInfo) => {
+  const scenario = createReasoningScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await modelButton.click();
+  await page.locator('[data-web-shell-model-submenu-trigger]').click();
+  await page.getByRole('button', { name: 'Qwen Test Alt' }).click();
+  await expect(modelButton).toContainText('Qwen Test Alt');
+
+  await modelButton.click();
+  await page.getByRole('button', { name: 'qwen3.8-max' }).click();
+  await expect(modelButton).toContainText('Extra High');
+
+  await modelButton.click();
+  await expect(page.getByRole('switch', { name: 'Thinking' })).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Medium' })).toBeVisible();
 });
 
 test('does not expose controls for qwen3.8-max-preview', async ({

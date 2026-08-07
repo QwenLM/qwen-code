@@ -535,7 +535,8 @@ export function createDaemonSessionActions({
         setConnection((current) => ({
           ...current,
           currentModel: modelId,
-          reasoning: undefined,
+          reasoning:
+            current.currentModel === modelId ? current.reasoning : undefined,
         }));
         return result;
       } catch (error) {
