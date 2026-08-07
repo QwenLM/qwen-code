@@ -236,6 +236,9 @@ describe('evaluateWebSearchGate', () => {
     expect(entries.every((entry) => entry.envKey === 'DASHSCOPE_API_KEY')).toBe(
       true,
     );
+    expect(entries.every((entry) => entry.baseUrl === DASHSCOPE_BASE_URL)).toBe(
+      true,
+    );
     const savedKey = process.env['DASHSCOPE_API_KEY'];
     process.env['DASHSCOPE_API_KEY'] = 'sk-test';
     try {
