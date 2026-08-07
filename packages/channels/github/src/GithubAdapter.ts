@@ -1314,7 +1314,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
-      const allowed = this.gate.isAllowed(senderId);
+      // Approved paired groups bypass the sender gate in preflight, so the
+      // directed lane must mirror that or follow-ups fail mention gating.
+      const allowed =
+        this.gate.isAllowed(senderId) ||
+        (directed &&
+          this.config.groupPolicy === 'pairing' &&
+          this.groupGate.isGroupApproved(ctx.chatId));
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -1324,7 +1330,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         messageId: String(comment.id),
         text: this.botUsername ? stripBotMention(body, this.botUsername) : body,
         isGroup: true,
-        isMentioned: hasMention || (directed && allowed),
+        // Never synthesize a mention into an unapproved pairing group: the
+        // pairing step must keep dropping ambient comments, and a synthesized
+        // mention would turn every ambient comment into a pairing request.
+        isMentioned:
+          hasMention ||
+          (directed &&
+            allowed &&
+            (this.config.groupPolicy !== 'pairing' ||
+              this.groupGate.isGroupApproved(ctx.chatId))),
         isReplyToBot: false,
         metadata: this.buildRouteMetadata(ctx),
       };
@@ -1339,7 +1353,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       if (allowed) {
         this.recordDispatchedComment(key);
-        if (hasMention) dispatched = true;
+      }
+      // A mention under group pairing has a visible effect (dispatch or a
+      // pairing code comment) even when the sender gate rejects the sender;
+      // suppress the first-contact body feed so the same intent cannot be
+      // dispatched twice. Record the body as consumed too: if the thread is
+      // later re-listed as unread (mark-read can fail), the body feed must
+      // not re-trigger the same pairing intent on a later poll.
+      if (hasMention && (allowed || this.config.groupPolicy === 'pairing')) {
+        dispatched = true;
+        this.recordDispatchedBody(`${ctx.chatId}|${ctx.threadId}`);
       }
     }
 
@@ -1389,7 +1412,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
-    if (this.config.senderPolicy === 'pairing') {
+    if (
+      this.config.senderPolicy === 'pairing' ||
+      this.config.groupPolicy === 'pairing'
+    ) {
       await this.processCommentLane(ctx, false, true);
       return;
     }

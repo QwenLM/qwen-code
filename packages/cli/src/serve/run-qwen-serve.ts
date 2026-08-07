@@ -3934,6 +3934,7 @@ async function runQwenServeImpl(
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider,
+        delegateReadTextFileToClient: false,
         fileSystem: createBridgeFileSystemAdapter(fsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
@@ -4334,6 +4335,7 @@ async function runQwenServeImpl(
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider: secondaryStatusProvider,
+        delegateReadTextFileToClient: false,
         fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
@@ -4884,6 +4886,7 @@ async function runQwenServeImpl(
           statusProvider: runtime.createDaemonStatusProvider({
             env: wsEnv.effectiveEnv,
           }),
+          delegateReadTextFileToClient: false,
           fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
           persistApprovalMode: (workspace, mode) =>
             withSettingsLock(workspace, async () => {

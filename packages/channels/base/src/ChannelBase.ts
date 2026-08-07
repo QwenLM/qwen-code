@@ -37,6 +37,7 @@ import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
+import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
 import { getGlobalQwenDir } from './paths.js';
 import {
@@ -375,6 +376,11 @@ export abstract class ChannelBase {
     observation: ChannelMemoryRecallObservation,
   ) => void;
   private groupHistory: GroupHistoryStore;
+  // Tracks the pairing code already announced per group so repeated triggers
+  // of the same pending request (extra mentions, parallel notification lanes)
+  // post the public notification once. In-memory by design: a restart can
+  // re-post once per still-pending request, but never per trigger.
+  private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -818,15 +824,18 @@ export abstract class ChannelBase {
     this.observedContacts = options?.observedContacts;
     this.bridgeRecovery = options?.bridgeRecovery;
 
-    this.groupGate = new GroupGate(config.groupPolicy, config.groups);
-    this.dmGate = new DmGate(config.dmPolicy);
-
     // Scoped by the channel's workspace cwd: two workspaces reusing the same
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing'
+      config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
         ? new PairingStore(name, config.cwd)
         : undefined;
+    this.groupGate = new GroupGate(
+      config.groupPolicy,
+      config.groups,
+      pairingStore,
+    );
+    this.dmGate = new DmGate(config.dmPolicy);
     this.gate = new SenderGate(
       config.senderPolicy,
       config.allowedUsers,
@@ -3604,9 +3613,11 @@ export abstract class ChannelBase {
       isReplyToBot: true,
     };
     return (
-      this.groupGate.check(envelope).allowed &&
+      this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      this.gate.isAllowed(normalizedTarget.senderId) &&
+      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
+        ? true
+        : this.gate.isAllowed(normalizedTarget.senderId)) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -4714,7 +4725,10 @@ export abstract class ChannelBase {
       return;
     }
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (!this.gate.isAllowed(senderId)) {
+    if (
+      this.config.groupPolicy !== 'pairing' &&
+      !this.gate.isAllowed(senderId)
+    ) {
       return;
     }
 
@@ -4743,7 +4757,17 @@ export abstract class ChannelBase {
       return [];
     }
     try {
-      return this.groupHistory.drain(this.groupHistoryKey(envelope), limit);
+      const entries = this.groupHistory.drain(
+        this.groupHistoryKey(envelope),
+        limit,
+      );
+      if (
+        this.config.groupPolicy === 'pairing' &&
+        !this.groupGate.isGroupApproved(envelope.chatId)
+      ) {
+        return [];
+      }
+      return entries;
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
@@ -4777,9 +4801,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines = entries.filter((entry) =>
-      this.gate.isAllowed(entry.senderId),
-    );
+    const lines =
+      this.config.groupPolicy === 'pairing'
+        ? entries
+        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
     if (lines.length === 0) {
       return promptText;
     }
@@ -4799,9 +4824,29 @@ export abstract class ChannelBase {
   protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
+      if (groupResult.pairing !== undefined) {
+        this.logPreflightRejected('group_pairing_required');
+        return this.onGroupPairingRequired(
+          envelope.chatId,
+          groupResult.pairing,
+          envelope.threadId,
+        )
+          .then(() => false)
+          .catch((err: unknown) => {
+            process.stderr.write(
+              `[Channel:${this.name}] group pairing notification failed: ${sanitizeLogText(
+                err instanceof Error ? err.message : String(err),
+                200,
+              )}\n`,
+            );
+            return false;
+          });
+      }
       if (groupResult.reason === 'mention_required') {
         // This is the expected high-frequency drop path for group bots.
         this.recordPendingGroupHistory(envelope);
+      } else if (groupResult.reason === 'pairing_trigger_required') {
+        return false;
       } else {
         this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
       }
@@ -4814,13 +4859,18 @@ export abstract class ChannelBase {
       return false;
     }
 
+    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
-      if (result.pairingCode !== undefined) {
+      if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
         return this.onPairingRequired(
           envelope.chatId,
-          result.pairingCode,
+          result.pairing,
           envelope.threadId,
         )
           .then(() => false)
@@ -5719,22 +5769,64 @@ export abstract class ChannelBase {
     await current;
   }
 
+  private pairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    return rejected === 'sender_pending'
+      ? 'You already have a pending pairing request. It must be approved or expire before another can be created.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
+  private groupPairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    // Group variant: the DM wording would publicly attribute the mentioning
+    // member's unrelated pending request to the whole group.
+    return rejected === 'sender_pending'
+      ? 'A pairing request cannot be created right now. Another member can mention the bot to start group approval, or try again later.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
   protected async onPairingRequired(
     chatId: string,
-    code: string | null,
+    result: CreatePairingRequestResult,
     threadId?: string,
   ): Promise<void> {
-    if (code) {
+    if ('code' in result) {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        `Your pairing code is: ${code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${code}`,
+        `Your pairing code is: ${result.code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
       );
     } else {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        'Too many pending pairing requests. Please try again later.',
+        this.pairingRejectionMessage(result.rejected),
+      );
+    }
+  }
+
+  protected async onGroupPairingRequired(
+    chatId: string,
+    result: CreatePairingRequestResult,
+    threadId?: string,
+  ): Promise<void> {
+    if ('code' in result) {
+      if (this.groupPairingNotified.get(chatId) === result.code) {
+        return;
+      }
+      await this.sendThreadMessage(
+        chatId,
+        threadId,
+        `This group requires approval. Its pairing code is: ${result.code}\n\nAsk the bot operator to approve the group with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
+      );
+      this.groupPairingNotified.set(chatId, result.code);
+    } else {
+      await this.sendThreadMessage(
+        chatId,
+        threadId,
+        this.groupPairingRejectionMessage(result.rejected),
       );
     }
   }
