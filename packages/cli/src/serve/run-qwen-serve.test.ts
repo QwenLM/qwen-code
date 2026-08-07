@@ -1332,6 +1332,11 @@ describe('runQwenServe telemetry validation', () => {
       await closing;
     }
     expect(createBridge).toHaveBeenCalledTimes(2);
+    for (const [options] of createBridge.mock.calls) {
+      expect(options).toMatchObject({
+        delegateReadTextFileToClient: false,
+      });
+    }
     for (const result of createBridge.mock.results) {
       expect(result.value.shutdown).toHaveBeenCalledWith({
         reason: 'daemon_shutdown',
@@ -1560,6 +1565,11 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      for (const [options] of createBridge.mock.calls) {
+        expect(options).toMatchObject({
+          delegateReadTextFileToClient: false,
+        });
+      }
       let releaseRemoval!: (count: number) => void;
       removeByIds.mockImplementationOnce(
         () =>
@@ -2071,7 +2081,8 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
 });
 
 /**
- * The budget is resolved at boot and reported; it does not size any child yet.
+ * The budget is resolved at boot and reported. Whether it also sizes a child
+ * depends on `childHeapMode`, which defaults to `observe` and sizes nothing.
  * The only boot-time behavior is rejecting an out-of-range flag value.
  */
 describe('runQwenServe memory budget', () => {
@@ -2114,7 +2125,13 @@ describe('runQwenServe memory budget', () => {
       const body = (await res.json()) as {
         limits: {
           memory: {
-            enforced: false;
+            enforced: boolean;
+            childHeap: {
+              mode: string;
+              maxConcurrentChildren: number;
+              perChildCeilingMb: number | null;
+              refusals: number;
+            } | null;
             configuredBudgetMb: number;
             effectiveBudgetMb: number;
             budgetSource: string;
@@ -2134,9 +2151,29 @@ describe('runQwenServe memory budget', () => {
             registeredWorkspaces: number;
             activeAcpChildren: number;
             childRssCoverage: string;
+            children: {
+              rssBytes: number;
+              sampled: number;
+              oldestReadingAgeMs: number | null;
+            };
             modeled: {
               recommendedShareAtRegisteredMb: number;
               recommendedShareAtActiveMb: number | null;
+            };
+            // Restated rather than imported on purpose: this shape is the
+            // wire contract, and casting to the internal type would make the
+            // assertions below accept whatever that type happens to say.
+            pressure: {
+              mode: string;
+              level: string;
+              source: string;
+              ratio: number;
+              rssBytes: number;
+              rssRatio: number;
+              availableBytes: number;
+              heapUsedBytes: number;
+              heapRatio: number;
+              heapLimitBytes: number;
             };
           };
         };
@@ -2144,8 +2181,44 @@ describe('runQwenServe memory budget', () => {
 
       const memory = body.limits.memory;
       expect(memory).not.toBeNull();
-      // Nothing in this section is applied, and the wire says so.
+      // The child-heap policy reached status on a daemon that really booted.
+      // Default is `observe`, so it computed a share and applied nothing —
+      // `enforced` has to stay false or the field means "the feature exists"
+      // rather than "children are being sized by this".
       expect(memory?.enforced).toBe(false);
+      // Pin the key set rather than the values, so an unannounced field added
+      // to the wire still fails here. `toEqual` on the whole object was the
+      // other option and it does not survive this suite booting a real daemon:
+      // both derived figures follow the host's pool, and on a runner with
+      // under ~1 GB available the model correctly publishes no partition at
+      // all — so a matcher asserting `any(Number)` would fail on exactly the
+      // host where the code is doing the right thing.
+      expect(Object.keys(memory?.childHeap ?? {}).sort()).toEqual([
+        'maxConcurrentChildren',
+        'mode',
+        'perChildCeilingMb',
+        'refusals',
+      ]);
+      expect(memory?.childHeap?.mode).toBe('observe');
+      expect(memory?.childHeap?.refusals).toBe(0);
+      // Whichever branch this host took, the two figures agree with each
+      // other. The arithmetic itself is pinned exhaustively in
+      // `child-heap-policy.test.ts`; what this asserts is that a real daemon
+      // put a self-consistent pair on the wire.
+      if (memory?.childHeap?.perChildCeilingMb === null) {
+        expect(memory?.childHeap?.maxConcurrentChildren).toBe(0);
+      } else {
+        // A fixed grant handed to every admitted child must total no more than
+        // the pool it partitions. That product is the whole reason the
+        // partition is a bound rather than a per-spawn share.
+        expect(memory?.childHeap?.maxConcurrentChildren ?? 0).toBeGreaterThan(
+          0,
+        );
+        expect(
+          (memory?.childHeap?.maxConcurrentChildren ?? 0) *
+            (memory?.childHeap?.perChildCeilingMb ?? 0),
+        ).toBeLessThanOrEqual(memory?.modeled.childPoolMb ?? 0);
+      }
       expect(memory?.configuredBudgetMb).toBe(4096);
       expect(memory?.budgetSource).toBe('flag');
       // The invariant that motivates separating configured from effective:
@@ -2165,12 +2238,46 @@ describe('runQwenServe memory budget', () => {
 
       const runtimeMemory = body.runtime.memory;
       expect(runtimeMemory?.registeredWorkspaces).toBe(1);
-      // Sampling still covers only the primary child; say so rather than let
-      // the section imply process-tree observation.
-      expect(runtimeMemory?.childRssCoverage).toBe('primary_only');
+      // Sampling now covers every live child; it still is not process-tree
+      // observation, which `children`'s own docs spell out.
+      expect(runtimeMemory?.childRssCoverage).toBe('active_children');
       expect(
         runtimeMemory?.modeled.recommendedShareAtRegisteredMb,
       ).toBeGreaterThan(0);
+
+      // Pressure, from a daemon that actually booted. Every other test for it
+      // calls the status builder directly, so nothing else would notice the
+      // reading failing to reach a live response.
+      const pressure = runtimeMemory?.pressure;
+      expect(pressure?.mode).toBe('observe');
+      // A real process against a real denominator: assert the invariants
+      // rather than a level, which depends on the host running the test.
+      expect(pressure?.rssBytes).toBeGreaterThan(0);
+      expect(pressure?.heapLimitBytes).toBeGreaterThan(0);
+      expect(pressure?.availableBytes).toBe(
+        (memory?.availableMemoryMb ?? 0) * 1024 * 1024,
+      );
+      expect(pressure?.ratio).toBe(
+        Math.max(pressure?.rssRatio ?? 0, pressure?.heapRatio ?? 0),
+      );
+      expect(pressure?.source).not.toBe('unknown');
+
+      // Aggregate child RSS. This test opens no SSE/WS stream, so the
+      // sampler's watch gate never fires and nothing is polled — assert the
+      // invariants that hold regardless rather than a non-zero sum, which
+      // only a streaming client would produce.
+      const children = runtimeMemory?.children;
+      expect(children?.sampled).toBeLessThanOrEqual(
+        runtimeMemory?.activeAcpChildren ?? 0,
+      );
+      // Nothing sampled must read as nothing summed and no age — never as a
+      // measured zero.
+      if (children?.sampled === 0) {
+        expect(children.rssBytes).toBe(0);
+        expect(children.oldestReadingAgeMs).toBeNull();
+      } else {
+        expect(children?.rssBytes).toBeGreaterThan(0);
+      }
     } finally {
       await handle.close();
     }

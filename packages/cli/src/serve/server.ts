@@ -277,6 +277,7 @@ import {
   resolveLiveProviderCredential,
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
+import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 
 export {
   createDefaultFsAuditEmit,
@@ -503,6 +504,7 @@ export interface ServeAppDeps {
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -976,8 +978,9 @@ export function createServeApp(
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider,
-      // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
-      // readTextFile pick up trust / TOCTOU / audit.
+      delegateReadTextFileToClient: false,
+      // Final ACP text writes remain delegated through WorkspaceFileSystem.
+      // Unexpected delegated reads still fail closed at the WFS boundary.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
@@ -1731,6 +1734,7 @@ export function createServeApp(
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
+    getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
   });
 
   if (liveVoiceEnabled) {
