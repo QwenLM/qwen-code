@@ -63,6 +63,42 @@ Or define them in the `env` section of `settings.json`:
 }
 ```
 
+### Interactive Cards
+
+Add an `interactiveCards` object to opt in to DingTalk status and question
+cards. Omitting the object disables interactive cards. When the object is
+present, the overall switch and both card types default to enabled, and
+question cards time out after 270,000 milliseconds (270 seconds).
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "interactiveCards": {
+        "enabled": true,
+        "statusCard": { "enabled": true },
+        "questionCard": {
+          "enabled": true,
+          "timeoutMs": 270000
+        }
+      }
+    }
+  }
+}
+```
+
+Set `interactiveCards.enabled` to `false` to disable all interactive cards.
+Use `statusCard.enabled` or `questionCard.enabled` to disable one card type,
+and set `questionCard.timeoutMs` to a finite positive number to change how long
+Qwen Code waits for a question-card response. Values above 2,147,483,647
+milliseconds (about 24.8 days) are capped at that maximum. Interactive cards
+are configured through `settings.json` or the management API; the Web Shell
+channel editor does not render them, and it preserves the stored object when
+you edit other fields.
+
 ### Connection Recovery
 
 `useConnectionManager` defaults to `true`. The connection manager monitors the Stream WebSocket and replaces the DingTalk SDK client when the connection stops responding. You should normally leave it enabled.
