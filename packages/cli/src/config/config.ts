@@ -45,6 +45,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
@@ -749,8 +750,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop', 'daemon'],
+          description:
+            'Channel identifier (VSCode, ACP, SDK, CI, desktop, daemon)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -1172,9 +1174,12 @@ export async function parseArguments(): Promise<CliArgs> {
     }
   }
 
-  // Apply ACP fallback: if acp or experimental-acp is present but no explicit --channel, treat as ACP
+  // Apply ACP fallback: if acp or experimental-acp is present but no explicit
+  // --channel, attribute the launch — daemon-spawned children carry the serve
+  // marker, the Tauri desktop shell additionally sets QWEN_CODE_DESKTOP.
   if ((result['acp'] || result['experimentalAcp']) && !result['channel']) {
-    (result as Record<string, unknown>)['channel'] = 'ACP';
+    (result as Record<string, unknown>)['channel'] =
+      resolveAcpChannelFallback();
   }
 
   return result as unknown as CliArgs;
