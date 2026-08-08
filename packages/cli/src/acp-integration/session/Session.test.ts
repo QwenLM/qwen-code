@@ -4010,7 +4010,7 @@ describe('Session', () => {
             },
             trustedContext,
           ),
-        ).rejects.toThrow('Request was aborted.');
+        ).resolves.toEqual({ stopReason: 'cancelled' });
 
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
