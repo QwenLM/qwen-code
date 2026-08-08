@@ -520,6 +520,7 @@ export type FallbackToAskReason =
   | 'plan_mode_floor'
   | 'org_ask_ceiling'
   | 'classifier_unavailable'
+  | 'external_write'
   | DenialFallbackReason;
 
 /** Outcome of {@link applyAutoModeDecision}. */
@@ -735,6 +736,19 @@ export async function evaluateAutoMode(
   // request that would deepen the denial streak.
   if (input.skipClassifierReason) {
     return { via: 'fallback', reason: input.skipClassifierReason };
+  }
+
+  // L5.2.6: External writes must never be auto-approved by the classifier.
+  // If a write tool targets a path outside the workspace, force a fallback to
+  // manual approval (ask) instead of risking an LLM classifier auto-approval.
+  if (
+    PROTECTED_WRITE_TOOL_NAMES.has(input.ctx.toolName) &&
+    input.ctx.filePath &&
+    !input.config
+      .getWorkspaceContext()
+      .isPathWithinWorkspace(input.ctx.filePath)
+  ) {
+    return { via: 'fallback', reason: 'external_write' };
   }
 
   // L5.3: two-stage LLM classifier.

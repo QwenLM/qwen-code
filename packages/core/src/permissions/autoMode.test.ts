@@ -1108,6 +1108,37 @@ describe('evaluateAutoMode — fast-path gating', () => {
     });
     expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
   });
+
+  // ─── New tests for external write fallback ───
+  it('routes external EDIT to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.EDIT,
+        filePath: '/Users/test/other-project/x.ts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes external WRITE_FILE to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/etc/hosts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
 });
 
 // ─── applyAutoModeDecision reason mapping ────────────────────────────────
