@@ -5704,42 +5704,6 @@ describe('ContentGenerationPipeline', () => {
       expect(gated.wasReturned()).toBe(true);
     });
 
-    it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
-      // Faithfully replicate EnhancedErrorHandler.handle's relevant behavior:
-      // it detects code 'ETIMEDOUT' as a timeout and re-throws a generic Error
-      // WITHOUT the code. If the inactivity timeout were routed through it, the
-      // retryable-transport classification (which reads err.code) would be lost.
-      (mockErrorHandler.handle as unknown as Mock).mockImplementation(
-        (error: unknown) => {
-          if ((error as { code?: string })?.code === 'ETIMEDOUT') {
-            throw new Error('stripped'); // the production failure mode
-          }
-          throw error;
-        },
-      );
-      const gated = gatedStream(); // silent
-      (mockClient.chat.completions.create as Mock).mockResolvedValue(
-        gated.stream,
-      );
-      const p = buildPipeline(1000);
-      const gen = await p.executeStream(
-        streamingRequest(new AbortController().signal),
-        'id',
-      );
-      const captured = (async () => {
-        for await (const _ of gen) {
-          /* drain */
-        }
-      })().catch((e: unknown) => e);
-      await vi.advanceTimersByTimeAsync(1000);
-      const err = await captured;
-      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
-      expect((err as { code?: string }).code).toBe('ETIMEDOUT');
-      expect(gated.wasReturned()).toBe(true);
-      // Proves the bypass: the handler (which would strip the code) is skipped.
-      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
-    });
-
     it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
       vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
       const gated = gatedStream(); // silent

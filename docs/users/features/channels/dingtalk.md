@@ -63,6 +63,42 @@ Or define them in the `env` section of `settings.json`:
 }
 ```
 
+### Interactive Cards
+
+Add an `interactiveCards` object to opt in to DingTalk status and question
+cards. Omitting the object disables interactive cards. When the object is
+present, the overall switch and both card types default to enabled, and
+question cards time out after 270,000 milliseconds (270 seconds).
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "interactiveCards": {
+        "enabled": true,
+        "statusCard": { "enabled": true },
+        "questionCard": {
+          "enabled": true,
+          "timeoutMs": 270000
+        }
+      }
+    }
+  }
+}
+```
+
+Set `interactiveCards.enabled` to `false` to disable all interactive cards.
+Use `statusCard.enabled` or `questionCard.enabled` to disable one card type,
+and set `questionCard.timeoutMs` to a finite positive number to change how long
+Qwen Code waits for a question-card response. Values above 2,147,483,647
+milliseconds (about 24.8 days) are capped at that maximum. Interactive cards
+are configured through `settings.json` or the management API; the Web Shell
+channel editor does not render them, and it preserves the stored object when
+you edit other fields.
+
 ### Connection Recovery
 
 `useConnectionManager` defaults to `true`. The connection manager monitors the Stream WebSocket and replaces the DingTalk SDK client when the connection stops responding. You should normally leave it enabled.
@@ -115,9 +151,10 @@ Every target must set `isGroup` explicitly. For a direct message, `chatId` is th
 
 DingTalk bots work in both DM and group conversations. To enable group support:
 
-1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. Add the bot to a DingTalk group
 3. @mention the bot in the group to trigger a response
+4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start
 
 By default, the bot requires an @mention in group chats (`requireMention: true`). Set `"requireMention": false` for a specific group to make it respond to all messages. See [Group Chats](./overview#group-chats) for full details.
 
@@ -161,7 +198,8 @@ You can send photos and documents to the bot, not just text.
 
 ### Bot doesn't respond in groups
 
-- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- Check that `groupPolicy` is set to `"allowlist"`, `"pairing"`, or `"open"` (default is `"disabled"`)
+- If using `"pairing"`, verify the group's pairing request has been approved
 - Make sure you @mention the bot in the group message
 - Verify the bot has been added to the group
 

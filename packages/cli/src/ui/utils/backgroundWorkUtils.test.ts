@@ -119,12 +119,16 @@ describe('resetBackgroundStateForSessionSwitch', () => {
     const resetMonitors = vi.fn();
     const resetShells = vi.fn();
     const resetWorkflows = vi.fn();
+    const abortWorkflows = vi.fn();
 
     const config = {
       getBackgroundTaskRegistry: () => ({ reset: resetTasks }),
       getMonitorRegistry: () => ({ reset: resetMonitors }),
       getBackgroundShellRegistry: () => ({ reset: resetShells }),
-      getWorkflowRunRegistry: () => ({ reset: resetWorkflows }),
+      getWorkflowRunRegistry: () => ({
+        reset: resetWorkflows,
+        abortAll: abortWorkflows,
+      }),
     } as unknown as Config;
 
     resetBackgroundStateForSessionSwitch(config);
@@ -133,5 +137,10 @@ describe('resetBackgroundStateForSessionSwitch', () => {
     expect(resetMonitors).toHaveBeenCalledOnce();
     expect(resetShells).toHaveBeenCalledOnce();
     expect(resetWorkflows).toHaveBeenCalledOnce();
+    // R12 (doudouOUC): paused runs no longer block the switch, so they
+    // must be cancelled before reset() drops their entries — aborting
+    // after reset would find nothing and leak the gated script.
+    expect(abortWorkflows).toHaveBeenCalledOnce();
+    expect(abortWorkflows).toHaveBeenCalledBefore(resetWorkflows);
   });
 });

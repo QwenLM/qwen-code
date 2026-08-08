@@ -14,7 +14,8 @@ following are true:
 
 - the compression model is the current main model;
 - the active provider is Anthropic or OpenAI-compatible and cache control is
-  enabled;
+  enabled, or the provider is Gemini or Vertex AI (implicit provider-managed
+  caching; `enableCacheControl` does not apply);
 - the chat has a provider-reported prompt token count to anchor the estimate;
 - the effective prompt token count plus the bounded compression output reserve
   fits the model's context window.
@@ -25,6 +26,7 @@ history, including media. The normal model-modality filtering is applied when
 the request is sent, so supported media remains unchanged and unsupported
 media uses the same placeholders as other model requests. The existing
 compression instruction is appended as the final user message.
+Gemini and Vertex AI rely on their provider-managed implicit prefix cache.
 Nothing consumes or executes function calls from this request. A response
 containing a function call, an empty response, a malformed state snapshot, or
 a request error is discarded and retried once through the existing cold side

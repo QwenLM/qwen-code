@@ -24,14 +24,18 @@ const ghWithInputMock = vi.hoisted(() =>
 const ghWithInputPlainMock = vi.hoisted(() =>
   vi.fn((_input: string, ..._rest: string[]) => ''),
 );
-vi.mock('./lib/gh.js', () => ({
-  gh: ghMock,
-  // Two DISTINCT mocks: aliasing them hid which function a write actually
-  // used, and the retry-vs-not split is the point of having two.
-  ghWithInput: ghWithInputPlainMock,
-  ghWithInputRetried: ghWithInputMock,
-  setGhHost: setGhHostMock,
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghMock,
+    // Two DISTINCT mocks: aliasing them hid which function a write actually
+    // used, and the retry-vs-not split is the point of having two.
+    ghWithInput: ghWithInputPlainMock,
+    ghWithInputRetried: ghWithInputMock,
+    setGhHost: setGhHostMock,
+  };
+});
 
 const setGhHostMock = vi.hoisted(() => vi.fn((_h: string) => {}));
 
