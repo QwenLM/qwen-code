@@ -86,6 +86,79 @@ class MockIdeContextStore {
   // 模拟 IDE 上下文存储
 }
 
+const createRawDiagnostic = (message: string) => ({
+  range: {
+    start: { line: 0, character: 0 },
+    end: { line: 0, character: 1 },
+  },
+  severity: 1,
+  message,
+  source: 'typescript',
+});
+
+const createFailingConnection = (failingMethod: string) => ({
+  listen: vi.fn(),
+  send: vi.fn(),
+  onNotification: vi.fn(),
+  onRequest: vi.fn(),
+  request: vi.fn((method: string) => {
+    if (method === failingMethod) {
+      throw new Error(`${method} unsupported`);
+    }
+    return null;
+  }),
+  initialize: vi.fn(async () => ({})),
+  shutdown: vi.fn(async () => {}),
+  end: vi.fn(),
+});
+
+const createReadyHandle = (
+  connection: ReturnType<typeof createFailingConnection>,
+  cachedDiagnostics: Map<string, Array<Record<string, unknown>>>,
+) => ({
+  config: {
+    name: 'typescript-language-server',
+    languages: ['typescript'],
+    command: 'typescript-language-server',
+    args: [],
+    transport: 'stdio',
+  },
+  status: 'READY',
+  connection,
+  cachedDiagnostics,
+});
+
+const createServiceWithHandle = (
+  workspaceRoot: string,
+  handle: ReturnType<typeof createReadyHandle>,
+) => {
+  const tempConfig = new MockConfig();
+  tempConfig.rootPath = workspaceRoot;
+  const tempWorkspace = new MockWorkspaceContext();
+  tempWorkspace.rootPath = workspaceRoot;
+  const tempService = new NativeLspService(
+    tempConfig as unknown as CoreConfig,
+    tempWorkspace as unknown as WorkspaceContext,
+    new EventEmitter(),
+    new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+    new MockIdeContextStore() as unknown as IdeContextStore,
+    { workspaceRoot },
+  );
+  (tempService as unknown as { serverManager: unknown }).serverManager = {
+    getHandles: () => new Map([['typescript-language-server', handle]]),
+    warmupTypescriptServer: vi.fn(),
+  };
+  return tempService;
+};
+
+const markDocumentOpened = (service: NativeLspService, uri: string) => {
+  (
+    service as unknown as {
+      openedDocuments: Map<string, Set<string>>;
+    }
+  ).openedDocuments.set('typescript-language-server', new Set([uri]));
+};
+
 describe('NativeLspService', () => {
   let lspService: NativeLspService;
   let mockConfig: MockConfig;
@@ -2145,6 +2218,68 @@ describe('NativeLspService', () => {
       vi.useRealTimers();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test('diagnostics falls back to cached publishDiagnostics when pull diagnostics fail', async () => {
+    const uri = pathToFileURL('/workspace/index.ts').toString();
+    const connection = createFailingConnection('textDocument/diagnostic');
+    const tempService = createServiceWithHandle(
+      '/workspace',
+      createReadyHandle(
+        connection,
+        new Map([[uri, [createRawDiagnostic('bad type')]]]),
+      ),
+    );
+    markDocumentOpened(tempService, uri);
+
+    await expect(tempService.diagnostics(uri)).resolves.toMatchObject([
+      {
+        message: 'bad type',
+        severity: 'error',
+        serverName: 'typescript-language-server',
+      },
+    ]);
+    expect(connection.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'textDocument/didClose' }),
+    );
+  });
+
+  test('diagnostics treats an empty publishDiagnostics cache entry as complete', async () => {
+    const uri = pathToFileURL('/workspace/index.ts').toString();
+    const connection = createFailingConnection('textDocument/diagnostic');
+    const tempService = createServiceWithHandle(
+      '/workspace',
+      createReadyHandle(connection, new Map([[uri, []]])),
+    );
+    markDocumentOpened(tempService, uri);
+
+    await expect(tempService.diagnostics(uri)).resolves.toEqual([]);
+    expect(connection.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'textDocument/didClose' }),
+    );
+  });
+
+  test('workspace diagnostics cache fallback respects workspace directory boundaries', async () => {
+    const workspaceUri = pathToFileURL('/workspace/index.ts').toString();
+    const siblingUri = pathToFileURL('/workspace-other/index.ts').toString();
+    const tempService = createServiceWithHandle(
+      '/workspace',
+      createReadyHandle(
+        createFailingConnection('workspace/diagnostic'),
+        new Map([
+          [workspaceUri, [createRawDiagnostic('inside workspace')]],
+          [siblingUri, [createRawDiagnostic('outside workspace')]],
+        ]),
+      ),
+    );
+
+    const diagnostics = await tempService.workspaceDiagnostics(undefined, 10);
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      uri: workspaceUri,
+      diagnostics: [{ message: 'inside workspace' }],
+    });
   });
 
   // PR #4333 review fold-in: cover the two error branches added in
