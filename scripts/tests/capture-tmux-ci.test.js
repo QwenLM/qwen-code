@@ -64,9 +64,11 @@ function logicalLinesOf(run) {
         cur += c + line[++i];
         continue;
       }
-      // A word-initial `#` opens a comment: the rest of the line is not code,
-      // and the line ends here whether or not it trails a backslash.
-      if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) break;
+      // A `#` opens a comment at line start, after whitespace, OR after a
+      // shell metacharacter — bash treats `echo hi;#note` as a comment, and
+      // a `;#...\` tail spliced the next line into the "comment", hiding
+      // its statements from every pin on that logical line.
+      if (c === '#' && (i === 0 || /[\s;&|()]/.test(line[i - 1]))) break;
       if (c === "'" || c === '"') {
         quote = c;
         cur += c;
@@ -86,27 +88,43 @@ function logicalLinesOf(run) {
   return lines;
 }
 
-// Strip wrappers the shell resolves before the real command: env
-// assignments, sudo, env/nice/timeout(+arg) — an apt-get behind any of
-// them is still an apt-get.
+// Strip what the shell resolves before the real command: env assignments
+// and wrapper verbs WITH their options (`sudo -n`, `timeout -k 1 5`,
+// `timeout --signal=KILL 5`, `nice -n 10`, `time`, `nohup`, `stdbuf -oL`).
+// An apt-get behind any of them is still an apt-get; option residue used to
+// break the recognition check and silently skip the guard requirement.
+const WRAPPERS = /^(sudo|env|nice|timeout|time|nohup|stdbuf|ionice|setsid)\s+/;
 function unwrapCommand(stmt) {
   let out = stmt.trim();
   for (;;) {
     const next = out
       .replace(/^(\w+=\S+\s+)+/, '')
-      .replace(/^(sudo|env|nice)\s+/, '')
-      .replace(/^timeout\s+\S+\s+/, '');
+      .replace(WRAPPERS, '')
+      // Options belonging to the wrapper just stripped, plus the bare
+      // duration `timeout`/`nice` take before the command word.
+      .replace(/^(-{1,2}[\w-]+(=\S+)?\s+)+/, '')
+      .replace(/^(\d+[smhd]?\s+)/, '');
     if (next === out) return out;
     out = next;
   }
 }
 
+// Is this statement a real apt-get invocation, or a mention of one? A
+// `command -v apt-get` probe names it without running it; anything else
+// that reaches apt-get — behind any wrapper, in any group — runs it.
+function isAptGet(stmt) {
+  const bare = unwrapCommand(stmt.replace(/^[\s({]+/, ''));
+  return /^apt-get\b/.test(bare);
+}
+
 // The commands on one logical line, with grouping punctuation removed: a
 // subshell-wrapped `(exit 1)` is an exit like any other, and it gives its
-// enclosing if/elif/else branch the same status.
+// enclosing if/elif/else branch the same status. A single `&` separates
+// statements too — `sleep 1 & exit 1` is two commands, and the exit was
+// invisible while the alphabet knew only `&&`.
 function statementsOf(line) {
   return line
-    .split(/;|&&|\|\||\||\bthen\b|\belse\b|\bdo\b|\bfi\b/)
+    .split(/;|&&|\|\||\||&|\bthen\b|\belse\b|\bdo\b|\bfi\b/)
     .map((x) =>
       unwrapCommand(x.replace(/^[\s({]+/, '').replace(/[\s)}]+$/, '')),
     )
@@ -125,6 +143,27 @@ function enablesErrexit(stmt) {
 // anchor while installing no tmux binary at all.
 function installsPackage(line, pkg) {
   return /apt-get\s+install\b/.test(line) && line.split(/\s+/).includes(pkg);
+}
+
+// Flags that make `apt-get install` exit 0 having installed NOTHING — the
+// quietest failure of all: the step stays green, no warning fires, and the
+// real-tmux suite skips inside the required check.
+const NO_OP_INSTALL_FLAGS = new Set([
+  '-s',
+  '--simulate',
+  '--just-print',
+  '--dry-run',
+  '--recon',
+  '--no-act',
+  '--download-only',
+  '-d',
+  '--print-uris',
+]);
+
+// A branch condition that can be satisfied without the tools it claims to
+// test: a literal constant, or bash's null command `:` (status 0 always).
+function hasForcingTerm(line) {
+  return /(^|[\s;&|(])(\|\|\s*(true|:)|&&\s*false)(\s|;|$)/.test(line);
 }
 
 describe('ci.yml capture tooling', () => {
@@ -152,6 +191,18 @@ describe('ci.yml capture tooling', () => {
         installLines.some((l) => installsPackage(l, pkg)),
         `no apt-get install of the exact package ${pkg}`,
       ).toBe(true);
+    }
+    // And it must really install: `-s`/`--download-only` and friends exit 0
+    // having installed nothing, with no warning — the step stays green while
+    // the real-tmux suite skips inside the required check.
+    for (const line of installLines) {
+      if (!/apt-get\s+install\b/.test(line)) continue;
+      for (const token of line.split(/\s+/)) {
+        expect(
+          NO_OP_INSTALL_FLAGS.has(token),
+          `${token} makes the install a no-op :: ${line}`,
+        ).toBe(false);
+      }
     }
   });
 
@@ -191,16 +242,32 @@ describe('ci.yml capture tooling', () => {
     const elifLine = lines.find((l) => l.startsWith('elif '));
     expect(ifLine, 'no `if` line in the install step').toBeDefined();
     expect(elifLine, 'no `elif` line in the install step').toBeDefined();
-    // The first branch tests for the tools THEMSELVES, and nothing may
-    // force it true.
-    expect(ifLine).toMatch(/^if\s+command -v tmux\b/);
+    // The already-installed branch must test for ALL THREE tools with AND,
+    // pinned whole: a prefix-only pin let a one-character `&&`→`||` typo
+    // (`command -v tmux || command -v zip …`) take the branch on a lane
+    // with zip but no tmux, killing the install with every pin green.
+    expect(ifLine.replace(/\s+/g, ' ')).toBe(
+      'if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then',
+    );
+    // Nothing may force either branch: a literal constant, or bash's null
+    // command `:` — `command -v tmux || :` is permanently true.
     for (const line of [ifLine, elifLine]) {
-      expect(line, line).not.toMatch(/(^|\s)(\|\|\s*true|&&\s*false)(\s|;|$)/);
-      expect(line, line).not.toMatch(/(^|\s)(true|false)\s*(&&|\|\||;)/);
+      expect(hasForcingTerm(line), `forced condition :: ${line}`).toBe(false);
+      expect(line, line).not.toMatch(/(^|\s)(true|false|:)\s*(&&|\|\||;)/);
     }
     // The install branch is guarded by the tools it needs, not by a
     // constant.
     expect(elifLine).toMatch(/command -v apt-get\b/);
+    // And the ELSE fallback exists: on a lane with neither tmux nor
+    // sudo+apt-get — a root-container self-hosted runner, the family this
+    // PR's own evidence is produced on — it is the only signal that the
+    // tooling is missing. Deleting it passed every other pin.
+    const elseIdx = lines.findIndex((l) => l === 'else');
+    expect(elseIdx, 'no `else` fallback branch').toBeGreaterThan(-1);
+    expect(
+      lines.slice(elseIdx + 1).some((l) => l.includes('::warning::')),
+      'the else branch emits no ::warning:: annotation',
+    ).toBe(true);
   });
 
   it('keeps the step advisory — no branch may fail the required check', () => {
@@ -233,13 +300,16 @@ describe('ci.yml capture tooling', () => {
         const at = line.indexOf('apt-get', from);
         if (at === -1) break;
         from = at + 1;
-        const stmt = unwrapCommand(
+        const stmt =
           line
             .slice(0, at)
-            .split(/;|&&|\|\||\||\bthen\b|\belse\b|\bdo\b/)
-            .pop() + 'apt-get',
-        );
-        if (!/^apt-get$/.test(stmt)) continue; // `command -v apt-get`, a message
+            .split(/;|&&|\|\||\||&|\bthen\b|\belse\b|\bdo\b/)
+            .pop() + 'apt-get';
+        // isAptGet strips grouping punctuation and every wrapper (with its
+        // options) before deciding — a `( sudo apt-get …` or a
+        // `time sudo apt-get …` used to be misread as a mere mention and
+        // skipped the guard requirement entirely.
+        if (!isAptGet(stmt)) continue; // `command -v apt-get`, a message
         const rest = line.slice(at);
         // Walk the operators after this apt-get. `&&` is transparent — the
         // status of `A && B` is A's when A fails, so a later `|| echo`
@@ -257,9 +327,17 @@ describe('ci.yml capture tooling', () => {
           true,
         );
       }
-      // The ANNOTATION, not the emitter verb.
-      if (/skipped|unavailable|install failed|not answering/.test(line)) {
-        expect(line, line).toContain('::warning::');
+      // EVERY message this step emits is an annotation. Keying on message
+      // words pinned the wording, not the annotation: rewording an echo
+      // while dropping `::warning::` escaped, and a lane where the install
+      // permanently fails then hides the loss in a multi-thousand-line log
+      // instead of showing it in the check UI.
+      for (const stmt of statementsOf(line)) {
+        if (/^echo\b/.test(stmt)) {
+          expect(stmt, `echo without an annotation :: ${line}`).toContain(
+            '::warning::',
+          );
+        }
       }
     }
   });

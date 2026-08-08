@@ -398,7 +398,19 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   // verbatim by tmux (measured: socket under '/tmp/x /tmux-<uid>'), so a
   // trimming sweep scanned a directory tmux never used.
   const envBase = process.env['TMUX_TMPDIR'];
-  const bases = [...new Set([envBase || '/tmp', '/tmp'])];
+  // De-duplicated by the directory the scan actually opens, not the raw
+  // string: an alias of /tmp (`/tmp/`, `/tmp/.`, `//tmp` — the same
+  // profile-exported family this fallback exists for) survived a
+  // string-keyed Set, so both entries joined to the same tmux-<uid> dir and
+  // every socket in it was listed, killed and reported TWICE.
+  const bases: string[] = [];
+  const seen = new Set<string>();
+  for (const base of [envBase || '/tmp', '/tmp']) {
+    const key = join(base, `tmux-${uid}`);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bases.push(base);
+  }
   let reapedAny = false;
   let failedAny = false;
   let entries: Array<{ dir: string; name: string }> = [];
@@ -474,7 +486,13 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       failedAny = true;
       writeStderrLine(
         `note: could not reap orphaned capture server ${name} ` +
-          `(tmux -L ${name} kill-server to reap it by hand)`,
+          // WITH the base override: `-L` re-resolves the socket directory
+          // from the invoking environment and does not fall back, so on
+          // the very hosts where this note appears the bare command
+          // resolves elsewhere and answers 'no server running' — reading
+          // as "already gone" while the orphan runs out its window.
+          `(TMUX_TMPDIR=${JSON.stringify(dirname(dir))} tmux -L ${name} ` +
+          `kill-server to reap it by hand)`,
       );
       continue;
     }

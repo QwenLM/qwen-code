@@ -477,6 +477,146 @@ describe('capture-tui without tmux (probe seam)', () => {
     },
   );
 
+  it('clears stale artifacts when the ENVIRONMENT refuses — absent, hung, too old', async () => {
+    // The clear-first contract has ordering pins for the sentinel, the
+    // shape guards, the marker gate and the directory-shaped --out — but
+    // every one of them runs with an OK probe, so a regression that let the
+    // probe-refusal family bypass the clear shipped green while a stale
+    // manifest claiming "evidence":"png" sat beside the refusal JSON.
+    for (const [name, probe] of [
+      ['absent', () => ({ status: 'absent' }) as const],
+      ['hung', () => ({ status: 'hung' }) as const],
+      ['too old', () => ({ status: 'ok', out: 'tmux 3.0a' }) as const],
+    ] as const) {
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-probestale-'));
+      try {
+        writeFileSync(join(dir, 'cap.ans'), 'old run');
+        writeFileSync(join(dir, 'cap.png'), 'old run');
+        writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+        probes.tmux = probe;
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+        expect(process.exitCode, name).toBe(3);
+        expect(existsSync(join(dir, 'cap.ans')), name).toBe(false);
+        expect(existsSync(join(dir, 'cap.png')), name).toBe(false);
+        expect(existsSync(join(dir, 'cap.json')), name).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        process.exitCode = undefined;
+      }
+    }
+  });
+
+  it('write-probes the artifact paths WITHOUT truncating them', async () => {
+    // The probe opens each existing artifact path to prove it writable;
+    // append mode is what keeps it from truncating a file this run is not
+    // yet authorized to replace. Existence assertions alone let a `w`-mode
+    // regression empty every file it touched and stay green.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-notrunc-'));
+    try {
+      writeFileSync(join(dir, 'cap.json'), '{"name":"not-a-manifest"}');
+      writeFileSync(join(dir, 'cap.ans'), 'user bytes');
+      await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 0,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(readFileSync(join(dir, 'cap.json'), 'utf8')).toBe(
+        '{"name":"not-a-manifest"}',
+      );
+      expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('user bytes');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses an unwritable MANIFEST path too, not just the .ans',
+    async () => {
+      // The probe loop covers both paths; dropping manifestPath from it
+      // passed the whole file. The brief template's `--out package` against
+      // a stage that left package.json mode-0444 is exactly this shape:
+      // every gate passes, the capture runs, and the manifest write fails
+      // at the very end with the pane text already thrown away.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-romanifest-'));
+      try {
+        writeFileSync(join(dir, 'cap.json'), '{"name":"not-a-manifest"}', {
+          mode: 0o444,
+        });
+        const started = performance.now();
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 5_000,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 30_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('not writable');
+        expect(performance.now() - started).toBeLessThan(3_000);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a BARE --keys — no tokens is a template that drove nothing', async () => {
+    // yargs `array: true` turns `--keys` (bare), `--keys=` and an unquoted
+    // `--keys $EMPTY` into [], which was accepted silently: nothing typed,
+    // success reported, while the QUOTED form of the same template failure
+    // was refused.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-barekeys-'));
+    try {
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: [],
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('no tokens');
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses an EMPTY --keys token — a keypress that never happens', async () => {
     // `send-keys ''` types nothing, so the run reported success with the
     // token in manifest.keys and keysSent true — a keypress a verdict can
@@ -1290,9 +1430,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // is not a silent outcome.
     const binDir = join(dir, 'fakebin');
     mkdirSync(binDir, { recursive: true });
+    const callLogPath = join(dir, 'tmux-calls');
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\necho "$@" >> "${callLogPath}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     // The control-call belt through its SEAM: the fake kill HANGS (sleep 5)
@@ -1317,6 +1458,15 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(performance.now() - started).toBeLessThan(8_000);
     expect(stderr).toContain('WARNING');
     expect(stderr).toContain('kill-server failed twice');
+    // The cap is ONE retry, pinned from ABOVE too: the assertions here hold
+    // for any cap up to ~13 under the shortened belt, and the "failed
+    // twice" wording blesses whatever the cap happens to be. Against a
+    // genuinely wedged server every extra attempt pays the full 15s belt
+    // while the capture is already done.
+    const killCalls = readFileSync(callLogPath, 'utf8')
+      .split('\n')
+      .filter((l) => l.includes('kill-server'));
+    expect(killCalls).toHaveLength(2);
     // The other half of "never an unqualified success": a wedged reap is a
     // WARNING next to a COMPLETE capture, not a failure — exit code clean,
     // artifacts written, success JSON emitted (a mutant setting exitCode

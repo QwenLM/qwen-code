@@ -95,6 +95,7 @@ import {
   type RawIssueComment,
   type RawReview,
 } from './cleanup.js';
+import { captureServerName } from './lib/tui-capture.js';
 
 describe('runCleanup', () => {
   beforeEach(() => {
@@ -168,12 +169,17 @@ describe('runCleanup', () => {
       // A pid that WAS alive and is not: spawn a process and let it exit.
       const deadPid = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
       const deadPid2 = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
-      const orphan = `qwen-review-capture-${deadPid}-aaaa`;
+      // Built with the PRODUCER, not hand-spelled: the sweep's matcher
+      // (`^${CAPTURE_SERVER_PREFIX}(\\d+)-`) only works while the pid sits
+      // immediately after the prefix, and a captureServerName edit that
+      // inserted a segment before it would leave every hand-written fixture
+      // matching while the real sweep stopped recognising real sockets.
+      const orphan = captureServerName(Number(deadPid), 'aaaa');
       // Listed AFTER the wedged orphan: an unreapable entry must not stop the
       // sweep (a continue→break mutant leaves this one alive for the
       // holder's full bounded window — up to three hours — with no stderr trail).
-      const orphan2 = `qwen-review-capture-${deadPid2}-cccc`;
-      const live = `qwen-review-capture-${process.pid}-bbbb`;
+      const orphan2 = captureServerName(Number(deadPid2), 'cccc');
+      const live = captureServerName(process.pid, 'bbbb');
 
       beforeEach(() => {
         process.env['TMUX_TMPDIR'] = '/fake-tmp';
@@ -270,6 +276,14 @@ describe('runCleanup', () => {
             `could not reap orphaned capture server ${orphan}`,
           ),
         );
+        // And the hand-reap command it suggests carries the base override
+        // the sweep itself needed: without it `-L` resolves elsewhere and
+        // answers 'no server running', reading as "already gone".
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `TMUX_TMPDIR="${dir.replace(/\/tmux-\d+$/, '')}"`,
+          ),
+        );
         expect(mocks.rmSync).not.toHaveBeenCalledWith(
           `${dir}/${orphan}`,
           expect.anything(),
@@ -328,6 +342,18 @@ describe('runCleanup', () => {
         );
         expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
           expect.stringContaining('could not reap'),
+        );
+      });
+
+      it('sweeps under a pr-<n> target too — the sweep is host-wide', () => {
+        // Every other fixture drives 'local'. The sweep is deliberately not
+        // target-scoped (an orphan belongs to the host, not to one review),
+        // so an edit that moves it into a local-only path would leave nine
+        // orphan tests green while PR runs — where captures actually
+        // happen — stopped reaping.
+        runCleanup('pr-8388');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
         );
       });
 
@@ -459,6 +485,18 @@ describe('runCleanup', () => {
         expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
           expect.stringContaining('could not reap'),
         );
+        // The cap is ONE retry, pinned from ABOVE as well: every earlier
+        // assertion here holds for any cap >= 2, so a "robustness" edit
+        // could widen it silently — and against a genuinely wedged server
+        // each attempt pays the full 15s belt before the cleanup moves on.
+        const killCalls = mocks.execFileSync.mock.calls.filter(
+          (c: unknown[]) =>
+            c[0] === 'tmux' &&
+            Array.isArray(c[1]) &&
+            (c[1] as string[]).includes('kill-server') &&
+            (c[1] as string[]).includes(orphan),
+        );
+        expect(killCalls).toHaveLength(2);
       });
 
       it('reports an ONLY-unreapable-orphan sweep without "Nothing to clean" — and without holding the lease', () => {

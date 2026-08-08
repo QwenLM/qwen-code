@@ -479,6 +479,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       refuse('--keys must not contain an empty token.');
       return;
     }
+    // A BARE `--keys` (or `--keys=`, or an unquoted `--keys $EMPTY`) parses
+    // to [] under yargs `array: true` and used to be accepted silently: the
+    // run typed nothing and reported success, while the quoted form of the
+    // very same template failure ([''])  refused. Both are a brief that
+    // meant to drive the TUI and did not — the manifest must not carry a
+    // keys field the run never acted on.
+    if (args.keys.length === 0) {
+      refuse('--keys was given with no tokens.');
+      return;
+    }
   }
   const tmuxProbe = probes.tmux();
   if (tmuxProbe.status === 'hung') {
@@ -743,6 +753,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   let readyFailed = false;
   let keysSent: boolean | undefined;
   let matchOverruns = 0;
+  // How long the --until poll actually had — see where it is set.
+  let untilPolledMs = 0;
   let captureFailed = false;
   try {
     // BEFORE the call: plan.start forks the server in the same client
@@ -804,6 +816,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       settledBy = 'timeout';
       ansText = tmux(plan.capture);
     } else if (untilRe) {
+      // What the marker search ACTUALLY got, for the degradation to report:
+      // the ready gate above shares this one deadline, so with --ready given
+      // the poll starts with only the remainder.
+      untilPolledMs = Math.max(0, deadline - Date.now());
       // Poll for the settle marker on the LOGICAL view (wraps joined,
       // escapes absent): on the physical frame, a marker spanning a wrap
       // boundary or an SGR attribute change can never match (measured:
@@ -919,8 +935,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       }late frame captured`,
     );
   } else if (settledBy === 'timeout') {
+    // The window ACTUALLY spent on the marker, not the whole budget: ONE
+    // deadline covers the ready gate and the until poll, so with --ready
+    // also given the gate consumes part of it and the poll runs for the
+    // remainder — reporting the full --timeout-ms overstated the search by
+    // up to the entire budget, and a reader deciding "the marker never
+    // appears" from that number is deciding from a window that never ran.
     degradations.push(
-      `--until never matched within ${args.timeoutMs}ms — late frame captured`,
+      `--until never matched within ${untilPolledMs}ms of the ` +
+        `${args.timeoutMs}ms budget — late frame captured`,
     );
   }
   if (matchOverruns > 0) {
