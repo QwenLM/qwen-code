@@ -1061,6 +1061,80 @@ describe('ChatEditor toolbar popovers', () => {
     expect(thinkingSwitch).not.toBeNull();
     act(() => thinkingSwitch?.click());
     expect(onSelectReasoningOption).toHaveBeenCalledWith('thinking', 'off');
+    // Changing an option keeps the popover open so an effort tier can be
+    // picked in the same interaction.
+    expect(trigger?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps effort rows visible but disabled while thinking is off', () => {
+    const onSelectReasoningOption = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [{ id: 'qwen-max', label: 'Qwen 3.8 Max' }],
+      reasoningControlsSupported: true,
+      reasoningState: {
+        thinking: { enabled: false },
+        effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+      },
+      onSelectReasoningOption,
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    act(() => trigger?.click());
+
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    const effortRows = Array.from(
+      popover?.querySelectorAll<HTMLButtonElement>('button') ?? [],
+    ).filter((button) =>
+      ['Low', 'Medium', 'Extra High'].includes(
+        button.textContent?.trim() ?? '',
+      ),
+    );
+    expect(effortRows).toHaveLength(3);
+    for (const row of effortRows) {
+      expect(row.disabled).toBe(true);
+    }
+    act(() => effortRows[0]?.click());
+    expect(onSelectReasoningOption).not.toHaveBeenCalled();
+  });
+
+  it('disables the thinking switch and effort rows while busy', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'qwen-max',
+      availableModels: [{ id: 'qwen-max', label: 'Qwen 3.8 Max' }],
+      reasoningControlsSupported: true,
+      reasoningState: {
+        thinking: { enabled: true },
+        effort: { value: 'xhigh', options: ['low', 'medium', 'xhigh'] },
+      },
+      reasoningBusy: { thinking: true, effort: true },
+      onSelectReasoningOption: vi.fn(),
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    act(() => trigger?.click());
+
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    const thinkingSwitch =
+      popover?.querySelector<HTMLButtonElement>('[role="switch"]');
+    expect(thinkingSwitch?.disabled).toBe(true);
+    const effortRows = Array.from(
+      popover?.querySelectorAll<HTMLButtonElement>('button') ?? [],
+    ).filter((button) =>
+      ['Low', 'Medium', 'Extra High'].includes(
+        button.textContent?.trim() ?? '',
+      ),
+    );
+    expect(effortRows).toHaveLength(3);
+    for (const row of effortRows) {
+      expect(row.disabled).toBe(true);
+    }
   });
 
   it('shows the thinking-off state on the model chip', () => {

@@ -2062,6 +2062,36 @@ describe('DaemonSessionClient', () => {
       'GET /session/:id/events: stream failed',
     );
   });
+
+  it('posts session config options with the persisted client id', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/config-option')) {
+        return jsonResponse(200, { configOptions: [{ id: 'effort' }] });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.setConfigOption('effort', 'medium')).resolves.toEqual({
+      configOptions: [{ id: 'effort' }],
+    });
+    expect(new URL(calls[0]!.url).pathname).toBe('/session/s-1/config-option');
+    expect(calls[0]?.method).toBe('POST');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      configId: 'effort',
+      value: 'medium',
+    });
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
 });
 
 describe('DaemonSessionClient clientId self-heal', () => {

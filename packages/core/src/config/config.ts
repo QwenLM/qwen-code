@@ -4358,6 +4358,14 @@ export class Config {
       resolvedReasoning?.thinkingEnabled === false
     ) {
       this.contentGeneratorConfig.reasoning = false;
+      // Mirror into the rebuildable source too: refreshAuth reads
+      // `priorReasoning` from modelsConfig, and a registry-resolved sync
+      // resets it to the preset, so a live-only write would only survive one
+      // auth refresh before thinking silently re-enables.
+      const modelsGenerationConfig = this.modelsConfig?.getGenerationConfig();
+      if (modelsGenerationConfig) {
+        modelsGenerationConfig.reasoning = false;
+      }
     } else if (
       reasoningControls.effort &&
       this.contentGeneratorConfig.reasoning !== false &&

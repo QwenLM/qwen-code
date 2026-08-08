@@ -451,6 +451,27 @@ function parseOptionalApprovalMode(
   return rawApprovalMode as ApprovalMode;
 }
 
+/**
+ * The session's current ACP-shaped config options, read from the child's own
+ * session state (the same read the ACP-HTTP dispatcher uses). Best-effort —
+ * an unreadable state yields an empty array so a successful write still
+ * returns its result.
+ */
+async function sessionConfigOptions(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+): Promise<unknown[]> {
+  try {
+    const ctx = (await bridge.getSessionContextStatus(sessionId)) as {
+      state?: { configOptions?: unknown };
+    };
+    const options = ctx?.state?.configOptions;
+    return Array.isArray(options) ? options : [];
+  } catch {
+    return [];
+  }
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -4549,7 +4570,15 @@ export function registerSessionRoutes(
               >[1],
               context,
             );
-            res.status(200).json(response);
+            // Uniform shape across all configIds (ACP parity): clients
+            // refresh their option cache from this result.
+            res.status(200).json({
+              ...response,
+              configOptions: await sessionConfigOptions(
+                runtime.bridge,
+                sessionId,
+              ),
+            });
             return;
           }
           if (configId === 'mode') {
@@ -4566,7 +4595,13 @@ export function registerSessionRoutes(
               { persist: persist === true },
               context,
             );
-            res.status(200).json(response);
+            res.status(200).json({
+              ...response,
+              configOptions: await sessionConfigOptions(
+                runtime.bridge,
+                sessionId,
+              ),
+            });
             return;
           }
           if (configId !== 'thinking' && configId !== 'effort') {

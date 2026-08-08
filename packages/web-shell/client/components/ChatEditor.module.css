@@ -1229,6 +1229,12 @@
   gap: 10px;
 }
 
+.dropdownSubmenuTrigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .dropdownSubmenuTrigger svg {
   width: 16px;
   height: 16px;

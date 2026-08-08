@@ -310,6 +310,34 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
   });
 
+  it('drops session-scoped snapshots while switching to a different session', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        tokenCount: 3,
+        tokenUsage: { totalTokens: 3 },
+        supportedCommands: supportedCommandsStatus('session-a'),
+        context: contextStatus('session-a'),
+        reasoning: { thinking: { enabled: true } },
+      } as DaemonConnectionState,
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    // Session A's snapshots must not render on session B while B's own
+    // context() is in flight (possibly forever, if it rejects).
+    const next = getConnection();
+    expect(next).toMatchObject({ sessionId: 'session-b' });
+    expect(next.reasoning).toBeUndefined();
+    expect(next.context).toBeUndefined();
+    expect(next.supportedCommands).toBeUndefined();
+    expect(next.tokenUsage).toBeUndefined();
+    expect(next.tokenCount).toBeUndefined();
+  });
+
   it('detaches the old same-session attachment after its replacement loads', async () => {
     const existingSession = createMockSession('session-a');
     const { actions, getConnection, pendingSessionLoadRef, sessionRef, store } =

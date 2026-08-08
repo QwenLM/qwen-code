@@ -7,13 +7,22 @@
 import type { ModelReasoningPreference } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 
+function asPreferencesRecord(
+  preferences: unknown,
+): Record<string, unknown> | undefined {
+  return preferences &&
+    typeof preferences === 'object' &&
+    !Array.isArray(preferences)
+    ? (preferences as Record<string, unknown>)
+    : undefined;
+}
+
 export function getModelReasoningPreference(
   settings: Settings,
   baseModelId: string,
 ): unknown {
-  const preferences = settings.model?.reasoningPreferences;
-  if (!preferences || typeof preferences !== 'object') return undefined;
-  return (preferences as Record<string, unknown>)[baseModelId];
+  const preferences = asPreferencesRecord(settings.model?.reasoningPreferences);
+  return preferences?.[baseModelId];
 }
 
 export function mergeModelReasoningPreference(
@@ -21,14 +30,10 @@ export function mergeModelReasoningPreference(
   baseModelId: string,
   patch: ModelReasoningPreference,
 ): Record<string, unknown> {
-  const preferences = settings.model?.reasoningPreferences;
-  const current =
-    preferences && typeof preferences === 'object'
-      ? (preferences as Record<string, unknown>)
-      : {};
-  const currentPreference = current[baseModelId];
+  const current = asPreferencesRecord(settings.model?.reasoningPreferences);
+  const currentPreference = current?.[baseModelId];
   return {
-    ...current,
+    ...(current ?? {}),
     [baseModelId]: {
       ...(currentPreference &&
       typeof currentPreference === 'object' &&

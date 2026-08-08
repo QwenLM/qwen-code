@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { useEffortCommand } from './use-effort-command.js';
 
@@ -139,6 +140,39 @@ describe('useEffortCommand', () => {
     expect(item.type).toBe('info');
     expect(item.text).toContain('xhigh');
     expect(item.text).toContain('normalized from high');
+  });
+
+  it('persists registered-model preferences to the scope owning the model key', () => {
+    config = {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      setReasoningEffort,
+      getReasoningEffort: vi.fn().mockReturnValue('medium'),
+    } as unknown as Config;
+    // Workspace owns `model` (reasoningPreferences) but no `modelProviders`;
+    // the modelProviders fallback would write to the user scope and be
+    // shadowed.
+    const workspaceSettings = { model: { reasoningPreferences: {} } };
+    const scopedSettings = {
+      setValue,
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: workspaceSettings },
+      merged: {},
+      forScope: vi.fn((scope: SettingScope) => ({
+        settings: scope === SettingScope.Workspace ? workspaceSettings : {},
+      })),
+    } as unknown as LoadedSettings;
+    const { result } = renderHook(() =>
+      useEffortCommand(scopedSettings, config),
+    );
+
+    act(() => result.current.handleEffortSelect('medium'));
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'model.reasoningPreferences',
+      expect.objectContaining({ 'qwen3.8-max': { effort: 'medium' } }),
+    );
   });
 
   it('keeps a supported tier for a registered model and reports it as requested', () => {

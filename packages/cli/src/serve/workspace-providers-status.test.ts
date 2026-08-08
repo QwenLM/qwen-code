@@ -151,6 +151,30 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(result.modelConfigScope).toBe('workspace');
   });
 
+  it('derives modelConfigScope from model-key ownership, not modelProviders', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {},
+      workspaceTrusted: true,
+    });
+    // The web-shell reads/writes `model.reasoningPreferences` under this
+    // scope. Workspace owns `model` here while user owns `modelProviders`;
+    // reporting the modelProviders scope would write to user and be
+    // shadowed by the workspace entry.
+    await writeWorkspaceSettings({
+      model: { reasoningPreferences: {} },
+    });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.modelConfigScope).toBe('workspace');
+  });
+
   it('returns the workspace approval mode', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

@@ -12,7 +12,10 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../../config/modelProvidersScope.js';
 import {
   getModelReasoningControls,
   normalizeModelReasoningEffort,
@@ -105,7 +108,12 @@ export const effortCommand: SlashCommand = {
       ? normalizeModelReasoningEffort(registration, tier)!
       : tier;
     config.setReasoningEffort(effectiveTier);
-    const scope = getPersistScopeForModelSelection(settings);
+    // `model.reasoningPreferences` is scoped independently from
+    // `modelProviders`; persist to the scope that owns the `model` key so the
+    // write cannot be shadowed by a higher-precedence scope's entry.
+    const scope =
+      getOwnKeyScope(settings, 'model') ??
+      getPersistScopeForModelSelection(settings);
     if (registration?.effort) {
       settings.setValue(
         scope,

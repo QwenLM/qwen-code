@@ -145,6 +145,30 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('rejects reasoning preferences that violate the schema shape', async () => {
+    const { app, persistSetting } = makeApp();
+
+    // An invalid entry persisted with a 200 would silently override provider
+    // presets for the model on the next session start.
+    const invalidValues = [
+      { 'qwen3.8-max': 'garbage' },
+      { 'qwen3.8-max': [{ effort: 'low' }] },
+      { 'qwen3.8-max': { effort: 'hihg' } },
+      { 'qwen3.8-max': { thinkingEnabled: 'no' } },
+      { 'qwen3.8-max': { budget: 3 } },
+    ];
+    for (const value of invalidValues) {
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key: 'model.reasoningPreferences',
+        value,
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_value');
+    }
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     let generationOpen = true;
     const { app, broadcastSettingsChanged } = makeApp({
