@@ -10,10 +10,15 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  type InboundPolicy,
   isDebugLogFileEnabled,
+  registerSession,
   type Config,
+  unregisterSession,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
+import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { PeerMessagingContext } from '../peerMessaging/PeerMessagingContext.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -101,6 +106,50 @@ export async function startInteractiveUI(
     // ignored: best-effort, never block UI startup.
   }
 
+  // Announce this session in the machine-wide registry so sibling
+  // sessions can discover it (`qwen sessions ps`). Unlike the runtime.json
+  // sidecar above, this record is unlinked on exit — the registry's whole
+  // value is that presence means "running right now".
+  //
+  // registerSession swallows its own I/O errors, so a failure here is
+  // silent by design: discovery is a convenience, not a precondition for
+  // running Qwen Code.
+  const registered = await registerSession({
+    sessionId: config.getSessionId(),
+    cwd: config.getTargetDir(),
+    kind: 'interactive',
+    qwenVersion: version,
+  });
+  if (registered) {
+    registerCleanup(() => unregisterSession());
+  }
+
+  // Cross-session messaging (experimental, off by default). Only worth
+  // binding a socket when this session is in the registry — an
+  // unregistered session is unreachable by name, so an inbox nobody can
+  // find is pure cost.
+  let peerMessaging: PeerMessaging | null = null;
+  if (registered && settings.merged.agents?.crossSessionMessaging === true) {
+    peerMessaging = await PeerMessaging.start({
+      getApprovalMode: () => {
+        try {
+          return config.getApprovalMode();
+        } catch {
+          // An unreadable mode must read as unknown, which the gate
+          // treats as "hold", not as "accept".
+          return null;
+        }
+      },
+      getPolicySetting: () =>
+        settings.merged.agents?.crossSessionInbound as
+          | InboundPolicy
+          | undefined,
+    });
+    if (peerMessaging) {
+      registerCleanup(() => peerMessaging?.close());
+    }
+  }
+
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
@@ -169,41 +218,43 @@ export async function startInteractiveUI(
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
     return (
-      <RemoteInputContext.Provider value={remoteInputWatcher}>
-        <DualOutputContext.Provider value={dualOutputBridge}>
-          <SettingsContext.Provider value={settings}>
-            <KeypressProvider
-              kittyProtocolEnabled={kittyProtocolStatus.enabled}
-              config={config}
-              debugKeystrokeLogging={
-                settings.merged.general?.debugKeystrokeLogging
-              }
-              pasteWorkaround={
-                process.platform === 'win32' || nodeMajorVersion < 20
-              }
-              initialCapturedInput={initialCapturedInput}
-            >
-              <SessionStatsProvider sessionId={config.getSessionId()}>
-                <VimModeProvider settings={settings}>
-                  <AgentViewProvider config={config}>
-                    <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                        initialUseVirtualViewport={useVP}
-                        extensionRefreshState={options.extensionRefreshState}
-                      />
-                    </BackgroundTaskViewProvider>
-                  </AgentViewProvider>
-                </VimModeProvider>
-              </SessionStatsProvider>
-            </KeypressProvider>
-          </SettingsContext.Provider>
-        </DualOutputContext.Provider>
-      </RemoteInputContext.Provider>
+      <PeerMessagingContext.Provider value={peerMessaging}>
+        <RemoteInputContext.Provider value={remoteInputWatcher}>
+          <DualOutputContext.Provider value={dualOutputBridge}>
+            <SettingsContext.Provider value={settings}>
+              <KeypressProvider
+                kittyProtocolEnabled={kittyProtocolStatus.enabled}
+                config={config}
+                debugKeystrokeLogging={
+                  settings.merged.general?.debugKeystrokeLogging
+                }
+                pasteWorkaround={
+                  process.platform === 'win32' || nodeMajorVersion < 20
+                }
+                initialCapturedInput={initialCapturedInput}
+              >
+                <SessionStatsProvider sessionId={config.getSessionId()}>
+                  <VimModeProvider settings={settings}>
+                    <AgentViewProvider config={config}>
+                      <BackgroundTaskViewProvider config={config}>
+                        <AppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                          initialUseVirtualViewport={useVP}
+                          extensionRefreshState={options.extensionRefreshState}
+                        />
+                      </BackgroundTaskViewProvider>
+                    </AgentViewProvider>
+                  </VimModeProvider>
+                </SessionStatsProvider>
+              </KeypressProvider>
+            </SettingsContext.Provider>
+          </DualOutputContext.Provider>
+        </RemoteInputContext.Provider>
+      </PeerMessagingContext.Provider>
     );
   };
 

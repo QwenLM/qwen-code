@@ -2406,4 +2406,6 @@ export default {
     '安全模式下禁止變更自動技能管理器。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny）',
 };

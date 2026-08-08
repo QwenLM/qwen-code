@@ -15,6 +15,7 @@ import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
 import { authCommand } from '../ui/commands/authCommand.js';
 import { branchCommand } from '../ui/commands/branchCommand.js';
+import { peersCommand } from '../ui/commands/peers-command.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { cdCommand } from '../ui/commands/cdCommand.js';
@@ -120,6 +121,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       approvalModeCommand,
       authCommand,
       branchCommand,
+      peersCommand,
       btwCommand,
       forkCommand,
       bugCommand,
