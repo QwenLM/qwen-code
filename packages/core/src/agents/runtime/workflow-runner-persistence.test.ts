@@ -187,6 +187,42 @@ describe('WorkflowRunner persistence', () => {
     expect((await fs.lstat(blockedManifest)).isDirectory()).toBe(true);
   });
 
+  // The background controller is deliberately unlinked from the caller
+  // signal, so the pre-start check is the only read of it — and this PR put
+  // an fsync between that check and dispatch. An Esc landing in that window
+  // used to start the run anyway and report "started in background".
+  it('cancels a background start when the abort lands during the initial checkpoint', async () => {
+    const { config, registry } = await harness();
+    const dispatch = vi.fn(async () => 'must not run');
+    const caller = new AbortController();
+
+    const originalFlush = WorkflowJournal.prototype.flush;
+    vi.spyOn(WorkflowJournal.prototype, 'flush').mockImplementationOnce(
+      async function (this: WorkflowJournal) {
+        const checkpoint = await originalFlush.call(this);
+        caller.abort();
+        return checkpoint;
+      },
+    );
+
+    await expect(
+      WorkflowRunner.start({
+        config,
+        signal: caller.signal,
+        script: 'return await agent("work")',
+        args: null,
+        runInBackground: true,
+        dispatch,
+      }),
+    ).rejects.toThrow(/Background workflow start was cancelled/);
+
+    expect(dispatch).not.toHaveBeenCalled();
+    // The initial persist already wrote 'running' + resumable; leaving it
+    // there would advertise a cancelled run as recoverable forever.
+    const active = registry.list().filter((run) => run.status === 'running');
+    expect(active).toEqual([]);
+  });
+
   it('drops a crash suffix before a resumed run publishes a new checkpoint', async () => {
     const { config, registry, storage } = await harness();
     let finishDispatch: ((value: string) => void) | undefined;

@@ -766,6 +766,29 @@ describe('workflowsCommand', () => {
       expect(result.content).toContain('reason      : disk write failed');
     });
 
+    // The reason string is content another process wrote, not a runId, so
+    // the legacy-filename guard never sees it. Both the listing row (which
+    // slices to 80 chars, keeping any ESC) and the detail view render it.
+    it('strips terminal control bytes from a durable recovery reason', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithManifest(
+        { runId: 'wf_badc0de', status: 'running' },
+        {
+          integrity: 'failed',
+          error: '\u001b]0;pwned\u0007disk write failed',
+        },
+      );
+
+      const listing = await workflowsCommand.action!(ctx, '');
+      const detail = await workflowsCommand.action!(ctx, 'wf_badc0de');
+      if (!listing || listing.type !== 'message') throw new Error('no result');
+      if (!detail || detail.type !== 'message') throw new Error('no result');
+
+      expect(listing.content).not.toContain('\u001b');
+      expect(detail.content).not.toContain('\u001b');
+      expect(detail.content).toContain('disk write failed');
+    });
+
     it('never routes pause or resume to an interrupted persisted run', async () => {
       getMock.mockReturnValue(undefined);
       const ctx = await ctxWithManifest({

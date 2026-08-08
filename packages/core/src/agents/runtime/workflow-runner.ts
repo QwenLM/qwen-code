@@ -211,15 +211,35 @@ export class WorkflowRunner {
     };
 
     if (entry && journal) {
+      let initialCheckpoint: JournalCheckpoint;
       try {
-        const checkpoint = await journal.flush();
-        assertCompleteCheckpoint(checkpoint, 'initial');
-        await persistManifest('running', checkpoint);
+        initialCheckpoint = await journal.flush();
+        assertCompleteCheckpoint(initialCheckpoint, 'initial');
+        await persistManifest('running', initialCheckpoint);
       } catch (error) {
         const message = `Failed to persist initial workflow checkpoint: ${extractErrorMessage(error)}`;
         registry?.fail(runId, message, Date.now());
         controller.abort();
         throw new Error(message);
+      }
+      // A background run's controller is deliberately not linked to the
+      // caller's signal, so nothing re-reads that signal after the
+      // pre-start check. The persist above is the only await between the
+      // two, and an fsync is long enough to swallow an Esc: without this
+      // the run registers, dispatches agents, and reports "started in
+      // background" for something the user just cancelled. The manifest
+      // that persist just wrote says 'running' + resumable, so it has to
+      // be settled here too or the run reads as recoverable forever.
+      if (runInBackground && options.signal.aborted) {
+        const endTime = Date.now();
+        registry?.cancel(runId, endTime);
+        controller.abort();
+        await persistManifestBestEffort(
+          'cancelled',
+          initialCheckpoint,
+          freezeWorkflowTask({ ...entry, status: 'cancelled', endTime }),
+        );
+        throw new Error('Background workflow start was cancelled.');
       }
     }
     const emitter: WorkflowOrchestratorEmitter = {

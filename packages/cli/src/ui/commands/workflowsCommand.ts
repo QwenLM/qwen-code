@@ -18,6 +18,7 @@ import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
 
 type WorkflowDisplayEntry = Omit<WorkflowTask, 'status'> & {
   status: WorkflowStatus | 'interrupted';
@@ -53,7 +54,18 @@ function recordToDisplay(s: WorkflowRunRecord): WorkflowDisplayEntry {
     notified: true,
     abortController: new AbortController(),
     canResume: s.canResume,
-    resumeBlockedReason: s.resumeBlockedReason,
+    // Both sources of this string are untrusted content, not a runId: a
+    // legacy `wf_<hex>.json` whose JSON.parse error message quotes the
+    // raw input back, and a v2 manifest whose `resumeBlockedReason`
+    // parseManifest only checks is a string. Both reach the terminal
+    // verbatim through `rowLine` (the 80-char slice keeps ESC) and the
+    // detail view, which is enough for OSC 52 clipboard writes and
+    // output spoofing. Sanitized here, at the one boundary where a
+    // record becomes display text.
+    resumeBlockedReason:
+      s.resumeBlockedReason === undefined
+        ? undefined
+        : sanitizeTerminalText(s.resumeBlockedReason),
   } as WorkflowDisplayEntry;
 }
 

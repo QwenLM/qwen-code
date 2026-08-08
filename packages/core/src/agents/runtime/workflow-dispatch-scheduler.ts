@@ -155,7 +155,14 @@ export class WorkflowDispatchScheduler {
     if (
       this.state !== 'pausing' ||
       this.inFlight !== 0 ||
-      this.pauseBarrierPending
+      this.pauseBarrierPending ||
+      // pause()/resume()/run() all refuse once the run is aborted; the
+      // in-flight `.finally` path reaches here without that check. Running
+      // the barrier anyway would durably write 'paused' + canResume for a
+      // run the user cancelled, and that write can land after the
+      // 'cancelled' one — leaving a cancelled run that resume() would
+      // re-execute.
+      this.signal?.aborted
     ) {
       return;
     }

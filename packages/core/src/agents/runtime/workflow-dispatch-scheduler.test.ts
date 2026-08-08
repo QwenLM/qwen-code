@@ -242,6 +242,65 @@ describe('WorkflowDispatchScheduler', () => {
     expect(scheduler.snapshot().state).toBe('paused');
   });
 
+  // pause()/resume()/run() all refuse once aborted, but the in-flight
+  // `.finally` path reached finishPause() without that check. The barrier
+  // durably writes 'paused' + canResume, and that write can land after the
+  // cancellation's — leaving a cancelled run that resume() re-executes.
+  it('does not run the pause barrier when the abort lands before the last job settles', async () => {
+    const controller = new AbortController();
+    const beforePaused = vi.fn(async () => {});
+    let finish: (() => void) | undefined;
+    const scheduler = new WorkflowDispatchScheduler(
+      1,
+      controller.signal,
+      undefined,
+      beforePaused,
+    );
+
+    const running = scheduler.run(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    expect(scheduler.pause()).toBe(true);
+    expect(scheduler.snapshot().state).toBe('pausing');
+
+    controller.abort();
+    finish?.();
+    await running;
+
+    await vi.waitFor(() => expect(scheduler.snapshot().inFlight).toBe(0));
+    expect(beforePaused).not.toHaveBeenCalled();
+    expect(scheduler.snapshot().state).toBe('pausing');
+  });
+
+  it('still runs the pause barrier when no abort landed', async () => {
+    const beforePaused = vi.fn(async () => {});
+    let finish: (() => void) | undefined;
+    const scheduler = new WorkflowDispatchScheduler(
+      1,
+      new AbortController().signal,
+      undefined,
+      beforePaused,
+    );
+
+    const running = scheduler.run(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    expect(scheduler.pause()).toBe(true);
+    finish?.();
+    await running;
+
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    expect(beforePaused).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses pause() after the abort signal fired on a running scheduler', async () => {
     // Symmetric guard: an aborted running run must not transition into
     // pausing/paused.
