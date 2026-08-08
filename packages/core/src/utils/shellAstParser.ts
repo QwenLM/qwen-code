@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hasShellSubstitution } from './shell-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -1112,7 +1113,12 @@ export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command).catch(() => 'unknown');
+  const safety = await classifyInternal(command).catch(
+    (): ShellCommandSafety => 'unknown',
+  );
+  return safety === 'read-only' && hasShellSubstitution(command)
+    ? 'unknown'
+    : safety;
 }
 
 /**
@@ -1132,6 +1138,7 @@ export async function isShellCommandReadOnlyAST(
   command: string,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
+  if (hasShellSubstitution(command)) return false;
 
   // If the WASM parser is permanently unavailable (e.g. WASM file missing
   // after a symlinked install), fall back to the regex-based checker so the

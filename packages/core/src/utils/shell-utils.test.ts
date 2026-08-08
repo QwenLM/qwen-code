@@ -10,6 +10,7 @@ import {
   checkArgumentSafety,
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
+  detectCommandSubstitution,
   detectSelfKillCommand,
   escapeShellArg,
   getCommandRoot,
@@ -150,6 +151,16 @@ describe('isCommandAllowed', () => {
   });
 
   describe('command substitution', () => {
+    it('detects the #8582 bypasses without treating literal twins as executable', () => {
+      expect(detectCommandSubstitution('echo "$\\\n(touch PWNED)"')).toBe(true);
+      expect(detectCommandSubstitution('echo "\\$\\\n(touch PWNED)"')).toBe(
+        false,
+      );
+      expect(detectCommandSubstitution('echo "${value@P}"')).toBe(true);
+      expect(detectCommandSubstitution('echo "${value@Q}"')).toBe(false);
+      expect(detectCommandSubstitution("echo '${value@P}'")).toBe(false);
+    });
+
     it('should block command substitution using `$(...)`', async () => {
       const result = await isCommandAllowed('echo $(rm -rf /)', config);
       expect(result.allowed).toBe(false);
