@@ -595,6 +595,24 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'branch_point_invalid') {
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'branch_point_invalid',
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'branch_publication_unsupported') {
+        const d = data as { causeCode?: string };
+        res.status(501).json({
+          error: errorMessage(err),
+          code: 'branch_publication_unsupported',
+          errorKind: kind,
+          ...(d.causeCode ? { causeCode: d.causeCode } : {}),
+        });
+        return;
+      }
       if (kind === 'mcp_budget_would_exceed') {
         const d = data as { serverName?: string };
         res.status(409).json({

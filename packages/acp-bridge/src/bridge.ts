@@ -1103,6 +1103,25 @@ function broadcastTurnComplete(
   originatorClientId: string | undefined,
 ): void {
   try {
+    const meta =
+      promptResult['_meta'] && typeof promptResult['_meta'] === 'object'
+        ? (promptResult['_meta'] as Record<string, unknown>)
+        : undefined;
+    const rawBranchPoint =
+      meta?.['qwen.branchPoint'] && typeof meta['qwen.branchPoint'] === 'object'
+        ? (meta['qwen.branchPoint'] as Record<string, unknown>)
+        : undefined;
+    const branchPoint =
+      promptResult.stopReason === 'end_turn' &&
+      typeof rawBranchPoint?.['assistantRecordUuid'] === 'string' &&
+      CHAT_RECORD_UUID_RE.test(rawBranchPoint['assistantRecordUuid']) &&
+      typeof rawBranchPoint['checkpointUuid'] === 'string' &&
+      CHAT_RECORD_UUID_RE.test(rawBranchPoint['checkpointUuid'])
+        ? {
+            assistantRecordUuid: rawBranchPoint['assistantRecordUuid'],
+            checkpointUuid: rawBranchPoint['checkpointUuid'],
+          }
+        : undefined;
     entry.events.publish({
       type: 'turn_complete',
       ...(promptId ? { promptId } : {}),
@@ -1110,6 +1129,7 @@ function broadcastTurnComplete(
         sessionId,
         stopReason: promptResult.stopReason ?? 'end_turn',
         ...(promptId ? { promptId } : {}),
+        ...(branchPoint ? { branchPoint } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
@@ -1404,6 +1424,8 @@ const MAX_MID_TURN_QUEUE_DEPTH = 20;
 const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
+const CHAT_RECORD_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
  * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
@@ -6808,6 +6830,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (entry.closing) {
+        throw new SessionNotFoundError(sessionId, 'The session is closing');
+      }
       const source = parseSessionSource(req.sourceType, req.sourceId);
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
@@ -6820,11 +6845,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
 
       const concurrentSideTask = isSideTask && entry.promptActive;
+      // Admission-time check: pendingPromptCount changes synchronously when a
+      // prompt is accepted, before its queue callback sets promptActive. A
+      // check inside the branch callback would observe post-prompt state and
+      // silently wait instead of rejecting.
+      if (!isSideTask && (entry.pendingPromptCount > 0 || entry.promptActive)) {
+        throw new BranchWhilePromptActiveError(sessionId);
+      }
       const branchResult = (
         concurrentSideTask ? Promise.resolve() : entry.promptQueue
       ).then(async () => {
-        if (entry.promptActive && !isSideTask) {
-          throw new BranchWhilePromptActiveError(sessionId);
+        if (entry.closing || byId.get(sessionId) !== entry) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
 
         if (
@@ -6847,20 +6879,40 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         };
         try {
           const ci = await ensureChannel();
-          const result = (await withTimeout(
-            ci.connection.extMethod(
-              isSideTask
-                ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
-                : SERVE_CONTROL_EXT_METHODS.sessionBranch,
-              {
-                sessionId,
-                cwd: boundWorkspace,
-                name: req.name,
-              },
-            ),
-            initTimeoutMs,
-            isSideTask ? 'createSideTaskSession' : 'branchSession',
-          )) as { newSessionId: string; title?: string; displayName?: string };
+          // HAZARD: dispatch the source-session mutation on the entry's
+          // OWN connection, not `ci.connection` (the current attach
+          // target). During the channel-overlap window (A dying, B
+          // freshly spawned as `channelInfo`) the source session still
+          // lives on A; routing through B reports session-not-found or
+          // operates on the wrong runtime state. The NEW session's
+          // restore below stays on the intended channel.
+          const mutation = entry.connection.extMethod(
+            isSideTask
+              ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
+              : SERVE_CONTROL_EXT_METHODS.sessionBranch,
+            {
+              sessionId,
+              cwd: boundWorkspace,
+              name: req.name,
+              ...(req.atRecordId !== undefined
+                ? { atRecordId: req.atRecordId }
+                : {}),
+            },
+          );
+          // ACP cannot cancel a branch after dispatch. Keep the queue and
+          // reservation until its real outcome is known so a caller never sees
+          // a timeout followed by an unobserved committed session. The
+          // transport-closed race rejects only when the channel exits — a
+          // branch whose channel died cannot be observed or delivered anyway —
+          // so a slow-but-alive fork still waits for its real outcome.
+          const result = (await Promise.race([
+            mutation,
+            getTransportClosedReject(entry),
+          ])) as {
+            newSessionId: string;
+            title?: string;
+            displayName?: string;
+          };
 
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(
@@ -6897,7 +6949,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             releaseAdmissionOnce();
           } catch (restoreErr) {
             writeStderrLine(
-              `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
+              `qwen serve: branchSession load failed for ${result.newSessionId}; closing partial live state while preserving the committed session...`,
             );
             try {
               await ci.connection.extMethod(
@@ -6906,7 +6958,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               );
             } catch (cleanupErr) {
               writeStderrLine(
-                `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+                `qwen serve: branchSession live-state close for ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
               );
             }
             throw restoreErr;
@@ -8709,10 +8761,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
 
-      let response: Record<string, unknown>;
-      try {
-        response = (await Promise.race([
-          withTimeout(
+      // Admission-time check: a rewind queued behind an active prompt runs
+      // after the prompt's `finally` clears the busy flags, and client-side
+      // timeouts cannot cancel queued work — the rewind would truncate
+      // history after the caller was told it failed. The agent-side
+      // `isIdle()` guard never fires because the queue guarantees the turn
+      // is over before the rewind reaches the agent. Reject synchronously,
+      // matching branchSession and launchSessionForkAgent.
+      if (entry.pendingPromptCount > 0 || entry.promptActive) {
+        throw new SessionBusyError(
+          sessionId,
+          'Cannot rewind while a prompt is running',
+        );
+      }
+
+      const rewindResult = entry.promptQueue.then(async () => {
+        if (entry.closing) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
+        }
+        let response: Record<string, unknown>;
+        try {
+          // ACP cannot cancel a rewind after dispatch. Keep the queue until
+          // its real outcome is known so a caller never sees a timeout
+          // followed by an unobserved history truncation + file restores —
+          // same hazard the branch path documents.
+          response = (await Promise.race([
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
               {
@@ -8721,107 +8794,113 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 rewindFiles: req.rewindFiles !== false,
               },
             ),
-            initTimeoutMs,
-            SERVE_CONTROL_EXT_METHODS.sessionRewind,
-          ),
-          getTransportClosedReject(entry),
-        ])) as Record<string, unknown>;
-      } catch (err) {
-        const data = (err as { data?: unknown })?.data;
-        if (data && typeof data === 'object' && 'errorKind' in data) {
-          const kind = (data as { errorKind: string }).errorKind;
-          const msg = (err as { message?: string })?.message ?? 'Rewind failed';
-          if (kind === 'session_busy') {
-            throw new SessionBusyError(sessionId, msg);
+            getTransportClosedReject(entry),
+          ])) as Record<string, unknown>;
+        } catch (err) {
+          const data = (err as { data?: unknown })?.data;
+          if (data && typeof data === 'object' && 'errorKind' in data) {
+            const kind = (data as { errorKind: string }).errorKind;
+            const msg =
+              (err as { message?: string })?.message ?? 'Rewind failed';
+            if (kind === 'session_busy') {
+              throw new SessionBusyError(sessionId, msg);
+            }
+            if (kind === 'invalid_rewind_target') {
+              throw new InvalidRewindTargetError(sessionId, msg);
+            }
           }
-          if (kind === 'invalid_rewind_target') {
-            throw new InvalidRewindTargetError(sessionId, msg);
-          }
+          throw err;
         }
-        throw err;
-      }
 
-      const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
-      const filesChanged = (response['filesChanged'] as string[]) ?? [];
-      const filesFailed = (response['filesFailed'] as string[]) ?? [];
-      const artifactSnapshot = restoredArtifactSnapshotFromState(
-        response as BridgeSessionState,
-      );
-      const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
-        response as BridgeSessionState,
-      );
-      const beforeArtifacts = (await entry.artifacts.list()).artifacts;
-      const shouldRestoreArtifactSnapshot =
-        artifactSnapshot !== undefined &&
-        artifactSnapshotUnavailable === undefined;
-      const artifactRestoreWarnings =
-        artifactSnapshotUnavailable !== undefined
-          ? [
-              `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
-            ]
-          : shouldRestoreArtifactSnapshot
-            ? await entry.artifacts.restore(artifactSnapshot, {
-                preserveLiveEphemeral: true,
-              })
-            : [];
-      const artifactRestoreFailed = artifactRestoreWarnings.some(
-        isArtifactRestoreFailureWarning,
-      );
-      const shouldRecordArtifactSnapshot =
-        shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
-      const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
-        ? await entry.artifacts.recordSnapshot()
-        : [];
-      const artifactWarnings = [
-        ...artifactRestoreWarnings,
-        ...artifactSnapshotWarnings,
-      ];
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
+        const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
+        const filesChanged = (response['filesChanged'] as string[]) ?? [];
+        const filesFailed = (response['filesFailed'] as string[]) ?? [];
+        const artifactSnapshot = restoredArtifactSnapshotFromState(
+          response as BridgeSessionState,
         );
-      }
-      for (const warning of artifactSnapshotWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
-            warning,
-          )}`,
+        const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
+          response as BridgeSessionState,
         );
-      }
-      const afterArtifacts = (await entry.artifacts.list()).artifacts;
-      publishArtifactChanges(
-        entry,
-        artifactReseedChanges(beforeArtifacts, afterArtifacts),
-        originatorClientId,
-      );
-      try {
-        entry.events.publish({
-          type: 'session_rewound',
-          data: {
-            sessionId,
-            promptId: req.promptId,
-            targetTurnIndex,
-            filesChanged,
-            filesFailed,
-            ...(artifactWarnings.length > 0
-              ? { warnings: artifactWarnings }
-              : {}),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+        const beforeArtifacts = (await entry.artifacts.list()).artifacts;
+        const shouldRestoreArtifactSnapshot =
+          artifactSnapshot !== undefined &&
+          artifactSnapshotUnavailable === undefined;
+        const artifactRestoreWarnings =
+          artifactSnapshotUnavailable !== undefined
+            ? [
+                `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
+              ]
+            : shouldRestoreArtifactSnapshot
+              ? await entry.artifacts.restore(artifactSnapshot, {
+                  preserveLiveEphemeral: true,
+                })
+              : [];
+        const artifactRestoreFailed = artifactRestoreWarnings.some(
+          isArtifactRestoreFailureWarning,
+        );
+        const shouldRecordArtifactSnapshot =
+          shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
+        const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
+          ? await entry.artifacts.recordSnapshot()
+          : [];
+        const artifactWarnings = [
+          ...artifactRestoreWarnings,
+          ...artifactSnapshotWarnings,
+        ];
+        for (const warning of artifactRestoreWarnings) {
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
+              warning,
+            )}`,
+          );
+        }
+        for (const warning of artifactSnapshotWarnings) {
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
+              warning,
+            )}`,
+          );
+        }
+        const afterArtifacts = (await entry.artifacts.list()).artifacts;
+        publishArtifactChanges(
+          entry,
+          artifactReseedChanges(beforeArtifacts, afterArtifacts),
+          originatorClientId,
+        );
+        try {
+          entry.events.publish({
+            type: 'session_rewound',
+            data: {
+              sessionId,
+              promptId: req.promptId,
+              targetTurnIndex,
+              filesChanged,
+              filesFailed,
+              ...(artifactWarnings.length > 0
+                ? { warnings: artifactWarnings }
+                : {}),
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch {
+          /* bus closed */
+        }
 
-      return {
-        rewound: filesFailed.length === 0,
-        targetTurnIndex,
-        filesChanged,
-        filesFailed,
-        ...(artifactWarnings.length > 0 ? { warnings: artifactWarnings } : {}),
-      };
+        return {
+          rewound: filesFailed.length === 0,
+          targetTurnIndex,
+          filesChanged,
+          filesFailed,
+          ...(artifactWarnings.length > 0
+            ? { warnings: artifactWarnings }
+            : {}),
+        };
+      });
+      entry.promptQueue = rewindResult.then(
+        () => undefined,
+        () => undefined,
+      );
+      return rewindResult;
     },
 
     async manageMcpServer(serverName, action, originatorClientId) {

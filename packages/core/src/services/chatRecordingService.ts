@@ -48,6 +48,11 @@ import type {
   GoalTurnPermit,
   TranscriptCursor,
 } from '../goals/goal-protocol.js';
+import {
+  resolveCompletedTurnBranchCandidate,
+  type BranchCheckpointRecordPayloadV1,
+  type BranchPoint,
+} from './branch-points.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -297,6 +302,7 @@ export interface ChatRecord {
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
+    | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
     | 'realtime_message';
@@ -357,6 +363,7 @@ export interface ChatRecord {
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
+    | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -563,6 +570,17 @@ export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
 
+interface BufferedRecordAppend {
+  record: ChatRecord;
+  options: { updateActiveTail?: boolean } | undefined;
+  resolve?: () => void;
+  reject?: (error: unknown) => void;
+}
+
+interface TranscriptTopologyFence {
+  buffered: BufferedRecordAppend[];
+}
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -624,6 +642,8 @@ export class ChatRecordingService {
   private acceptingWrites = false;
   private closePromise: Promise<void> | undefined;
   private handoffRequested = false;
+  /** Prevents asynchronous metadata writers from becoming checkpoint siblings. */
+  private topologyFence: TranscriptTopologyFence | undefined;
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
@@ -977,7 +997,10 @@ export class ChatRecordingService {
     record: ChatRecord,
     options?: { updateActiveTail?: boolean },
   ): void {
-    if (this.writeFailure || !this.acceptingWrites || this.state !== 'active') {
+    if (this.writeFailure || !this.acceptingWrites || this.state !== 'active')
+      return;
+    if (this.topologyFence) {
+      this.topologyFence.buffered.push({ record, options });
       return;
     }
     const legacyConversationFile = this.writerLeaseRequired
@@ -996,8 +1019,18 @@ export class ChatRecordingService {
     options?: { updateActiveTail?: boolean },
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
-    if (!this.acceptingWrites || this.state !== 'active') {
+    if (!this.acceptingWrites || this.state !== 'active')
       throw new SessionWriterUnavailableError();
+    if (this.topologyFence) {
+      await new Promise<void>((resolve, reject) => {
+        this.topologyFence!.buffered.push({
+          record,
+          options,
+          resolve,
+          reject,
+        });
+      });
+      return;
     }
 
     const updateActiveTail = options?.updateActiveTail !== false;
@@ -1018,6 +1051,25 @@ export class ChatRecordingService {
     this.updateTitleAnchorTracking(record);
 
     await pendingWrite;
+  }
+
+  private releaseTopologyFence(fence: TranscriptTopologyFence): void {
+    if (this.topologyFence !== fence) return;
+    this.topologyFence = undefined;
+    for (const intent of fence.buffered) {
+      // Side artifacts keep updateActiveTail=false, but still move behind the
+      // reserved checkpoint so they cannot become siblings of the completed
+      // turn and invalidate the active transcript topology.
+      intent.record.parentUuid = this.lastRecordUuid;
+      if (intent.resolve && intent.reject) {
+        void this.appendRecordStrict(intent.record, intent.options).then(
+          intent.resolve,
+          intent.reject,
+        );
+      } else {
+        this.appendRecord(intent.record, intent.options);
+      }
+    }
   }
 
   /**
@@ -1245,6 +1297,57 @@ export class ChatRecordingService {
 
   getTranscriptCursor(): TranscriptCursor {
     return { recordId: this.lastRecordUuid };
+  }
+
+  async recordBranchCheckpointTransaction(input: {
+    startExclusiveRecordUuid: string | null;
+    stopReason: string;
+    promptId?: string;
+  }): Promise<BranchPoint | undefined> {
+    if (input.stopReason !== 'end_turn') return undefined;
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.state !== 'active') throw new SessionWriterUnavailableError();
+    if (this.topologyFence) {
+      throw new Error('Transcript topology transaction already active');
+    }
+
+    const fence: TranscriptTopologyFence = { buffered: [] };
+    this.topologyFence = fence;
+    try {
+      await this.flush();
+      const activeChain = await this.readActiveTranscriptChain();
+      const endInclusiveRecordUuid = this.lastRecordUuid;
+      if (endInclusiveRecordUuid === null) return undefined;
+      const candidate = resolveCompletedTurnBranchCandidate({
+        activeChain,
+        startExclusiveRecordUuid: input.startExclusiveRecordUuid,
+        endInclusiveRecordUuid,
+      });
+      if (!candidate) return undefined;
+
+      const checkpointUuid = randomUUID();
+      const checkpoint: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        uuid: checkpointUuid,
+        parentUuid: endInclusiveRecordUuid,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: input.startExclusiveRecordUuid,
+          assistantRecordUuid: candidate.assistantRecordUuid,
+          ...(input.promptId === undefined ? {} : { promptId: input.promptId }),
+        },
+      };
+
+      this.topologyFence = undefined;
+      const checkpointWrite = this.appendRecordStrict(checkpoint);
+      this.topologyFence = fence;
+      await checkpointWrite;
+      return { ...candidate, checkpointUuid };
+    } finally {
+      this.releaseTopologyFence(fence);
+    }
   }
 
   async recordGoalState(

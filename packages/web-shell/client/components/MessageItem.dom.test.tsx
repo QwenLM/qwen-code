@@ -39,9 +39,11 @@ vi.mock('./messages/AssistantMessage', async () => {
     AssistantMessage: ({
       content,
       customFooterInfo,
+      onBranchSession,
     }: {
       content: string;
       customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+      onBranchSession?: () => void | Promise<void>;
     }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
       const { renderAssistantTurnFooter } = useWebShellCustomization();
@@ -53,6 +55,16 @@ vi.mock('./messages/AssistantMessage', async () => {
         { 'data-testid': 'assistant-ok' },
         content,
         customFooter,
+        onBranchSession
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'assistant-branch',
+                onClick: () => void onBranchSession(),
+              },
+              'branch',
+            )
+          : null,
       );
     },
     ThinkingMessage: ({ generateContent }: { generateContent?: unknown }) =>
@@ -222,6 +234,46 @@ describe('MessageItem generation updates', () => {
         .querySelector('[data-testid="thinking"]')
         ?.getAttribute('data-has-generator'),
     ).toBe('true');
+  });
+});
+
+describe('MessageItem branch binding', () => {
+  it('passes the checkpoint record id to the branch handler', () => {
+    const onBranchSession = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <MessageItem
+          message={assistantMsg('1', 'hello')}
+          onBranchSession={onBranchSession}
+          branchRecordId="checkpoint-1"
+        />
+      </I18nProvider>,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="assistant-branch"]',
+    );
+    expect(button).not.toBeNull();
+
+    act(() => button?.click());
+
+    expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
+  });
+
+  it('exposes no branch action without a checkpoint record id', () => {
+    const onBranchSession = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <MessageItem
+          message={assistantMsg('1', 'hello')}
+          onBranchSession={onBranchSession}
+        />
+      </I18nProvider>,
+    );
+
+    expect(
+      container.querySelector('[data-testid="assistant-branch"]'),
+    ).toBeNull();
+    expect(onBranchSession).not.toHaveBeenCalled();
   });
 });
 

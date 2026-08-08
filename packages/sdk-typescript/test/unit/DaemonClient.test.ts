@@ -11,6 +11,7 @@ import {
   DaemonPendingPromptLimitError,
   abortTimeout,
   composeAbortSignals,
+  isStaleBranchPointError,
   normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
@@ -2697,6 +2698,116 @@ describe('DaemonClient', () => {
       await expect(client.loadSession('missing')).rejects.toMatchObject({
         status: 404,
       });
+    });
+  });
+
+  describe('branchSession', () => {
+    it('posts the historical checkpoint to the encoded session route', async () => {
+      const reply = {
+        sessionId: 'branch-1',
+        workspaceCwd: '/work/a',
+        attached: false,
+        clientId: 'branch-client',
+        state: {},
+        displayName: 'Historical branch',
+        forkedFrom: {
+          sessionId: 'source/1',
+          displayName: 'Source session',
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(201, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.branchSession(
+          'source/1',
+          {
+            name: 'Historical branch',
+            atRecordId: 'checkpoint-1',
+          },
+          'client-1',
+        ),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.url).toBe('http://daemon/session/source%2F1/branch');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'Historical branch',
+        atRecordId: 'checkpoint-1',
+      });
+    });
+
+    it('does not detach a dispatched branch when the generic fetch timeout elapses', async () => {
+      const reply = {
+        sessionId: 'slow-branch',
+        workspaceCwd: '/work/a',
+        attached: false,
+        clientId: 'branch-client',
+        state: {},
+        displayName: 'Slow branch',
+        forkedFrom: {
+          sessionId: 'source-1',
+          displayName: 'Source session',
+        },
+      };
+      let releaseFetch: (() => void) | undefined;
+      let requestSignal: AbortSignal | null | undefined;
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve) => {
+            requestSignal = init?.signal;
+            releaseFetch = () => resolve(jsonResponse(201, reply));
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      let settled = false;
+      const branch = client.branchSession('source-1').finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(releaseFetch).toBeDefined());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(settled).toBe(false);
+      expect(requestSignal?.aborted ?? false).toBe(false);
+
+      releaseFetch!();
+      await expect(branch).resolves.toEqual(reply);
+    });
+  });
+
+  describe('isStaleBranchPointError', () => {
+    it('accepts the daemon stale-branch contract', () => {
+      expect(
+        isStaleBranchPointError(
+          new DaemonHttpError(
+            409,
+            { code: 'branch_point_invalid' },
+            'Conflict',
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it('rejects lookalike errors', () => {
+      expect(
+        isStaleBranchPointError(
+          new DaemonHttpError(409, { code: 'session_busy' }, 'Conflict'),
+        ),
+      ).toBe(false);
+      expect(
+        isStaleBranchPointError(
+          new DaemonHttpError(404, { code: 'branch_point_invalid' }, 'Missing'),
+        ),
+      ).toBe(false);
+      expect(isStaleBranchPointError(new Error('branch_point_invalid'))).toBe(
+        false,
+      );
+      expect(isStaleBranchPointError(undefined)).toBe(false);
     });
   });
 

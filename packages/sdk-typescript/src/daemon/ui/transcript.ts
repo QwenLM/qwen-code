@@ -247,6 +247,7 @@ function applyDaemonTranscriptEvent(
           event.serverTimestamp,
           undefined,
           event.sourceRecordIds,
+          event.promptId,
         ) as DaemonTextTranscriptBlock;
         block.images = [{ data: event.data, mimeType: event.mimeType }];
         appendBlock(next, block);
@@ -277,6 +278,33 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'assistant.done':
+      if (
+        event.branchRecordId &&
+        event.promptId &&
+        event.reason === 'end_turn'
+      ) {
+        const activeAssistant = getWritableBlockById(
+          next,
+          next.activeAssistantBlockId,
+        );
+        if (
+          activeAssistant?.kind === 'assistant' &&
+          activeAssistant.parentToolCallId === undefined &&
+          activeAssistant.promptId === event.promptId &&
+          activeAssistant.text.trim().length > 0 &&
+          isFinalVisibleAssistantForPrompt(
+            next,
+            activeAssistant.id,
+            event.promptId,
+          )
+        ) {
+          activeAssistant.branchRecordId = event.branchRecordId;
+          activeAssistant.sourceRecordIds = unionStrings(
+            activeAssistant.sourceRecordIds,
+            event.sourceRecordIds,
+          );
+        }
+      }
       finishAssistant(next, event);
       // PR-E cancellation propagation: when the assistant turn ENDS
       // abnormally, any in-flight tool block whose status the daemon
@@ -655,6 +683,15 @@ function appendTextDelta(
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
     }
+    // The merge predicate admits deltas when one side omits `promptId`;
+    // backfill so a late exact-promptId lookup (e.g. `assistant.done`
+    // attaching the branch checkpoint) still matches the merged block.
+    if (existing.promptId === undefined && event.promptId !== undefined) {
+      existing.promptId = event.promptId;
+    }
+    if (kind === 'assistant' && event.branchRecordId) {
+      existing.branchRecordId = event.branchRecordId;
+    }
     if (kind !== 'user') existing.streaming = true;
     return;
   }
@@ -671,7 +708,11 @@ function appendTextDelta(
     event.serverTimestamp,
     'meta' in event ? event.meta : undefined,
     event.sourceRecordIds,
+    event.promptId,
   );
+  if (kind === 'assistant' && event.branchRecordId) {
+    block.branchRecordId = event.branchRecordId;
+  }
   if (kind !== 'user') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   if (parentId != null) {
@@ -711,10 +752,35 @@ function canMergeTextDelta(
     return false;
   }
   if (existing.meta?.qwenDiscreteMessage === true) return false;
+  if (
+    existing.promptId !== undefined &&
+    event.promptId !== undefined &&
+    existing.promptId !== event.promptId
+  )
+    return false;
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }
   return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
+}
+
+function isFinalVisibleAssistantForPrompt(
+  state: DaemonTranscriptState,
+  blockId: string,
+  promptId: string,
+): boolean {
+  for (let index = state.blocks.length - 1; index >= 0; index--) {
+    const block = state.blocks[index];
+    if (
+      block?.kind === 'assistant' &&
+      block.parentToolCallId === undefined &&
+      block.promptId === promptId &&
+      block.text.trim().length > 0
+    ) {
+      return block.id === blockId;
+    }
+  }
+  return false;
 }
 
 function finishAssistant(
@@ -1294,6 +1360,7 @@ function createTextBlock(
   serverTimestamp?: number,
   meta?: Record<string, unknown>,
   sourceRecordIds?: readonly string[],
+  promptId?: string,
 ): DaemonTextTranscriptBlock {
   const blockId = allocateBlockId(state, kind);
   return {
@@ -1306,6 +1373,7 @@ function createTextBlock(
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
+    ...(promptId ? { promptId } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };
 }

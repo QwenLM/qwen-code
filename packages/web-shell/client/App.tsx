@@ -29,7 +29,11 @@ import {
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  isDaemonTurnError,
+  isStaleBranchPointError,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
@@ -5974,10 +5978,11 @@ export function App({
   }, [showContextUsage]);
 
   const branchCurrentSession = useCallback(
-    (name?: string) => {
+    (name?: string, atRecordId?: string) => {
       if (!requireActiveSessionForLocalCommand()) return;
-      sessionActions
-        .branchSession(name || undefined)
+      const sourceSessionId = connectionRef.current.sessionId;
+      return sessionActions
+        .branchSession(name || undefined, atRecordId)
         .then((result) => {
           store.dispatch([
             {
@@ -5988,21 +5993,54 @@ export function App({
             },
           ]);
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
+          if (isStaleBranchPointError(error)) {
+            if (!transcriptReloadSupported) {
+              pushToast('error', t('branch.staleUnsupported'));
+              return;
+            }
+            // The recovery reload targets whatever session is selected when
+            // the branch call returns. If the user switched away in flight,
+            // report the failure without refreshing the unrelated session.
+            if (connectionRef.current.sessionId !== sourceSessionId) {
+              pushToast('error', t('branch.failed'));
+              return;
+            }
+            let refreshed = false;
+            try {
+              await sessionActions.reloadSession(new AbortController().signal);
+              refreshed = true;
+            } catch {
+              refreshed = false;
+            }
+            // A switch landing while the recovery reload is in flight
+            // supersedes it; the outcome toast belongs to the source session.
+            if (connectionRef.current.sessionId !== sourceSessionId) return;
+            pushToast(
+              'error',
+              t(refreshed ? 'branch.stale' : 'branch.staleRefreshFailed'),
+            );
+            return;
+          }
           reportError(error, t('branch.failed'));
         });
     },
     [
       reportError,
+      pushToast,
       requireActiveSessionForLocalCommand,
       sessionActions,
       store,
       t,
+      transcriptReloadSupported,
     ],
   );
-  const handleBranchCurrentSession = useCallback(() => {
-    branchCurrentSession();
-  }, [branchCurrentSession]);
+  const handleBranchCurrentSession = useCallback(
+    (atRecordId?: string) => {
+      return branchCurrentSession(undefined, atRecordId);
+    },
+    [branchCurrentSession],
+  );
 
   const composerFocusRequestRef = useRef(0);
   const scheduleComposerFocus = useCallback((sessionId?: string) => {

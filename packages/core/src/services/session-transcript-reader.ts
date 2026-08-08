@@ -8,6 +8,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import type { Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -22,6 +23,10 @@ import {
   validateTranscriptRecord,
   walkTranscriptUuidChain,
 } from '../utils/transcript-records.js';
+import {
+  resolveBranchPoints,
+  type BranchPointRecord,
+} from './branch-points.js';
 
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
@@ -114,6 +119,7 @@ export interface SessionTranscriptRecordPage {
   replay?: unknown;
   startTime: string;
   lastUpdated: string;
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
 }
 
 interface SessionTranscriptFileIdentity {
@@ -147,6 +153,7 @@ interface TranscriptIndex {
   startTime: string;
   lastUpdated: string;
   byUuid: Map<string, UuidIndexEntry>;
+  branchPointsByAssistantUuid: ReadonlyMap<string, string>;
 }
 
 interface CacheEntry {
@@ -182,6 +189,84 @@ let expandedPageBytesForTest: number | undefined;
 
 function getExpandedPageBytes(): number {
   return expandedPageBytesForTest ?? SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
+}
+
+function projectBranchPointParts(record: ChatRecord): Part[] {
+  return ((record.message?.parts ?? []) as unknown[]).flatMap((rawPart) => {
+    const projected: Part[] = [];
+    if (rawPart === null || typeof rawPart !== 'object') return projected;
+    const part = rawPart as Part;
+    if (part.functionCall) {
+      projected.push({
+        functionCall: {
+          ...(part.functionCall.id !== undefined
+            ? { id: part.functionCall.id }
+            : {}),
+          ...(part.functionCall.name !== undefined
+            ? { name: part.functionCall.name }
+            : {}),
+        },
+      });
+    }
+    if (part.functionResponse) {
+      projected.push({
+        functionResponse: {
+          ...(part.functionResponse.id !== undefined
+            ? { id: part.functionResponse.id }
+            : {}),
+          ...(part.functionResponse.name !== undefined
+            ? { name: part.functionResponse.name }
+            : {}),
+        },
+      });
+    }
+    if (
+      record.type === 'assistant' &&
+      part.thought !== true &&
+      typeof part.text === 'string' &&
+      part.text.trim().length > 0
+    ) {
+      projected.push({ text: 'visible' });
+    }
+    return projected;
+  });
+}
+
+function projectBranchPointRecord(record: ChatRecord): BranchPointRecord {
+  const parts = projectBranchPointParts(record);
+  return {
+    uuid: record.uuid,
+    parentUuid: record.parentUuid,
+    type: record.type,
+    ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
+    ...(parts.length > 0 ? { message: { parts } } : {}),
+    ...(record.subtype === 'branch_checkpoint'
+      ? { systemPayload: record.systemPayload }
+      : {}),
+  };
+}
+
+function appendBranchPointRecord(
+  records: Map<string, BranchPointRecord>,
+  record: ChatRecord,
+): void {
+  const projected = projectBranchPointRecord(record);
+  const existing = records.get(record.uuid);
+  if (!existing) {
+    records.set(record.uuid, projected);
+    return;
+  }
+  const parts = [
+    ...(existing.message?.parts ?? []),
+    ...(projected.message?.parts ?? []),
+  ];
+  // Duplicate uuids merge strictly first-wins for identity fields, matching
+  // the byUuid index and fragment aggregation, so the reader never advertises
+  // a branch marker that the first-wins fork path cannot honor.
+  records.set(record.uuid, {
+    ...existing,
+    ...(parts.length > 0 ? { message: { parts } } : {}),
+  });
 }
 
 function makeSessionTranscriptNotFoundError(
@@ -870,6 +955,15 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.parentUuid) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
+  for (const [
+    assistantUuid,
+    checkpointUuid,
+  ] of index.branchPointsByAssistantUuid) {
+    total +=
+      INDEX_ENTRY_BASE_BYTES +
+      estimateStringBytes(assistantUuid) +
+      estimateStringBytes(checkpointUuid);
+  }
 
   return total;
 }
@@ -1086,6 +1180,9 @@ async function buildIndex(params: {
     `index build start session=${sessionId} snapshotSize=${snapshotSize}`,
   );
   const byUuid = new Map<string, UuidIndexEntry>();
+  // Retain only the fields required by the shared branch resolver while the
+  // frozen snapshot is parsed, so page reads never reopen the full active chain.
+  const branchPointRecords = new Map<string, BranchPointRecord>();
   let sequence = 0;
   let leafUuid: string | undefined;
   let startTime: string | undefined;
@@ -1103,6 +1200,10 @@ async function buildIndex(params: {
         if (!record || !isTranscriptConversationRecord(record)) {
           continue;
         }
+        appendBranchPointRecord(
+          branchPointRecords,
+          record as unknown as ChatRecord,
+        );
         if (
           record.type === 'system' &&
           record.subtype === 'session_source' &&
@@ -1182,9 +1283,21 @@ async function buildIndex(params: {
     );
   }
 
+  const branchPointsByAssistantUuid = new Map(
+    [
+      ...resolveBranchPoints(
+        activeUuids.flatMap((uuid) => {
+          const record = branchPointRecords.get(uuid);
+          return record ? [record] : [];
+        }),
+      ).values(),
+    ].map((point) => [point.assistantRecordUuid, point.checkpointUuid]),
+  );
+
   debugLogger.debug(
     `index build complete session=${sessionId} records=${byUuid.size} ` +
-      `active=${activeUuids.length} gaps=${gaps.length}`,
+      `active=${activeUuids.length} gaps=${gaps.length} ` +
+      `branchPoints=${branchPointsByAssistantUuid.size}`,
   );
 
   return {
@@ -1198,6 +1311,7 @@ async function buildIndex(params: {
     startTime,
     lastUpdated,
     byUuid,
+    branchPointsByAssistantUuid,
   };
 }
 
@@ -1373,6 +1487,15 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
+    // Null prototype: record uuids are untrusted, and '__proto__' would
+    // silently drop the entry on a plain object.
+    const pageBranchPoints: Record<string, string> = Object.create(null);
+    for (const record of records) {
+      const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
+      if (checkpointUuid !== undefined) {
+        pageBranchPoints[record.uuid] = checkpointUuid;
+      }
+    }
     const backwardGoalState =
       direction === 'backward'
         ? await readGoalStateBeforePosition(index, nextPosition)
@@ -1418,6 +1541,9 @@ export class SessionTranscriptReader {
           : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
+      ...(Object.keys(pageBranchPoints).length > 0
+        ? { branchPointsByAssistantUuid: pageBranchPoints }
+        : {}),
     };
   }
 }

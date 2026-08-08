@@ -2543,25 +2543,36 @@ export function registerSessionRoutes(
             name = name.slice(0, 200);
           }
         }
+        const atRecordId = body?.['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          res.status(400).json({
+            error: '`atRecordId` must be a string',
+            code: 'branch_point_invalid',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const result = await runtime.bridge.branchSession(
           sessionId,
-          { name },
+          {
+            name,
+            ...(atRecordId !== undefined ? { atRecordId } : {}),
+          },
           { clientId },
         );
+        // Core has already committed the branch transcript. From this point,
+        // failures release only live Bridge ownership; the complete persisted
+        // session remains recoverable from the session picker. Another client
+        // may already have discovered or attached it, so deleting it here risks
+        // cross-client data loss.
         try {
           runtime.generationGuard?.assertOpen();
         } catch (error) {
           if (!result.attached) {
-            await runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => false);
+            await runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
           } else {
             await runtime.bridge
               .detachClient(result.sessionId, result.clientId)
@@ -2571,16 +2582,11 @@ export function registerSessionRoutes(
         }
         if (!res.writable) {
           if (!result.attached) {
-            void runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
+            runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
           } else {
             runtime.bridge
               .detachClient(result.sessionId, result.clientId)

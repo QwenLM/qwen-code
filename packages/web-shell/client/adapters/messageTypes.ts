@@ -91,6 +91,7 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   role: 'assistant';
   content: string;
   isStreaming?: boolean;
+  branchRecordId?: string;
   /**
    * Token usage folded onto this assistant block by the daemon SDK reducer
    * (summed when several blocks merge into one message). Summed again across a

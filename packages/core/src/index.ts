@@ -242,6 +242,7 @@ export {
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
+export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
 export type {
   CronTaskDelivery,

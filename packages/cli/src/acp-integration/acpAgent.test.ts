@@ -183,6 +183,17 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  BranchPublicationUnsupportedError: class BranchPublicationUnsupportedError extends Error {
+    readonly errorKind = 'branch_publication_unsupported';
+    constructor(readonly causeCode?: string) {
+      super('Atomic branch publication is unsupported');
+    }
+  },
+  BranchPointInvalidError: class BranchPointInvalidError extends Error {
+    constructor(readonly recordId: string) {
+      super(`Invalid or inactive branch point: ${recordId}`);
+    }
+  },
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
@@ -832,6 +843,8 @@ import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
+  BranchPublicationUnsupportedError,
+  BranchPointInvalidError,
   SessionEndReason,
   MCPServerConfig,
   SessionService,
@@ -1883,6 +1896,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
+        beginHistoryMutation: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
@@ -1895,6 +1909,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         appendLiveConversationTranscript: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
+        isIdle: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -3545,11 +3560,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: vi
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+        beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
         clearActiveTodoPlanRevision: vi.fn(),
         clearTodoStopGuardTrust: vi.fn(),
         hardSuspendTodoStopGuard: vi.fn(),
         releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
+        isIdle: vi.fn().mockReturnValue(true),
         prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
       };
       lastSessionMock = sessionMock;
@@ -3864,6 +3881,87 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod(PROMPT_CANCEL_METHOD, { sessionId }),
     ).resolves.toEqual({ cancelled: false });
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('aborts a tracked prompt waiting at writer admission on cancel', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    let releaseAdmission!: () => void;
+    const admissionGate = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    lastSessionMock?.prompt.mockImplementation(
+      async (
+        _params: unknown,
+        _invocationContext: unknown,
+        signal?: AbortSignal,
+      ) => {
+        // The prompt waits at writer admission inside Session.prompt: tracked
+        // in activePromptCalls, but no session pendingPrompt exists yet, so
+        // cancelPendingPrompt cannot reach it.
+        await admissionGate;
+        return { stopReason: signal?.aborted ? 'cancelled' : 'end_turn' };
+      },
+    );
+
+    const prompt = agent.prompt({ sessionId, prompt: [] });
+    await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
+    const admissionSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
+      | AbortSignal
+      | undefined;
+
+    await agent.cancel({ sessionId });
+    expect(admissionSignal?.aborted).toBe(true);
+
+    releaseAdmission();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not serialize overlapping prompts behind the history-mutation gate', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    let releaseFirstPrompt!: () => void;
+    const firstPromptGate = new Promise<void>((resolve) => {
+      releaseFirstPrompt = resolve;
+    });
+    const abortedAtEntry: boolean[] = [];
+    lastSessionMock?.prompt.mockImplementation(
+      async (
+        _params: unknown,
+        _invocationContext: unknown,
+        signal?: AbortSignal,
+      ) => {
+        abortedAtEntry.push(signal?.aborted ?? false);
+        if (abortedAtEntry.length === 1) await firstPromptGate;
+        return { stopReason: signal?.aborted ? 'cancelled' : 'end_turn' };
+      },
+    );
+
+    const first = agent.prompt({ sessionId, prompt: [] });
+    await vi.waitFor(() =>
+      expect(lastSessionMock?.prompt).toHaveBeenCalledTimes(1),
+    );
+    const second = agent.prompt({ sessionId, prompt: [] });
+    await vi.waitFor(() =>
+      expect(lastSessionMock?.prompt).toHaveBeenCalledTimes(2),
+    );
+    await expect(second).resolves.toEqual({ stopReason: 'end_turn' });
+    releaseFirstPrompt();
+
+    await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(abortedAtEntry).toEqual([false, false]);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -12224,6 +12322,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
       rewindFiles: true,
     });
+    expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalledOnce();
+    expect(
+      lastSessionMock?.beginHistoryMutation.mock.results[0]?.value,
+    ).toHaveBeenCalledOnce();
     expect(SessionService).toHaveBeenCalledWith('/tmp');
     expect(innerConfig.getSessionService).toHaveBeenCalled();
     expect(response).toEqual({
@@ -12396,6 +12498,166 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
       rewindFiles: false,
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession fails fast with session_busy while a turn is active', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    // Simulate an active turn (e.g. a cron/notification drain holding the
+    // history-mutation gate): admission must reject instead of queueing a
+    // rewind the bridge timeout cannot cancel.
+    lastSessionMock!.isIdle.mockReturnValue(false);
+
+    await expect(
+      agent.extMethod('rewindSession', {
+        sessionId,
+        targetTurnIndex: 1,
+        cwd: '/tmp',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+    expect(lastSessionMock?.rewindToTurn).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession rejects at admission without waiting on a held gate', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    let releaseFork!: () => void;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          forkSession: vi.fn(() => forkGate),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Occupy the history-mutation gate with a branch whose fork hangs; a
+    // rewind that queued behind it would only settle after the gate frees —
+    // i.e., after the bridge timeout already told the client it failed.
+    const branch = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+      sessionId,
+      name: 'Gate holder',
+      cwd: '/tmp',
+    });
+    await vi.waitFor(() =>
+      expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalled(),
+    );
+
+    lastSessionMock!.isIdle.mockReturnValue(false);
+    await expect(
+      agent.extMethod('rewindSession', {
+        sessionId,
+        targetTurnIndex: 1,
+        cwd: '/tmp',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+    expect(lastSessionMock?.rewindToTurn).not.toHaveBeenCalled();
+
+    releaseFork();
+    await branch;
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rewindSession rejects malformed requests without waiting on a held gate', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    let releaseFork!: () => void;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          forkSession: vi.fn(() => forkGate),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Hold the gate with a hanging branch: a malformed rewind must fail
+    // FORMAT synchronously with invalid_rewind_target, not queue behind the
+    // mutation and surface as a timeout (which means "may have executed").
+    const branch = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+      sessionId,
+      name: 'Gate holder',
+      cwd: '/tmp',
+    });
+    await vi.waitFor(() =>
+      expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalled(),
+    );
+
+    await expect(
+      agent.extMethod('rewindSession', {
+        sessionId,
+        promptId: 'not-a-valid-prompt-id',
+        cwd: '/tmp',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'invalid_rewind_target' },
+    });
+    expect(lastSessionMock?.rewindToTurn).not.toHaveBeenCalled();
+
+    releaseFork();
+    await branch;
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -13062,6 +13324,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
   let liveWaitForCloseGateToRelease: ReturnType<typeof vi.fn>;
   let liveReleaseCloseGate: ReturnType<typeof vi.fn>;
   let liveBeginClose: ReturnType<typeof vi.fn>;
+  let liveAssertCanStartTurn: ReturnType<typeof vi.fn>;
+  let liveBeginHistoryMutation: ReturnType<typeof vi.fn>;
+  let liveReleaseHistoryMutation: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -13077,6 +13342,11 @@ describe('QwenAgent extMethod renameSession routing', () => {
     liveWaitForCloseGateToRelease = vi.fn().mockResolvedValue(undefined);
     liveReleaseCloseGate = vi.fn();
     liveBeginClose = vi.fn().mockReturnValue(liveReleaseCloseGate);
+    liveAssertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+    liveReleaseHistoryMutation = vi.fn();
+    liveBeginHistoryMutation = vi
+      .fn()
+      .mockReturnValue(liveReleaseHistoryMutation);
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -13186,7 +13456,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
           beginCloseIfAvailable: liveBeginCloseIfAvailable,
           waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
           waitForActiveTurnsToSettle: liveWaitForActiveTurnsToSettle,
-          assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+          assertCanStartTurn: liveAssertCanStartTurn,
+          beginHistoryMutation: liveBeginHistoryMutation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -13548,10 +13819,19 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
-  it('does not branch a live session when its recording flush fails', async () => {
+  it('does not branch a live session when its write barrier fails', async () => {
     const recording = makeRecordingService();
-    recording.flush.mockRejectedValue(new Error('flush failed'));
+    recording.runWithWriteBarrier.mockRejectedValue(
+      new Error('write barrier failed'),
+    );
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
     const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -13561,8 +13841,114 @@ describe('QwenAgent extMethod renameSession routing', () => {
         cwd: '/tmp',
         sessionId: liveSessionId,
       }),
-    ).rejects.toThrow('flush failed');
+    ).rejects.toThrow('write barrier failed');
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
     expect(SessionService).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a branch at the agent gate when assertCanStartTurn fails', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    liveAssertCanStartTurn.mockRejectedValueOnce(
+      new Error('Session is closing'),
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toThrow('Session is closing');
+    expect(liveAssertCanStartTurn).toHaveBeenCalledOnce();
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
+    // Ordering invariant: beginHistoryMutation must run only AFTER a passing
+    // assertCanStartTurn, so a failing assert never leaves the busy latch set
+    // with no wired release.
+    expect(liveBeginHistoryMutation).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('surfaces session_busy errorKind when a branch hits a busy session', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    // Mirrors Session.beginHistoryMutation()'s busy throw: the branch
+    // handler must let errorKind reach the caller (the rewind endpoint
+    // already maps the same condition to session_busy).
+    liveBeginHistoryMutation.mockImplementation(() => {
+      throw new RequestError(-32602, 'Session is busy processing a turn', {
+        errorKind: 'session_busy',
+      });
+    });
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps unsupported atomic branch publication to a typed ACP error', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(new BranchPublicationUnsupportedError('ENOTSUP')),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32010,
+      data: {
+        errorKind: 'branch_publication_unsupported',
+        causeCode: 'ENOTSUP',
+      },
+    });
+    expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -13593,21 +13979,99 @@ describe('QwenAgent extMethod renameSession routing', () => {
       },
     );
 
-    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
+    expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
     expect(innerConfig.getSessionService).toHaveBeenCalledOnce();
     expect(SessionService).not.toHaveBeenCalled();
     expect(sessionService.forkSession).toHaveBeenCalledWith(
       liveSessionId,
       expect.any(String),
+      { title: 'Source session (Branch)' },
     );
-    expect(sessionService.renameSession).toHaveBeenCalledWith(
+    expect(sessionService.renameSession).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      title: 'Source session (Branch)',
+      displayName: 'Source session (Branch)',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('strips an existing branch suffix from the source title when branching', async () => {
+    const recording = makeRecordingService();
+    recording.getCurrentCustomTitle.mockReturnValue(
+      'Source session (Branch 2)',
+    );
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+      renameSession: vi.fn().mockResolvedValue(true),
+      removeSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionBranch,
+      {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      },
+    );
+
+    expect(sessionService.forkSession).toHaveBeenCalledWith(
+      liveSessionId,
       expect.any(String),
-      'Source session (Branch)',
-      'manual',
+      { title: 'Source session (Branch)' },
     );
     expect(result).toMatchObject({
       title: 'Source session (Branch)',
       displayName: 'Source session (Branch)',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('falls back to the session id prefix when branching an untitled session', async () => {
+    const recording = makeRecordingService();
+    recording.getCurrentCustomTitle.mockReturnValue(undefined);
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+      renameSession: vi.fn().mockResolvedValue(true),
+      removeSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionBranch,
+      {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      },
+    );
+
+    expect(sessionService.forkSession).toHaveBeenCalledWith(
+      liveSessionId,
+      expect.any(String),
+      { title: '550e8400 (Branch)' },
+    );
+    expect(result).toMatchObject({
+      title: '550e8400 (Branch)',
+      displayName: '550e8400 (Branch)',
     });
 
     mockConnectionState.resolve();
@@ -13645,19 +14109,166 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sourceType: 'side_task',
           sourceId: liveSessionId,
         },
+        title: 'Side task',
       },
     );
     expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
-    const newSessionId = sessionService.forkSession.mock.calls[0]?.[1];
-    expect(sessionService.renameSession).toHaveBeenCalledWith(
-      newSessionId,
-      'Side task',
-      'manual',
-    );
+    expect(sessionService.renameSession).not.toHaveBeenCalled();
+    expect(sessionService.removeSession).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       title: 'Side task',
       displayName: 'Side task',
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps unsupported side-task publication to a typed ACP error', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(new BranchPublicationUnsupportedError('EPERM')),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSideTask, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        name: 'Side task',
+      }),
+    ).rejects.toMatchObject({
+      code: -32010,
+      data: {
+        errorKind: 'branch_publication_unsupported',
+        causeCode: 'EPERM',
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects atRecordId on a side task instead of silently discarding it', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      renameSession: vi.fn().mockResolvedValue(true),
+      removeSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSideTask, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        name: 'Side task',
+        atRecordId: '11111111-1111-4111-8111-111111111111',
+      }),
+    ).rejects.toThrow('atRecordId is not supported for side tasks');
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps an inactive durable checkpoint to branch_point_invalid', async () => {
+    const checkpoint = '11111111-1111-4111-8111-111111111111';
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(new BranchPointInvalidError(checkpoint)),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        atRecordId: checkpoint,
+      }),
+    ).rejects.toMatchObject({
+      code: -32009,
+      data: { errorKind: 'branch_point_invalid', recordId: checkpoint },
+    });
+    expect(sessionService.forkSession).toHaveBeenCalledWith(
+      liveSessionId,
+      expect.any(String),
+      { title: 'Source session (Branch)', atRecordId: checkpoint },
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not finalize the source recorder while a branch mutation is active', async () => {
+    let releaseFork!: () => void;
+    let markForkStarted!: () => void;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    const forkStarted = new Promise<void>((resolve) => {
+      markForkStarted = resolve;
+    });
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn(async () => {
+        markForkStarted();
+        await forkGate;
+      }),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const branch = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+      cwd: '/tmp',
+      sessionId: liveSessionId,
+    });
+    await forkStarted;
+    const close = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+      sessionId: liveSessionId,
+    });
+    // Advance the close to the mutation queue before asserting: without the
+    // gate it would reach recorder.finalize() on its own, which is what
+    // makes the not-called assertion discriminate.
+    await vi.waitFor(() =>
+      expect(liveWaitForActiveTurnsToSettle).toHaveBeenCalled(),
+    );
+    for (let tick = 0; tick < 20; tick++) {
+      await Promise.resolve();
+    }
+
+    expect(recording.finalize).not.toHaveBeenCalled();
+    releaseFork();
+    await branch;
+    await close;
+    expect(recording.finalize).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

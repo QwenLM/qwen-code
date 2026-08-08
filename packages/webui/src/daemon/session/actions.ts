@@ -24,7 +24,11 @@ import type {
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
-import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
+import {
+  isDaemonTurnError,
+  isStaleBranchPointError,
+  type PromptResult,
+} from '@qwen-code/sdk/daemon';
 import { extractHttpStatus } from './httpErrors.js';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
@@ -1302,7 +1306,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async branchSession(name?: string) {
+    async branchSession(name?: string, atRecordId?: string) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -1310,13 +1314,10 @@ export function createDaemonSessionActions({
         'branch_session',
       );
       try {
-        const result = await withActionTimeout(
-          session.client.branchSession(
-            session.sessionId,
-            { name },
-            session.clientId,
-          ),
-          'Branch session timed out',
+        const result = await session.client.branchSession(
+          session.sessionId,
+          { name, atRecordId },
+          session.clientId,
         );
         persistStableClientId(result.clientId, result.sessionId);
         void startSessionSwitch(result.sessionId, 'load').catch(
@@ -1335,6 +1336,9 @@ export function createDaemonSessionActions({
           displayName: result.displayName,
         };
       } catch (error) {
+        if (isStaleBranchPointError(error)) {
+          throw markNoticeDispatched(error);
+        }
         throw dispatchActionError(
           addNotice,
           'Branch session failed',

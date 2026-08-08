@@ -443,6 +443,7 @@ export interface DaemonSessionActions {
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
+    atRecordId?: string,
   ): Promise<{ sessionId: string; displayName: string }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }

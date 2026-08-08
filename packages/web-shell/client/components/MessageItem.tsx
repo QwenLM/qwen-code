@@ -1,4 +1,4 @@
-import { memo, type ReactElement } from 'react';
+import { memo, useMemo, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
@@ -34,7 +34,8 @@ interface MessageItemProps {
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onBranchSession?: () => void;
+  onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+  branchRecordId?: string;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
@@ -53,6 +54,7 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onBranchSession,
+  branchRecordId,
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
@@ -60,6 +62,13 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  const boundBranchSession = useMemo(
+    () =>
+      onBranchSession && branchRecordId
+        ? () => onBranchSession(branchRecordId)
+        : undefined,
+    [onBranchSession, branchRecordId],
+  );
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -79,7 +88,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
-            onBranchSession={onBranchSession}
+            onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
             isLocateFlashing={isLocateFlashing}
@@ -271,6 +280,7 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
+  if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;

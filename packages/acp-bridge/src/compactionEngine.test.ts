@@ -1115,6 +1115,35 @@ describe('transcript record provenance compaction', () => {
       },
     });
   });
+
+  it('preserves a replay branch anchor while merging text chunks', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const first = withSources(makeTextChunk(1, 'one '), ['assistant-record']);
+    const firstUpdate = updateOf(first);
+    firstUpdate['_meta'] = {
+      qwenTranscript: {
+        sourceRecordIds: ['assistant-record'],
+        branchRecordId: 'checkpoint-record',
+      },
+    };
+    engine.ingest(first);
+    engine.ingest(withSources(makeTextChunk(2, 'two'), ['assistant-record']));
+    engine.ingest(makeTurnComplete(3));
+
+    const textEvent = engine
+      .snapshot()
+      .compactedTurns.find(
+        (event) =>
+          event.type === 'session_update' &&
+          updateOf(event)['sessionUpdate'] === 'agent_message_chunk',
+      );
+    expect(updateOf(textEvent!)['_meta']).toMatchObject({
+      qwenTranscript: {
+        sourceRecordIds: ['assistant-record'],
+        branchRecordId: 'checkpoint-record',
+      },
+    });
+  });
 });
 
 describe('EventBus + CompactionEngine integration', () => {

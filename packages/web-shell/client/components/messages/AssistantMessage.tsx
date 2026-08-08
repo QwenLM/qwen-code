@@ -25,7 +25,7 @@ interface AssistantMessageProps {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
-  onBranchSession?: () => void;
+  onBranchSession?: () => void | Promise<void>;
   showFooterActions?: boolean;
   showBranchAction?: boolean;
   isLocateFlashing?: boolean;
@@ -45,6 +45,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   const { t } = useI18n();
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, setCopied] = useState(false);
+  const [branchPending, setBranchPending] = useState(false);
   const showFooter = !!content && !isStreaming && showFooterActions;
   const customFooter = useMemo(
     () =>
@@ -53,6 +54,17 @@ export const AssistantMessage = memo(function AssistantMessage({
         : undefined,
     [customFooterInfo, renderAssistantTurnFooter],
   );
+  const handleBranch = useCallback(async () => {
+    if (!onBranchSession || branchPending) return;
+    setBranchPending(true);
+    try {
+      await onBranchSession();
+    } catch {
+      // host owns error surfacing
+    } finally {
+      setBranchPending(false);
+    }
+  }, [branchPending, onBranchSession]);
   const handleCopy = useCallback(() => {
     const write = navigator.clipboard?.writeText(content);
     if (!write) {
@@ -102,7 +114,8 @@ export const AssistantMessage = memo(function AssistantMessage({
               className={styles.copyButton}
               title={t('assistant.branch')}
               aria-label={t('assistant.branch')}
-              onClick={onBranchSession}
+              disabled={branchPending}
+              onClick={() => void handleBranch()}
             >
               <BranchIcon />
             </button>

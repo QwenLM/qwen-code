@@ -770,6 +770,91 @@ describe('createDaemonSessionActions', () => {
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
     expect(restartEventStream).not.toHaveBeenCalled();
   });
+
+  it('rethrows a stale branch point error without a generic notice', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.client.branchSession.mockRejectedValueOnce(
+      new DaemonHttpError(409, { code: 'branch_point_invalid' }, 'Conflict'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.branchSession(undefined, 'a1')).rejects.toMatchObject({
+      _alreadyDispatched: true,
+    });
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('reports non-stale branch failures with a user action notice', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.client.branchSession.mockRejectedValueOnce(
+      new DaemonHttpError(500, undefined, 'Agent failure'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.branchSession(undefined, 'a1')).rejects.toMatchObject({
+      _alreadyDispatched: true,
+    });
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'daemon.branch_session.failed',
+        operation: 'branch_session',
+      }),
+    );
+  });
+
+  it('keeps waiting for a dispatched branch beyond the generic action timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const branchResult = createDeferred<{
+        sessionId: string;
+        clientId: string;
+        workspaceCwd: string;
+        attached: boolean;
+        state: Record<string, never>;
+        displayName: string;
+      }>();
+      session.client.branchSession.mockReturnValueOnce(branchResult.promise);
+      const addNotice = vi.fn((notice) => notice);
+      const { actions, pendingSessionLoadRef } = createActionsHarness({
+        addNotice,
+        session,
+      });
+
+      let settled = false;
+      const branch = actions
+        .branchSession(undefined, 'checkpoint-1')
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(settled).toBe(false);
+      expect(addNotice).not.toHaveBeenCalled();
+
+      branchResult.resolve({
+        sessionId: 'session-b',
+        clientId: 'client-session-b',
+        workspaceCwd: '/workspace',
+        attached: false,
+        state: {},
+        displayName: 'Historical branch',
+      });
+      await expect(branch).resolves.toEqual({
+        sessionId: 'session-b',
+        displayName: 'Historical branch',
+      });
+      if (pendingSessionLoadRef.current) {
+        clearTimeout(pendingSessionLoadRef.current.timeout);
+        pendingSessionLoadRef.current.resolve();
+        pendingSessionLoadRef.current = undefined;
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
 });
 
 function createActionsHarness(
@@ -863,6 +948,7 @@ function createMockSession(sessionId: string) {
       setSessionApprovalMode: vi.fn(),
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
+      branchSession: vi.fn(),
     },
     cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),

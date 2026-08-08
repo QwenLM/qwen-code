@@ -394,6 +394,8 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    getTranscriptCursor: ReturnType<typeof vi.fn>;
+    recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -619,6 +621,8 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      getTranscriptCursor: vi.fn().mockReturnValue({ recordId: null }),
+      recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
     };
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
@@ -855,6 +859,7 @@ describe('Session', () => {
         mockConfig,
         mockClient,
         mockSettings,
+        undefined,
         () => {
           changes++;
         },
@@ -2038,6 +2043,51 @@ describe('Session', () => {
     await expect(prompt).rejects.toMatchObject({ code: -32602 });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     releaseClose();
+  });
+
+  it('rejects a prompt while an exclusive history mutation is active', async () => {
+    const releaseMutation = session.beginHistoryMutation();
+
+    expect(session.isIdle()).toBe(false);
+    await expect(
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'must wait for the branch' }],
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+    releaseMutation();
+    expect(session.isIdle()).toBe(true);
+  });
+
+  it('rejects a prompt when a history mutation begins during writer admission', async () => {
+    let resolveAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      resolveAdmission = resolve;
+    });
+    let markAdmissionStarted!: () => void;
+    const admissionStarted = new Promise<void>((resolve) => {
+      markAdmissionStarted = resolve;
+    });
+    vi.mocked(mockConfig.assertCanStartTurn).mockImplementationOnce(
+      async () => {
+        markAdmissionStarted();
+        await admission;
+      },
+    );
+
+    const prompt = session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'must not race the branch' }],
+    });
+    await admissionStarted;
+    const releaseMutation = session.beginHistoryMutation();
+    resolveAdmission();
+
+    await expect(prompt).rejects.toMatchObject({ code: -32602 });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    releaseMutation();
   });
 
   it('does not reopen a disposed session when a close gate releases late', async () => {
@@ -4010,6 +4060,62 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('completes the turn when branch checkpoint recording fails', async () => {
+      const checkpointError = new Error('checkpoint storage unavailable');
+      mockChatRecordingService.getTranscriptCursor = vi
+        .fn()
+        .mockReturnValue({ recordId: 'turn-start' });
+      mockChatRecordingService.recordBranchCheckpointTransaction = vi
+        .fn()
+        .mockRejectedValue(checkpointError);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      debugLoggerWarnSpy.mockClear();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'complete without a checkpoint' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(
+        mockChatRecordingService.recordBranchCheckpointTransaction,
+      ).toHaveBeenCalledWith({
+        startExclusiveRecordUuid: 'turn-start',
+        stopReason: 'end_turn',
+      });
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'Failed to record branch checkpoint; completing the turn without a branch point',
+        checkpointError,
+      );
+    });
+
+    it('attaches branch point metadata when checkpoint recording succeeds', async () => {
+      const branchPoint = {
+        assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
+        checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
+      };
+      mockChatRecordingService.getTranscriptCursor = vi
+        .fn()
+        .mockReturnValue({ recordId: 'turn-start' });
+      mockChatRecordingService.recordBranchCheckpointTransaction = vi
+        .fn()
+        .mockResolvedValue(branchPoint);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(result._meta?.['qwen.branchPoint']).toEqual(branchPoint);
+    });
+
     it('installs a trusted daemon context only for the root prompt', async () => {
       const trustedContext: core.InvocationContextV1 = {
         version: 1,
@@ -23037,6 +23143,133 @@ describe('Session', () => {
       expect(internals.notificationQueue).toHaveLength(0);
       expect(internals.notificationProcessing).toBe(false);
       expect(internals.disposed).toBe(true);
+    });
+  });
+
+  describe('automatic drain serialization on the history mutation gate', () => {
+    // Mirrors acpAgent's `runExclusiveHistoryMutation` FIFO gate that the
+    // interactive prompt + checkpoint transaction runs under, and that
+    // Session receives as `runExclusiveAutomaticHistoryMutation`.
+    function createGatedRunner() {
+      let tail: Promise<void> = Promise.resolve();
+      const run = <T>(operation: () => Promise<T>): Promise<T> => {
+        const previous = tail;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        tail = previous.then(() => gate);
+        return (async () => {
+          await previous;
+          try {
+            return await operation();
+          } finally {
+            release();
+          }
+        })();
+      };
+      return run;
+    }
+
+    async function settlePendingWork() {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+
+    it('waits for an interactive checkpoint mutation before draining cron', async () => {
+      const runExclusive = createGatedRunner();
+      const gateSession = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        runExclusive,
+      );
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for gate test'),
+      );
+      let fireCron:
+        | ((job: { id: string; prompt: string; cronExpr: string }) => void)
+        | undefined;
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn((callback: typeof fireCron) => {
+          fireCron = callback;
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      gateSession.startCronScheduler();
+      await vi.waitFor(() => expect(scheduler.start).toHaveBeenCalled());
+
+      // The interactive prompt + checkpoint transaction holds the gate.
+      let releaseCheckpoint!: () => void;
+      const checkpointGate = new Promise<void>((resolve) => {
+        releaseCheckpoint = resolve;
+      });
+      const checkpointMutation = runExclusive(() => checkpointGate);
+
+      fireCron?.({ id: 'task-1', prompt: 'scheduled', cronExpr: '* * * * *' });
+      await settlePendingWork();
+
+      // The cron drain queued behind the checkpoint mutation and its
+      // exclusive body has not started.
+      expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+      releaseCheckpoint();
+      await checkpointMutation;
+      await vi.waitFor(() =>
+        expect(mockConfig.assertCanStartTurn).toHaveBeenCalled(),
+      );
+
+      gateSession.dispose();
+    });
+
+    it('waits for an interactive checkpoint mutation before draining notifications', async () => {
+      const runExclusive = createGatedRunner();
+      const gateSession = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        runExclusive,
+      );
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for gate test'),
+      );
+      const notify = vi
+        .mocked(mockBackgroundTaskRegistry.setNotificationCallback)
+        .mock.calls.at(-1)?.[0];
+      expect(notify).toBeDefined();
+
+      // The interactive prompt + checkpoint transaction holds the gate.
+      let releaseCheckpoint!: () => void;
+      const checkpointGate = new Promise<void>((resolve) => {
+        releaseCheckpoint = resolve;
+      });
+      const checkpointMutation = runExclusive(() => checkpointGate);
+
+      notify?.('Agent done', 'agent finished', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await settlePendingWork();
+
+      // The notification drain queued behind the checkpoint mutation and
+      // its exclusive body has not started.
+      expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+      releaseCheckpoint();
+      await checkpointMutation;
+      await vi.waitFor(() =>
+        expect(mockConfig.assertCanStartTurn).toHaveBeenCalled(),
+      );
+
+      gateSession.dispose();
     });
   });
 

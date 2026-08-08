@@ -476,6 +476,24 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   );
 }
 
+/**
+ * The daemon rejected a session branch because the requested checkpoint is
+ * no longer on the session's active history path. Daemon action layers and
+ * UI shells both recover from this contract, so the predicate lives here to
+ * keep the copies from drifting.
+ */
+export function isStaleBranchPointError(
+  error: unknown,
+): error is DaemonHttpError {
+  return (
+    error instanceof DaemonHttpError &&
+    error.status === 409 &&
+    typeof error.body === 'object' &&
+    error.body !== null &&
+    (error.body as Record<string, unknown>)['code'] === 'branch_point_invalid'
+  );
+}
+
 export interface CreateSessionRequest {
   /**
    * Workspace path the daemon must have registered. When
@@ -2522,6 +2540,7 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           ...(req.name !== undefined ? { name: req.name } : {}),
+          atRecordId: req.atRecordId,
         }),
       },
       async (res) => {
@@ -2530,6 +2549,11 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonBranchedSession;
       },
+      // 0 disables the per-call timeout: branch creation restores the forked
+      // session server-side and can exceed fetchTimeoutMs on large sessions.
+      // The bridge/agent side bounds and reports failures; a client-side
+      // abort here could leave a committed branch unobserved.
+      0,
     );
   }
 
@@ -6102,9 +6126,33 @@ export function matchTurnEvent(
   promptId: string,
 ): PromptResult | undefined {
   if (event.type === 'turn_complete') {
-    const data = event.data as { promptId?: string; stopReason?: string };
+    const data = event.data as {
+      promptId?: string;
+      stopReason?: string;
+      branchPoint?: {
+        assistantRecordUuid?: unknown;
+        checkpointUuid?: unknown;
+      };
+    };
     if (data.promptId === promptId) {
-      return { stopReason: data.stopReason ?? 'end_turn' };
+      const stopReason = data.stopReason ?? 'end_turn';
+      const recordUuidPattern =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const branchPoint =
+        stopReason === 'end_turn' &&
+        typeof data.branchPoint?.assistantRecordUuid === 'string' &&
+        recordUuidPattern.test(data.branchPoint.assistantRecordUuid) &&
+        typeof data.branchPoint.checkpointUuid === 'string' &&
+        recordUuidPattern.test(data.branchPoint.checkpointUuid)
+          ? {
+              assistantRecordUuid: data.branchPoint.assistantRecordUuid,
+              checkpointUuid: data.branchPoint.checkpointUuid,
+            }
+          : undefined;
+      return {
+        stopReason,
+        ...(branchPoint ? { branchPoint } : {}),
+      };
     }
   }
   if (event.type === 'turn_error') {

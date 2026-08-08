@@ -120,6 +120,8 @@ describe('Session.pendingWorktreeNotice', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        getTranscriptCursor: vi.fn().mockReturnValue({ recordId: null }),
+        recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
         recordUserMessage: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),

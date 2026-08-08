@@ -218,6 +218,10 @@ const {
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
       getRewindSnapshots: vi.fn().mockResolvedValue([]),
       rewindSession: vi.fn().mockResolvedValue(undefined),
+      branchSession: vi.fn().mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+      }),
       submitPermission: vi.fn().mockResolvedValue(true),
       clearGoal: vi.fn().mockResolvedValue(undefined),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
@@ -298,6 +302,7 @@ const {
       latestMessageListProps: null as {
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
+        onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
       } | null,
@@ -409,8 +414,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/sdk/daemon', () => ({
-  DaemonHttpError: class DaemonHttpError extends Error {
+vi.mock('@qwen-code/sdk/daemon', () => {
+  class DaemonHttpError extends Error {
     constructor(
       readonly status: number,
       readonly body: unknown,
@@ -418,10 +423,20 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
     ) {
       super(message);
     }
-  },
-  DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
-  isDaemonTurnError: () => false,
-}));
+  }
+  return {
+    DaemonHttpError,
+    DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
+    isDaemonTurnError: () => false,
+    isStaleBranchPointError: (error: unknown): boolean =>
+      error instanceof DaemonHttpError &&
+      error.status === 409 &&
+      typeof error.body === 'object' &&
+      error.body !== null &&
+      (error.body as Record<string, unknown>)['code'] ===
+        'branch_point_invalid',
+  };
+});
 
 vi.mock('./hooks/useMessages', () => ({
   useMessages: () => testState.messages,
@@ -597,6 +612,7 @@ vi.mock('./components/MessageList', async () => {
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
+        onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
         welcomeHeader?: React.ReactNode;
@@ -2431,6 +2447,10 @@ beforeEach(() => {
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
   mockSessionActions.getRewindSnapshots.mockResolvedValue([]);
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
+  mockSessionActions.branchSession.mockResolvedValue({
+    sessionId: 'branch-1',
+    displayName: 'Historical branch',
+  });
   mockSessionActions.submitPermission.mockResolvedValue(undefined);
   mockSessionActions.clearGoal.mockResolvedValue(undefined);
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
@@ -4309,6 +4329,232 @@ describe('App read-only local commands mid-turn', () => {
 });
 
 describe('App session callbacks', () => {
+  it('forwards an Assistant checkpoint and returns the pending branch request', async () => {
+    const branch = deferred<{
+      sessionId: string;
+      displayName: string;
+    }>();
+    mockSessionActions.branchSession.mockReturnValue(branch.promise);
+    renderApp();
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
+      undefined,
+      'checkpoint-1',
+    );
+    expect(request!).toBeInstanceOf(Promise);
+
+    branch.resolve({
+      sessionId: 'branch-1',
+      displayName: 'Historical branch',
+    });
+    await act(async () => {
+      await request;
+    });
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        text: expect.stringContaining('Historical branch') as string,
+      }),
+    ]);
+  });
+
+  it('reloads the transcript when a historical checkpoint becomes stale', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.(
+        'stale-checkpoint',
+      );
+    });
+
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
+      undefined,
+      'stale-checkpoint',
+    );
+    expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path. The transcript has been refreshed.',
+    );
+  });
+
+  it('does not reload an unrelated session when the branch source was switched away', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    let rejectBranch!: (error: unknown) => void;
+    mockSessionActions.branchSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectBranch = reject;
+      }),
+    );
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
+    });
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
+      undefined,
+      'stale-checkpoint',
+    );
+
+    // The user switches to another session before the branch call returns.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender({ onToast });
+    });
+    await flush();
+
+    await act(async () => {
+      rejectBranch(
+        new DaemonHttpError(
+          409,
+          { code: 'branch_point_invalid' },
+          'Invalid branch point',
+        ),
+      );
+      await request;
+    });
+
+    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith('error', 'Failed to branch session.');
+  });
+
+  it('explains a stale checkpoint without reloading when pagination is unsupported', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    // beforeEach leaves capabilities.features empty, so the daemon does not
+    // advertise session_transcript_pagination.
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.(
+        'stale-checkpoint',
+      );
+    });
+
+    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
+    );
+  });
+
+  it('reports when the stale-checkpoint transcript refresh itself fails', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    mockSessionActions.reloadSession.mockRejectedValue(
+      new Error('Session load superseded'),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.(
+        'stale-checkpoint',
+      );
+    });
+
+    expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+    );
+  });
+
+  it('skips the stale-recovery toast when a switch lands during the reload', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    let rejectReload!: (error: unknown) => void;
+    mockSessionActions.reloadSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectReload = reject;
+      }),
+    );
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.reloadSession).toHaveBeenCalled(),
+    );
+
+    // The user switches away while the recovery reload is in flight, and the
+    // superseded load then rejects.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender({ onToast });
+    });
+    await flush();
+
+    await act(async () => {
+      rejectReload(new DOMException('Session load superseded', 'AbortError'));
+      await request;
+    });
+
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+    );
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path. The transcript has been refreshed.',
+    );
+  });
+
   it('binds the main composer Voice target to its active secondary session', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
