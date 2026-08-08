@@ -30,6 +30,7 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { hasExitStarted } from '../utils/exit-state.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import type { PeerUserFrame } from './peer-frames.js';
 
@@ -173,7 +174,17 @@ export class InboundGate {
     // the `delivered` receipt would tell the sender the opposite. A parked
     // one strands the same way: nothing will ever release it, and the
     // sender would wait on a decision that cannot come.
-    if (this.shuttingDown) {
+    //
+    // `shuttingDown` alone is too late. It is set by `shutdown()`, whose
+    // only production caller is `PeerMessaging.close()`, registered near
+    // the end of the FIFO cleanup chain — behind cleanups that each get
+    // their own multi-second budget. The whole point of the check is the
+    // window this gate is open while the process is already dying, and
+    // that window opens when the chain starts, not when this gate's turn
+    // in it arrives. So the process-level exit flag is what actually
+    // closes it; `shuttingDown` still covers a gate torn down on its own,
+    // without a process exit.
+    if (this.shuttingDown || hasExitStarted()) {
       debugLogger.debug(
         `not admitting peer message ${frame.msgId} during shutdown; expiring it`,
       );

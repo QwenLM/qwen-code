@@ -14,6 +14,14 @@ import {
   type InboundPolicy,
 } from './inbound-gate.js';
 import { buildUserFrame, type PeerUserFrame } from './peer-frames.js';
+import {
+  _resetExitStateForTest,
+  markExitStarted,
+} from '../utils/exit-state.js';
+
+beforeEach(() => {
+  _resetExitStateForTest();
+});
 
 interface Harness {
   gate: InboundGate;
@@ -313,6 +321,41 @@ describe('shutdown', () => {
     const late = frame();
     expect(h.gate.admit(late)).toBe('refused');
     expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'denied' });
+  });
+
+  // `shutdown()` runs from `PeerMessaging.close()`, which sits near the end
+  // of the exit-cleanup chain. The whole window this gate has to guard is
+  // the one *before* its own cleanup is reached, so the process-level exit
+  // flag — not `shutdown()` — is what has to close it.
+  it('expires an accept-policy arrival once exit starts, before shutdown() runs', () => {
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    markExitStarted();
+
+    const late = frame();
+    expect(h.gate.admit(late)).toBe('refused');
+    expect(h.delivered).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
+  });
+
+  it('expires a hold-policy arrival once exit starts, before shutdown() runs', () => {
+    // Parking is no better than delivering here: nothing will ever release
+    // it, so the sender would wait on a decision that cannot come.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    markExitStarted();
+
+    const late = frame();
+    expect(h.gate.admit(late)).toBe('refused');
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
+  });
+
+  it('admits normally while no exit is under way', () => {
+    // Pins that the flag is read, not assumed: a gate built after some
+    // earlier process marked exit must not inherit that state.
+    const h = harness({ mode: ApprovalMode.DEFAULT });
+    const f = frame();
+    expect(h.gate.admit(f)).toBe('accept');
+    expect(h.delivered).toHaveLength(1);
   });
 });
 

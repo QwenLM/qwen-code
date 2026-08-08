@@ -47,9 +47,10 @@ export class PeerSendError extends Error {
  *
  * Rejects with a {@link PeerSendError} carrying the underlying errno so
  * callers can distinguish the cases that matter to a user: ENOENT and
- * ECONNREFUSED mean the peer is gone and its address is stale, while
- * EBUSY means it is alive but its listen backlog is momentarily full and
- * the same address is worth retrying.
+ * ECONNREFUSED mean the peer is gone and its address is stale, while a
+ * full listen backlog means it is alive and the same address is worth
+ * retrying. Which errno reports that overflow is platform-dependent:
+ * Linux returns EAGAIN, other platforms EBUSY.
  */
 export function sendPeerFrame(
   socketPath: string,
@@ -121,11 +122,13 @@ export async function sendDeliveryStatus(
 /**
  * True when something is listening on `socketPath`.
  *
- * `EBUSY` counts as alive: the peer is listening but its backlog is full,
- * which is a busy session, not a dead one. Everything else — including a
- * socket file left behind by a crashed process — is dead, which is the
- * point: a stale socket inode still stats fine, so only a dial can tell
- * the difference.
+ * A full listen backlog counts as alive: the peer is listening but
+ * momentarily saturated, which is a busy session, not a dead one. Linux
+ * reports that overflow as `EAGAIN` and other platforms as `EBUSY`, so
+ * both have to count — keying on `EBUSY` alone buries every congested
+ * Linux peer. Everything else — including a socket file left behind by a
+ * crashed process — is dead, which is the point: a stale socket inode
+ * still stats fine, so only a dial can tell the difference.
  */
 export function probePeerSocket(socketPath: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -140,7 +143,7 @@ export function probePeerSocket(socketPath: string): Promise<boolean> {
     };
     socket.on('connect', () => settle(true));
     socket.on('error', (error: NodeJS.ErrnoException) =>
-      settle(error.code === 'EBUSY'),
+      settle(error.code === 'EBUSY' || error.code === 'EAGAIN'),
     );
     socket.setTimeout(PROBE_TIMEOUT_MS, () => settle(false));
   });

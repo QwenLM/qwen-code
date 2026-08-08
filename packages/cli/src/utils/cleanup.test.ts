@@ -6,6 +6,10 @@
 
 import { vi } from 'vitest';
 import {
+  _resetExitStateForTest,
+  hasExitStarted,
+} from '@qwen-code/qwen-code-core';
+import {
   _resetCleanupFunctionsForTest,
   registerCleanup,
   runExitCleanup,
@@ -13,11 +17,29 @@ import {
 
 describe('cleanup', () => {
   beforeEach(() => {
+    _resetExitStateForTest();
     // The previous `global['cleanupFunctions'] = []` setup was dead code —
     // the array is module-private, not on `global`. Tests passed by accident
     // because `runExitCleanup` itself clears at the end. A test that throws
     // before reaching `runExitCleanup` would leak state into the next case.
     _resetCleanupFunctionsForTest();
+  });
+
+  it('marks exit started before the first cleanup runs', async () => {
+    // Not after the chain: the point of the flag is the window while the
+    // chain is still working through cleanups registered ahead of yours.
+    // A cross-session peer inbox reads it to stop receipting messages
+    // `delivered` into a queue that `process.exit()` is about to kill.
+    expect(hasExitStarted()).toBe(false);
+    let startedWhenFirstCleanupRan: boolean | undefined;
+    registerCleanup(() => {
+      startedWhenFirstCleanupRan = hasExitStarted();
+    });
+
+    await runExitCleanup();
+
+    expect(startedWhenFirstCleanupRan).toBe(true);
+    expect(hasExitStarted()).toBe(true);
   });
 
   it('should run a registered synchronous function', async () => {

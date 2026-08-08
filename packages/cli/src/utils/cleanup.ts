@@ -6,6 +6,7 @@
 
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
+import { markExitStarted } from '@qwen-code/qwen-code-core';
 
 const cleanupFunctions: Array<(() => void) | (() => Promise<void>)> = [];
 
@@ -68,6 +69,10 @@ export interface RunExitCleanupOptions {
 export async function runExitCleanup(
   options: RunExitCleanupOptions = {},
 ): Promise<void> {
+  // Before the first cleanup runs, not after the last: code that must
+  // refuse new work once exit begins cannot wait for its own cleanup to
+  // be reached, because the chain below can spend seconds getting there.
+  markExitStarted();
   const perFn = options._testPerFnTimeoutMs ?? PER_CLEANUP_TIMEOUT_MS;
   const overall = options._testOverallTimeoutMs ?? OVERALL_CLEANUP_TIMEOUT_MS;
 
