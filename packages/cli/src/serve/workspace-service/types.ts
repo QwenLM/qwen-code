@@ -426,6 +426,17 @@ export interface DaemonWorkspaceServiceDeps {
   contextFilename: string;
 
   /**
+   * Optional resolver for the context file path. When provided, `initWorkspace`
+   * uses it to compute the target path and effective workspace root instead of
+   * resolving against `boundWorkspace` directly. This allows worktree-aware
+   * resolution where the context file lives in the worktree, not the project root.
+   */
+  resolveContextFile?: (
+    filename: string,
+    boundWorkspace: string,
+  ) => { target: string; effectiveWorkspace: string };
+
+  /**
    * Daemon-host status provider for env + preflight cells.
    * When present, `getWorkspaceEnvStatus` returns daemon-local process state
    * without querying ACP. When absent, falls back to idle placeholders.

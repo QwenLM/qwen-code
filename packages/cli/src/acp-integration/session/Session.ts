@@ -1463,6 +1463,14 @@ export class Session implements SessionContext {
    */
   pendingWorktreeNotice: string | null = null;
 
+  /**
+   * Absolute path to the worktree when this session operates inside one.
+   * Set by acpAgent after session creation; `null` for regular sessions.
+   * Read by `removeStoredSessionEntry` to clear the agent-level
+   * `defaultSettingsCwd` when the owning session closes.
+   */
+  worktreeCwd: string | null = null;
+
   /** One-shot model notice for background agents restored with the session. */
   pendingRecoveredAgentsNotice: string | null = null;
 

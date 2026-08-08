@@ -24,6 +24,13 @@ import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 const { mockRunExitCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
 }));
+const { mockExistsSync } = vi.hoisted(() => ({
+  mockExistsSync: vi.fn().mockReturnValue(true),
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, existsSync: mockExistsSync };
+});
 const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
   mockMcpPoolDrainAll: vi
     .fn()
@@ -1973,6 +1980,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     processExitSpy.mockRestore();
     stdinDestroySpy.mockRestore();
     stdoutDestroySpy.mockRestore();
+  });
+
+  afterEach(() => {
+    mockExistsSync.mockReturnValue(true);
   });
 
   it('initialize response includes mcpCapabilities with sse and http', async () => {
@@ -4274,6 +4285,58 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       ).rejects.toThrow('relocation failed');
       expect(lastSessionMock?.hardSuspendTodoStopGuard).toHaveBeenCalledOnce();
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true });
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('session/cd sets worktreeCwd and getCore resolves against the worktree path', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-cd-worktree-settings-'),
+    );
+    const canonicalTargetDir = await fs.realpath(targetDir);
+    const innerConfig = await setupSessionMocks(sessionId);
+    const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+    Object.assign(innerConfig, {
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory,
+    });
+    Object.assign(innerConfig.getGeminiClient(), {
+      addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: targetDir,
+        }),
+      ).resolves.toMatchObject({
+        previousCwd: '/tmp',
+        newCwd: canonicalTargetDir,
+      });
+
+      expect(
+        (lastSessionMock as Record<string, unknown>)?.['worktreeCwd'],
+      ).toBe(canonicalTargetDir);
+
+      vi.mocked(loadSettings).mockClear();
+      await agent.extMethod('qwen/settings/getCore', {});
+      expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(canonicalTargetDir);
     } finally {
       await fs.rm(targetDir, { recursive: true, force: true });
     }
@@ -9697,6 +9760,167 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         value: 42,
       }),
     ).rejects.toThrowError(/value must be a string/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings handlers resolve against worktree cwd set by createAndStoreSession', async () => {
+    const WORKTREE_DIR = os.tmpdir();
+    const innerConfig = await setupSessionMocks('wt-settings-session');
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/fake/project', mcpServers: [] });
+
+    vi.mocked(loadSettings).mockClear();
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(WORKTREE_DIR);
+
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(process.cwd());
+    innerConfig.getSessionId = vi.fn().mockReturnValue('regular-session');
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    await agent.newSession({ cwd: '/fake/project', mcpServers: [] });
+
+    // The fallback loop scans all sessions for worktreeCwd; the first
+    // session's worktreeCwd is still set, so it wins over process.cwd().
+    vi.mocked(loadSettings).mockClear();
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(WORKTREE_DIR);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings handlers fall back to process.cwd() after worktree session closes', async () => {
+    const WORKTREE_DIR = os.tmpdir();
+    const innerConfig = await setupSessionMocks('wt-close-session');
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/fake/project', mcpServers: [] });
+
+    vi.mocked(loadSettings).mockClear();
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(WORKTREE_DIR);
+
+    await agent.extMethod('qwen/control/session/close', {
+      sessionId: 'wt-close-session',
+    });
+
+    vi.mocked(loadSettings).mockClear();
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(process.cwd());
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore resolves per-session worktreeCwd via sessionId param', async () => {
+    const WORKTREE_DIR = os.tmpdir();
+    const innerConfig = await setupSessionMocks('per-session-wt-id');
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    const newResult = (await agent.newSession({
+      cwd: '/fake/project',
+      mcpServers: [],
+    })) as { sessionId: string };
+    const sessionId = newResult.sessionId;
+
+    vi.mocked(loadSettings).mockClear();
+    await agent.extMethod('qwen/settings/getCore', { sessionId });
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(WORKTREE_DIR);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore falls through to configWt when worktreeCwd dir is deleted', async () => {
+    const WORKTREE_DIR = '/fake/deleted-wt';
+    const innerConfig = await setupSessionMocks('deleted-wt-session');
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
+    (innerConfig as Record<string, unknown>)['getActiveWorktree'] = vi
+      .fn()
+      .mockReturnValue(null);
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    const newResult = (await agent.newSession({
+      cwd: '/fake/project',
+      mcpServers: [],
+    })) as { sessionId: string };
+    const sessionId = newResult.sessionId;
+
+    mockExistsSync.mockReturnValue(false);
+    try {
+      vi.mocked(loadSettings).mockClear();
+      await agent.extMethod('qwen/settings/getCore', { sessionId });
+      expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(process.cwd());
+    } finally {
+      mockExistsSync.mockReturnValue(true);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore uses configWt when worktreeCwd is deleted but activeWorktree exists', async () => {
+    const ACTIVE_WT = os.tmpdir();
+    const innerConfig = await setupSessionMocks('active-wt-session');
+    innerConfig.getTargetDir = vi.fn().mockReturnValue('/fake/deleted-wt');
+    (innerConfig as Record<string, unknown>)['getActiveWorktree'] = vi
+      .fn()
+      .mockReturnValue(ACTIVE_WT);
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    const newResult = (await agent.newSession({
+      cwd: '/fake/project',
+      mcpServers: [],
+    })) as { sessionId: string };
+    const sessionId = newResult.sessionId;
+
+    mockExistsSync.mockImplementation(
+      (p: string | Buffer | URL) => p === ACTIVE_WT,
+    );
+    try {
+      vi.mocked(loadSettings).mockClear();
+      await agent.extMethod('qwen/settings/getCore', { sessionId });
+      expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(ACTIVE_WT);
+    } finally {
+      mockExistsSync.mockReturnValue(true);
+    }
 
     mockConnectionState.resolve();
     await agentPromise;

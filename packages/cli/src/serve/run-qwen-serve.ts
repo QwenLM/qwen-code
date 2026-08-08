@@ -69,6 +69,7 @@ import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
+import { findEffectiveWorkspace } from './worktree-workspace.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -3968,6 +3969,13 @@ async function runQwenServeImpl(
       isWorkspaceTrusted: () => trustedWorkspace,
       assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
+      resolveContextFile: (filename, ws) => {
+        const effective = findEffectiveWorkspace(bridge, ws);
+        return {
+          target: path.resolve(effective, filename),
+          effectiveWorkspace: effective,
+        };
+      },
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,

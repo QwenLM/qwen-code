@@ -6,7 +6,9 @@
 
 import express from 'express';
 import type { Application } from 'express';
+import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { findEffectiveWorkspace } from './worktree-workspace.js';
 import {
   hashDaemonWorkspace,
   Storage,
@@ -1055,6 +1057,13 @@ export function createServeApp(
       boundWorkspace,
       isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
+      resolveContextFile: (filename, ws) => {
+        const effective = findEffectiveWorkspace(bridge, ws);
+        return {
+          target: path.resolve(effective, filename),
+          effectiveWorkspace: effective,
+        };
+      },
       statusProvider,
       workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider({
         ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
@@ -2128,6 +2137,8 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      resolveEffectiveWorkspace: () =>
+        findEffectiveWorkspace(primaryBridge, primaryBoundWorkspace),
       includeLiveVoice: liveVoiceSurfaceAvailable,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {

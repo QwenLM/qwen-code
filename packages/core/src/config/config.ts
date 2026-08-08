@@ -1795,6 +1795,7 @@ export class Config {
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
+  private activeWorktreePath: string | null = null;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -4634,6 +4635,14 @@ export class Config {
 
   getTargetDir(): string {
     return this.targetDir;
+  }
+
+  setActiveWorktree(worktreePath: string | null): void {
+    this.activeWorktreePath = worktreePath;
+  }
+
+  getActiveWorktree(): string | null {
+    return this.activeWorktreePath;
   }
 
   private getCurrentSessionArtifactMoves(

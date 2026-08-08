@@ -30,6 +30,7 @@ function makeApp(
   overrides: {
     captureGenerationAssertion?: () => (() => void) | undefined;
     afterPersist?: () => void;
+    resolveEffectiveWorkspace?: () => string;
   } = {},
 ) {
   const app = express();
@@ -49,6 +50,7 @@ function makeApp(
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
     captureGenerationAssertion: overrides.captureGenerationAssertion,
+    resolveEffectiveWorkspace: overrides.resolveEffectiveWorkspace,
     includeLiveVoice: true,
   });
 
@@ -477,4 +479,38 @@ describe('POST /workspace/settings', () => {
       );
     },
   );
+
+  it('GET /workspace/settings uses resolveEffectiveWorkspace when provided', async () => {
+    const { app } = makeApp({
+      resolveEffectiveWorkspace: () => '/worktree/effective',
+    });
+
+    const res = await request(app).get('/workspace/settings');
+
+    expect(res.status).toBe(200);
+    expect(loadSettings).toHaveBeenCalledWith(
+      '/worktree/effective',
+      expect.any(Object),
+    );
+  });
+
+  it('POST /workspace/settings uses resolveEffectiveWorkspace when provided', async () => {
+    const { app, persistSetting } = makeApp({
+      resolveEffectiveWorkspace: () => '/worktree/effective',
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'general.cleanupPeriodDays',
+      value: 7,
+    });
+
+    expect(res.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/worktree/effective',
+      expect.any(String),
+      'general.cleanupPeriodDays',
+      7,
+    );
+  });
 });

@@ -219,6 +219,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
           `Kept worktree "${this.params.name}" at ${worktreePath}. ` +
           `Resume work there by referencing this path in subsequent tool calls.`,
       };
+      if (this.config.getActiveWorktree?.() === worktreePath) {
+        this.config.setActiveWorktree?.(null);
+      }
       return {
         llmContent: JSON.stringify(output),
         returnDisplay: `Kept worktree **${this.params.name}** at \`${worktreePath}\``,
@@ -339,6 +342,10 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     if (!result.success) {
       return errorResult(result.error ?? 'Failed to remove worktree.');
     }
+    if (this.config.getActiveWorktree?.() === worktreePath) {
+      this.config.setActiveWorktree?.(null);
+    }
+
     if (result.branchPreserved) {
       // Status check passed and unmerged check passed, but the safe
       // delete still refused — most likely a race where new commits
@@ -358,7 +365,6 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
         returnDisplay: `Removed worktree directory **${this.params.name}**, branch \`${branch}\` preserved`,
       };
     }
-
     debugLogger.debug(
       `Removed user worktree: ${worktreePath} (branch=${branch})`,
     );
