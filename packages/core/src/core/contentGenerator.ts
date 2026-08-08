@@ -55,6 +55,7 @@ export interface ContentGenerator {
 
 export enum AuthType {
   USE_OPENAI = 'openai',
+  USE_OPENAI_RESPONSES = 'openai-responses',
   QWEN_OAUTH = 'qwen-oauth',
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
@@ -515,6 +516,13 @@ export async function createContentGenerator(
           './openaiContentGenerator/index.js'
         );
         return createOpenAIContentGenerator(generatorConfig, config);
+      };
+    } else if (authType === AuthType.USE_OPENAI_RESPONSES) {
+      loadBaseGenerator = async () => {
+        const { createOpenAIResponsesContentGenerator } = await import(
+          './openaiResponsesContentGenerator/index.js'
+        );
+        return createOpenAIResponsesContentGenerator(generatorConfig, config);
       };
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(
