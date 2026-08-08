@@ -26,8 +26,7 @@ export {
   parseGoalStateRecordPayloadV2,
 } from './goal-reducer.js';
 export {
-  isGoalCheckpointBookkeepingCause,
-  isGoalCheckpointBookkeepingTransition,
+  isGoalCheckpointBookkeepingRecord,
   projectGoalStateToLegacy,
   type LegacyActiveGoal,
   type LegacyGoalProjection,

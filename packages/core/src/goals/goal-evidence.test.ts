@@ -494,6 +494,88 @@ describe('Goal evidence catalog', () => {
     );
   });
 
+  it('caps oversized window content with a truncation marker', () => {
+    const records = [
+      record('cursor', 'system'),
+      record('evidence-large', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        text: 'x'.repeat(10_000),
+      }),
+      record('tool-large', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { output: 'y'.repeat(100_000), exitCode: 0 },
+      }),
+      ...Array.from({ length: 78 }, (_, index) =>
+        record(`evidence-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: `output ${index}`,
+        }),
+      ),
+    ];
+
+    const window = buildGoalEvidenceCheckpointWindow({
+      records,
+      goal: goal(),
+      permit: permit(),
+    });
+
+    // The 80th entry crosses the checkpoint entry threshold while the
+    // bounded previews keep the catalog whole.
+    expect(window.truncated).toBe(false);
+    expect(window.shouldCheckpoint).toBe(true);
+    expect(window.evidence).toHaveLength(80);
+
+    const largeAssistant = window.evidence.find(
+      ({ uuid }) => uuid === 'evidence-large',
+    );
+    expect(largeAssistant?.content.endsWith('\n\u2026[truncated]')).toBe(true);
+    expect(
+      Buffer.byteLength(largeAssistant!.content, 'utf8'),
+    ).toBeLessThanOrEqual(2_000);
+    expect(largeAssistant?.content.startsWith('x'.repeat(100))).toBe(true);
+
+    const largeTool = window.evidence.find(({ uuid }) => uuid === 'tool-large');
+    expect(Buffer.byteLength(largeTool!.content, 'utf8')).toBeLessThanOrEqual(
+      2_000,
+    );
+    expect(largeTool?.content.endsWith('\n\u2026[truncated]')).toBe(true);
+
+    const small = window.evidence.find(({ uuid }) => uuid === 'evidence-1');
+    expect(small?.content).toBe('output 1');
+  });
+
+  it('caps window content on a code point boundary for multi-byte text', () => {
+    const records = [
+      record('cursor', 'system'),
+      ...Array.from({ length: 26 }, (_, index) =>
+        record(`evidence-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: '\u4e2d'.repeat(5_000),
+        }),
+      ),
+    ];
+
+    const window = buildGoalEvidenceCheckpointWindow({
+      records,
+      goal: goal(),
+      permit: permit(),
+    });
+
+    expect(window.truncated).toBe(false);
+    expect(window.shouldCheckpoint).toBe(true);
+    const capped = window.evidence.find(({ uuid }) => uuid === 'evidence-0');
+    const bytes = Buffer.byteLength(capped!.content, 'utf8');
+    expect(bytes).toBeLessThanOrEqual(2_000);
+    expect(capped?.content.endsWith('\n\u2026[truncated]')).toBe(true);
+    // The prefix must survive the cap untouched, code point aligned.
+    expect(capped?.content.startsWith('\u4e2d'.repeat(600))).toBe(true);
+    expect(capped?.content).not.toContain('\ufffd');
+  });
+
   it('does not expand raw evidence below the checkpoint threshold', () => {
     let fullPayloadReads = 0;
     const level2: Record<string, unknown> = {};

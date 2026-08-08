@@ -16,8 +16,7 @@ import type {
   TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
-  isGoalCheckpointBookkeepingCause,
-  isGoalCheckpointBookkeepingTransition,
+  isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
   parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
@@ -881,11 +880,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
-      const bookkeepingOnly =
-        isGoalCheckpointBookkeepingTransition(
-          this.goalState,
-          payload.snapshot,
-        ) && isGoalCheckpointBookkeepingCause(payload.cause, this.goalCause);
+      const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
+        cause: payload.cause,
+        previousCause: this.goalCause,
+        previous: this.goalState,
+        next: payload.snapshot,
+      });
       const projection = projectGoalStateToLegacy(
         payload,
         this.goalState?.goal ?? null,

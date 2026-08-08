@@ -106,7 +106,7 @@ export function projectGoalStateToLegacy(
 
 // Checkpoint bookkeeping records differ from their predecessor only in
 // evidence bookkeeping fields, so display paths suppress them as duplicates.
-export function isGoalCheckpointBookkeepingTransition(
+function isGoalCheckpointBookkeepingTransition(
   previous: GoalSnapshotV2 | undefined,
   next: GoalSnapshotV2,
 ): boolean {
@@ -127,7 +127,7 @@ export function isGoalCheckpointBookkeepingTransition(
 // A shape-equal transition is bookkeeping only when its cause is a
 // checkpoint follow-up write; a verifier rejection that repeats the
 // preceding turn's snapshot is a genuine rejection card.
-export function isGoalCheckpointBookkeepingCause(
+function isGoalCheckpointBookkeepingCause(
   cause: GoalStateCause,
   previousCause: GoalStateCause | undefined,
 ): boolean {
@@ -135,6 +135,21 @@ export function isGoalCheckpointBookkeepingCause(
   return (
     cause === 'verifier_reject' &&
     (previousCause === 'verifier_reject' || previousCause === 'checkpoint')
+  );
+}
+
+// The one suppression predicate the replay and resume display paths share:
+// the record is a checkpoint bookkeeping rewrite of the snapshot the
+// previous goal_state record already carried.
+export function isGoalCheckpointBookkeepingRecord(input: {
+  cause: GoalStateCause;
+  previousCause: GoalStateCause | undefined;
+  previous: GoalSnapshotV2 | undefined;
+  next: GoalSnapshotV2;
+}): boolean {
+  return (
+    isGoalCheckpointBookkeepingTransition(input.previous, input.next) &&
+    isGoalCheckpointBookkeepingCause(input.cause, input.previousCause)
   );
 }
 

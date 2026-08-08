@@ -15,12 +15,13 @@ import type {
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
   GoalSnapshotV2,
+  GoalStateCause,
   HistoryGap,
   UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
-  isGoalCheckpointBookkeepingTransition,
+  isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
   stripTrailingUserPromptSubmitContextPart,
 } from '@qwen-code/qwen-code-core';
@@ -211,7 +212,8 @@ function convertToHistoryItems(
   const gapByChildUuid = indexGapsByChild(historyGaps);
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
-  let lastDisplayedGoalSnapshot: GoalSnapshotV2 | undefined;
+  let lastGoalStateSnapshot: GoalSnapshotV2 | undefined;
+  let lastGoalStateCause: GoalStateCause | undefined;
 
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
@@ -305,20 +307,24 @@ function convertToHistoryItems(
       // reconstructHistory truncates to the tail, so the at-command buffer is
       // already empty here; this keeps the invariant if that ever changes.
       pendingAtCommands.length = 0;
-      lastDisplayedGoalSnapshot = undefined;
+      lastGoalStateSnapshot = undefined;
+      lastGoalStateCause = undefined;
       items.push(createHistoryGapItem(gap));
     }
 
     if (record.type === 'system') {
       if (record.subtype === 'goal_state') {
         const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
-        if (payload && shouldDisplayGoalStateCause(payload.cause)) {
-          const bookkeepingOnly = isGoalCheckpointBookkeepingTransition(
-            lastDisplayedGoalSnapshot,
-            payload.snapshot,
-          );
-          lastDisplayedGoalSnapshot = payload.snapshot;
-          if (!bookkeepingOnly) {
+        if (payload) {
+          const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
+            cause: payload.cause,
+            previousCause: lastGoalStateCause,
+            previous: lastGoalStateSnapshot,
+            next: payload.snapshot,
+          });
+          lastGoalStateCause = payload.cause;
+          lastGoalStateSnapshot = payload.snapshot;
+          if (shouldDisplayGoalStateCause(payload.cause) && !bookkeepingOnly) {
             if (currentToolGroup.length > 0) {
               items.push({ type: 'tool_group', tools: [...currentToolGroup] });
               currentToolGroup = [];

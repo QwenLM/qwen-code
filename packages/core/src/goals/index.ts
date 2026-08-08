@@ -53,8 +53,7 @@ export type {
 } from './goal-reducer.js';
 export * from './goal-persistence.js';
 export {
-  isGoalCheckpointBookkeepingCause,
-  isGoalCheckpointBookkeepingTransition,
+  isGoalCheckpointBookkeepingRecord,
   projectGoalStateToLegacy,
 } from './goal-legacy-projection.js';
 export type {

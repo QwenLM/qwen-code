@@ -9,6 +9,7 @@ import {
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
+  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
   isGoalEvidenceProofKind,
@@ -132,7 +133,8 @@ export function reduceGoalControl(
   }
   if (
     current.status === 'usage_limited' &&
-    current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON
+    (current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON ||
+      current.lastReason === GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON)
   ) {
     throw new GoalInvalidTransitionError(
       'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',

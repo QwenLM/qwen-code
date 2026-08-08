@@ -21,6 +21,12 @@ const CATALOG_BYTE_LIMIT = 24_000;
 const CATALOG_LINEAGE_LIMIT = 16;
 const CHECKPOINT_ENTRY_THRESHOLD = 80;
 const CHECKPOINT_BYTE_THRESHOLD = 19_200;
+// 100 catalogued records x 2_000 bytes of content stays inside the
+// checkpoint verifier's 256_000-byte request limit once previous claims and
+// request envelope overhead are added, so one oversized tool output cannot
+// permanently exhaust a healthy Goal.
+const CHECKPOINT_CONTENT_BYTE_LIMIT = 2_000;
+const CHECKPOINT_CONTENT_TRUNCATION_MARKER = '\n\u2026[truncated]';
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
 const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
 
@@ -185,7 +191,7 @@ export function buildGoalEvidenceCheckpointWindow(
         entry.uuid,
       );
     }
-    return { ...entry, content };
+    return { ...entry, content: capCheckpointContent(content) };
   });
   return {
     previousClaims: structuredClone(
@@ -682,6 +688,24 @@ function legacySafeProvenance(
     return 'tool_result';
   }
   return undefined;
+}
+
+function capCheckpointContent(content: string): string {
+  if (Buffer.byteLength(content, 'utf8') <= CHECKPOINT_CONTENT_BYTE_LIMIT) {
+    return content;
+  }
+  const budget =
+    CHECKPOINT_CONTENT_BYTE_LIMIT -
+    Buffer.byteLength(CHECKPOINT_CONTENT_TRUNCATION_MARKER, 'utf8');
+  let byteLength = 0;
+  let cutoff = 0;
+  for (const codePoint of content) {
+    const codePointBytes = Buffer.byteLength(codePoint, 'utf8');
+    if (byteLength + codePointBytes > budget) break;
+    byteLength += codePointBytes;
+    cutoff += codePoint.length;
+  }
+  return `${content.slice(0, cutoff)}${CHECKPOINT_CONTENT_TRUNCATION_MARKER}`;
 }
 
 function evidenceContent(

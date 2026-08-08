@@ -20,10 +20,12 @@ import {
 } from './goal-checkpoint.js';
 import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import {
+  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
   isRepeatedBlockerProposal,
   type GoalControlRequest,
+  type GoalEvidenceCheckpoint,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -815,26 +817,43 @@ export function createGoalRuntime(
         await finishCheckpointCheck(attempt);
         return;
       }
-      const result = await checkpointVerifier(
-        {
-          goal: {
-            goalId: attempt.goal.goalId,
-            revision: attempt.goal.revision,
-            objective: attempt.goal.objective,
+      let checkpoint: GoalEvidenceCheckpoint;
+      try {
+        const result = await checkpointVerifier(
+          {
+            goal: {
+              goalId: attempt.goal.goalId,
+              revision: attempt.goal.revision,
+              objective: attempt.goal.objective,
+            },
+            previousClaims: window.previousClaims,
+            evidence: window.evidence,
           },
+          attempt.controller.signal,
+        );
+        if (attempt.controller.signal.aborted) return;
+        checkpoint = materializeGoalEvidenceCheckpoint({
+          checkpointId: attempt.recordUuid,
+          createdAt: Date.now(),
           previousClaims: window.previousClaims,
           evidence: window.evidence,
-        },
-        attempt.controller.signal,
-      );
-      if (attempt.controller.signal.aborted) return;
-      const checkpoint = materializeGoalEvidenceCheckpoint({
-        checkpointId: attempt.recordUuid,
-        createdAt: Date.now(),
-        previousClaims: window.previousClaims,
-        evidence: window.evidence,
-        result,
-      });
+          result,
+        });
+      } catch (error) {
+        if (attempt.controller.signal.aborted) return;
+        if (error instanceof GoalCheckpointVerifierInputTooLargeError) {
+          await recordCheckpointFailure(
+            attempt,
+            GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+          );
+          return;
+        }
+        // A transient or malformed checkpoint verification must not abort a
+        // healthy Goal: settle the attempt as bookkeeping so the evidence
+        // stays citable and a later turn retries the checkpoint.
+        await finishCheckpointCheck(attempt);
+        return;
+      }
       await recordCheckpoint(attempt, checkpoint);
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
@@ -847,13 +866,6 @@ export function createGoalRuntime(
         // legitimate empty turn, not an integrity failure; close the
         // attempt with bookkeeping only so the goal stays active.
         await finishCheckpointCheck(attempt);
-        return;
-      }
-      if (error instanceof GoalCheckpointVerifierInputTooLargeError) {
-        await recordCheckpointFailure(
-          attempt,
-          GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
-        );
         return;
       }
       const reason = error instanceof Error ? error.message : String(error);
