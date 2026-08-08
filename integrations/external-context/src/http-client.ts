@@ -151,9 +151,11 @@ async function readBoundedBody(response: Response): Promise<string> {
     }
   } finally {
     // Parity with `for await`, whose implicit iterator return() cancels the
-    // stream when the loop exits early (the oversize throw above).
+    // stream when the loop exits early (the oversize throw above) and is
+    // awaited before the error propagates — an immediate retry must not
+    // overlap this response's still-settling teardown.
     if (!finished) {
-      void reader.cancel().catch(() => undefined);
+      await reader.cancel().catch(() => undefined);
     }
     reader.releaseLock();
   }

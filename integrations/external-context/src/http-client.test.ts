@@ -130,6 +130,74 @@ describe('postJson bounded body reading', () => {
     expect(enqueued).toBeLessThanOrEqual(4);
   });
 
+  it('holds the oversize reject until a deferred cancellation settles', async () => {
+    // `for await` awaited iterator return() before propagating, so a caller
+    // retrying immediately could not overlap the old transport's teardown.
+    let resolveCancel!: () => void;
+    const cancelBarrier = new Promise<void>((resolve) => {
+      resolveCancel = resolve;
+    });
+    let cancelSeen!: () => void;
+    const cancelCalled = new Promise<void>((resolve) => {
+      cancelSeen = resolve;
+    });
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(512 * 1024));
+      },
+      cancel() {
+        cancelSeen();
+        return cancelBarrier;
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 200 })),
+    );
+
+    let rejected = false;
+    let rejection: unknown;
+    const pending = postJson(requestArgs()).catch((error: unknown) => {
+      rejected = true;
+      rejection = error;
+    });
+
+    await cancelCalled;
+    // Let any racing microtasks land; the reject must still be on hold.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rejected).toBe(false);
+
+    resolveCancel();
+    await pending;
+    expect(rejected).toBe(true);
+    expect((rejection as Error).message).toBe(
+      'External context provider returned an invalid response.',
+    );
+  });
+
+  it('maps a mid-stream read failure after partial data to a transport error', async () => {
+    // The provider disconnects after sending part of the JSON: read() rejects
+    // with the partial chunk already accumulated.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"answer":'));
+      },
+      pull(controller) {
+        controller.error(new Error('connection reset'));
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 200 })),
+    );
+
+    await expect(postJson(requestArgs())).rejects.toThrow(
+      'External context provider request did not complete.',
+    );
+    // Cleanup must still run: the reader lock is released on mid-read errors.
+    expect(body.locked).toBe(false);
+  });
+
   it('rejects a body that is not valid UTF-8', async () => {
     const cancelled = vi.fn();
     vi.stubGlobal(
