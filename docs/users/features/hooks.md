@@ -45,17 +45,17 @@ Command hooks execute commands via child processes. Input JSON is passed through
 
 **Configuration:**
 
-| Field           | Type                     | Required | Description                                 |
-| :-------------- | :----------------------- | :------- | :------------------------------------------ |
-| `type`          | `"command"`              | Yes      | Hook type                                   |
-| `command`       | `string`                 | Yes      | Command to execute                          |
-| `name`          | `string`                 | No       | Hook name (for logging)                     |
-| `description`   | `string`                 | No       | Hook description                            |
-| `timeout`       | `number`                 | No       | Timeout in milliseconds, default 60000      |
-| `async`         | `boolean`                | No       | Whether to run asynchronously in background |
-| `env`           | `Record<string, string>` | No       | Environment variables                       |
-| `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
-| `statusMessage` | `string`                 | No       | Status message displayed during execution   |
+| Field           | Type                     | Required | Description                                                                                               |
+| :-------------- | :----------------------- | :------- | :-------------------------------------------------------------------------------------------------------- |
+| `type`          | `"command"`              | Yes      | Hook type                                                                                                 |
+| `command`       | `string`                 | Yes      | Command to execute                                                                                        |
+| `name`          | `string`                 | No       | Hook name (for logging)                                                                                   |
+| `description`   | `string`                 | No       | Hook description                                                                                          |
+| `timeout`       | `number`                 | No       | Timeout in milliseconds, default 60000                                                                    |
+| `async`         | `boolean`                | No       | Whether to run asynchronously in background                                                               |
+| `env`           | `Record<string, string>` | No       | Environment variables                                                                                     |
+| `shell`         | `"bash" \| "powershell"` | No       | Shell to use. Default: `powershell` on Windows (`bash` in Git Bash/MSYS2 environments); `bash` elsewhere. |
+| `statusMessage` | `string`                 | No       | Status message displayed during execution                                                                 |
 
 **Example:**
 

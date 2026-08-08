@@ -241,7 +241,7 @@ export class HookRunner {
         return {
           shell: 'powershell',
           executable: 'powershell',
-          argsPrefix: ['-Command'],
+          argsPrefix: ['-NoProfile', '-Command'],
         };
       }
 
@@ -254,7 +254,15 @@ export class HookRunner {
       };
     }
 
-    // Use global configuration
+    // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
+    // quoted path fails; powershell strips them natively.
+    if (globalConfig.shell === 'cmd') {
+      return {
+        shell: 'powershell',
+        executable: 'powershell',
+        argsPrefix: ['-NoProfile', '-Command'],
+      };
+    }
     return globalConfig;
   }
 

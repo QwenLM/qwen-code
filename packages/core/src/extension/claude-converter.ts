@@ -19,18 +19,14 @@ import type {
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
-import {
-  copyDirectory,
-  isPathWithin,
-  realPathWithin,
-} from './gemini-converter.js';
+import { copyDirectory } from './gemini-converter.js';
+import { isPathWithin, realPathWithin, readExtensionManifest } from './variables.js';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
-import { substituteHookVariables } from './variables.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -410,11 +406,11 @@ export function convertClaudeToQwenConfig(
   }
 
   // Parse hooks
-  let hooks: { [K in HookEventName]?: HookDefinition[] } | undefined;
+  let hooks: ExtensionConfig['hooks'] | undefined;
   if (claudeConfig.hooks) {
     if (typeof claudeConfig.hooks === 'string') {
-      // If it's a string, it's a file path, we handle it later in the conversion process
-      // hooks will be loaded from file path in the convertClaudePluginPackage function
+      // Keep the string path; the hook file is loaded at runtime (see loadExtension).
+      hooks = claudeConfig.hooks;
     } else {
       // Assume it's already in the correct format
       hooks = claudeConfig.hooks as { [K in HookEventName]?: HookDefinition[] };
@@ -500,6 +496,16 @@ export async function convertClaudePluginPackage(
     networkPolicy,
     signal,
   );
+
+  // When the source resolves to the marketplace dir itself (source "."), the
+  // pluginDir was created but never used — remove the empty directory.
+  if (pluginSource !== pluginDir) {
+    try {
+      await fs.promises.rmdir(pluginDir);
+    } catch {
+      // Non-empty or already removed; leave it alone.
+    }
+  }
 
   if (!fs.existsSync(pluginSource)) {
     throw new Error(`Plugin source directory not found: ${pluginSource}`);
@@ -617,6 +623,17 @@ async function buildQwenExtensionFromPlugin(
     }
   }
 
+  // Confine a hooks string path to the plugin the same way as mcpServers, so
+  // an absolute or `../`-laden value can't point at a file outside it.
+  if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
+    if (!resolvePluginRelativeFile(pluginSource, mergedConfig.hooks)) {
+      debugLogger.warn(
+        `Dropping hooks path "${mergedConfig.hooks}" that escapes the plugin; hooks will not load.`,
+      );
+      delete mergedConfig.hooks;
+    }
+  }
+
   const tmpDir = await ExtensionStorage.createTmpDir();
 
   try {
@@ -651,38 +668,6 @@ async function buildQwenExtensionFromPlugin(
         fs.existsSync(folderPath)
       ) {
         fs.rmSync(folderPath, { recursive: true, force: true });
-      }
-    }
-
-    // Handle hooks from a file path if needed.
-    if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
-      const hooksPath = resolvePluginRelativeFile(
-        pluginSource,
-        mergedConfig.hooks,
-      );
-
-      if (hooksPath && fs.existsSync(hooksPath)) {
-        try {
-          const hooksContent = fs.readFileSync(hooksPath, 'utf-8');
-          const parsedHooks = JSON.parse(hooksContent);
-
-          let hooksData;
-          if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
-            hooksData = parsedHooks.hooks as {
-              [K in HookEventName]?: HookDefinition[];
-            };
-          } else {
-            hooksData = parsedHooks as {
-              [K in HookEventName]?: HookDefinition[];
-            };
-          }
-
-          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
       }
     }
 
@@ -962,54 +947,40 @@ export function mergeClaudeConfigs(
 }
 
 /**
- * Checks if a config object is in Claude plugin format.
- * @param config Configuration object to check
- * @returns true if config appears to be Claude format
+ * Classifies a directory as a Claude plugin: `'marketplace'` when a plugin
+ * named `pluginName` is listed, `'standalone'` when a valid plugin.json exists,
+ * or `null` when neither applies. An explicitly requested pluginName that is
+ * absent, or a defective plugin.json, throws the precise error.
+ * @param extensionDir The extension directory to check
+ * @param pluginName When provided, checks the marketplace for this plugin;
+ *   otherwise probes for a standalone plugin.
+ * @returns `'marketplace'`, `'standalone'`, or `null` when no Claude plugin.
  */
 export function isClaudePluginConfig(
   extensionDir: string,
-  marketplace: { extensionSource: string; pluginName: string },
-) {
-  const marketplaceConfigFilePath = path.join(
-    extensionDir,
-    '.claude-plugin/marketplace.json',
-  );
-  if (!fs.existsSync(marketplaceConfigFilePath)) {
-    return false;
+  pluginName?: string,
+): 'standalone' | 'marketplace' | null {
+  // pluginName given = user explicitly chose a marketplace plugin.
+  if (pluginName) {
+    const m = readExtensionManifest(extensionDir, '.claude-plugin/marketplace.json');
+    if (m) {
+      if (Array.isArray(m['plugins']) &&
+          m['plugins'].some((p) => (p as { name?: string }).name === pluginName)) {
+        return 'marketplace';
+      }
+      throw new Error(`Plugin ${pluginName} not found in marketplace.json`);
+    }
+    // No marketplace.json — fall through to the standalone probe.
   }
-
-  const marketplaceConfigContent = fs.readFileSync(
-    marketplaceConfigFilePath,
-    'utf-8',
-  );
-  const marketplaceConfig = JSON.parse(marketplaceConfigContent);
-
-  if (typeof marketplaceConfig !== 'object' || marketplaceConfig === null) {
-    return false;
+  // No pluginName = probe a single-source standalone plugin.
+  const p = readExtensionManifest(extensionDir, '.claude-plugin/plugin.json');
+  if (p) {
+    if (typeof p['name'] !== 'string') {
+      throw new Error('Invalid .claude-plugin/plugin.json: missing "name"');
+    }
+    return 'standalone';
   }
-
-  const marketplaceConfigObj = marketplaceConfig as Record<string, unknown>;
-
-  // Must have name and owner
-  if (
-    typeof marketplaceConfigObj['name'] !== 'string' ||
-    typeof marketplaceConfigObj['owner'] !== 'object'
-  ) {
-    return false;
-  }
-
-  if (!Array.isArray(marketplaceConfigObj['plugins'])) {
-    return false;
-  }
-
-  const marketplacePluginObj = marketplaceConfigObj['plugins'].find(
-    (plugin: ClaudeMarketplacePluginConfig) =>
-      plugin.name === marketplace.pluginName,
-  );
-
-  if (!marketplacePluginObj) return false;
-
-  return true;
+  return null;
 }
 
 /**

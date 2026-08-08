@@ -196,18 +196,77 @@ describe('mergeClaudeConfigs', () => {
 });
 
 describe('isClaudePluginConfig', () => {
-  it('should identify Claude plugin directory', () => {
-    const extensionDir = '/tmp/test-extension';
-    const marketplace = {
-      extensionSource: 'https://test.com',
-      pluginName: 'test-plugin',
-    };
+  let testDir: string;
 
-    // This will check if marketplace.json exists and contains the plugin
-    // Note: In real usage, this requires actual file system setup
-    expect(typeof isClaudePluginConfig(extensionDir, marketplace)).toBe(
-      'boolean',
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-plugin-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  const writeManifest = (subpath: string, content: unknown) => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, '.claude-plugin', subpath),
+      JSON.stringify(content),
+      'utf-8',
     );
+  };
+
+  it('classifies a marketplace that lists pluginName', () => {
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'test-plugin', source: './' }],
+    });
+    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBe('marketplace');
+  });
+
+  it('throws when the marketplace does not list pluginName', () => {
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'other', source: './' }],
+    });
+    expect(() => isClaudePluginConfig(testDir, 'missing')).toThrow(
+      'Plugin missing not found in marketplace.json',
+    );
+  });
+
+  it('returns null when there is no Claude manifest', () => {
+    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBeNull();
+  });
+
+  it('classifies a standalone plugin via plugin.json without pluginName', () => {
+    writeManifest('plugin.json', { name: 'test-plugin', version: '1.0.0' });
+    expect(isClaudePluginConfig(testDir)).toBe('standalone');
+  });
+
+  it('throws for a standalone plugin.json lacking a name', () => {
+    writeManifest('plugin.json', { version: '1.0.0' });
+    expect(() => isClaudePluginConfig(testDir)).toThrow(
+      'Invalid .claude-plugin/plugin.json: missing "name"',
+    );
+  });
+
+  it('returns null for unparseable manifests', () => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, '.claude-plugin', 'plugin.json'),
+      '{',
+    );
+    expect(isClaudePluginConfig(testDir)).toBeNull();
+  });
+
+  it('returns null when a standalone manifest symlinks outside the package', () => {
+    const outside = path.join(
+      path.dirname(testDir),
+      `${path.basename(testDir)}-outside.json`,
+    );
+    fs.writeFileSync(outside, JSON.stringify({ name: 'evil' }), 'utf-8');
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.symlinkSync(outside, path.join(testDir, '.claude-plugin', 'plugin.json'));
+
+    expect(isClaudePluginConfig(testDir)).toBeNull();
+    fs.rmSync(outside, { force: true });
   });
 });
 
@@ -307,6 +366,9 @@ describe('convertClaudePluginPackage', () => {
     // Verify csv and txt skills are NOT installed
     expect(fs.existsSync(path.join(convertedSkillsDir, 'csv'))).toBe(false);
     expect(fs.existsSync(path.join(convertedSkillsDir, 'txt'))).toBe(false);
+
+    // source "." resolves to the marketplace dir itself; no empty scratch dir is left behind
+    expect(fs.readdirSync(pluginSourceDir).filter((f) => f.startsWith('plugin'))).toEqual([]);
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
@@ -804,7 +866,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('should convert hooks from Claude plugin format to Qwen format with variable substitution', async () => {
+  it('should keep the hooks string path unresolved for runtime loading', async () => {
     // Setup: Create a plugin with hooks in Claude format
     const pluginSourceDir = path.join(testDir, 'plugin-with-hooks');
     fs.mkdirSync(pluginSourceDir, { recursive: true });
@@ -868,16 +930,49 @@ describe('convertClaudePluginPackage', () => {
       'hooks-plugin',
     );
 
-    // Verify: The converted config should contain processed hooks
-    expect(result.config.hooks).toBeDefined();
-    expect(result.config.hooks!['PostToolUse']).toHaveLength(1);
-    // Check that the variable was substituted
-    expect(
-      (result.config.hooks!['PostToolUse']![0].hooks![0] as { command: string })
-        .command,
-    ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
+    // Verify: the string hooks path is preserved; the hook file is loaded at
+    // runtime against the installed directory (see loadExtension).
+    expect(result.config.hooks).toBe('./hooks/hooks.json');
+    // The referenced hooks file must be copied into the converted directory so
+    // the runtime loader can find it.
+    expect(fs.existsSync(path.join(result.convertedDir, 'hooks', 'hooks.json'))).toBe(true);
 
     // Clean up converted directory
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('drops a hooks string path that escapes the plugin', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-hooks-escape');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          hooks: '../outside-hooks.json', // Escapes the plugin dir
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
+    // The escaping hooks path is confined away rather than persisted.
+    expect(result.config.hooks).toBeUndefined();
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
