@@ -54,9 +54,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
   ): boolean {
     // Only suppress error logging for user-initiated cancellations, so
     // network-level aborts the user should know about still surface. Shared
-    // with the api_error telemetry gate in `LoggingContentGenerator` — one
-    // definition of "user cancel" for both paths, since #8356 was caused by
-    // exactly that pair drifting apart.
+    // with the api_error telemetry gate in `LoggingContentGenerator` so the
+    // two logging paths use one definition of "user cancel" and cannot drift
+    // apart (the divergence #8398 fixes).
     return isUserCancel(error, request.config?.abortSignal);
   }
 

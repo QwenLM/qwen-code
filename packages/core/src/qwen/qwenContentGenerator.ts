@@ -81,7 +81,8 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
     // Compose rather than replace: returning only isAuthError would bypass
     // the shared user-cancel predicate on this family's debug-log path, so a
     // cancel under qwen OAuth would log as an API error while the identical
-    // cancel under openai auth is suppressed — the drift #8356 was about.
+    // cancel under openai auth is suppressed — the same logging-path
+    // divergence #8398 fixes, one auth family over.
     return (
       this.isAuthError(error) ||
       super.shouldSuppressErrorLogging(error, request)
