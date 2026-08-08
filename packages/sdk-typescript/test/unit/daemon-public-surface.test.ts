@@ -19,6 +19,7 @@ import {
 // `src/daemon/index.ts` but not re-exported by the published entry"
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
+  DaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
@@ -295,12 +296,27 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
-    // Batch Skill toggle surface: clients type the result of
-    // `client.setWorkspaceSkillsEnabled(...)` through the published entry.
-    expectTypeOf<DaemonSkillBatchToggleResult>().not.toBeNever();
-    expectTypeOf<DaemonSkillBatchToggleItem>().not.toBeNever();
-    expectTypeOf<DaemonSkillBatchToggleError>().not.toBeNever();
-    expectTypeOf<DaemonSkillBatchToggleErrorCode>().not.toBeNever();
+    // Batch Skill toggle surface: type-only imports are erased at vitest
+    // runtime, so the prototype check is the fence that actually executes
+    // here; the shape assertions pin the contract for any tsc pass.
+    expect(typeof Public.DaemonClient.prototype.setWorkspaceSkillsEnabled).toBe(
+      'function',
+    );
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setWorkspaceSkillsEnabled']>>
+    >().toEqualTypeOf<DaemonSkillBatchToggleResult>();
+    expectTypeOf<DaemonSkillBatchToggleItem>().toEqualTypeOf<{
+      skillName: string;
+      enabled: boolean;
+      changed: boolean;
+    }>();
+    expectTypeOf<DaemonSkillBatchToggleError>().toEqualTypeOf<{
+      skillName: string;
+      code: DaemonSkillBatchToggleErrorCode;
+      error: string;
+      reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();

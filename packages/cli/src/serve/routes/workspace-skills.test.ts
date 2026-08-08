@@ -254,6 +254,14 @@ describe('workspace Skill management routes', () => {
         skillNames: Array.from({ length: 101 }, (_, i) => `s${i}`),
         enabled: false,
       });
+    // The cap counts raw entries before deduplication (contract stated in
+    // docs/developers/qwen-serve-protocol.md), so duplicates cannot bypass it.
+    const duplicatesOverCap = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({
+        skillNames: Array.from({ length: 101 }, () => 'review'),
+        enabled: false,
+      });
     const blank = await request(harness.app)
       .post('/workspace/skills/enable')
       .send({ skillNames: ['  '], enabled: false });
@@ -284,6 +292,8 @@ describe('workspace Skill management routes', () => {
     expect(empty.body.code).toBe('invalid_skill_names');
     expect(tooMany.status).toBe(400);
     expect(tooMany.body.code).toBe('invalid_skill_names');
+    expect(duplicatesOverCap.status).toBe(400);
+    expect(duplicatesOverCap.body.code).toBe('invalid_skill_names');
     expect(blank.status).toBe(400);
     expect(blank.body.code).toBe('invalid_skill_name');
     expect(invalidFlag.status).toBe(400);
