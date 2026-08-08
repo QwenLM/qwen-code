@@ -2631,6 +2631,7 @@ export default {
     'Ctrl+Q per posar a la cua · ↑ per editar els missatges en cua',
   'Enter to steer · Ctrl+Q to queue':
     'Return per redirigir · Ctrl+Q per posar a la cua',
+  '{{count}} queued': '{{count}} a la cua',
   'Queue message for the next turn':
     'Posar el missatge a la cua per al torn següent',
   '{{count}} session': '{{count}} sessió',

@@ -748,6 +748,16 @@ jobs:
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
           QWEN_HOME: '${{ runner.temp }}/qwen-home'
+          # KEEP THE `run` BODY BELOW FREE OF `${{ }}`. A run block containing
+          # one is evaluated as a single expression template, capped at 21000
+          # characters — and this script is far past that. Every value it needs
+          # from the workflow context is passed as an environment variable, so
+          # the body is plain bash the runner never templates. See the
+          # workflow-expression-length test in
+          # scripts/tests/qwen-pr-review-workflow.test.js.
+          EVENT_NAME: '${{ github.event_name }}'
+          EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
         run: |-
           set -euo pipefail
           fail() {
@@ -960,7 +970,7 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+          MAX_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
           if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then
             fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"
           fi
@@ -989,7 +999,7 @@ jobs:
               if [ "$PR_SIZE_LINES" -le 300 ]; then
                 EFFECTIVE_TIMEOUT_MINUTES=180
               else
-                EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+                EFFECTIVE_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
               fi
               echo "PR #${PR_NUMBER} changed ${PR_SIZE_LINES} lines; auto timeout ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
             else
@@ -1056,8 +1066,7 @@ jobs:
             exit 0
           fi
           EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
             if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then
               echo "Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current (current head ${CURRENT_HEAD_SHA})." | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0

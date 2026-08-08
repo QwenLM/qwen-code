@@ -23,10 +23,12 @@ import {
   getSystemSettingsPath,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/storage-paths-lite.js';
+import { getPathComparisonVariants } from '../config/path-comparison.js';
 import {
-  getPathComparisonVariants,
-  isWithinRoot,
-} from '../config/path-comparison.js';
+  buildTrustPrecedenceRules,
+  resolveTrustDecision,
+  type TrustPrecedenceRule,
+} from '../config/trust-precedence.js';
 import { publishPendingCompileCache } from '../config/compile-cache.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
@@ -46,14 +48,7 @@ export type ServeFastPathSettings = Pick<
   policy?: ServeFastPathPolicyInput;
 };
 const V2_SETTINGS_VERSION = 2;
-const TRUST_FOLDER = 'TRUST_FOLDER';
-const TRUST_PARENT = 'TRUST_PARENT';
-const DO_NOT_TRUST = 'DO_NOT_TRUST';
-
-type CachedTrustRule = {
-  level: 'trusted' | 'untrusted';
-  variants: Set<string>;
-};
+type CachedTrustRule = TrustPrecedenceRule<string>;
 let homeEnvBootstrapped = false;
 let cachedTrustedFoldersPath: string | undefined;
 let cachedTrustedFolderRules: CachedTrustRule[] | undefined;
@@ -384,54 +379,17 @@ function readTrustedFolderRulesFastPath(): readonly CachedTrustRule[] {
 function buildTrustedFolderRules(
   trustedFolders: Record<string, string>,
 ): CachedTrustRule[] {
-  const rules: CachedTrustRule[] = [];
-  for (const [rulePath, trustLevel] of Object.entries(trustedFolders)) {
-    if (trustLevel === TRUST_FOLDER) {
-      rules.push({
-        level: 'trusted',
-        variants: getPathComparisonVariants(rulePath),
-      });
-    } else if (trustLevel === TRUST_PARENT) {
-      rules.push({
-        level: 'trusted',
-        variants: getPathComparisonVariants(path.dirname(rulePath)),
-      });
-    } else if (trustLevel === DO_NOT_TRUST) {
-      rules.push({
-        level: 'untrusted',
-        variants: getPathComparisonVariants(rulePath),
-      });
-    }
-  }
-  return rules;
+  return buildTrustPrecedenceRules(
+    Object.entries(trustedFolders).map(([rulePath, trustLevel]) => ({
+      path: rulePath,
+      trustLevel,
+    })),
+  );
 }
 
 function isPathTrustedFastPath(location: string): boolean | undefined {
   const rules = readTrustedFolderRulesFastPath();
-  const locationVariants = getPathComparisonVariants(location);
-  for (const rule of rules) {
-    if (rule.level !== 'trusted') continue;
-    for (const locationVariant of locationVariants) {
-      for (const trustedVariant of rule.variants) {
-        if (isWithinRoot(locationVariant, trustedVariant)) {
-          return true;
-        }
-      }
-    }
-  }
-
-  for (const rule of rules) {
-    if (rule.level !== 'untrusted') continue;
-    for (const locationVariant of locationVariants) {
-      for (const untrustedVariant of rule.variants) {
-        if (locationVariant === untrustedVariant) {
-          return false;
-        }
-      }
-    }
-  }
-
-  return undefined;
+  return resolveTrustDecision(rules, getPathComparisonVariants(location));
 }
 
 function isWorkspaceTrustedFastPath(
