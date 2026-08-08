@@ -18,7 +18,6 @@ import type {
 } from '../config/config.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
-import { createHash } from 'node:crypto';
 import {
   copyDirectory,
   isPathWithin,
@@ -103,7 +102,7 @@ export type ClaudePluginSource =
     };
 
 export interface ClaudeMarketplacePluginConfig extends ClaudePluginConfig {
-  source: string | ClaudePluginSource;
+  source?: string | ClaudePluginSource;
   category?: string;
   strict?: boolean;
   tags?: string[];
@@ -453,6 +452,7 @@ export async function convertClaudePluginPackage(
   pluginName: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
   signal?: AbortSignal,
+  preserveHookVariables = false,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   signal?.throwIfAborted();
   // Step 1: Load marketplace.json
@@ -487,64 +487,70 @@ export async function convertClaudePluginPackage(
   }
 
   // Step 2: Resolve plugin source directory based on source field
-  const pluginDir = path.join(
-    extensionDir,
-    `plugin${createHash('sha256').update(`${extensionDir}/${pluginName}`).digest('hex')}`,
-  );
-  await fs.promises.mkdir(pluginDir, { recursive: true });
+  const pluginDir = await ExtensionStorage.createTmpDir();
+  try {
+    const pluginSource = await resolvePluginSource(
+      marketplacePlugin,
+      extensionDir,
+      pluginDir,
+      networkPolicy,
+      signal,
+    );
 
-  const pluginSource = await resolvePluginSource(
-    marketplacePlugin,
-    extensionDir,
-    pluginDir,
-    networkPolicy,
-    signal,
-  );
-
-  if (!fs.existsSync(pluginSource)) {
-    throw new Error(`Plugin source directory not found: ${pluginSource}`);
-  }
-
-  // Step 3: Load and merge plugin.json if exists (based on strict mode)
-  const strict = marketplacePlugin.strict ?? false;
-  let mergedConfig: ClaudePluginConfig;
-
-  const pluginJsonPath = path.join(
-    pluginSource,
-    '.claude-plugin',
-    'plugin.json',
-  );
-  if (strict && !fs.existsSync(pluginJsonPath)) {
-    throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
-  }
-  // Treat a symlinked plugin.json (pointing outside the source) as absent
-  // rather than reading an arbitrary host file into the merged config.
-  const pluginJsonSafe =
-    fs.existsSync(pluginJsonPath) &&
-    realPathWithin(pluginJsonPath, pluginSource);
-  if (pluginJsonSafe) {
-    const pluginContent = fs.readFileSync(pluginJsonPath, 'utf-8');
-    const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
-    mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
-  } else {
-    // `existsSync` follows symlinks, so the strict check at line 500 passes
-    // when plugin.json is a symlink to an existing host file — but the file is
-    // not trusted (`realPathWithin` rejected it). Strict mode must fail here
-    // rather than silently fall back to the marketplace entry.
-    if (strict) {
-      throw new Error(
-        `Strict mode requires a trusted plugin.json at ${pluginJsonPath}`,
-      );
+    if (!fs.existsSync(pluginSource)) {
+      throw new Error(`Plugin source directory not found: ${pluginSource}`);
     }
-    if (fs.existsSync(pluginJsonPath)) {
-      debugLogger.warn(
-        `Ignoring plugin.json at ${pluginJsonPath}; it resolves through a symlink outside the plugin.`,
-      );
-    }
-    mergedConfig = marketplacePlugin as ClaudePluginConfig;
-  }
 
-  return buildQwenExtensionFromPlugin(pluginSource, mergedConfig);
+    // Step 3: Load and merge plugin.json if exists (based on strict mode)
+    const strict = marketplacePlugin.strict ?? false;
+    let mergedConfig: ClaudePluginConfig;
+
+    const pluginJsonPath = path.join(
+      pluginSource,
+      '.claude-plugin',
+      'plugin.json',
+    );
+    if (strict && !fs.existsSync(pluginJsonPath)) {
+      throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
+    }
+    // Treat a symlinked plugin.json (pointing outside the source) as absent
+    // rather than reading an arbitrary host file into the merged config.
+    const pluginJsonSafe =
+      fs.existsSync(pluginJsonPath) &&
+      realPathWithin(pluginJsonPath, pluginSource);
+    if (pluginJsonSafe) {
+      const pluginContent = fs.readFileSync(pluginJsonPath, 'utf-8');
+      const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
+      mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
+    } else {
+      // `existsSync` follows symlinks, so the strict check above passes when
+      // plugin.json points to an existing host file. Strict mode must fail
+      // here rather than silently fall back to the marketplace entry.
+      if (strict) {
+        throw new Error(
+          `Strict mode requires a trusted plugin.json at ${pluginJsonPath}`,
+        );
+      }
+      if (fs.existsSync(pluginJsonPath)) {
+        debugLogger.warn(
+          `Ignoring plugin.json at ${pluginJsonPath}; it resolves through a symlink outside the plugin.`,
+        );
+      }
+      mergedConfig = marketplacePlugin as ClaudePluginConfig;
+    }
+
+    return await buildQwenExtensionFromPlugin(
+      pluginSource,
+      mergedConfig,
+      preserveHookVariables,
+    );
+  } finally {
+    try {
+      await fs.promises.rm(pluginDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup must not mask conversion errors or a valid result.
+    }
+  }
 }
 
 /**
@@ -594,6 +600,7 @@ function resolvePluginRelativeFile(
 async function buildQwenExtensionFromPlugin(
   pluginSource: string,
   mergedConfig: ClaudePluginConfig,
+  preserveHookVariables = false,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   // Resolve MCP servers from a JSON file path if needed.
   if (mergedConfig.mcpServers && typeof mergedConfig.mcpServers === 'string') {
@@ -677,7 +684,9 @@ async function buildQwenExtensionFromPlugin(
             };
           }
 
-          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
+          mergedConfig.hooks = preserveHookVariables
+            ? hooksData
+            : substituteHookVariables(hooksData, pluginSource);
         } catch (error) {
           debugLogger.warn(
             `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -722,6 +731,7 @@ async function buildQwenExtensionFromPlugin(
  */
 export async function convertClaudePluginStandalone(
   extensionDir: string,
+  preserveHookVariables = false,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
   const pluginJsonPath = path.join(
     extensionDir,
@@ -794,7 +804,11 @@ export async function convertClaudePluginStandalone(
     }
   }
 
-  return buildQwenExtensionFromPlugin(extensionDir, mergedConfig);
+  return buildQwenExtensionFromPlugin(
+    extensionDir,
+    mergedConfig,
+    preserveHookVariables,
+  );
 }
 
 /**
@@ -1025,6 +1039,10 @@ async function resolvePluginSource(
 ): Promise<string> {
   signal?.throwIfAborted();
   const source = pluginConfig.source;
+
+  // A marketplace entry without `source` describes a plugin at the
+  // marketplace root.
+  if (source === undefined || source === null) return marketplaceDir;
 
   // Handle string source (relative path or URL)
   if (typeof source === 'string') {

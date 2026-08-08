@@ -411,6 +411,7 @@ export async function parseInstallSource(
   source: string,
   options: {
     networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+    pluginSourceKind?: ExtensionInstallMetadata['pluginSourceKind'];
   } = {},
 ): Promise<ExtensionInstallMetadata> {
   // Step 1: Parse source into repo and optional pluginName
@@ -505,6 +506,11 @@ export async function parseInstallSource(
 
   if (options.networkPolicy) {
     installMetadata.networkPolicy = options.networkPolicy;
+  }
+  const pluginSourceKind =
+    options.pluginSourceKind ?? (pluginName ? 'marketplace-entry' : undefined);
+  if (pluginSourceKind) {
+    installMetadata.pluginSourceKind = pluginSourceKind;
   }
 
   return installMetadata;

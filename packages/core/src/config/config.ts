@@ -675,6 +675,7 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
 
 export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 export type ExtensionNetworkPolicy = 'public';
+export type ExtensionPluginSourceKind = 'marketplace-entry' | 'extension-root';
 
 export interface ExtensionInstallMetadata {
   source: string;
@@ -687,6 +688,7 @@ export interface ExtensionInstallMetadata {
   allowPreRelease?: boolean;
   marketplaceConfig?: ClaudeMarketplaceConfig;
   pluginName?: string;
+  pluginSourceKind?: ExtensionPluginSourceKind;
   networkPolicy?: ExtensionNetworkPolicy;
 }
 

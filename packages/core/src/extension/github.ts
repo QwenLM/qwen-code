@@ -328,18 +328,21 @@ export async function checkForExtensionUpdate(
         signal?.throwIfAborted();
         await extractArchiveFile(installMetadata.source, tempDir, signal);
         signal?.throwIfAborted();
-        const converted = await convertGeminiOrClaudeExtension(
-          tempDir,
-          installMetadata.pluginName,
-          installMetadata.networkPolicy,
-          signal,
-        );
-        extensionDir = converted.extensionDir;
-        if (extensionDir !== tempDir) {
-          convertedDir = extensionDir;
-        }
-        signal?.throwIfAborted();
+        extensionDir = tempDir;
       }
+      const sourceBeforeConversion = extensionDir;
+      const converted = await convertGeminiOrClaudeExtension(
+        sourceBeforeConversion,
+        installMetadata.pluginName,
+        installMetadata.networkPolicy,
+        signal,
+        installMetadata.pluginSourceKind,
+      );
+      extensionDir = converted.extensionDir;
+      if (extensionDir !== sourceBeforeConversion) {
+        convertedDir = extensionDir;
+      }
+      signal?.throwIfAborted();
       latestConfig = extensionManager.loadExtensionConfig({
         extensionDir,
       });
@@ -385,6 +388,7 @@ export async function checkForExtensionUpdate(
         installMetadata.pluginName,
         installMetadata.networkPolicy,
         signal,
+        installMetadata.pluginSourceKind,
       );
       const extensionDir = converted.extensionDir;
       if (extensionDir !== tempDir) {

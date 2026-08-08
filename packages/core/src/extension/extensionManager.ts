@@ -1738,12 +1738,14 @@ export class ExtensionManager {
       if (
         installMetadata.originSource === 'Claude' &&
         installMetadata.marketplaceConfig &&
+        installMetadata.pluginSourceKind !== 'extension-root' &&
         !installMetadata.pluginName
       ) {
         const pluginName = await this.requestChoicePlugin(
           installMetadata.marketplaceConfig,
         );
         installMetadata.pluginName = pluginName;
+        installMetadata.pluginSourceKind = 'marketplace-entry';
       }
 
       if (
@@ -1819,12 +1821,13 @@ export class ExtensionManager {
       signal?.throwIfAborted();
       try {
         const sourceBeforeConversion = localSourcePath;
-        const { extensionDir, originSource } =
+        const { extensionDir, originSource, requiresClaudeFileAdaptation } =
           await convertGeminiOrClaudeExtension(
             sourceBeforeConversion,
             installMetadata.pluginName,
             installMetadata.networkPolicy,
             signal,
+            installMetadata.pluginSourceKind,
           );
         signal?.throwIfAborted();
 
@@ -1964,8 +1967,9 @@ export class ExtensionManager {
             : null;
 
         if (
-          (originSource === 'Claude' && fs.existsSync(hooksDir)) ||
-          (originSource === 'Claude' &&
+          ((originSource === 'Claude' || requiresClaudeFileAdaptation) &&
+            fs.existsSync(hooksDir)) ||
+          ((originSource === 'Claude' || requiresClaudeFileAdaptation) &&
             configHooksPath &&
             fs.existsSync(configHooksPath))
         ) {

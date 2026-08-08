@@ -108,6 +108,18 @@ describe('parseInstallSource', () => {
       expect(result.source).toBe('https://github.com/owner/repo');
       expect(result.type).toBe('git');
       expect(result.pluginName).toBe('my-plugin');
+      expect(result.pluginSourceKind).toBe('marketplace-entry');
+    });
+
+    it('preserves an explicit root-plugin source kind', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('owner/repo:alias', {
+        pluginSourceKind: 'extension-root',
+      });
+
+      expect(result.pluginName).toBe('alias');
+      expect(result.pluginSourceKind).toBe('extension-root');
     });
 
     it('should handle owner/repo with dashes and underscores', async () => {

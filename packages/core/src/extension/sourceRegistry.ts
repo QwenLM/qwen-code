@@ -12,7 +12,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { loadMarketplaceConfigFromSource } from './marketplace.js';
 import { quarantineCorruptFile } from './corruptFile.js';
-import type { ExtensionInstallMetadata } from '../config/config.js';
+import type {
+  ExtensionInstallMetadata,
+  ExtensionPluginSourceKind,
+} from '../config/config.js';
 import type {
   ClaudeMarketplaceConfig,
   ClaudeMarketplacePluginConfig,
@@ -65,6 +68,8 @@ export interface DiscoveredPlugin {
   components?: DiscoveredPluginComponents;
   /** Source string suitable for `parseInstallSource`. */
   installSource: string;
+  /** Whether `pluginName` selects a marketplace entry or names a root plugin. */
+  pluginSourceKind?: ExtensionPluginSourceKind;
   /** Whether an extension with this name is already installed. */
   installed: boolean;
 }
@@ -161,9 +166,15 @@ function isOwnerRepoShorthand(source: string): boolean {
 function resolveInstallSource(
   marketplace: ExtensionSource,
   plugin: ClaudeMarketplacePluginConfig,
-): string {
+): {
+  installSource: string;
+  pluginSourceKind: ExtensionPluginSourceKind;
+} {
   if (marketplace.type !== 'http') {
-    return `${marketplace.source}:${plugin.name}`;
+    return {
+      installSource: `${marketplace.source}:${plugin.name}`,
+      pluginSourceKind: 'marketplace-entry',
+    };
   }
   const src = plugin.source;
   if (typeof src === 'string') {
@@ -173,12 +184,21 @@ function resolveInstallSource(
       debugLogger.warn(
         `Ignoring local path source "${src}" from remote marketplace "${marketplace.source}".`,
       );
-      return plugin.name;
+      return {
+        installSource: plugin.name,
+        pluginSourceKind: 'extension-root',
+      };
     }
-    return src.includes(':') ? src : `${src}:${plugin.name}`;
+    return {
+      installSource: src.includes(':') ? src : `${src}:${plugin.name}`,
+      pluginSourceKind: 'extension-root',
+    };
   }
   if (src && src.source === 'github') {
-    return `${src.repo}:${plugin.name}`;
+    return {
+      installSource: `${src.repo}:${plugin.name}`,
+      pluginSourceKind: 'extension-root',
+    };
   }
   if (src && src.source === 'url') {
     // Same local-path guard as the string-source branch above: a remote
@@ -193,11 +213,20 @@ function resolveInstallSource(
       debugLogger.warn(
         `Ignoring local path source "${src.url}" from remote marketplace "${marketplace.source}".`,
       );
-      return plugin.name;
+      return {
+        installSource: plugin.name,
+        pluginSourceKind: 'extension-root',
+      };
     }
-    return src.url;
+    return {
+      installSource: src.url,
+      pluginSourceKind: 'extension-root',
+    };
   }
-  return plugin.name;
+  return {
+    installSource: plugin.name,
+    pluginSourceKind: 'extension-root',
+  };
 }
 
 /**
@@ -221,24 +250,27 @@ function pluginsFromConfig(
   config: ClaudeMarketplaceConfig,
   installedNames: ReadonlySet<string>,
 ): DiscoveredPlugin[] {
-  return (config.plugins ?? []).map((plugin) => ({
-    marketplaceName: sanitizeDisplay(config.name || marketplace.name),
-    name: sanitizeDisplay(plugin.name),
-    description: sanitizeDisplay(plugin.description),
-    // `version` and `lastUpdated` render in the pre-consent Discover detail via
-    // `t()` (no escaping), so they need the same scrubbing as the other
-    // untrusted display fields. `category` has no sink today but is wrapped for
-    // consistency / future-proofing.
-    version: sanitizeDisplay(plugin.version),
-    author: sanitizeDisplay(plugin.author?.name),
-    homepage: sanitizeDisplay(plugin.homepage),
-    category: sanitizeDisplay(plugin.category),
-    lastUpdated: sanitizeDisplay(pluginLastUpdated(plugin)),
-    installs: pluginInstalls(plugin),
-    components: pluginComponents(plugin),
-    installSource: resolveInstallSource(marketplace, plugin),
-    installed: installedNames.has(plugin.name),
-  }));
+  return (config.plugins ?? []).map((plugin) => {
+    const installTarget = resolveInstallSource(marketplace, plugin);
+    return {
+      marketplaceName: sanitizeDisplay(config.name || marketplace.name),
+      name: sanitizeDisplay(plugin.name),
+      description: sanitizeDisplay(plugin.description),
+      // `version` and `lastUpdated` render in the pre-consent Discover detail
+      // via `t()` (no escaping), so they need the same scrubbing as the other
+      // untrusted display fields. `category` has no sink today but is wrapped
+      // for consistency / future-proofing.
+      version: sanitizeDisplay(plugin.version),
+      author: sanitizeDisplay(plugin.author?.name),
+      homepage: sanitizeDisplay(plugin.homepage),
+      category: sanitizeDisplay(plugin.category),
+      lastUpdated: sanitizeDisplay(pluginLastUpdated(plugin)),
+      installs: pluginInstalls(plugin),
+      components: pluginComponents(plugin),
+      ...installTarget,
+      installed: installedNames.has(plugin.name),
+    };
+  });
 }
 
 /**
