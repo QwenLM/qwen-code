@@ -42,8 +42,8 @@ function matchingDepth<TPayload>(
  */
 export function buildTrustPrecedenceRules<T extends string>(
   rules: Iterable<{ path: string; trustLevel: T }>,
-): TrustPrecedenceRule<T>[] {
-  const result: TrustPrecedenceRule<T>[] = [];
+): Array<TrustPrecedenceRule<T>> {
+  const result: Array<TrustPrecedenceRule<T>> = [];
   for (const rule of rules) {
     let level: TrustPrecedenceRule['level'];
     let rulePath = rule.path;
