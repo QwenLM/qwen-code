@@ -197,6 +197,22 @@ describe('qwen-triage: agent tool/permission settings', () => {
   });
 });
 
+describe('qwen-triage: triage step labels with the bot PAT', () => {
+  // issues: labeled/unlabeled events only fire for label writes made with
+  // a PAT — writes with the default GITHUB_TOKEN never trigger downstream
+  // workflow runs. assign-issue-owner.yml chains on those events, so
+  // pointing this step at secrets.GITHUB_TOKEN would keep triage green
+  // while silently starving that workflow forever. Pin the token choice so
+  // the dependency fails loudly in CI instead of in production.
+  const patToken = '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}';
+
+  it('pins GITHUB_TOKEN and GH_TOKEN to the PAT chain', () => {
+    assert.ok(triageStep, 'triage step (id: triage) must exist');
+    assert.equal(triageStep.env.GITHUB_TOKEN, patToken);
+    assert.equal(triageStep.env.GH_TOKEN, patToken);
+  });
+});
+
 describe('qwen-triage: fork-PR runner routing', () => {
   const runsOn = String(triageJob['runs-on']);
   const authorizeJob = doc.jobs.authorize;

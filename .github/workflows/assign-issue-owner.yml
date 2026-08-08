@@ -25,7 +25,7 @@ on:
       number:
         description: 'Issue number to evaluate'
         required: true
-        type: 'string'
+        type: 'number'
       dry_run:
         description: 'Report the chosen assignee without assigning'
         required: false
