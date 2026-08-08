@@ -16,7 +16,9 @@
  *
  * The reroute is strictly fail-open: any probe failure, absent bridge,
  * legacy (single-client) extension, token-gated daemon, or opt-out keeps the
- * user's literal config.
+ * user's literal config. When a candidate server exists but no usable bridge
+ * is found, a one-line hint explains that direct connections keep popping
+ * Chrome's per-connection consent dialog and how to enable the shared bridge.
  */
 
 import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
@@ -167,7 +169,21 @@ export async function maybeRouteChromeDevToolsViaDaemonBridge(
     if (candidates.length === 0) return;
 
     const status = await probeDaemonCdpStatus(env, fetchImpl);
-    if (status?.usable !== true) return;
+    if (status?.usable !== true) {
+      // The fallback still attaches to the user's own Chrome (login state
+      // preserved) but re-triggers Chrome's per-connection consent dialog;
+      // point users at the one-time-consent path instead of leaving them to
+      // wonder why the dialog keeps re-appearing.
+      log(
+        `qwen: no usable shared Chrome bridge on the local daemon; ` +
+          `'${candidates[0]![0]}' will connect to Chrome directly and ` +
+          `re-trigger Chrome's "Allow remote debugging?" dialog on every ` +
+          `new connection. For one-time consent, run 'qwen serve' with the ` +
+          `Qwen Code Chrome extension connected (set ` +
+          `${SHARED_CHROME_BRIDGE_OPT_OUT_ENV}=1 to silence this hint)`,
+      );
+      return;
+    }
 
     const wsEndpoint = cdpWsEndpointFor(env);
     const next = { ...servers };

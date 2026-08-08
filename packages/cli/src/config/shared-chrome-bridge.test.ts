@@ -239,6 +239,32 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
     expect(setMcpServers).not.toHaveBeenCalled();
   });
 
+  it('hints at the shared bridge when a candidate exists but no usable bridge', async () => {
+    const { config } = configStub({ 'chrome-devtools': AUTO_CONNECT_SERVER });
+    const log = vi.fn();
+    await maybeRouteChromeDevToolsViaDaemonBridge(
+      config,
+      {},
+      log,
+      statusResponse(200, { ...USABLE, usable: false }),
+    );
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toContain('no usable shared Chrome bridge');
+    expect(log.mock.calls[0]?.[0]).toContain('qwen serve');
+  });
+
+  it('stays silent when the probe fails without any candidate', async () => {
+    const { config } = configStub({
+      filesystem: { command: 'npx', args: ['-y', 'some-fs-server'] },
+    });
+    const log = vi.fn();
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    await maybeRouteChromeDevToolsViaDaemonBridge(config, {}, log, fetchImpl);
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it('keeps the user config when the probe fails', async () => {
     const { config, setMcpServers } = configStub({
       'chrome-devtools': AUTO_CONNECT_SERVER,
