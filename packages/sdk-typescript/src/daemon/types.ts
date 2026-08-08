@@ -3886,7 +3886,11 @@ export type DaemonExtensionInstallType =
   | 'github-release'
   | 'npm';
 
-export type DaemonExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type DaemonExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder';
 
 export interface DaemonExtensionCapabilities {
   mcpServerCount: number;
