@@ -5469,6 +5469,7 @@ async function runQwenServeImpl(
 
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      getSessionBridges: () => runtimeBridges,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       ...(workspaceTrustHotReloadAvailable
         ? {

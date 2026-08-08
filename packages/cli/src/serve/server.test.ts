@@ -7,6 +7,7 @@
 import { existsSync, realpathSync, promises as fsp } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -153,6 +154,7 @@ import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
 } from './acp-http/client-mcp-sender-registry.js';
+import type { AcpHttpHandle } from './acp-http/index.js';
 import {
   DeviceFlowRegistry,
   TooManyActiveDeviceFlowsError,
@@ -384,6 +386,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'daemon_status',
   'capabilities',
   'session_create',
+  'session_id_override',
   'session_scope_override',
   'session_load',
   'session_resume',
@@ -3733,6 +3736,8 @@ describe('createServeApp', () => {
         },
         workspaceRuntimeRemoval: {},
         voiceCoordinator: {},
+        getSessionBridges: () =>
+          registry.listManaged().map((runtime) => runtime.bridge),
       } as Parameters<typeof createServeApp>[2]);
 
       const supported = await request(app)
@@ -3987,6 +3992,8 @@ describe('createServeApp', () => {
           bridge,
           workspaceRegistry: registry,
           workspaceTrustHotReloadAvailable: true,
+          getSessionBridges: () =>
+            registry.listManaged().map((runtime) => runtime.bridge),
           daemonEnv: {},
         });
 
@@ -9407,6 +9414,50 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('does not create after the generation closes during requested-id admission', async () => {
+      const bridge = fakeBridge();
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'session-primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+      });
+      const workspaceRegistry = createWorkspaceRegistry([runtime]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry },
+      );
+      const scan = deferred<undefined>();
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockReturnValue(scan.promise);
+
+      try {
+        const pending = request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId: '550e8400-e29b-41d4-a716-446655440004' })
+          .then((response) => response);
+        await vi.waitFor(() => expect(locationSpy).toHaveBeenCalledOnce());
+        expect(
+          workspaceRegistry.beginReplacement(
+            workspaceRegistry.primaryEntry,
+            'policy-2',
+          ),
+        ).toBe(true);
+        scan.resolve(undefined);
+
+        const res = await pending;
+        expect(res.status).toBe(503);
+        expect(res.body.code).toBe('workspace_runtime_unavailable');
+        expect(bridge.calls).toEqual([]);
+      } finally {
+        scan.resolve(undefined);
+        locationSpy.mockRestore();
+      }
+    });
+
     it('forwards valid session source metadata to the bridge', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -9531,6 +9582,33 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('detaches when a bridge mismatch attached to an existing session', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => ({
+          sessionId: 'existing-session',
+          workspaceCwd: req.workspaceCwd,
+          attached: true,
+          clientId: 'client-x',
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionId: '550e8400-e29b-41d4-a716-446655440000' });
+
+      expect(res.status).toBe(500);
+      expect(res.body.code).toBe('session_id_not_honored');
+      expect(bridge.detachCalls).toEqual([
+        { sessionId: 'existing-session', clientId: 'client-x' },
+      ]);
+      expect(bridge.killCalls).toEqual([]);
+    });
+
     it('409 when sessionId already exists (active or archived)', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -9555,7 +9633,34 @@ describe('createServeApp', () => {
       }
     });
 
-    it('runs the sessionId existence check inside runWithRuntimeBaseDir', async () => {
+    it('503 when persisted session state cannot be inspected', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockRejectedValue(new Error('EACCES: runtime directory unreadable'));
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId: '550e8400-e29b-41d4-a716-446655440000' });
+
+        expect(res.status).toBe(503);
+        expect(res.body).toMatchObject({
+          code: 'session_id_admission_unavailable',
+          retryable: true,
+        });
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        locationSpy.mockRestore();
+      }
+    });
+
+    it('uses the runtime-pinned SessionService without ambient storage context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -9574,7 +9679,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('session_id_conflict');
-        expect(runWithSpy).toHaveBeenCalled();
+        expect(runWithSpy).not.toHaveBeenCalled();
         expect(bridge.calls).toHaveLength(0);
       } finally {
         locationSpy.mockRestore();
@@ -9625,9 +9730,8 @@ describe('createServeApp', () => {
           .post('/session')
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sessionId: sid });
-      // Fire both concurrently; the 20 ms gap ensures the first reaches
-      // spawnOrAttach (and registers in inFlightSessionIds) before the
-      // second arrives at the guard.
+      // Fire both concurrently; the 20 ms gap ensures the first holds the
+      // daemon-wide requested-id claim before the second reaches admission.
       const [firstRes, secondRes] = await Promise.all([
         makeReq(),
         new Promise((r) => setTimeout(r, 20)).then(() => makeReq()),
@@ -9640,7 +9744,112 @@ describe('createServeApp', () => {
       expect(spawnCallCount).toBe(1);
     });
 
-    it('releases inFlightSessionIds after a spawn failure (finally cleanup)', async () => {
+    it('shares requested sessionId admission between REST and ACP', async () => {
+      let releaseSpawn!: () => void;
+      const spawnGate = new Promise<void>((resolve) => {
+        releaseSpawn = resolve;
+      });
+      let spawnCallCount = 0;
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => {
+          spawnCallCount++;
+          await spawnGate;
+          return {
+            sessionId: req.sessionId!,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: req.clientId ?? 'rest-client',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const acpHandle = app.locals['acpHandle'] as AcpHttpHandle;
+      acpHandle.attachServer(server);
+      const port = (server.address() as AddressInfo).port;
+      const sessionId = '550e8400-e29b-41d4-a716-446655440003';
+
+      try {
+        const rest = request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId })
+          .then((response) => response);
+        await vi.waitFor(() => expect(spawnCallCount).toBe(1));
+
+        const acp = await new Promise<Record<string, unknown>>(
+          (resolve, reject) => {
+            const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, {
+              handshakeTimeout: 2000,
+            });
+            ws.on('open', () =>
+              ws.send(
+                JSON.stringify({
+                  jsonrpc: '2.0',
+                  id: 1,
+                  method: 'initialize',
+                }),
+              ),
+            );
+            ws.on('message', (data) => {
+              try {
+                const message = JSON.parse(data.toString()) as Record<
+                  string,
+                  unknown
+                >;
+                if (message['id'] === 1) {
+                  ws.send(
+                    JSON.stringify({
+                      jsonrpc: '2.0',
+                      id: 2,
+                      method: 'session/new',
+                      params: {
+                        workspaceCwd: WS_BOUND,
+                        _meta: { 'qwen-code/sessionId': sessionId },
+                      },
+                    }),
+                  );
+                  return;
+                }
+                if (message['id'] === 2) {
+                  ws.close();
+                  resolve(message);
+                }
+              } catch (error) {
+                ws.terminate();
+                reject(error as Error);
+              }
+            });
+            ws.on('error', reject);
+          },
+        );
+        expect(acp['error']).toMatchObject({
+          code: -32602,
+          data: {
+            httpStatus: 409,
+            errorKind: 'session_id_conflict',
+            conflict: 'pending',
+          },
+        });
+        expect(spawnCallCount).toBe(1);
+
+        releaseSpawn();
+        await expect(rest).resolves.toMatchObject({ status: 200 });
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        releaseSpawn();
+        acpHandle.dispose();
+        server.closeAllConnections?.();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it('releases requested-id admission after a spawn failure', async () => {
       let spawnCallCount = 0;
       const bridge = fakeBridge({
         spawnImpl: (req) => {
@@ -11446,13 +11655,15 @@ describe('createServeApp', () => {
         sessionId: 'live-primary',
         workspaceCwd: WS_DIFFERENT,
         liveWorkspaceCwd: WS_BOUND,
+        liveWorkspaceId: 'ws-primary',
       });
       expect(secondaryBridge.loadCalls).toHaveLength(0);
     });
 
-    it('keeps a transitioning in-flight restore owner scoped to its workspace', async () => {
+    it('keeps a transitioning restore scoped and rolls its stale result back', async () => {
       const secondaryStarted = deferred();
       const releaseSecondary = deferred();
+      const daemonLog = fakeDaemonLog();
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
         loadImpl: async (req) => {
@@ -11485,7 +11696,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
-        { workspaceRegistry: registry },
+        { workspaceRegistry: registry, daemonLog },
       );
 
       const secondaryRequest = request(app)
@@ -11517,20 +11728,37 @@ describe('createServeApp', () => {
         liveWorkspaceCwd: WS_DIFFERENT,
         liveWorkspaceId: 'ws-secondary',
       });
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'session routing failed',
+        expect.objectContaining({
+          route: 'POST /session/:id/load',
+          resolutionKind: 'workspace_conflict',
+          sessionId: 'concurrent-restore',
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          liveWorkspaceId: 'ws-secondary',
+          liveWorkspaceCwd: WS_DIFFERENT,
+        }),
+      );
       expect(primaryBridge.loadCalls).toHaveLength(0);
 
       const secondaryRes = await secondaryRequest;
 
-      expect(secondaryRes.status).toBe(200);
+      expect(secondaryRes.status).toBe(503);
       expect(secondaryRes.body).toMatchObject({
-        sessionId: 'concurrent-restore',
-        workspaceCwd: WS_DIFFERENT,
+        code: 'workspace_runtime_unavailable',
       });
       expect(secondaryBridge.loadCalls).toEqual([
         {
           sessionId: 'concurrent-restore',
           workspaceCwd: WS_DIFFERENT,
           historyReplay: 'response',
+        },
+      ]);
+      expect(secondaryBridge.killCalls).toEqual([
+        {
+          sessionId: 'concurrent-restore',
+          opts: { requireZeroAttaches: true },
         },
       ]);
     });
@@ -16940,6 +17168,8 @@ describe('createServeApp', () => {
         boundWorkspace: WS_BOUND,
         workspaceRegistry,
         workspaceTrustHotReloadAvailable: true,
+        getSessionBridges: () =>
+          workspaceRegistry.listManaged().map((runtime) => runtime.bridge),
         getWorkspaceTrustPolicySnapshot,
       });
 
@@ -17946,9 +18176,11 @@ describe('createServeApp', () => {
     it('loads fallback workspace settings fail-closed during trust hot reload', async () => {
       const settingsRuntime = await import('../config/settings.js');
       const loadSettings = vi.spyOn(settingsRuntime, 'loadSettings');
+      const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, {
-        bridge: fakeBridge(),
+        bridge,
         workspaceTrustHotReloadAvailable: true,
+        getSessionBridges: () => [bridge],
       });
 
       const res = await auth(request(app).get('/workspace/trust'));
@@ -25219,6 +25451,8 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       {
         workspaceRegistry: registry,
         workspaceTrustHotReloadAvailable: true,
+        getSessionBridges: () =>
+          registry.listManaged().map((runtime) => runtime.bridge),
       } as Parameters<typeof createServeApp>[2],
     );
     const nextForRequest = vi.fn(() => ({ marker: 'next-fs' }));
@@ -25285,6 +25519,24 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
         } as Parameters<typeof createServeApp>[2],
       ),
     ).toThrow(/workspaceRuntimeRemoval requires.*voiceCoordinator/);
+  });
+
+  it('requires a live bridge provider when runtime generations can change', async () => {
+    const { createServeApp } = await import('./server.js');
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/bound',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceTrustHotReloadAvailable: true,
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(/requires deps\.getSessionBridges/);
   });
 
   it('uses the injected registry sender when client-MCP over WS is enabled', async () => {
@@ -27527,6 +27779,8 @@ describe('Live conversation runtime lifecycle', () => {
       liveConversationWorkspace: conversationWorkspace,
       workspaceRuntimeRemoval,
       voiceCoordinator: new WorkspaceVoiceCoordinator(),
+      getSessionBridges: () =>
+        registry.listManaged().map((runtime) => runtime.bridge),
       daemonEnv: { QWEN_SERVE_ACP_HTTP: '1' },
       runtimePlatform: 'darwin',
       webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
