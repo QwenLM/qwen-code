@@ -56,6 +56,8 @@ import {
   createClientMcpServerProvider,
 } from './acp-http/client-mcp-sender-registry.js';
 import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
+import { WebBridgeRegistry } from './web-bridge/web-bridge-registry.js';
+import { WebBridgeService } from './web-bridge/web-bridge-service.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
@@ -87,6 +89,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerWebBridgeRoutes } from './routes/web-bridge.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -1703,6 +1706,16 @@ export function createServeApp(
   // both ends connect (gated by `cdpTunnelOverWs`).
   const cdpTunnelRegistry =
     opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
+  const webBridgeRegistry = new WebBridgeRegistry();
+  const webBridgeService = new WebBridgeService(
+    webBridgeRegistry,
+    deps.qwenCodeVersion ?? 'unknown',
+  );
+
+  registerWebBridgeRoutes(app, {
+    service: webBridgeService,
+    mutate,
+  });
 
   registerDaemonStatusRoutes(app, {
     opts,
@@ -2642,6 +2655,7 @@ export function createServeApp(
     // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
+    webBridgeRegistry,
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.

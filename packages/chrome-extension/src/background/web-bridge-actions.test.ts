@@ -1,0 +1,824 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const cdp = vi.hoisted(() => ({
+  send: vi.fn(),
+  withTab: vi.fn(),
+  release: vi.fn(),
+  unsubscribe: vi.fn(),
+  listeners: [] as Array<
+    (method: string, params: Record<string, unknown>, tabId: number) => void
+  >,
+  subscribe: vi.fn(
+    (
+      listener: (
+        method: string,
+        params: Record<string, unknown>,
+        tabId: number,
+      ) => void,
+    ) => {
+      cdp.listeners.push(listener);
+      return cdp.unsubscribe;
+    },
+  ),
+}));
+
+vi.mock('./cdp-bridge', () => ({
+  withCdpTab: cdp.withTab,
+  withDirectBrowserAction: <T>(operation: () => Promise<T>) => operation(),
+  releaseCdpTab: cdp.release,
+  subscribeCdpEvents: cdp.subscribe,
+}));
+
+function installChrome(): void {
+  globalThis.chrome = {
+    tabs: {
+      create: vi.fn().mockResolvedValue({
+        id: 17,
+        url: 'https://example.test',
+        status: 'complete',
+      }),
+      get: vi.fn().mockResolvedValue({
+        id: 17,
+        url: 'https://example.test',
+        title: 'Example',
+        status: 'complete',
+        groupId: -1,
+      }),
+      query: vi.fn().mockResolvedValue([]),
+      group: vi.fn().mockResolvedValue(3),
+      remove: vi.fn().mockResolvedValue(undefined),
+      onUpdated: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      },
+    },
+    tabGroups: {
+      TAB_GROUP_ID_NONE: -1,
+      update: vi.fn().mockResolvedValue({}),
+      get: vi.fn().mockResolvedValue({ title: 'Research' }),
+    },
+    windows: {
+      getLastFocused: vi.fn().mockResolvedValue({ tabs: [] }),
+    },
+    runtime: {
+      getPlatformInfo: vi.fn().mockResolvedValue({ os: 'mac' }),
+    },
+  } as unknown as typeof chrome;
+}
+
+async function loadActions() {
+  return import('./web-bridge-actions.js');
+}
+
+describe('WebBridge actions', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    cdp.listeners.length = 0;
+    installChrome();
+    cdp.withTab.mockImplementation(
+      async (
+        _tabId: number,
+        operation: (
+          send: (method: string, params?: Record<string, unknown>) => unknown,
+        ) => Promise<unknown>,
+      ) => operation(cdp.send),
+    );
+  });
+
+  it('opens and groups the first session tab', async () => {
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('navigate', {
+        url: 'https://example.test',
+        newTab: true,
+        _session: 'research',
+        group_title: 'Research',
+      }),
+    ).resolves.toEqual({
+      success: true,
+      url: 'https://example.test',
+      tabId: 17,
+    });
+    expect(chrome.tabs.group).toHaveBeenCalledWith({ tabIds: 17 });
+    expect(chrome.tabs.create).toHaveBeenCalledWith({
+      url: 'https://example.test',
+      active: false,
+    });
+    expect(chrome.tabGroups.update).toHaveBeenCalledWith(3, {
+      title: 'Research',
+      color: 'blue',
+      collapsed: false,
+    });
+  });
+
+  it('closes a newly created tab when navigation setup fails', async () => {
+    cdp.withTab.mockRejectedValueOnce(new Error('debugger attach failed'));
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('navigate', {
+        url: 'https://example.test',
+        newTab: true,
+        _session: 'research',
+      }),
+    ).rejects.toThrow('debugger attach failed');
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(17);
+  });
+
+  it('returns the final URL after navigation redirects', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 17,
+      url: 'https://example.test/final',
+      status: 'complete',
+      groupId: -1,
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('navigate', {
+        url: 'https://example.test/start',
+        newTab: true,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ url: 'https://example.test/final' });
+  });
+
+  it('reports Page.navigate failures', async () => {
+    cdp.send.mockResolvedValue({
+      frameId: 'frame-1',
+      errorText: 'net::ERR_NAME_NOT_RESOLVED',
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('navigate', {
+        url: 'https://missing.example.test',
+        _tabId: 17,
+      }),
+    ).rejects.toThrow('net::ERR_NAME_NOT_RESOLVED');
+  });
+
+  it('invalidates snapshot refs as soon as navigation starts', async () => {
+    cdp.send.mockImplementation(async (method: string) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            { nodeId: 'root', childIds: ['button'] },
+            {
+              nodeId: 'button',
+              role: { value: 'button' },
+              name: { value: 'Run' },
+              backendDOMNodeId: 55,
+            },
+          ],
+        };
+      }
+      if (method === 'Page.navigate') {
+        return { frameId: 'frame-1', errorText: 'net::ERR_FAILED' };
+      }
+      return {};
+    });
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('snapshot', { _tabId: 17 });
+
+    await expect(
+      executeWebBridgeAction('navigate', {
+        url: 'https://example.test/next',
+        _tabId: 17,
+      }),
+    ).rejects.toThrow('net::ERR_FAILED');
+    await expect(
+      executeWebBridgeAction('click', { selector: '@e1', _tabId: 17 }),
+    ).rejects.toThrow('unknown ref');
+  });
+
+  it('waits for the current navigation to finish loading', async () => {
+    cdp.send.mockImplementation(async (method: string) =>
+      method === 'Page.navigate'
+        ? { frameId: 'frame-1', loaderId: 'loader-1' }
+        : {},
+    );
+    const { executeWebBridgeAction } = await loadActions();
+    let settled = false;
+    const pending = executeWebBridgeAction('navigate', {
+      url: 'https://example.test/next',
+      _tabId: 17,
+    }).finally(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() =>
+      expect(cdp.send).toHaveBeenCalledWith('Page.navigate', {
+        url: 'https://example.test/next',
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    const listener = cdp.listeners[0];
+    expect(listener).toBeDefined();
+    if (!listener) throw new Error('lifecycle listener was not installed');
+
+    listener(
+      'Page.lifecycleEvent',
+      { name: 'load', frameId: 'frame-1', loaderId: 'old-loader' },
+      17,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    listener(
+      'Page.lifecycleEvent',
+      { name: 'load', frameId: 'frame-1', loaderId: 'loader-1' },
+      17,
+    );
+    await expect(pending).resolves.toMatchObject({
+      url: 'https://example.test',
+      frameId: 'frame-1',
+    });
+    expect(cdp.unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('waits for a same-URL reload to finish loading', async () => {
+    cdp.send.mockImplementation(async (method: string) =>
+      method === 'Page.getFrameTree'
+        ? {
+            frameTree: {
+              frame: { id: 'frame-1', loaderId: 'loader-old' },
+            },
+          }
+        : {},
+    );
+    const { executeWebBridgeAction } = await loadActions();
+    let settled = false;
+    const pending = executeWebBridgeAction('navigate', {
+      url: 'https://example.test',
+      _tabId: 17,
+    }).finally(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() =>
+      expect(cdp.send).toHaveBeenCalledWith('Page.reload', {
+        ignoreCache: true,
+        loaderId: 'loader-old',
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    const listener = cdp.listeners[0];
+    expect(listener).toBeDefined();
+    if (!listener) throw new Error('lifecycle listener was not installed');
+    listener(
+      'Page.lifecycleEvent',
+      { name: 'load', frameId: 'frame-1', loaderId: 'loader-old' },
+      17,
+    );
+    listener(
+      'Page.frameNavigated',
+      { frame: { id: 'frame-1', loaderId: 'loader-new' } },
+      17,
+    );
+    listener(
+      'Page.lifecycleEvent',
+      { name: 'load', frameId: 'frame-1', loaderId: 'loader-new' },
+      17,
+    );
+    await expect(pending).resolves.toMatchObject({
+      url: 'https://example.test',
+    });
+  });
+
+  it('recovers the existing session tab group after a worker restart', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (tabId: number) =>
+        tabId === 16
+          ? { id: 16, groupId: 9, url: 'https://example.test/one' }
+          : {
+              id: 17,
+              groupId: 9,
+              url: 'https://example.test/two',
+              status: 'complete',
+            },
+    );
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('navigate', {
+      url: 'https://example.test/two',
+      newTab: true,
+      _session: 'research',
+      _tabIds: [16],
+    });
+
+    expect(chrome.tabs.group).toHaveBeenCalledWith({
+      tabIds: 17,
+      groupId: 9,
+    });
+    expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+  });
+
+  it('supports top-level await in evaluate', async () => {
+    cdp.send.mockResolvedValue({ result: { type: 'number', value: 42 } });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('evaluate', {
+      code: 'await Promise.resolve(42)',
+      _tabId: 17,
+    });
+
+    expect(cdp.send).toHaveBeenCalledWith('Runtime.evaluate', {
+      expression: 'await Promise.resolve(42)',
+      returnByValue: true,
+      awaitPromise: true,
+      replMode: true,
+    });
+  });
+
+  it('fills textarea values through the textarea setter', async () => {
+    document.body.innerHTML = '<textarea id="notes"></textarea>';
+    cdp.send.mockImplementation(
+      async (_method: string, params?: Record<string, unknown>) => ({
+        result: { value: window.eval(String(params?.['expression'])) },
+      }),
+    );
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('fill', {
+        selector: '#notes',
+        value: 'hello',
+        _tabId: 17,
+      }),
+    ).resolves.toMatchObject({ success: true, mode: 'value' });
+    expect(
+      (document.querySelector('#notes') as HTMLTextAreaElement).value,
+    ).toBe('hello');
+  });
+
+  it('creates stable snapshot refs and clicks them through DOM.resolveNode', async () => {
+    cdp.send
+      .mockResolvedValueOnce({
+        nodes: [
+          { nodeId: 'root', childIds: ['button'] },
+          {
+            nodeId: 'button',
+            role: { value: 'button' },
+            name: { value: 'Submit' },
+            backendDOMNodeId: 91,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ object: { objectId: 'object-91' } })
+      .mockResolvedValueOnce({
+        result: { value: { success: true, tag: 'BUTTON', text: 'Submit' } },
+      });
+    const { executeWebBridgeAction } = await loadActions();
+
+    const snapshot = await executeWebBridgeAction('snapshot', { _tabId: 17 });
+    expect(snapshot).toMatchObject({
+      tree: [{ role: 'button', name: 'Submit', ref: '@e1' }],
+    });
+    await expect(
+      executeWebBridgeAction('click', { selector: '@e1', _tabId: 17 }),
+    ).resolves.toMatchObject({ success: true, tag: 'BUTTON' });
+    expect(cdp.send).toHaveBeenNthCalledWith(2, 'DOM.resolveNode', {
+      backendNodeId: 91,
+    });
+
+    await executeWebBridgeAction('navigate', {
+      url: 'https://example.test/next',
+      _tabId: 17,
+    });
+    await expect(
+      executeWebBridgeAction('click', { selector: '@e1', _tabId: 17 }),
+    ).rejects.toThrow('Run snapshot first');
+  });
+
+  it('dispatches a trusted mouse click at the element center', async () => {
+    cdp.send
+      .mockResolvedValueOnce({ result: { objectId: 'button-1' } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        model: { content: [10, 20, 30, 20, 30, 40, 10, 40] },
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ result: { value: { tag: 'BUTTON' } } });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('mouse_click', {
+        selector: '#submit',
+        _tabId: 17,
+      }),
+    ).resolves.toMatchObject({ success: true, x: 20, y: 30 });
+    expect(cdp.send).toHaveBeenCalledWith(
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mousePressed', x: 20, y: 30 }),
+    );
+  });
+
+  it('maps Mod to Meta on macOS and sends key down/up events', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('send_keys', {
+        keys: 'Mod+A Enter',
+        _tabId: 17,
+      }),
+    ).resolves.toMatchObject({ success: true, dispatched: 2, os: 'mac' });
+    expect(cdp.send).toHaveBeenCalledWith(
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ type: 'rawKeyDown', key: 'Meta' }),
+    );
+    expect(cdp.send).toHaveBeenCalledWith(
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ key: 'a', commands: ['selectAll'] }),
+    );
+    expect(cdp.send).toHaveBeenCalledWith(
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ type: 'keyDown', key: 'Enter' }),
+    );
+  });
+
+  it('captures network metadata and reads the response body', async () => {
+    cdp.send
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ body: '{"ok":true}', base64Encoded: false });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    const listener = cdp.listeners[0];
+    listener(
+      'Network.requestWillBeSent',
+      {
+        requestId: 'request-1',
+        request: { url: 'https://example.test/api', method: 'GET' },
+      },
+      17,
+    );
+    listener(
+      'Network.responseReceived',
+      {
+        requestId: 'request-1',
+        response: { status: 200, mimeType: 'application/json' },
+      },
+      17,
+    );
+    listener('Network.loadingFinished', { requestId: 'request-1' }, 17);
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        filter: '/api',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({
+      count: 1,
+      requests: [{ requestId: 'request-1', status: 200, completed: true }],
+    });
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'detail',
+        requestId: 'request-1',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ body: { ok: true } });
+  });
+
+  it('removes the global network listener when capture stops', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    await executeWebBridgeAction('network', {
+      cmd: 'stop',
+      _tabId: 17,
+      _session: 'research',
+    });
+
+    expect(cdp.unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('rolls back capture state when Network.enable fails', async () => {
+    cdp.send
+      .mockRejectedValueOnce(new Error('debugger detached'))
+      .mockResolvedValueOnce({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'start',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).rejects.toThrow('debugger detached');
+    expect(cdp.unsubscribe).toHaveBeenCalledOnce();
+
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    expect(cdp.subscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it('requires an explicitly selected session tab', async () => {
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(executeWebBridgeAction('snapshot', {})).rejects.toThrow(
+      'No current tab for this session',
+    );
+    expect(chrome.tabs.query).not.toHaveBeenCalled();
+  });
+
+  it('bounds captured network request metadata', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    const listener = cdp.listeners[0];
+
+    for (let index = 0; index <= 2_000; index++) {
+      listener(
+        'Network.requestWillBeSent',
+        {
+          requestId: `request-${index}`,
+          request: { url: `https://example.test/${index}`, method: 'GET' },
+        },
+        17,
+      );
+    }
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ count: 2_000 });
+  });
+
+  it('isolates network captures by session on a shared tab', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'one',
+    });
+    cdp.listeners[0](
+      'Network.requestWillBeSent',
+      {
+        requestId: 'private-request',
+        request: { url: 'https://example.test/private', method: 'GET' },
+      },
+      17,
+    );
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'two',
+    });
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 17,
+        _session: 'two',
+      }),
+    ).resolves.toMatchObject({ count: 0 });
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 17,
+        _session: 'one',
+      }),
+    ).resolves.toMatchObject({ count: 1 });
+  });
+
+  it('releases a borrowed tab without closing it when the session closes', async () => {
+    (
+      chrome.windows.getLastFocused as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({
+      tabs: [{ id: 17, active: true, url: 'https://example.test' }],
+    });
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('find_tab', {
+      url: 'https://example.test',
+      active: true,
+      _session: 'borrower',
+    });
+
+    await executeWebBridgeAction('close_session', {
+      _session: 'borrower',
+      _tabIds: [],
+    });
+
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+    expect(cdp.release).toHaveBeenCalledWith(17);
+  });
+
+  it('releases a borrowed current tab after extension state is lost', async () => {
+    cdp.send.mockResolvedValue({ nodes: [] });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('snapshot', {
+      _session: 'borrower',
+      _tabId: 17,
+      _tabIds: [],
+    });
+    expect(cdp.release).toHaveBeenCalledWith(17);
+    cdp.release.mockClear();
+
+    await executeWebBridgeAction('close_session', {
+      _session: 'borrower',
+      _tabId: 17,
+      _tabIds: [],
+    });
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+    expect(cdp.release).toHaveBeenCalledWith(17);
+  });
+
+  it('prefers an exact URL when multiple session tabs share a host', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (tabId: number) => ({
+        id: tabId,
+        url:
+          tabId === 17
+            ? 'https://example.test/inbox'
+            : 'https://example.test/settings',
+      }),
+    );
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('find_tab', {
+        url: 'https://example.test/settings',
+        _session: 'research',
+        _tabIds: [17, 18],
+      }),
+    ).resolves.toMatchObject({ tabId: 18 });
+    expect(cdp.withTab).toHaveBeenCalledWith(18, expect.any(Function));
+  });
+
+  it('selects the leftmost tab when exact URLs are duplicated', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (tabId: number) => ({
+        id: tabId,
+        index: tabId === 17 ? 8 : 2,
+        url: 'https://example.test/settings',
+      }),
+    );
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('find_tab', {
+        url: 'https://example.test/settings',
+        _session: 'research',
+        _tabIds: [17, 18],
+      }),
+    ).resolves.toMatchObject({ tabId: 18 });
+  });
+
+  it('does not fall back to another path for a full URL', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 17,
+      url: 'https://example.test/inbox',
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('find_tab', {
+        url: 'https://example.test/settings',
+        _session: 'research',
+        _tabIds: [17],
+      }),
+    ).rejects.toThrow('no tab matching');
+  });
+
+  it('returns screenshot and PDF bytes for daemon-side persistence', async () => {
+    cdp.send
+      .mockResolvedValueOnce({ data: 'cG5n' })
+      .mockResolvedValueOnce({ data: 'cGRm' })
+      .mockResolvedValueOnce({ result: { value: 'Example' } });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('screenshot', { format: 'png', _tabId: 17 }),
+    ).resolves.toEqual({ format: 'png', dataLength: 4, data: 'cG5n' });
+    await expect(
+      executeWebBridgeAction('save_as_pdf', {
+        paper_format: 'a4',
+        _tabId: 17,
+      }),
+    ).resolves.toMatchObject({ data: 'cGRm', pageTitle: 'Example' });
+    expect(cdp.send).toHaveBeenCalledWith(
+      'Page.printToPDF',
+      expect.objectContaining({
+        paperWidth: 8.27,
+        paperHeight: 11.69,
+        preferCSSPageSize: false,
+      }),
+    );
+  });
+
+  it('releases a session without closing its owned tabs', async () => {
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('navigate', {
+      url: 'https://example.test',
+      newTab: true,
+      _session: 'research',
+    });
+    cdp.release.mockClear();
+
+    await expect(
+      executeWebBridgeAction('close_session', {
+        close_tabs: false,
+        _session: 'research',
+        _tabIds: [17],
+      }),
+    ).resolves.toEqual({ success: true, closed: 0, released: 1 });
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+    expect(cdp.release).toHaveBeenCalledWith(17);
+  });
+
+  it('handles tab-removal failures without leaking attachment state', async () => {
+    const remove = chrome.tabs.remove as unknown as ReturnType<typeof vi.fn>;
+    remove.mockRejectedValue(new Error('Tabs cannot be edited right now'));
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('close_tab', {
+        _session: 'research',
+        _tabId: 17,
+        _tabIds: [17],
+      }),
+    ).rejects.toThrow('Tabs cannot be edited right now');
+    expect(cdp.release).not.toHaveBeenCalled();
+
+    await executeWebBridgeAction('close_session', {
+      _session: 'research',
+      _tabId: 17,
+      _tabIds: [17],
+    });
+    expect(cdp.release).toHaveBeenCalledWith(17);
+  });
+
+  it('uploads files through DOM.setFileInputFiles', async () => {
+    cdp.send
+      .mockResolvedValueOnce({ root: { nodeId: 1 } })
+      .mockResolvedValueOnce({ nodeId: 2 })
+      .mockResolvedValueOnce({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('upload', {
+        selector: 'input[type=file]',
+        files: ['/tmp/example.txt'],
+        _tabId: 17,
+      }),
+    ).resolves.toEqual({ success: true, fileCount: 1 });
+    expect(cdp.send).toHaveBeenLastCalledWith('DOM.setFileInputFiles', {
+      files: ['/tmp/example.txt'],
+      nodeId: 2,
+    });
+  });
+
+  it('lists and closes only session-owned tabs', async () => {
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('list_tabs', { _tabIds: [17] }),
+    ).resolves.toMatchObject({ tabs: [{ tabId: 17 }] });
+    await expect(
+      executeWebBridgeAction('close_session', {
+        _tabIds: [17, 18],
+        _session: 'research',
+      }),
+    ).resolves.toEqual({ success: true, closed: 2 });
+    expect(chrome.tabs.remove).toHaveBeenCalledTimes(2);
+  });
+});

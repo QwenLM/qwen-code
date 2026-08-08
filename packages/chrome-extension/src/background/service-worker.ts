@@ -3,11 +3,11 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Daemon CDP client — the entire extension service worker (Plan C, issue #5626).
+ * Daemon browser client — the extension service worker (Plan C, issue #5626).
  *
- * A dumb CDP-tunnel pipe: connects to the local `qwen serve` daemon's `/acp`
- * WebSocket and bridges `cdp_*` frames into `chrome.debugger` via
- * {@link handleCdpFrame}. No chat UI — chat lives in the daemon web UI.
+ * Connects to the local `qwen serve` daemon's `/acp` WebSocket and handles both
+ * direct WebBridge actions and the existing raw `cdp_*` tunnel. No chat UI —
+ * chat lives in the daemon web UI.
  *
  * On open we send an ACP `initialize`: the daemon closes the socket on a 30s
  * timeout otherwise, and registers this connection as the CDP bridge at that
@@ -20,9 +20,9 @@ import {
   shutdownCdpBridge,
 } from './cdp-bridge';
 import { getDaemonConfig } from '../daemon/config.js';
-import { checkDaemonHealth } from '../daemon/discovery.js';
+import { handleWebBridgeFrame, isWebBridgeFrame } from './web-bridge';
 
-/* global WebSocket, console, setTimeout, chrome, TextEncoder, btoa */
+/* global WebSocket, console, setTimeout, clearTimeout, chrome, TextEncoder, btoa */
 
 const LOG_PREFIX = '[ServiceWorker]';
 
@@ -59,10 +59,12 @@ const ACP_INIT_ID = 'browser-tools-acp-init';
  * module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+const WEB_BRIDGE_CAPABILITY = 'webbridge-v1';
 
 /** Reconnect backoff bounds (ms). */
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 10_000;
 
 let socket: WebSocket | null = null;
 let started = false;
@@ -126,6 +128,10 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
     handleCdpFrame(msg as { type?: unknown }, (frame) => sendRaw(ws, frame));
     return;
   }
+  if (isWebBridgeFrame(msg['type'])) {
+    handleWebBridgeFrame(msg, (frame) => sendRaw(ws, frame));
+    return;
+  }
   // Other frame types (chat/session traffic) aren't ours; ignore.
 }
 
@@ -182,8 +188,12 @@ async function connect(): Promise<void> {
     return;
   }
   socket = ws;
+  const connectTimer = setTimeout(() => {
+    if (ws.readyState === WebSocket.CONNECTING) ws.close();
+  }, CONNECT_TIMEOUT_MS);
 
   ws.onopen = () => {
+    clearTimeout(connectTimer);
     if (socket !== ws) {
       ws.close();
       return;
@@ -197,7 +207,12 @@ async function connect(): Promise<void> {
       // `clientInfo.name` gates which /acp connection becomes the CDP bridge
       // (vs web UI / Zed clients sharing /acp); must match the daemon's gate.
       params: {
-        clientInfo: { name: CDP_BRIDGE_CLIENT_NAME, version: '1.0.0' },
+        clientInfo: {
+          name: CDP_BRIDGE_CLIENT_NAME,
+          version: chrome.runtime.getManifest().version,
+          extensionId: chrome.runtime.id,
+          capabilities: [WEB_BRIDGE_CAPABILITY],
+        },
       },
     });
   };
@@ -209,6 +224,7 @@ async function connect(): Promise<void> {
   };
 
   ws.onclose = (event: CloseEvent) => {
+    clearTimeout(connectTimer);
     // Surface the daemon's close code/reason (e.g. 1011 "No browser extension
     // connected to the CDP tunnel") so failure modes aren't indistinguishable.
     console.log(
@@ -228,29 +244,9 @@ async function connect(): Promise<void> {
   };
 }
 
-/**
- * Start the daemon CDP client: probe `/health` to avoid spamming reconnects
- * when no daemon is up, then open the `/acp` WebSocket (which owns its own
- * reconnect loop once started). Idempotent.
- */
-async function start(): Promise<void> {
+/** Start the daemon CDP client. The WebSocket owns its reconnect backoff. */
+function start(): void {
   if (started) return;
-  try {
-    const config = await getDaemonConfig();
-    const health = await checkDaemonHealth(config);
-    if (!health.reachable) {
-      console.log(
-        LOG_PREFIX,
-        'Daemon not reachable; CDP client idle:',
-        health.error,
-      );
-      return;
-    }
-    console.log(LOG_PREFIX, 'Daemon reachable; starting CDP client');
-  } catch (error) {
-    console.warn(LOG_PREFIX, 'Daemon health probe failed:', error);
-    return;
-  }
   started = true;
   reconnectDelay = RECONNECT_MIN_MS;
   void connect();
@@ -272,7 +268,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // Reconnect: a fresh worker has started===false (top-level start() also runs);
   // a still-alive worker whose socket dropped has started===true.
   if (started) void connect();
-  else void start();
+  else start();
 });
 
 // No UI of its own: clicking the toolbar icon opens the side panel, which hosts
@@ -283,4 +279,4 @@ chrome.sidePanel
     console.warn(LOG_PREFIX, 'Failed to set side panel behavior:', error),
   );
 
-void start();
+start();

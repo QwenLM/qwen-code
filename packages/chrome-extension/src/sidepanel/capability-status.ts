@@ -45,6 +45,7 @@ export function deriveCapabilityStatus(
   features: readonly string[],
   mcpSnapshot?: WorkspaceMcpSnapshot | null,
   baseUrl?: string,
+  webBridgeConnected?: boolean,
 ): CapabilityStatus {
   if (!daemonReachable) {
     return { state: 'down', shellReady: false, warning: null };
@@ -53,6 +54,20 @@ export function deriveCapabilityStatus(
     return {
       state: 'needs-allow-origin',
       shellReady: false,
+      warning: null,
+    };
+  }
+  if (features.includes('webbridge')) {
+    if (webBridgeConnected !== true) {
+      return {
+        state: 'automation-pending',
+        shellReady: true,
+        warning: 'WebBridge extension is not connected.',
+      };
+    }
+    return {
+      state: 'automation-connected',
+      shellReady: true,
       warning: null,
     };
   }
