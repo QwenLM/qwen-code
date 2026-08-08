@@ -29,11 +29,15 @@ const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
 );
 const ghViewMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
-vi.mock('./lib/gh.js', () => ({
-  ghWithInput: ghMock,
-  gh: ghViewMock,
-  setGhHost: vi.fn(),
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    ghWithInput: ghMock,
+    gh: ghViewMock,
+    setGhHost: vi.fn(),
+  };
+});
 
 const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({

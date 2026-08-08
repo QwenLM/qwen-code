@@ -1,4 +1,3 @@
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { isSafeHref, Markdown } from '../messages/Markdown';
@@ -7,6 +6,7 @@ import {
   readWorkspaceFileAsBlob,
 } from './artifactUtils';
 import styles from './CodeReviewArtifactDetail.module.css';
+import type { ArtifactWorkspaceActions } from './useArtifactWorkspaceTarget';
 
 // Hand-duplicated from the CLI's canonical lists in
 // packages/cli/src/commands/review/findings.ts. The parser below fails closed
@@ -306,7 +306,7 @@ export function CodeReviewArtifactDetail({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
 }) {
   const { t } = useI18n();
   const [content, setContent] = useState<string | null>(null);
@@ -671,7 +671,7 @@ function EvidenceFile({
   workspaceActions,
 }: {
   path: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
 }) {
   const mimeType = getImageMimeTypeFromPath(path);
   const [src, setSrc] = useState<string | null>(null);

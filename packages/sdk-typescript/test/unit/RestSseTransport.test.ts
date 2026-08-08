@@ -61,7 +61,10 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-function sseResponse(frames: string): Response {
+function sseResponse(
+  frames: string,
+  headers: Record<string, string> = {},
+): Response {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -71,7 +74,7 @@ function sseResponse(frames: string): Response {
   });
   return new Response(body, {
     status: 200,
-    headers: { 'content-type': 'text/event-stream' },
+    headers: { 'content-type': 'text/event-stream', ...headers },
   });
 }
 
@@ -334,6 +337,55 @@ describe('RestSseTransport', () => {
       expect(calls[0].url).toContain('?maxQueued=50');
     });
 
+    it('sends SSE diagnostics and accepts a valid response stream id', async () => {
+      const streamId = '019535d9-3df7-7a61-8f6d-6f37c39c5f19';
+      const predecessor = '22222222-2222-4222-8222-222222222222';
+      const { fetch, calls } = recordingFetch(() =>
+        sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n', {
+          'x-qwen-sse-stream-id': streamId.toUpperCase(),
+        }),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const onSseStreamAccepted = vi.fn();
+      const gen = transport.subscribeEvents('s1', {
+        clientId: 'client-1',
+        sseConnectReason: 'prompt_restart',
+        previousSseStreamId: predecessor,
+        onSseStreamAccepted,
+      });
+
+      await gen.next();
+
+      const url = new URL(calls[0].url);
+      expect(calls[0].headers['x-qwen-client-id']).toBe('client-1');
+      expect(url.searchParams.get('connectReason')).toBe('prompt_restart');
+      expect(url.searchParams.get('previousStreamId')).toBe(predecessor);
+      expect(onSseStreamAccepted).toHaveBeenCalledOnce();
+      expect(onSseStreamAccepted).toHaveBeenCalledWith(streamId);
+    });
+
+    it.each([undefined, 'not-a-stream-id'])(
+      'reports an omitted or invalid response stream id as undefined (%s)',
+      async (streamId) => {
+        const { fetch } = recordingFetch(() =>
+          sseResponse(
+            'data: {"type":"a","data":{},"id":1,"v":1}\n\n',
+            streamId ? { 'x-qwen-sse-stream-id': streamId } : {},
+          ),
+        );
+        const transport = new RestSseTransport('http://d', undefined, fetch);
+        const onSseStreamAccepted = vi.fn();
+        const gen = transport.subscribeEvents('s1', {
+          onSseStreamAccepted,
+        });
+
+        await gen.next();
+
+        expect(onSseStreamAccepted).toHaveBeenCalledOnce();
+        expect(onSseStreamAccepted).toHaveBeenCalledWith(undefined);
+      },
+    );
+
     it('does not append maxQueued when not specified', async () => {
       const { fetch, calls } = recordingFetch(() =>
         sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
@@ -353,9 +405,11 @@ describe('RestSseTransport', () => {
           }),
       );
       const transport = new RestSseTransport('http://d', undefined, fetch);
-      const gen = transport.subscribeEvents('s1');
+      const onSseStreamAccepted = vi.fn();
+      const gen = transport.subscribeEvents('s1', { onSseStreamAccepted });
       await expect(gen.next()).rejects.toThrow(DaemonHttpError);
       expect(calls[0].signal?.aborted).toBe(true);
+      expect(onSseStreamAccepted).not.toHaveBeenCalled();
     });
 
     it('throws DaemonHttpError on non-ok response', async () => {
@@ -363,9 +417,11 @@ describe('RestSseTransport', () => {
         jsonResponse(404, { error: 'session not found' }),
       );
       const transport = new RestSseTransport('http://d', undefined, fetch);
-      const gen = transport.subscribeEvents('s1');
+      const onSseStreamAccepted = vi.fn();
+      const gen = transport.subscribeEvents('s1', { onSseStreamAccepted });
       await expect(gen.next()).rejects.toThrow(DaemonHttpError);
       expect(calls[0].signal?.aborted).toBe(true);
+      expect(onSseStreamAccepted).not.toHaveBeenCalled();
     });
 
     it('throws DaemonHttpError with correct status on non-ok response', async () => {
@@ -392,9 +448,11 @@ describe('RestSseTransport', () => {
           }),
       );
       const transport = new RestSseTransport('http://d', undefined, fetch);
-      const gen = transport.subscribeEvents('s1');
+      const onSseStreamAccepted = vi.fn();
+      const gen = transport.subscribeEvents('s1', { onSseStreamAccepted });
       await expect(gen.next()).rejects.toThrow('No SSE body');
       expect(calls[0].signal?.aborted).toBe(true);
+      expect(onSseStreamAccepted).not.toHaveBeenCalled();
     });
 
     it('parses SSE frames into DaemonEvents', async () => {

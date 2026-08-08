@@ -100,7 +100,7 @@ function readHomeEnvIntoFastPath(file: string): void {
   if (!fs.existsSync(file)) return;
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf8'));
-    for (const key of PROJECT_ENV_HARDCODED_EXCLUSIONS) {
+    for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
       if (parsed[key] && !Object.hasOwn(process.env, key)) {
         process.env[key] = parsed[key];
       }
