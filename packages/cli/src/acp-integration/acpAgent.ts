@@ -305,6 +305,7 @@ import {
   isValidExternalToolGuardDenialReason,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+  SHELL_EXECUTING_TOOL_NAMES,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   parseSessionSource,
@@ -2805,11 +2806,11 @@ export function createManagedExternalToolGuard(
     // With only the daemon's built-in policy attached there is no external
     // provider to consult: every non-shell tool is structurally allowed,
     // so resolve locally instead of paying a serialized child-daemon-child
-    // round trip on every tool call. `run_shell_command` still goes to the
-    // daemon because that is the only tool the built-in policy inspects.
+    // round trip on every tool call. The shell-executing tools still go to
+    // the daemon because they are the only ones the built-in policy inspects.
     if (
       !options.externalProviderAttached &&
-      context.toolName !== 'run_shell_command'
+      !SHELL_EXECUTING_TOOL_NAMES.has(context.toolName)
     ) {
       return { allowed: true };
     }

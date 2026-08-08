@@ -440,17 +440,22 @@ any capability advertisement. The daemon owns the bound workspace and the
 session's current effective working directory; both are supplied from trusted
 session state and never accepted from the ACP child.
 
-The guard inspects `run_shell_command` invocations and denies a mutating Git
+The guard inspects the tools that run a shell command line — `run_shell_command`
+and `monitor` — and denies a mutating Git
 command before execution when its repository location resolves outside the
 session's effective working directory. Relocation is recognized for literal
 forms of `git -C <path>`, `git --git-dir[=]<path>`,
 `git --work-tree[=]<path>`, leading
-`GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE` assignments,
+`GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE` assignments (also
+when made through `export`/`declare`/`readonly`, which keep them in the
+environment of every later command in the chain),
 directory-shifting wrapper flags (`env -C`, `sudo -D`), and `cd`, `pushd`, or
 `popd` builtins earlier in the same command chain. Common wrapper prefixes
 (`sh -c`, `bash -c`, `eval`, `sudo`, `nohup`, `timeout`, `exec`, `command`,
+`builtin`,
 `env`, path-qualified `git` binaries, and `{ …; }` / `! …` shell syntax) are
-unwrapped so the same policy applies to the inner Git invocation.
+unwrapped so the same policy applies to the inner Git invocation, and `$(…)`
+or backtick substitution bodies are analyzed as commands of their own.
 
 Relative targets resolve from the command's effective starting directory
 (`arguments.directory` when present, otherwise the session's current effective
@@ -460,8 +465,10 @@ target that cannot be fully resolved before execution — a dynamic target
 (`$VAR`, backticks, `~`, globs), a path that does not exist yet, or an
 unreadable indirection — is denied for mutating or unclassifiable subcommands.
 Relocated commands whose subcommand is one of a small verified read-only set
-(`status`, `rev-parse`, `ls-files`, `grep`, `describe`, `cat-file`) remain
-allowed. Commands with no recognized relocation keep their existing behavior.
+(`rev-parse`, `ls-files`, `describe`, `cat-file`) remain allowed, unless they
+carry a `--output`, `--textconv`, or `--filters` flag: those write a file or
+run the target repository's configured drivers. Commands with no recognized
+relocation keep their existing behavior.
 Denials are final and are reported to the model as
 `Daemon shell guard denied a mutating Git command…`.
 

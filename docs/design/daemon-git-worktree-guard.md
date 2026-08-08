@@ -23,7 +23,9 @@ built-in policy allows it.
 
 ## Policy
 
-The built-in guard inspects `run_shell_command` calls only. Command splitting
+The built-in guard inspects the tools that hand the host a shell command line:
+`run_shell_command` and `monitor`, which spawns its `command` through the same
+shell and carries the same `directory` argument. Command splitting
 reuses core `splitCommands`; containment reuses core `realpathNearestExisting`
 and `isWithinRoot`. It recognizes Git invocations whose repository location is
 changed by literal forms of:
@@ -33,12 +35,16 @@ changed by literal forms of:
 - `git --git-dir <path>` and `git --git-dir=<path>`
 - leading `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, or `GIT_INDEX_FILE`
   assignments
+- the same assignments made through `export`/`declare`/`typeset`/`readonly`
+  (or plain assignments under `set -a`), which stay in the environment of
+  every later command in the same chain rather than only their own run
 - directory-shifting wrapper flags `env -C`/`--chdir` and `sudo -D`/`--chdir`
 - `cd`, `pushd`, or `popd` builtins earlier in the same command chain, whose
   targets become the containment basis for later Git invocations in that chain
 
 Wrapper prefixes are unwrapped before Git detection: leading env assignments,
-`command`, `env` (with its value-taking flags), `sudo` (with its value-taking
+`command`, `builtin`, `env` (with its value-taking flags), `sudo` (with its
+value-taking
 flags), `nohup`, `exec`, `timeout <duration>`, `sh|bash|dash|zsh|ksh -c`
 payloads (analyzed recursively, keeping the outermost run's entry cwd as the
 containment basis so a preceding `cd` cannot disappear inside the wrapper),
@@ -47,12 +53,24 @@ containment basis so a preceding `cd` cannot disappear inside the wrapper),
 and leading shell keywords and reserved words (`{`, `}`, `!`, `if`, `then`,
 `else`, `elif`, `fi`, `for`, `do`, `done`, `while`, `until`, `in`, `case`,
 `esac`, `time`, `coproc`), which can lead a split segment without changing
-what executes. A segment whose program token cannot be classified fails
-closed when the segment still references Git and carries a relocation marker
-(token-level or inside a quoted payload), a recorded relocation, or an
-unresolved prefix. A `-c` payload that is dynamic (`sh -c "$CMD"`) or fused
+what executes. `cd`/`pushd` option words (`-L`, `-P`, `-e`, `-@`, `--`) are
+skipped when locating the directory operand, so containment is evaluated
+against the directory the shell actually enters. A segment whose program token
+cannot be classified fails closed when the segment still references Git and
+carries a relocation marker (token-level or inside a quoted payload), a
+recorded relocation, an unresolved prefix, or a tracked working directory that
+is unknown or already outside the boundary — `cd <outside> && nice git reset
+--hard` is denied on that last clause. A `-c` payload that is dynamic
+(`sh -c "$CMD"`) or fused
 into the flag token (`bash -c'cmd'`, read from the same token) is analyzed
 after extraction; an undecidable payload is denied rather than allowed.
+
+Command substitutions (`$(…)` and backticks) execute before the command they
+are embedded in, so their bodies are extracted from the raw segment and
+analyzed as nested commands against the current tracked directory; their own
+`cd` changes stay inside the substitution. `$((…))` is arithmetic and is
+stepped over, though a substitution nested inside it is still analyzed. An
+unterminated substitution is denied as unparseable.
 
 Relative targets resolve from the command's effective starting directory:
 `arguments.directory` when present, otherwise the session's current effective
@@ -80,7 +98,12 @@ Relocated commands whose subcommand is in a small verified read-only set
 files, and textconv-style drivers execute programs configured by the target
 repository. `grep` takes the same `--textconv` path, and `status` refreshes
 the target index and runs the target repository's `core.fsmonitor`, so
-neither is read-only here. Any `--output` flag demotes an invocation. Commands with no recognized relocation retain existing behavior.
+neither is read-only here. A `--output`, `--textconv`, or `--filters` flag
+demotes an invocation wherever it appears: the first writes a file, and the
+other two run the target repository's configured drivers even for an
+allowlisted subcommand (`git -C <outside> cat-file --textconv --path=f HEAD:f`
+executes its `diff.<driver>.textconv` command). Commands with no recognized
+relocation retain existing behavior.
 Dynamic relocation targets (`$` expansions, backticks, leading `~`, globs)
 and command-executing `-c`/`--config-env` assignments (`alias.*`,
 `core.editor`, `core.pager`, `credential.helper`, `filter.*`, `difftool.*`,
@@ -123,8 +146,9 @@ not a live prompt. Consulting the external provider always requires a prompt
 binding, so a prompt-less request with a provider attached fails closed.
 Without a provider the child also resolves every non-shell tool call locally
 (the built-in policy allows them structurally) instead of paying a
-child-daemon-child round trip per call; `run_shell_command` always makes the
-round trip. With a provider attached every prompt-bound call still makes it.
+child-daemon-child round trip per call; `run_shell_command` and `monitor`
+always make the round trip. With a provider attached every prompt-bound call
+still makes it.
 
 ## Limitations
 

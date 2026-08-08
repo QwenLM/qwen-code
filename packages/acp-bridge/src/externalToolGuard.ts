@@ -44,6 +44,20 @@ export const EXTERNAL_TOOL_GUARD_REQUIRED_VALUE = 'required-v1';
  */
 export const EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE = 'attached-v1';
 
+/**
+ * Tools whose arguments carry a shell command line the host runs on the
+ * session's behalf. The daemon's built-in policy inspects exactly these, and
+ * the ACP child resolves every other tool locally when no external provider
+ * is attached. Pinned to `ToolNames.SHELL`/`ToolNames.MONITOR` in
+ * `@qwen-code/qwen-code-core`, which this package deliberately does not
+ * depend on; `daemon-git-worktree-guard.test.ts` asserts the values still
+ * match so a rename cannot silently unhook a tool from the guard.
+ */
+export const SHELL_EXECUTING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'monitor',
+  'run_shell_command',
+]);
+
 /** Daemon-local bearer token for the loopback external Tool Guard provider. */
 export const EXTERNAL_TOOL_GUARD_TOKEN_ENV =
   'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN';

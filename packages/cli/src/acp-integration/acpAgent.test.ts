@@ -243,6 +243,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     WORKFLOW: 'workflow',
     CREATE_SUB_SESSION: 'create_sub_session',
     SEND_MESSAGE: 'send_message',
+    SHELL: 'run_shell_command',
+    MONITOR: 'monitor',
   },
   FORK_SUBAGENT_TYPE: 'fork',
   IMAGE_CAPABILITY: Object.freeze({
@@ -18511,6 +18513,39 @@ describe('createManagedExternalToolGuard', () => {
       }),
     ).resolves.toEqual({ allowed: true });
     expect(extMethod).toHaveBeenCalledOnce();
+  });
+
+  // `monitor` spawns its `command` through the same shell, so the built-in
+  // daemon policy has to see it too.
+  it('routes monitor commands to the daemon without an external provider', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: ToolNames.MONITOR,
+        args: { command: 'npm run build' },
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: ToolNames.MONITOR,
+        arguments: { command: 'npm run build' },
+      },
+    );
   });
 
   it('stops waiting when the tool invocation is cancelled', async () => {

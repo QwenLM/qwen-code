@@ -12,7 +12,10 @@ import {
   realpathNearestExistingAsync,
   splitCommands,
 } from '@qwen-code/qwen-code-core';
-import { EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS } from '@qwen-code/acp-bridge/externalToolGuard';
+import {
+  EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
+  SHELL_EXECUTING_TOOL_NAMES as SHELL_EXECUTING_TOOLS,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import type {
   ExternalToolGuardHandler,
   ExternalToolGuardPrepareRequest,
@@ -32,6 +35,17 @@ const RELOCATED_READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'describe',
   'ls-files',
   'rev-parse',
+]);
+
+// Flags that break the invariant above wherever they appear: `--output`
+// writes a file, and `--textconv`/`--filters` run the *target* repository's
+// configured drivers (`git -C <outside> cat-file --textconv --path=f HEAD:f`
+// executes its `diff.<driver>.textconv` command). A subcommand from the set
+// above carrying one of these is treated as any other relocated command.
+const RELOCATED_READ_ONLY_DISQUALIFYING_FLAGS = new Set([
+  '--filters',
+  '--output',
+  '--textconv',
 ]);
 
 // Git global options whose next argv entry is consumed as a value.
@@ -320,22 +334,6 @@ const GIT_WORD_PATTERN = /\bgit\b/;
 const TEXT_RELOCATION_MARKER_PATTERN =
   /(^|\s)(-C|--git-dir=?|--work-tree=?)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)=/;
 
-function runMayConcealRelocatedGit(
-  run: GuardToken[],
-  state: PrefixState,
-  context: GuardEvaluationContext,
-): boolean {
-  if (!run.some((token) => GIT_WORD_PATTERN.test(token.text))) return false;
-  return (
-    hasGitRelocationMarker(run) ||
-    run.some((token) => TEXT_RELOCATION_MARKER_PATTERN.test(token.text)) ||
-    state.relocations.length > 0 ||
-    state.unresolved ||
-    context.ambientRelocations.length > 0 ||
-    context.ambientUnresolved
-  );
-}
-
 function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
   const key = leadingEnvAssignmentKey(token.text);
   if (key === null) return;
@@ -574,8 +572,10 @@ type RunAnalysis =
       target?: GuardToken;
     }
   | { kind: 'dynamic-program'; rest: GuardToken[]; state: PrefixState }
+  | { kind: 'export'; state: PrefixState }
+  | { kind: 'all-export' }
   | { kind: 'undecidable' }
-  | { kind: 'other'; state: PrefixState };
+  | { kind: 'other'; state: PrefixState; assignmentsOnly: boolean };
 
 // Shell keywords that can lead a split segment without changing what
 // executes: `if true; then git ...` arrives as a `then git ...` segment
@@ -603,9 +603,65 @@ const LEADING_SHELL_KEYWORDS = new Set([
   'coproc',
 ]);
 
+// Builtins that declare variables. `export`/`declare -x`/`typeset -x` put the
+// assignment in the environment of every later command in this shell, so a
+// GIT_* relocation declared here outlives its own run. `readonly`/`local` are
+// treated the same way: over-approximating an assignment as exported can only
+// deny, never allow.
+const EXPORT_BUILTINS = new Set([
+  'declare',
+  'export',
+  'local',
+  'readonly',
+  'typeset',
+]);
+
+// `cd`/`pushd` options that precede the directory operand. Consuming one as
+// the target would resolve containment against `<cwd>/-P` instead of the
+// directory the shell actually enters.
+const CHDIR_OPTION_PATTERN = /^-[LPe@qs]+$/;
+
+function findChdirTarget(
+  run: GuardToken[],
+  start: number,
+  variant: 'cd' | 'popd' | 'pushd',
+): GuardToken | undefined {
+  let index = start;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.text === '--') return run[index + 1];
+    if (variant === 'cd' && CHDIR_OPTION_PATTERN.test(token.text)) {
+      index++;
+      continue;
+    }
+    // `cd -` (previous directory), `pushd +N`/`-N` (stack rotation) and any
+    // unrecognized option land somewhere unresolvable: report no target so
+    // the caller drops the tracked cwd.
+    if (/^[-+]/.test(token.text)) return undefined;
+    return token;
+  }
+  return undefined;
+}
+
+// `set -a` / `set -o allexport` puts every later assignment in the
+// environment, so plain `GIT_DIR=…` runs stop being shell-local.
+function requestsAllExport(run: GuardToken[], start: number): boolean {
+  for (let index = start; index < run.length; index++) {
+    const text = run[index]!.text;
+    if (text === '-o' || text === '--') {
+      if (run[index + 1]?.text === 'allexport') return true;
+      continue;
+    }
+    if (text === 'allexport' || text === '--allexport') return true;
+    if (/^-[a-zA-Z]*a/.test(text)) return true;
+  }
+  return false;
+}
+
 function analyzeRun(run: GuardToken[]): RunAnalysis {
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
+  let assignments = 0;
   while (index < run.length && LEADING_SHELL_KEYWORDS.has(run[index]!.text)) {
     index++;
   }
@@ -613,6 +669,7 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
     const token = run[index]!;
     if (leadingEnvAssignmentKey(token.text) !== null) {
       recordEnvAssignment(token, state);
+      assignments++;
       index++;
       continue;
     }
@@ -620,10 +677,21 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
       return { kind: 'dynamic-program', rest: run.slice(index), state };
     }
     const program = executableBaseName(token);
-    if (program === 'command') {
+    // `command git …` and `builtin cd …` run the following word with the
+    // function/alias lookup suppressed; neither changes what executes.
+    if (program === 'command' || program === 'builtin') {
       index++;
       while (index < run.length && run[index]!.text.startsWith('-')) index++;
       continue;
+    }
+    if (EXPORT_BUILTINS.has(program)) {
+      for (const operand of run.slice(index + 1)) {
+        recordEnvAssignment(operand, state);
+      }
+      return { kind: 'export', state };
+    }
+    if (program === 'set' && requestsAllExport(run, index + 1)) {
+      return { kind: 'all-export' };
     }
     if (program === 'env') {
       const scan = consumeEnvWrapper(run, index, state);
@@ -679,11 +747,15 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
       return { kind: 'git', tokens: run.slice(index), state };
     }
     if (program === 'cd' || program === 'pushd' || program === 'popd') {
-      return { kind: 'cd', variant: program, target: run[index + 1] };
+      return {
+        kind: 'cd',
+        variant: program,
+        target: findChdirTarget(run, index + 1, program),
+      };
     }
-    return { kind: 'other', state };
+    return { kind: 'other', state, assignmentsOnly: false };
   }
-  return { kind: 'other', state };
+  return { kind: 'other', state, assignmentsOnly: assignments > 0 };
 }
 
 interface GitInvocation {
@@ -693,7 +765,7 @@ interface GitInvocation {
   readonly subcommand?: string;
   readonly unresolved: boolean;
   readonly dangerousConfig: boolean;
-  readonly hasOutputFlag: boolean;
+  readonly hasDisqualifyingFlag: boolean;
 }
 
 function readGitInvocation(tokens: GuardToken[]): GitInvocation {
@@ -821,9 +893,11 @@ function readGitInvocation(tokens: GuardToken[]): GitInvocation {
     break;
   }
 
-  const hasOutputFlag = tokens.some(
-    (token) => token.text === '--output' || token.text.startsWith('--output='),
-  );
+  const hasDisqualifyingFlag = tokens.some((token) => {
+    const separator = token.text.indexOf('=');
+    const flag = separator >= 0 ? token.text.slice(0, separator) : token.text;
+    return RELOCATED_READ_ONLY_DISQUALIFYING_FLAGS.has(flag);
+  });
   return {
     cwdTargets,
     gitDirTargets,
@@ -831,7 +905,7 @@ function readGitInvocation(tokens: GuardToken[]): GitInvocation {
     subcommand,
     unresolved,
     dangerousConfig,
-    hasOutputFlag,
+    hasDisqualifyingFlag,
   };
 }
 
@@ -898,7 +972,7 @@ async function evaluateGitInvocation(
   }
   if (
     RELOCATED_READ_ONLY_GIT_SUBCOMMANDS.has(invocation.subcommand ?? '') &&
-    !invocation.hasOutputFlag
+    !invocation.hasDisqualifyingFlag
   ) {
     return undefined;
   }
@@ -997,6 +1071,121 @@ async function evaluateGitInvocation(
   return undefined;
 }
 
+/**
+ * Extract the bodies of `$(…)` and backtick command substitutions from one
+ * segment. They execute before the command they are embedded in, so a
+ * relocated mutation hidden inside one (`echo $(git -C <outside> reset
+ * --hard)`) has to be analysed rather than folded into an opaque token.
+ * Returns null when a substitution is left unterminated.
+ */
+function extractCommandSubstitutions(segment: string): string[] | null {
+  const bodies: string[] = [];
+  let single = false;
+  let double = false;
+  let index = 0;
+  while (index < segment.length) {
+    const character = segment[index]!;
+    if (!single && character === '\\' && index + 1 < segment.length) {
+      index += 2;
+      continue;
+    }
+    if (!single && character === '$' && segment[index + 1] === '(') {
+      // `$((…))` is arithmetic, not a command. Stepping over the opening
+      // punctuation keeps any real substitution nested inside it visible.
+      if (segment[index + 2] === '(') {
+        index += 3;
+        continue;
+      }
+      const end = findSubstitutionEnd(segment, index + 2);
+      if (end === -1) return null;
+      bodies.push(segment.slice(index + 2, end));
+      index = end + 1;
+      continue;
+    }
+    if (!single && character === '`') {
+      let end = index + 1;
+      while (end < segment.length && segment[end] !== '`') {
+        if (segment[end] === '\\') end++;
+        end++;
+      }
+      if (end >= segment.length) return null;
+      bodies.push(segment.slice(index + 1, end));
+      index = end + 1;
+      continue;
+    }
+    if (character === "'" && !double) single = !single;
+    else if (character === '"' && !single) double = !double;
+    index++;
+  }
+  return bodies;
+}
+
+/** Index of the `)` closing a `$(` body opened at `start`, or -1. */
+function findSubstitutionEnd(segment: string, start: number): number {
+  let single = false;
+  let double = false;
+  let depth = 0;
+  for (let index = start; index < segment.length; index++) {
+    const character = segment[index]!;
+    if (!single && character === '\\') {
+      index++;
+      continue;
+    }
+    if (character === "'" && !double) {
+      single = !single;
+      continue;
+    }
+    if (character === '"' && !single) {
+      double = !double;
+      continue;
+    }
+    if (single || double) continue;
+    if (character === '(') depth++;
+    else if (character === ')') {
+      if (depth === 0) return index;
+      depth--;
+    }
+  }
+  return -1;
+}
+
+/**
+ * A run whose program word the daemon does not recognize can still run git:
+ * `nice git reset --hard`, `xargs git …`, `find -exec git …`. The static scan
+ * cannot prove what it executes, so deny whenever the run mentions git and the
+ * repository it would act on is not provably the session's own — either
+ * because a relocation is in play or because the shell has been moved out of
+ * the boundary by an earlier `cd`.
+ */
+async function evaluateUnrecognizedRun(
+  run: GuardToken[],
+  state: PrefixState,
+  basisCwd: string | undefined,
+  entryCwd: string | undefined,
+  context: GuardEvaluationContext,
+): Promise<GuardDenial | undefined> {
+  if (!run.some((token) => GIT_WORD_PATTERN.test(token.text))) return undefined;
+  if (
+    hasGitRelocationMarker(run) ||
+    run.some((token) => TEXT_RELOCATION_MARKER_PATTERN.test(token.text)) ||
+    state.relocations.length > 0 ||
+    state.unresolved ||
+    context.ambientRelocations.length > 0 ||
+    context.ambientUnresolved
+  ) {
+    return { allowed: false, reason: UNRECOGNIZED_PROGRAM_DENIAL };
+  }
+  if (basisCwd === undefined) {
+    return { allowed: false, reason: UNRECOGNIZED_PROGRAM_DENIAL };
+  }
+  if (basisCwd === entryCwd) return undefined;
+  const canonicalBasis = await realpathNearestExistingAsync(basisCwd);
+  if (!isWithinRoot(canonicalBasis, context.canonicalEffectiveCwd)) {
+    return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, canonicalBasis);
+  }
+  return undefined;
+}
+
 interface CommandEvaluation {
   readonly denial?: GuardDenial;
   readonly cwdAfter: string | undefined;
@@ -1010,30 +1199,61 @@ async function evaluateCommandWithCwd(
   depth: number,
 ): Promise<CommandEvaluation> {
   let trackedCwd = startCwd;
+  // Assignments this command exported into the environment of everything that
+  // runs after them, and whether `set -a` made plain assignments exported.
+  const exported: PrefixState = { relocations: [], unresolved: false };
+  let allExport = false;
+  // Exported relocations reach every later command, including the ones nested
+  // inside a wrapper payload or a substitution body.
+  const activeContext = (): GuardEvaluationContext =>
+    exported.relocations.length > 0 || exported.unresolved
+      ? {
+          canonicalEffectiveCwd: context.canonicalEffectiveCwd,
+          ambientRelocations: [
+            ...context.ambientRelocations,
+            ...exported.relocations,
+          ],
+          ambientUnresolved: context.ambientUnresolved || exported.unresolved,
+        }
+      : context;
   for (const segment of splitCommands(command)) {
-    const runs = tokenizeSegment(segment);
+    const substitutions = extractCommandSubstitutions(segment);
+    const runs = substitutions === null ? null : tokenizeSegment(segment);
     if (runs === null) {
       return {
         denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
         cwdAfter: trackedCwd,
       };
     }
+    // A substitution body executes before the command it is embedded in, in a
+    // subshell of the current directory, so its cwd changes do not escape it.
+    for (const body of substitutions!) {
+      if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
+        return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
+      }
+      const nested = await evaluateCommandWithCwd(
+        body,
+        trackedCwd,
+        entryCwd,
+        activeContext(),
+        depth + 1,
+      );
+      if (nested.denial) {
+        return { denial: nested.denial, cwdAfter: trackedCwd };
+      }
+    }
     for (const run of runs) {
       const analysis = analyzeRun(run);
       switch (analysis.kind) {
         case 'cd': {
           const target = analysis.target;
-          if (
-            analysis.variant === 'popd' ||
-            target === undefined ||
-            (analysis.variant === 'pushd' && /^[-+]/.test(target.text))
-          ) {
+          if (analysis.variant === 'popd' || target === undefined) {
             // `popd`, bare `cd` ($HOME), and dir-stack rotations land the
             // shell somewhere the daemon cannot resolve statically.
             trackedCwd = undefined;
             break;
           }
-          if (target.text === '-' || isDynamicPathValue(target)) {
+          if (isDynamicPathValue(target)) {
             trackedCwd = undefined;
             break;
           }
@@ -1051,14 +1271,15 @@ async function evaluateCommandWithCwd(
           if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
             return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
           }
+          const inherited = activeContext();
           const ambient: GuardEvaluationContext = {
-            canonicalEffectiveCwd: context.canonicalEffectiveCwd,
+            canonicalEffectiveCwd: inherited.canonicalEffectiveCwd,
             ambientRelocations: [
-              ...context.ambientRelocations,
+              ...inherited.ambientRelocations,
               ...analysis.state.relocations,
             ],
             ambientUnresolved:
-              context.ambientUnresolved || analysis.state.unresolved,
+              inherited.ambientUnresolved || analysis.state.unresolved,
           };
           // The payload keeps the outermost run's entry cwd as its
           // containment basis: re-basing it to the tracked cwd would let a
@@ -1085,17 +1306,18 @@ async function evaluateCommandWithCwd(
             analysis.state,
             trackedCwd,
             entryCwd,
-            context,
+            activeContext(),
           );
           if (denial) return { denial, cwdAfter: trackedCwd };
           break;
         }
         case 'dynamic-program': {
+          const inherited = activeContext();
           if (
             analysis.state.unresolved ||
             analysis.state.relocations.length > 0 ||
-            context.ambientUnresolved ||
-            context.ambientRelocations.length > 0 ||
+            inherited.ambientUnresolved ||
+            inherited.ambientRelocations.length > 0 ||
             hasGitRelocationMarker(analysis.rest)
           ) {
             return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
@@ -1107,17 +1329,38 @@ async function evaluateCommandWithCwd(
             denial: { allowed: false, reason: UNDECIDABLE_PAYLOAD_DENIAL },
             cwdAfter: trackedCwd,
           };
-        case 'other':
-          if (runMayConcealRelocatedGit(run, analysis.state, context)) {
-            return {
-              denial: {
-                allowed: false,
-                reason: UNRECOGNIZED_PROGRAM_DENIAL,
-              },
-              cwdAfter: trackedCwd,
-            };
-          }
+        case 'export': {
+          exported.relocations.push(...analysis.state.relocations);
+          if (analysis.state.unresolved) exported.unresolved = true;
+          const denial = await evaluateUnrecognizedRun(
+            run,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            activeContext(),
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
           break;
+        }
+        case 'all-export':
+          allExport = true;
+          break;
+        case 'other': {
+          if (allExport && analysis.assignmentsOnly) {
+            // `set -a` turned this shell-local assignment into an exported one.
+            exported.relocations.push(...analysis.state.relocations);
+            if (analysis.state.unresolved) exported.unresolved = true;
+          }
+          const denial = await evaluateUnrecognizedRun(
+            run,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            activeContext(),
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
+          break;
+        }
         default: {
           const exhaustive: never = analysis;
           void exhaustive;
@@ -1132,7 +1375,7 @@ async function evaluateCommandWithCwd(
 async function evaluateBuiltInGuard(
   request: TrustedDaemonToolGuardRequest,
 ): Promise<ExternalToolGuardPrepareResult> {
-  if (request.toolName !== 'run_shell_command') return { allowed: true };
+  if (!SHELL_EXECUTING_TOOLS.has(request.toolName)) return { allowed: true };
   const command = request.arguments['command'];
   if (typeof command !== 'string') return { allowed: true };
 
