@@ -9,6 +9,7 @@ import {
   MAX_INLINE_ANGLES,
   MIN_INLINE_ANGLES,
   VERIFY_SHARD,
+  launchToolBudget,
   reviewBudget,
 } from './budget.js';
 
@@ -158,5 +159,43 @@ describe('reviewBudget — the agent tool budget', () => {
     expect(
       reviewBudget({ srcDiffLines: 0, diffLines: 3200 }).agentToolBudget,
     ).toBe(50);
+  });
+});
+
+describe('launchToolBudget — the per-launch ceiling', () => {
+  it('derives the allowance from the launch territory, same rate and clamps', () => {
+    expect(launchToolBudget(0, 0)).toBe(30);
+    expect(launchToolBudget(217, 0)).toBe(40);
+    expect(launchToolBudget(5000, 0)).toBe(60);
+  });
+
+  it('mandatory reads ride on top of the allowance, never inside it', () => {
+    // The finding this pins: a whole-diff role on a 25,000-line diff is
+    // ASSIGNED 63 chunk reads — a flat cap would be exhausted by the reading
+    // list before any analysis began.
+    expect(launchToolBudget(25_000, 63)).toBe(60 + 63);
+    expect(launchToolBudget(100, 2)).toBe(35 + 2);
+  });
+
+  it('garbled inputs fail toward the floor, never throw', () => {
+    expect(launchToolBudget(Number.NaN, Number.NaN)).toBe(30);
+    expect(launchToolBudget(-40, -3)).toBe(30);
+    expect(launchToolBudget(100, Number.POSITIVE_INFINITY)).toBe(35);
+  });
+});
+
+describe('reviewBudget — the budget survives the trip through the plan', () => {
+  it('agentToolBudget is an enumerable field of the returned object', () => {
+    // The plan is written with JSON.stringify(report); a field that were a
+    // getter on a prototype, or added only under some inputs, would silently
+    // vanish from the plan every consumer reads. Assert the runtime shape,
+    // not just the type.
+    const b = reviewBudget({ srcDiffLines: 10, diffLines: 10 });
+    expect(Object.keys(b)).toContain('agentToolBudget');
+    expect(
+      (JSON.parse(JSON.stringify(b)) as Record<string, unknown>)[
+        'agentToolBudget'
+      ],
+    ).toBe(30);
   });
 });

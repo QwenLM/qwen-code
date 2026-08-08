@@ -238,6 +238,24 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `aggregate findings over a diff that was not read.`,
     );
   }
+  // A NOTE, never an error, and never a relaunch: a disclosed gap is the soft
+  // tool budget working as designed, and failing the gate on it would teach
+  // agents not to disclose. The ruling belongs to the orchestrator — a gap
+  // naming an incomplete REQUIRED trace joins unreviewedDimensions; optional
+  // depth goes to the report's "Not reviewed" section.
+  if (report.budgetGaps.length > 0) {
+    const total = report.budgetGaps.reduce((n, g) => n + g.gaps.length, 0);
+    writeStderrLine(
+      `NOTE: ${total} budget-gap disclosure(s) from ` +
+        `${report.budgetGaps.length} agent(s) — ` +
+        report.budgetGaps
+          .map((g) => `${g.agent}: ${g.gaps.join('; ')}`)
+          .join(' | ') +
+        `. Do not relaunch over these. Rule on each one: a gap naming an ` +
+        `incomplete required trace goes in unreviewedDimensions; optional ` +
+        `depth is disclosed in the report's "Not reviewed" section.`,
+    );
+  }
 
   if (!report.ok) {
     process.exitCode = 3;

@@ -3669,6 +3669,18 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
 describe('the tool budget in the briefs', () => {
   const budgetPlan = {
     ...PLAN,
+    // Role 0 refuses to build without a PR to check issues against.
+    prNumber: '6771',
+    ownerRepo: 'QwenLM/qwen-code',
+    files: [
+      {
+        path: 'big.ts',
+        kind: 'source',
+        heavy: true,
+        addedLines: 300,
+        removedLines: 100,
+      },
+    ],
     budget: {
       inlineAngles: 4,
       sweep: true,
@@ -3678,24 +3690,109 @@ describe('the tool budget in the briefs', () => {
     },
   } as never;
 
-  it('bakes the soft ceiling into finder and chunk briefs', () => {
+  it('scopes a chunk agent to its own territory, not the whole plan', () => {
+    // Chunk 13 is 217 lines / 9,000 chars: allowance 30 + 217/20 = 40, plus
+    // its one mandatory diff read. Handing it the whole-diff number instead
+    // keeps exactly the wandering headroom the budget exists to cut.
     expect(buildChunkAgentPrompt(budgetPlan, 13)).toContain(
-      'About **42 tool calls**',
+      'About **41 tool calls**',
     );
+    // Chunk 14's 40,000 chars take two reads to page through: both ride on
+    // top of its 38-call allowance.
+    expect(buildChunkAgentPrompt(budgetPlan, 14)).toContain(
+      'About **40 tool calls**',
+    );
+  });
+
+  it('gives a whole-diff role the plan allowance plus one read per chunk', () => {
+    // 42 from the plan + 3 chunks assigned to read.
     for (const role of ['1a', '2', '6b', 'reverse-audit'] as const) {
       expect(buildRoleBrief(budgetPlan, role)).toContain(
-        'About **42 tool calls**',
+        'About **45 tool calls**',
       );
     }
   });
 
-  it('never budgets the verifier or Build & Test', () => {
-    // The verifier's per-finding re-trace is the one walk that must not stop
-    // early (verifyShard governs its load); Agent 7 runs deterministic
-    // commands.
-    for (const role of ['verify', '7'] as const) {
-      expect(buildRoleBrief(budgetPlan, role)).not.toContain('Tool budget');
-    }
+  it('a chunk-scoped reverse auditor gets its chunk, not the diff', () => {
+    expect(
+      buildRoleBrief(budgetPlan, 'reverse-audit', { chunk: 13 }),
+    ).toContain('About **41 tool calls**');
+  });
+
+  it('an invariant agent budgets on its file, with a page allowance', () => {
+    // 300 added + 100 removed lines: allowance 30 + 400/20 = 50, plus the
+    // flat 4 reads (brief, diff slice, post-change file pages).
+    expect(
+      buildRoleBrief(budgetPlan, 'invariant-a', { file: 'big.ts' }),
+    ).toContain('About **54 tool calls**');
+  });
+
+  it('an Agent 8 specialist is budgeted like any other whole-diff finder', () => {
+    // Specialists launch through buildWholeDiffBlock; without this they were
+    // the one launch class that could still wander unbudgeted.
+    expect(buildWholeDiffBlock(budgetPlan)).toContain(
+      'About **45 tool calls**',
+    );
+  });
+
+  it('budgets every role except the three exemptions', () => {
+    // The full roster, so a role added later cannot silently join the exempt
+    // set: the verifier (verifyShard governs it), Build & Test (deterministic
+    // commands), Agent 0 (issue-sized work, not diff-sized).
+    const roles = [
+      '0',
+      '1a',
+      '1b',
+      '1c',
+      '2',
+      '3a',
+      '3b',
+      '3c',
+      '4',
+      '5',
+      '6a',
+      '6b',
+      '6c',
+      '7',
+      'test-matrix',
+      'invariant-a',
+      'invariant-b',
+      'invariant-c',
+      'verify',
+      'reverse-audit',
+    ] as const;
+    const exempt = new Set(['verify', '7', '0']);
+    const budgeted = Object.fromEntries(
+      roles.map((role) => {
+        const opts = role.startsWith('invariant-') ? { file: 'big.ts' } : {};
+        return [
+          role,
+          buildRoleBrief(budgetPlan, role, opts).includes('Tool budget'),
+        ];
+      }),
+    );
+    // Compared as one object so a failure names the role.
+    expect(budgeted).toEqual(
+      Object.fromEntries(roles.map((role) => [role, !exempt.has(role)])),
+    );
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['a string', '42'],
+  ])('a plan whose ceiling is %s gets no ceiling at all', (_name, value) => {
+    // The plan is parsed off disk with an unchecked cast; a garbled field
+    // must fall back exactly like an absent one — toward more coverage —
+    // not render `About **NaN tool calls**` into a brief.
+    const garbled = {
+      ...PLAN,
+      budget: { agentToolBudget: value },
+    } as never;
+    expect(buildChunkAgentPrompt(garbled, 13)).not.toContain('Tool budget');
+    expect(buildRoleBrief(garbled, '1a')).not.toContain('Tool budget');
   });
 
   it('a plan without the field falls back to no ceiling — more coverage, never less', () => {
@@ -3705,9 +3802,12 @@ describe('the tool budget in the briefs', () => {
     expect(buildRoleBrief(PLAN as never, '1a')).not.toContain('Tool budget');
   });
 
-  it('restates the recall rule so the ceiling cannot read as a reporting cap', () => {
-    expect(buildRoleBrief(budgetPlan, '1a')).toContain(
-      'never suppresses a finding',
-    );
+  it('restates the recall rule and fixes the disclosure format', () => {
+    // Without the restatement the ceiling reads as a reporting cap and
+    // suppresses exactly the low-confidence candidates Step 4 exists to
+    // judge; without the fixed format, check-coverage has nothing to parse.
+    const brief = buildRoleBrief(budgetPlan, '1a');
+    expect(brief).toContain('never suppresses a finding');
+    expect(brief).toContain('Budget gap: <the check>');
   });
 });

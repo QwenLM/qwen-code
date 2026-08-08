@@ -42,6 +42,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { launchToolBudget } from './lib/budget.js';
 import {
   expectedRoundSeconds,
   readRoundStamps,
@@ -136,6 +137,8 @@ interface HeavyFile {
   heavy?: boolean;
   addedRanges?: Array<{ start: number; end: number }>;
   diffRange?: { startLine: number; endLine: number };
+  addedLines?: number;
+  removedLines?: number;
 }
 
 /**
@@ -278,38 +281,57 @@ function chunkFrom(
 }
 
 /**
- * The soft tool-call ceiling for finder/auditor briefs (see
- * lib/budget.ts, `agentToolBudget`). Empty when the plan predates the
- * field — an old plan fails toward more coverage, exactly like the
- * pre-budget fallback the skill documents — and empty for the roles whose
- * load is governed elsewhere: the verifier (verifyShard) and Build & Test
- * (deterministic commands).
+ * The soft tool-call ceiling for finder/auditor briefs (see lib/budget.ts,
+ * `agentToolBudget` and `launchToolBudget`). Empty when the plan predates
+ * the budget field — an old plan fails toward more coverage, exactly like
+ * the pre-budget fallback the skill documents — and empty for the roles
+ * whose load is governed elsewhere: the verifier (verifyShard), Build &
+ * Test (deterministic commands), and Agent 0, whose mandatory work is
+ * issue-sized, not diff-sized — a small bugfix referencing many issues
+ * would exhaust a diff-derived ceiling on required fetches alone.
  *
- * The wording is deliberate on two points. "Stop exploring" is aimed at the
- * measured pathology — the slowest agent of a wave is reliably one that
- * kept walking the tree past any recall gain (two runs of the same
- * 14-agent wave: 11.7 vs 41 minutes) — and the recall rule is restated
- * inline because a budget that reads as a reporting cap would suppress
- * exactly the low-confidence candidates the pipeline's later stages exist
- * to judge.
+ * The ceiling is per LAUNCH, not per plan: a scoped agent's allowance is
+ * derived from its own territory (its chunk, its heavy file), and every
+ * launch's mandatory reads ride on top of the allowance — a whole-diff
+ * role on a huge diff is assigned more chunk reads than a flat cap holds.
+ *
+ * The wording is deliberate on three points. "Stop exploring" is aimed at
+ * the measured pathology — the slowest agent of a wave is reliably one
+ * that kept walking the tree past any recall gain (two runs of the same
+ * 14-agent wave: 11.7 vs 41 minutes). The recall rule is restated inline
+ * because a budget that reads as a reporting cap would suppress exactly
+ * the low-confidence candidates the pipeline's later stages exist to
+ * judge. And the disclosure format is FIXED (`Budget gap: <the check>`,
+ * one per line) because check-coverage parses those lines out of the
+ * transcript and reports them — a gap the orchestrator must then rule on,
+ * exactly as it rules on whiffs.
  */
-function toolBudgetBlock(report: PlanReport): string[] {
-  const budget = report.budget?.agentToolBudget;
-  if (typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0) {
+function toolBudgetBlock(
+  report: PlanReport,
+  launch: { territoryLines?: number; mandatoryReads: number },
+): string[] {
+  const base = report.budget?.agentToolBudget;
+  if (typeof base !== 'number' || !Number.isFinite(base) || base <= 0) {
     return [];
   }
+  const reads = Math.max(0, Math.floor(launch.mandatoryReads));
+  const total =
+    typeof launch.territoryLines === 'number'
+      ? launchToolBudget(launch.territoryLines, reads)
+      : Math.floor(base) + reads;
   return [
     '',
     '## Tool budget',
     '',
-    `About **${budget} tool calls** for this whole review — reads, greps, shell, ` +
-      'everything — as a soft ceiling. At the ceiling: stop exploring, write your ' +
-      'findings from the evidence already in hand, and name what you did not get ' +
-      'to in your return (`did not get to: <the check>`) — a disclosed gap is ' +
-      'actionable; a silent crawl only slows the review. The budget never ' +
-      'suppresses a finding: a candidate you can already name goes in your ' +
-      'return regardless (at `Confidence: low` if the budget stopped you before ' +
-      'verifying it), exactly as the recall rule requires.',
+    `About **${total} tool calls** for this whole review — reads, greps, shell, ` +
+      `everything, and the ~${reads} assigned reads your brief lists are already ` +
+      'counted in. It is a soft ceiling. At the ceiling: stop exploring, write ' +
+      'your findings from the evidence already in hand, and disclose each ' +
+      'unfinished check on its own line, exactly as `Budget gap: <the check>` — ' +
+      'the coverage tool reads those lines, so the format is load-bearing. The ' +
+      'budget never suppresses a finding: a candidate you can already name goes ' +
+      'in your return regardless (at `Confidence: low` if the budget stopped ' +
+      'you before verifying it), exactly as the recall rule requires.',
   ];
 }
 
@@ -422,7 +444,12 @@ export function buildChunkAgentPrompt(
     parts.push('', ...repositoryContextBlock(repositoryContext));
   }
 
-  parts.push(...toolBudgetBlock(report));
+  parts.push(
+    ...toolBudgetBlock(report, {
+      territoryLines: chunk.lines,
+      mandatoryReads: Math.max(1, Math.ceil(chunk.chars / READ_FILE_CHAR_CAP)),
+    }),
+  );
 
   // Deliberately NOT included: a sentence for the agent to recite when it finds
   // nothing. Every real launch handed the agent its own receipt text — `If you
@@ -546,6 +573,15 @@ export function buildWholeDiffBlock(
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
   }
+  // An Agent 8 specialist is a whole-diff finder like any other: without
+  // this block it was the one launch class that could still spend 40-100
+  // calls wandering — recreating exactly the slowest-agent tail the budget
+  // exists to cut.
+  parts.push(
+    ...toolBudgetBlock(report, {
+      mandatoryReads: Array.isArray(report.chunks) ? report.chunks.length : 0,
+    }),
+  );
   parts.push(...tail(rules));
   return parts.join('\n');
 }
@@ -870,10 +906,53 @@ export function buildRoleBrief(
 
   parts.push('## Your dimension', '', brief.brief);
   // Not the verifier (verifyShard governs its load, and its per-finding
-  // re-tracing is the one walk that must not stop early) and not Build & Test
-  // (deterministic commands, already self-budgeted).
-  if (role !== 'verify' && role !== '7') {
-    parts.push(...toolBudgetBlock(report));
+  // re-tracing is the one walk that must not stop early), not Build & Test
+  // (deterministic commands, already self-budgeted), and not Agent 0, whose
+  // mandatory work scales with the linked ISSUES, not the diff — a
+  // diff-derived ceiling on a small bugfix would be exhausted by required
+  // fetches alone.
+  if (role !== 'verify' && role !== '7' && role !== '0') {
+    const chunks = (
+      Array.isArray(report.chunks) ? report.chunks : []
+    ) as Array<{ id?: number; lines?: number; chars?: number }>;
+    if (typeof opts.chunk === 'number') {
+      // A chunk-scoped launch (a 3B reverse-audit chunk agent): its own
+      // territory, not the whole diff's.
+      const c = chunks.find((x) => x?.id === opts.chunk);
+      parts.push(
+        ...toolBudgetBlock(report, {
+          territoryLines: typeof c?.lines === 'number' ? c.lines : 0,
+          mandatoryReads: Math.max(
+            1,
+            Math.ceil(
+              (typeof c?.chars === 'number' ? c.chars : 0) / READ_FILE_CHAR_CAP,
+            ),
+          ),
+        }),
+      );
+    } else if (role.startsWith('invariant-') && opts.file) {
+      // One heavy file: budget on its changed lines, with a rough page
+      // allowance for the post-change read plus its own diff slice — the
+      // ceiling is soft, so the roughness costs a disclosure, never a
+      // truncation.
+      const files = (
+        Array.isArray(report.files) ? report.files : []
+      ) as HeavyFile[];
+      const f = files.find((x) => x?.path === opts.file);
+      const changed =
+        (typeof f?.addedLines === 'number' ? f.addedLines : 0) +
+        (typeof f?.removedLines === 'number' ? f.removedLines : 0);
+      parts.push(
+        ...toolBudgetBlock(report, {
+          territoryLines: changed,
+          mandatoryReads: 4,
+        }),
+      );
+    } else {
+      // A whole-diff role is assigned one read per chunk; those ride on
+      // top of the plan-level allowance rather than inside it.
+      parts.push(...toolBudgetBlock(report, { mandatoryReads: chunks.length }));
+    }
   }
   const repositoryContext = repositoryContextOf(report);
   if (role === '7') {

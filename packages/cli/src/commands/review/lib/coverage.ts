@@ -154,6 +154,17 @@ export interface CoverageFromTranscripts {
   missingChunks: number[];
   /** Chunk ids an agent declared unreachable. */
   uncoverableChunks: number[];
+  /**
+   * `Budget gap: <the check>` lines parsed from agent returns — the fixed
+   * disclosure format the tool-budget brief mandates when an agent's soft
+   * ceiling stopped a check it wanted. Detection is deterministic (this
+   * parse); the RULING stays with the orchestrator, exactly as it does for
+   * whiffs: a gap naming an incomplete required trace joins
+   * `unreviewedDimensions` and caps Approve, a gap naming optional depth is
+   * disclosed in the report. An empty list on a budgeted run means no agent
+   * hit its ceiling mid-check.
+   */
+  budgetGaps: Array<{ agent: string; gaps: string[] }>;
   /** Chunk ids a working agent actually reviewed. */
   coveredChunks: number[];
   /**
@@ -304,6 +315,7 @@ function merge(ranges: Array<[number, number]>): Array<[number, number]> {
 }
 
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
+const BUDGET_GAP_RE = /^\s*Budget gap:\s*(.+)$/gim;
 
 /** The exact rebuild flags for one required agent — operator-facing (stderr). */
 function selectorOf(req: RequiredAgent): string {
@@ -851,6 +863,19 @@ export function coverageFromTranscripts(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
 
+  // Budget-gap disclosures, parsed from every agent return with the fixed
+  // format the tool-budget brief mandates. Deterministic detection here;
+  // the ruling (which gaps cap Approve) stays with the orchestrator, like
+  // whiffs. Not part of `ok`: a disclosed gap is the budget working, and
+  // failing the gate on it would teach agents not to disclose.
+  const budgetGaps: Array<{ agent: string; gaps: string[] }> = [];
+  for (const rec of records) {
+    const gaps = [...rec.finalText.matchAll(BUDGET_GAP_RE)]
+      .map((m) => m[1].trim())
+      .filter(Boolean);
+    if (gaps.length > 0) budgetGaps.push({ agent: rec.agentId, gaps });
+  }
+
   return {
     ok:
       blindAgents.length === 0 &&
@@ -876,6 +901,7 @@ export function coverageFromTranscripts(
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
+    budgetGaps,
     coveredChunks: [...covered].sort((a, b) => a - b),
     plannedChunks: plan.chunks.map((c) => ({
       id: c.id,

@@ -168,6 +168,32 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
   };
 }
 
+/**
+ * The per-launch tool ceiling: the exploration allowance for a territory of
+ * `effectiveLines`, PLUS the launch's mandatory reads.
+ *
+ * Two review findings shaped the second term and the split. A whole-diff
+ * role on a 25,000-line diff is ASSIGNED 63 chunk reads — a flat 60-call
+ * cap is exhausted by the reading list before any analysis begins, so
+ * mandatory reads ride on top of the allowance, never inside it. And a
+ * scoped agent (one chunk, one heavy file) inheriting the whole-diff
+ * ceiling keeps exactly the wandering headroom the budget exists to cut, so
+ * the allowance is derived from the launch's own territory. Same constants
+ * as `reviewBudget` — one rate, one home.
+ */
+export function launchToolBudget(
+  effectiveLines: number,
+  mandatoryReads: number,
+): number {
+  const allowance = clamp(
+    MIN_AGENT_TOOL_BUDGET +
+      Math.floor(sane(effectiveLines) / LINES_PER_TOOL_CALL),
+    MIN_AGENT_TOOL_BUDGET,
+    MAX_AGENT_TOOL_BUDGET,
+  );
+  return allowance + Math.max(0, Math.floor(sane(mandatoryReads)));
+}
+
 function sane(n: unknown): number {
   const v = Number(n);
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;

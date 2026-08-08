@@ -724,6 +724,41 @@ describe('Step 3A — dimension agents, no territory, no receipts', () => {
   });
 });
 
+describe('budget-gap disclosures — parsed, reported, never punished', () => {
+  it("collects each agent's `Budget gap:` lines from its final return", () => {
+    transcript('a1', good(1), {
+      calls: 3,
+      text:
+        'No issues found — reviewed chunk 1 end to end.\n' +
+        'Budget gap: callers of parseArgs outside packages/cli\n' +
+        'Budget gap: the removed retry path in fetch-pr',
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.budgetGaps).toEqual([
+      {
+        agent: 'a1',
+        gaps: [
+          'callers of parseArgs outside packages/cli',
+          'the removed retry path in fetch-pr',
+        ],
+      },
+    ]);
+    // The load-bearing half: a disclosed gap must not fail the gate. Failing
+    // on disclosure teaches agents not to disclose — the ruling on each gap
+    // belongs to the orchestrator, exactly as with whiffs.
+    expect(r.ok).toBe(true);
+  });
+
+  it('reports none when nobody disclosed one', () => {
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    expect(coverageFromTranscripts(plan(), ENV).budgetGaps).toEqual([]);
+  });
+});
+
 describe('worked, but not on the diff', () => {
   it('catches the agent that was pointed at the diff and never opened it', () => {
     // The old bar was one successful tool call, and a `glob` for test files is a
