@@ -33,12 +33,14 @@ const { MessageRewriteMiddleware } = await import(
 function createMiddleware(
   target: 'message' | 'thought' | 'all' = 'all',
   sendUpdate?: ReturnType<typeof vi.fn>,
+  getOwnerPromptId?: () => string | undefined,
 ) {
   const mockSendUpdate = sendUpdate ?? vi.fn().mockResolvedValue(undefined);
   const middleware = new MessageRewriteMiddleware(
     {} as Config,
     { enabled: true, target, prompt: 'test prompt' },
     mockSendUpdate,
+    getOwnerPromptId ?? (() => undefined),
   );
   return { middleware, mockSendUpdate };
 }
@@ -68,7 +70,10 @@ describe('MessageRewriteMiddleware', () => {
       } as unknown as SessionUpdate;
 
       await middleware.interceptUpdate(msgUpdate);
-      expect(mockSendUpdate).toHaveBeenCalledWith(msgUpdate);
+      expect(mockSendUpdate).toHaveBeenCalledWith(msgUpdate, {
+        turnIndex: 1,
+        rewritten: false,
+      });
     });
   });
 
@@ -91,11 +96,15 @@ describe('MessageRewriteMiddleware', () => {
         await middleware.flushTurn();
         await middleware.waitForPendingRewrites();
 
-        expect(mockSendUpdate).toHaveBeenNthCalledWith(3, {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'rewritten text' },
-          _meta: { rewritten: true, turnIndex: 1 },
-        });
+        expect(mockSendUpdate).toHaveBeenNthCalledWith(
+          3,
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'rewritten text' },
+            _meta: { rewritten: true, turnIndex: 1 },
+          },
+          { turnIndex: 1, rewritten: true },
+        );
 
         const { LlmRewriter } = await import('./LlmRewriter.js');
         const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
@@ -219,6 +228,37 @@ describe('MessageRewriteMiddleware', () => {
   });
 
   describe('rewrite metadata', () => {
+    it('keeps prompt ownership in callback context instead of wire metadata', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware(
+        'message',
+        undefined,
+        () => 'prompt-a',
+      );
+      const original = {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'raw answer' },
+      } as unknown as SessionUpdate;
+
+      await middleware.interceptUpdate(original);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      expect(mockSendUpdate.mock.calls).toEqual([
+        [
+          original,
+          { ownerPromptId: 'prompt-a', turnIndex: 1, rewritten: false },
+        ],
+        [
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'rewritten text' },
+            _meta: { rewritten: true, turnIndex: 1 },
+          },
+          { ownerPromptId: 'prompt-a', turnIndex: 1, rewritten: true },
+        ],
+      ]);
+    });
+
     it('should emit rewritten message with _meta.rewritten=true', async () => {
       const { middleware, mockSendUpdate } = createMiddleware();
 

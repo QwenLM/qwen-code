@@ -297,6 +297,7 @@ export interface ChatRecord {
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
+    | 'turn_result'
     | 'goal_state'
     | 'goal_runtime'
     | 'realtime_message';
@@ -357,6 +358,7 @@ export interface ChatRecord {
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
+    | TurnResultRecordPayload
     | GoalStateRecordPayloadV2;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -552,6 +554,34 @@ export interface FileHistorySnapshotRecordPayload {
 export interface UserTextElementsRecordPayload {
   content: string;
   textElements: unknown[];
+}
+
+/**
+ * Cap (in UTF-16 code units) on the prompt / result text stored in a
+ * `turn_result` record. Writers truncate and set the paired flag.
+ */
+export const TURN_RESULT_TEXT_MAX_CHARS = 32_768;
+
+/**
+ * Settled outcome of one admitted prompt, appended at turn settle so
+ * pollable turn-status queries survive daemon restarts. `state`
+ * distinguishes normal completion (`completed`, with `stopReason`),
+ * user/abort cancellation (`cancelled`), and failure (`error`).
+ */
+export interface TurnResultRecordPayload {
+  promptId: string;
+  state: 'completed' | 'cancelled' | 'error';
+  stopReason?: string;
+  error?: { message: string; code?: string };
+  /** Epoch ms the turn started executing (agent clock). */
+  startedAt: number;
+  /** Epoch ms the turn settled (agent clock). */
+  endedAt: number;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  resultText?: string;
+  resultTruncated?: boolean;
+  originatorClientId?: string;
 }
 
 export interface ChatRecordingFailureEvent {
@@ -2126,6 +2156,25 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record);
+  }
+
+  /**
+   * Append the settled outcome of a turn. Best-effort by design: a
+   * recording failure must never break turn settlement, so this uses the
+   * non-strict append path (inactive/failed writers skip silently).
+   */
+  recordTurnResult(payload: TurnResultRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'turn_result',
+        systemPayload: payload,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error recording turn result:', error);
+    }
   }
 
   private appendSerializedFileHistorySnapshotBatch(

@@ -721,6 +721,8 @@ export interface MidTurnQueueEntry {
 export interface PendingPromptEntry {
   promptId: string;
   queuedAt: number;
+  /** Wallclock ms the entry was dispatched on the FIFO (running start). */
+  startedAt?: number;
   originatorClientId?: string;
   text: string;
   abortController: AbortController;
@@ -758,6 +760,29 @@ export interface PendingPromptSummary {
   text: string;
   queuedAt: number;
   state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+/**
+ * Pollable snapshot of one admitted prompt's turn, returned by
+ * `getSessionTurnStatus`. `queued` / `running` mirror the live
+ * `pendingPromptList`; settled states come from the bridge's bounded formal
+ * terminal overlay and are enriched or restored from persisted `turn_result`
+ * records.
+ */
+export interface BridgeTurnStatus {
+  sessionId: string;
+  state: 'idle' | 'queued' | 'running' | 'completed' | 'cancelled' | 'error';
+  promptId?: string;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  queuedAt?: number;
+  startedAt?: number;
+  endedAt?: number;
+  stopReason?: string;
+  error?: { message: string; code?: string };
+  resultText?: string;
+  resultTruncated?: boolean;
   originatorClientId?: string;
 }
 
@@ -1030,6 +1055,22 @@ export interface AcpSessionBridge {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ): readonly PendingPromptSummary[];
+
+  /**
+   * Return the pollable status of a turn. With `promptId`, resolves that
+   * exact prompt: live `pendingPromptList` first (queued / running), then
+   * the bridge's recent formal terminal overlay and the agent's persisted
+   * `turn_result` records (completed / cancelled / error); resolves
+   * `undefined` when none knows it. Without `promptId`, returns the current
+   * turn: the running prompt, the queued FIFO head, the most recent terminal
+   * or persisted outcome, or `state: 'idle'`.
+   * Throws `SessionNotFoundError` for unknown ids.
+   */
+  getSessionTurnStatus(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    promptId?: string,
+  ): Promise<BridgeTurnStatus | undefined>;
 
   /**
    * Remove a specific prompt from the pending queue. For `queued` prompts,

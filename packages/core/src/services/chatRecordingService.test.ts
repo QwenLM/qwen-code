@@ -14,6 +14,7 @@ import {
   ChatRecordingService,
   type ChatRecord,
   type AtCommandRecordPayload,
+  type TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -798,6 +799,43 @@ describe('ChatRecordingService', () => {
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('user_text_elements');
       expect(record.systemPayload).toEqual(payload);
+    });
+  });
+
+  describe('recordTurnResult', () => {
+    it('records a settled turn outcome as a system payload', async () => {
+      const payload: TurnResultRecordPayload = {
+        promptId: 'prompt-1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'hello',
+        resultText: 'world',
+        originatorClientId: 'client-1',
+      };
+
+      chatRecordingService.recordTurnResult(payload);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('turn_result');
+      expect(record.systemPayload).toEqual(payload);
+    });
+
+    it('is best-effort when recording is inactive', () => {
+      const inactive = new ChatRecordingService(mockConfig);
+      expect(() =>
+        inactive.recordTurnResult({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1000,
+          endedAt: 1500,
+        }),
+      ).not.toThrow();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
   });
 

@@ -4716,6 +4716,81 @@ export function registerSessionRoutes(
     ),
   );
 
+  // Turn status: pollable state of one admitted prompt's turn. `current`
+  // resolves the running turn (or queued FIFO head, latest settled outcome,
+  // idle); `:promptId` resolves that exact prompt. Live queue state comes
+  // from the bridge's pending list; settled outcomes (completed / cancelled
+  // / error) from the bridge terminal overlay and persisted `turn_result`
+  // transcript records.
+  app.get('/session/:id/turns/current', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/turns/current',
+    );
+    if (!runtime) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    void (async () => {
+      try {
+        const status = await runtime.bridge.getSessionTurnStatus(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'GET /session/:id/turns/current',
+          sessionId,
+        });
+      }
+    })();
+  });
+
+  app.get('/session/:id/turns/:promptId', (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/turns/:promptId',
+    );
+    if (!runtime) return;
+    const promptId = req.params['promptId'];
+    if (!promptId) {
+      res.status(400).json({ error: '`promptId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    void (async () => {
+      try {
+        const status = await runtime.bridge.getSessionTurnStatus(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+          promptId,
+        );
+        if (!status) {
+          res.status(404).json({
+            error: `Prompt ${promptId} not found in session ${sessionId}`,
+            code: 'prompt_not_found',
+            sessionId,
+            promptId,
+          });
+          return;
+        }
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'GET /session/:id/turns/:promptId',
+          sessionId,
+        });
+      }
+    })();
+  });
+
   app.post(
     '/session/:id/shell',
     mutate({ strict: true }),

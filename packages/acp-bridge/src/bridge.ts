@@ -21,6 +21,7 @@ import type {
 import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
+  TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
@@ -29,6 +30,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -127,6 +129,7 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  BridgeTurnStatus,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -527,6 +530,14 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  /**
+   * Bounded bridge-owned terminal overlay. Formal terminal events are
+   * published before the agent's transcript writer is guaranteed to expose
+   * the matching `turn_result`, so polling consults this map to avoid a
+   * transient terminal-to-404 regression.
+   */
+  terminalTurnStatuses: Map<string, BridgeTurnStatus>;
+  terminalTurnStatusLimit: number;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
@@ -1189,6 +1200,66 @@ type PromptTerminal =
   | { kind: 'cancelled' }
   | { kind: 'error'; err: unknown };
 
+function truncateTurnText(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  const truncated = text.length > TURN_RESULT_TEXT_MAX_CHARS;
+  return {
+    text: truncated ? text.slice(0, TURN_RESULT_TEXT_MAX_CHARS) : text,
+    truncated,
+  };
+}
+
+function rememberTerminalTurnStatus(
+  entry: SessionEntry,
+  pendingEntry: PendingPromptEntry,
+  terminal: PromptTerminal,
+): void {
+  const promptText = truncateTurnText(pendingEntry.text);
+  const shared = {
+    sessionId: entry.sessionId,
+    promptId: pendingEntry.promptId,
+    promptText: promptText.text,
+    ...(promptText.truncated ? { promptTextTruncated: true } : {}),
+    queuedAt: pendingEntry.queuedAt,
+    ...(pendingEntry.startedAt !== undefined
+      ? { startedAt: pendingEntry.startedAt }
+      : {}),
+    endedAt: Date.now(),
+    ...(pendingEntry.originatorClientId !== undefined
+      ? { originatorClientId: pendingEntry.originatorClientId }
+      : {}),
+  };
+  let status: BridgeTurnStatus;
+  if (terminal.kind === 'complete') {
+    const stopReason = terminal.result.stopReason;
+    status = {
+      ...shared,
+      state: stopReason === 'cancelled' ? 'cancelled' : 'completed',
+      ...(stopReason !== undefined ? { stopReason } : {}),
+    };
+  } else if (terminal.kind === 'cancelled') {
+    status = { ...shared, state: 'cancelled', stopReason: 'cancelled' };
+  } else {
+    const code = extractErrorCode(terminal.err);
+    status = {
+      ...shared,
+      state: 'error',
+      error: {
+        message: extractErrorMessage(terminal.err),
+        ...(code !== undefined ? { code } : {}),
+      },
+    };
+  }
+  entry.terminalTurnStatuses.set(pendingEntry.promptId, status);
+  while (entry.terminalTurnStatuses.size > entry.terminalTurnStatusLimit) {
+    const oldestPromptId = entry.terminalTurnStatuses.keys().next().value;
+    if (oldestPromptId === undefined) break;
+    entry.terminalTurnStatuses.delete(oldestPromptId);
+  }
+}
+
 /**
  * Publish the formal terminal event for an accepted prompt exactly once.
  * All terminal paths (agent settle, queued removal, deadline, session
@@ -1214,6 +1285,7 @@ function publishPromptTerminal(
     return;
   }
   pendingEntry.terminalPublished = true;
+  rememberTerminalTurnStatus(entry, pendingEntry, terminal);
   const originatorClientId = pendingEntry.originatorClientId;
   if (terminal.kind === 'complete') {
     broadcastTurnComplete(
@@ -1314,6 +1386,108 @@ function extractPromptText(
     }
   }
   return hasImage ? '[image]' : '';
+}
+
+/**
+ * Project a live pending-prompt entry into the pollable turn status shape
+ * (`queued` while waiting on the FIFO, `running` once dispatched).
+ */
+function liveTurnStatus(
+  sessionId: string,
+  pending: PendingPromptEntry,
+): BridgeTurnStatus {
+  // Mirror the settled-record contract: `promptText` is capped at
+  // TURN_RESULT_TEXT_MAX_CHARS with the paired truncation flag, so the
+  // same promptId reports a consistent shape before and after settle.
+  const promptText = truncateTurnText(pending.text);
+  return {
+    sessionId,
+    state: pending.state === 'running' ? 'running' : 'queued',
+    promptId: pending.promptId,
+    promptText: promptText.text,
+    ...(promptText.truncated ? { promptTextTruncated: true } : {}),
+    queuedAt: pending.queuedAt,
+    ...(pending.startedAt !== undefined
+      ? { startedAt: pending.startedAt }
+      : {}),
+    ...(pending.originatorClientId !== undefined
+      ? { originatorClientId: pending.originatorClientId }
+      : {}),
+  };
+}
+
+/**
+ * Project a persisted `turn_result` record into the pollable turn status
+ * shape. The record's `state` is already settled (`completed` /
+ * `cancelled` / `error`).
+ */
+function settledTurnStatus(
+  sessionId: string,
+  record: TurnResultRecordPayload,
+): BridgeTurnStatus {
+  return {
+    sessionId,
+    state: record.state,
+    promptId: record.promptId,
+    ...(record.stopReason !== undefined
+      ? { stopReason: record.stopReason }
+      : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+    ...(record.promptText !== undefined
+      ? { promptText: record.promptText }
+      : {}),
+    ...(record.promptTextTruncated !== undefined
+      ? { promptTextTruncated: record.promptTextTruncated }
+      : {}),
+    ...(record.resultText !== undefined
+      ? { resultText: record.resultText }
+      : {}),
+    ...(record.resultTruncated !== undefined
+      ? { resultTruncated: record.resultTruncated }
+      : {}),
+    ...(record.originatorClientId !== undefined
+      ? { originatorClientId: record.originatorClientId }
+      : {}),
+  };
+}
+
+/**
+ * Keep the bridge's exactly-once formal outcome authoritative while allowing
+ * the durable transcript record to fill in content recorded slightly later.
+ */
+function enrichTerminalTurnStatus(
+  terminal: BridgeTurnStatus,
+  persisted: BridgeTurnStatus,
+): BridgeTurnStatus {
+  return {
+    ...terminal,
+    ...(persisted.promptText !== undefined
+      ? { promptText: persisted.promptText }
+      : {}),
+    ...(persisted.promptTextTruncated !== undefined
+      ? { promptTextTruncated: persisted.promptTextTruncated }
+      : {}),
+    ...(persisted.resultText !== undefined
+      ? { resultText: persisted.resultText }
+      : {}),
+    ...(persisted.resultTruncated !== undefined
+      ? { resultTruncated: persisted.resultTruncated }
+      : {}),
+    ...(terminal.originatorClientId === undefined &&
+    persisted.originatorClientId !== undefined
+      ? { originatorClientId: persisted.originatorClientId }
+      : {}),
+  };
+}
+
+function latestTerminalTurnStatus(
+  entry: SessionEntry,
+): BridgeTurnStatus | undefined {
+  let latest: BridgeTurnStatus | undefined;
+  for (const status of entry.terminalTurnStatuses.values()) latest = status;
+  return latest;
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
@@ -3970,6 +4144,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
+      terminalTurnStatuses: new Map(),
+      terminalTurnStatusLimit: eventRingSize,
       midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
@@ -5554,6 +5730,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         text: extractPromptText(req.prompt),
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
+        ...(!isQueued ? { startedAt: Date.now() } : {}),
       };
       entry.pendingPromptList.push(pendingEntry);
       try {
@@ -5691,6 +5868,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (pendingEntry.state === 'queued') {
             delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
             pendingEntry.state = 'running';
+            pendingEntry.startedAt = Date.now();
             entry.events.publish({
               type: 'pending_prompt_started',
               promptId: pendingEntry.promptId,
@@ -7795,6 +7973,66 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }));
     },
 
+    async getSessionTurnStatus(sessionId, context, promptId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against this session — mirrors /prompt and
+      // getPendingPrompts.
+      resolveTrustedClientId(entry, context?.clientId);
+
+      // Live state wins: a prompt on the pending list has not settled yet,
+      // so no `turn_result` record can exist for it.
+      const live = entry.pendingPromptList.filter((p) => !p.removed);
+      if (promptId !== undefined) {
+        const match = live.find((p) => p.promptId === promptId);
+        if (match) return liveTurnStatus(sessionId, match);
+      } else {
+        const running = live.find((p) => p.state === 'running');
+        if (running) return liveTurnStatus(sessionId, running);
+        const queuedHead = live.find((p) => p.state === 'queued');
+        if (queuedHead) return liveTurnStatus(sessionId, queuedHead);
+      }
+
+      // Settled state is durable: read the agent's persisted `turn_result`
+      // records. This survives daemon restarts (the pending list does not).
+      const result = await requestSessionStatus<{
+        v: number;
+        sessionId: string;
+        turnResult: TurnResultRecordPayload | null;
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        ...(promptId !== undefined ? { promptId } : {}),
+      });
+      const persisted = result.turnResult
+        ? settledTurnStatus(sessionId, result.turnResult)
+        : undefined;
+      if (promptId !== undefined) {
+        const terminal = entry.terminalTurnStatuses.get(promptId);
+        if (terminal && persisted) {
+          return enrichTerminalTurnStatus(terminal, persisted);
+        }
+        if (terminal) return terminal;
+        if (persisted) return persisted;
+      } else {
+        const terminal = latestTerminalTurnStatus(entry);
+        if (terminal && persisted && persisted.promptId === terminal.promptId) {
+          return enrichTerminalTurnStatus(terminal, persisted);
+        }
+        if (terminal && persisted) {
+          return (terminal.endedAt ?? 0) >= (persisted.endedAt ?? 0)
+            ? terminal
+            : persisted;
+        }
+        if (terminal) return terminal;
+        if (persisted) return persisted;
+      }
+      if (promptId !== undefined) {
+        // Neither the live queue nor the transcript knows this prompt.
+        return undefined;
+      }
+      // No live prompt and no settled outcome on record: idle.
+      return { sessionId, state: 'idle' as const };
+    },
+
     removePendingPrompt(sessionId, promptId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -7847,14 +8085,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } catch {
         /* bus may be closed during session teardown */
       }
-      // DAEMON-004: a deleted QUEUED prompt never dispatches, so nothing
-      // downstream would ever emit its formal terminal — publish the
-      // `cancelled` turn_complete now. Running prompts keep the existing
-      // cooperative cancel path (agent returns cancelled → turn_complete);
-      // the FIFO node's later AbortError is deduped by the latch.
-      if (target.state === 'queued') {
-        publishPromptTerminal(entry, target, { kind: 'cancelled' });
-      }
+      // Publish immediately for both states so status polling cannot regress
+      // from queued/running to unknown while cooperative cancellation drains.
+      // The FIFO node's later terminal is deduped by the latch.
+      publishPromptTerminal(entry, target, { kind: 'cancelled' });
       return { removed: true };
     },
 
