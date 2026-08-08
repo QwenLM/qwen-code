@@ -36,6 +36,15 @@
  * not resurrect a dead session. Records that fail that check are swept
  * during enumeration; anything we cannot positively prove dead is left
  * alone.
+ *
+ * That liveness probe is only meaningful inside one PID namespace, and
+ * this directory can span several: the sandbox mounts the host's global
+ * qwen dir into a container that gets its own PID namespace, so both
+ * sides read each other's records while neither can see the other's
+ * processes. Each record therefore carries the namespace it was written
+ * in (see `readPidNamespaceId`), and enumeration ignores — never sweeps,
+ * never lists — any record it cannot attribute to its own namespace. A
+ * namespace-local `ESRCH` is not proof of death for a shared directory.
  */
 
 import { createHash } from 'node:crypto';
@@ -46,6 +55,7 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   isSameProcess,
+  readPidNamespaceId,
   readProcStartToken,
 } from '../utils/process-liveness.js';
 
@@ -85,6 +95,12 @@ export interface SessionRegistryRecord {
   pid: number;
   /** Start-time token guarding against PID reuse; null where unavailable. */
   procStart: string | null;
+  /**
+   * The PID namespace `pid` was allocated in; null where the platform has
+   * no such concept. Readers that cannot match it against their own must
+   * treat the PID as unreadable rather than dead.
+   */
+  pidNamespace: string | null;
   sessionId: string;
   cwd: string;
   /** Short human-facing label, unique-ish per session. */
@@ -152,6 +168,7 @@ export async function registerSession(
     schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
     pid,
     procStart: readProcStartToken(pid),
+    pidNamespace: readPidNamespaceId(),
     sessionId: fields.sessionId,
     cwd: fields.cwd,
     name: fields.name ?? deriveSessionName(fields.cwd, fields.sessionId),
@@ -260,6 +277,10 @@ export async function listLiveSessions(
     return [];
   }
 
+  // Read once per enumeration, not once per record: a process cannot
+  // change PID namespace under itself, and this is a syscall.
+  const selfNamespace = readPidNamespaceId();
+
   const live: SessionRegistryRecord[] = [];
   await Promise.all(
     entries
@@ -280,6 +301,18 @@ export async function listLiveSessions(
           if (includeSelf) live.push(record);
           return;
         }
+
+        // Every check below reads `record.pid` as a number in *our* PID
+        // namespace. When the record came from another one — or from a
+        // writer whose namespace we cannot pin down — that reading is
+        // meaningless, so the record is neither reported (the PID would
+        // name some unrelated local process) nor swept (a local ESRCH
+        // says nothing about a process in another namespace, and
+        // registration is startup-only, so an unlink here would hide a
+        // live session for the rest of its life). Two nulls is the
+        // no-namespaces case — every non-Linux platform — and stays on
+        // the original path.
+        if (selfNamespace !== record.pidNamespace) return;
 
         if (isSameProcess(record.pid, record.procStart)) {
           live.push(record);
@@ -355,6 +388,7 @@ async function readRecord(
   }
 
   const procStart = value['procStart'];
+  const pidNamespace = value['pidNamespace'];
   const qwenVersion = value['qwenVersion'];
   const peerProtocol = value['peerProtocol'];
 
@@ -362,6 +396,7 @@ async function readRecord(
     schemaVersion,
     pid,
     procStart: typeof procStart === 'string' ? procStart : null,
+    pidNamespace: typeof pidNamespace === 'string' ? pidNamespace : null,
     sessionId,
     cwd,
     name,

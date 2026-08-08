@@ -78,6 +78,34 @@ export function readProcStartToken(pid: number): string | null {
 }
 
 /**
+ * An opaque identifier for the PID namespace this process lives in, or
+ * `null` where the platform does not expose one.
+ *
+ * A PID only means something inside one namespace. Anything that writes a
+ * PID into a directory another namespace can also read — a container and
+ * its host sharing a mounted home dir, say — has to record *which*
+ * namespace the number came from, or a namespace-local "no such process"
+ * reads as proof of death for a process that is very much alive.
+ *
+ * Backed by `/proc/self/ns/pid`, a symlink whose target is
+ * `pid:[<inode>]`; the inode is stable for the namespace's lifetime and
+ * identical for two processes exactly when a PID means the same thing to
+ * both of them. Returns `null` off Linux, where the concept does not
+ * exist — callers must treat a `null` on both sides as "no namespace
+ * boundary to worry about", and a mismatch of any kind as unprovable.
+ */
+export function readPidNamespaceId(): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const target = fs.readlinkSync('/proc/self/ns/pid');
+    const match = /^pid:\[(\d+)\]$/.exec(target);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * True when `pid` is alive AND is the same process that recorded
  * `procStart`.
  *

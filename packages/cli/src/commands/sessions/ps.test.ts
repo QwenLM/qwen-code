@@ -30,6 +30,7 @@ function record(
     schemaVersion: 1,
     pid: 4242,
     procStart: '123',
+    pidNamespace: '4026531836',
     sessionId: 'sess-1',
     cwd: '/w/app',
     name: 'app-ab',

@@ -2382,8 +2382,18 @@ describe('startInteractiveUI', () => {
   let originalStdoutIsTTY: boolean | undefined;
   let restoreCiEnv = () => {};
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    // The `main function` and kitty-protocol describes above tear down
+    // with vi.restoreAllMocks(), which wipes the suite-level
+    // registerSession stub's implementation. Left wiped it resolves
+    // undefined, so every test here would silently take
+    // startInteractiveUI's registration-failed branch and register one
+    // cleanup fewer than production does — green in a full-file run, red
+    // the moment a single test is run on its own. Re-arm it so the
+    // default path through this describe is the one users get.
+    const { registerSession } = await import('@qwen-code/qwen-code-core');
+    vi.mocked(registerSession).mockResolvedValue(true);
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -2646,12 +2656,14 @@ describe('startInteractiveUI', () => {
       mockInitializationResult,
     );
 
-    // Verify all startup tasks were called
+    // Verify all startup tasks were called. Two cleanups: the session
+    // registry's unregister hook, then the unmount hook.
     expect(getCliVersion).toHaveBeenCalledTimes(1);
-    expect(registerCleanup).toHaveBeenCalledTimes(1);
+    expect(registerCleanup).toHaveBeenCalledTimes(2);
 
-    // Verify cleanup handler is registered with unmount function
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
+    // Verify cleanup handler is registered with unmount function. Read
+    // the last call, not the first — the first is now the registry's.
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0];
     expect(typeof cleanupFn).toBe('function');
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(

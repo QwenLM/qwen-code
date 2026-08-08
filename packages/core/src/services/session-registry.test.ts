@@ -18,7 +18,10 @@ import {
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
-import { readProcStartToken } from '../utils/process-liveness.js';
+import {
+  readPidNamespaceId,
+  readProcStartToken,
+} from '../utils/process-liveness.js';
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/session-registry-test';
@@ -138,39 +141,75 @@ describe('registerSession', () => {
     }
   });
 
-  it('creates the registry directory as 0700', async () => {
-    await registerSession({
-      sessionId: 's1',
-      cwd: '/w/app',
-      kind: 'interactive',
-    });
-    const stat = await fs.stat(getSessionRegistryDir());
-    expect(stat.mode & 0o777).toBe(0o700);
-  });
-
-  it('tightens a pre-existing loose registry directory', async () => {
-    await fs.mkdir(getSessionRegistryDir(), { recursive: true, mode: 0o755 });
-    await fs.chmod(getSessionRegistryDir(), 0o755);
-
+  it('records the PID namespace the pid was allocated in', async () => {
     await registerSession({
       sessionId: 's1',
       cwd: '/w/app',
       kind: 'interactive',
     });
 
-    const stat = await fs.stat(getSessionRegistryDir());
-    expect(stat.mode & 0o777).toBe(0o700);
+    // Same reason as the token above: the self-pid shortcut skips every
+    // check, so read it back as a different process. A regression writing
+    // `pidNamespace: null` would let a sandboxed sibling sweep this
+    // record while the session is still running.
+    const [record] = await listLiveSessions({
+      selfPid: DEAD_PID,
+      sweepStale: false,
+    });
+    expect(record.pidNamespace).toBe(readPidNamespaceId());
+    if (process.platform === 'linux') {
+      expect(record.pidNamespace).toMatch(/^\d+$/);
+    } else {
+      expect(record.pidNamespace).toBeNull();
+    }
   });
 
-  it('writes the record as 0600', async () => {
-    await registerSession({
-      sessionId: 's1',
-      cwd: '/w/app',
-      kind: 'interactive',
-    });
-    const stat = await fs.stat(getSessionRecordPath());
-    expect(stat.mode & 0o777).toBe(0o600);
-  });
+  // Windows synthesizes st_mode from file attributes (a writable dir reads
+  // 0o777, a file 0o666) and chmod there can only toggle the read-only bit,
+  // so POSIX permission bits are not assertable on the test_windows gate.
+  // Same guard as atomicFileWrite.test.ts and session-writer-lease.test.ts.
+  it.skipIf(process.platform === 'win32')(
+    'creates the registry directory as 0700',
+    async () => {
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      });
+      const stat = await fs.stat(getSessionRegistryDir());
+      expect(stat.mode & 0o777).toBe(0o700);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'tightens a pre-existing loose registry directory',
+    async () => {
+      await fs.mkdir(getSessionRegistryDir(), { recursive: true, mode: 0o755 });
+      await fs.chmod(getSessionRegistryDir(), 0o755);
+
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      });
+
+      const stat = await fs.stat(getSessionRegistryDir());
+      expect(stat.mode & 0o777).toBe(0o700);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'writes the record as 0600',
+    async () => {
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      });
+      const stat = await fs.stat(getSessionRecordPath());
+      expect(stat.mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('reports failure instead of throwing when the home dir is unwritable', async () => {
     __setMockGlobalDir(path.join(tmpDir, 'nope', '\0invalid'));
@@ -245,6 +284,7 @@ describe('listLiveSessions', () => {
       schemaVersion: 1,
       pid: DEAD_PID,
       procStart: null,
+      pidNamespace: readPidNamespaceId(),
       sessionId: 's-dead',
       cwd: '/w/app',
       name: 'app-aa',
@@ -262,6 +302,7 @@ describe('listLiveSessions', () => {
     const filePath = await writeRaw(`${DEAD_PID}.json`, {
       schemaVersion: 1,
       pid: DEAD_PID,
+      pidNamespace: readPidNamespaceId(),
       sessionId: 's-dead',
       cwd: '/w/app',
       name: 'app-aa',
@@ -281,6 +322,7 @@ describe('listLiveSessions', () => {
       schemaVersion: 1,
       pid: process.pid,
       procStart: '1',
+      pidNamespace: readPidNamespaceId(),
       sessionId: 's-recycled',
       cwd: '/w/app',
       name: 'app-aa',
@@ -361,6 +403,73 @@ describe('listLiveSessions', () => {
     ]);
   });
 
+  // The sandbox mounts the host's global qwen dir — `sessions/` included —
+  // into a container that gets its own PID namespace, so both sides read
+  // each other's records while neither can see the other's processes. A
+  // PID that is invisible here is not therefore dead there.
+  it('neither lists nor sweeps a record from another PID namespace', async () => {
+    // Same PID as this very process, so the local liveness probe would
+    // say "alive"; the record still must not be reported, because that
+    // number names an unrelated process on the other side of the border.
+    const livePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: readProcStartToken(process.pid),
+      pidNamespace: 'not-our-namespace',
+      sessionId: 's-foreign-live',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+    // And a PID that is invisible here, which is what the sweep would
+    // otherwise read as proof of death.
+    const deadPath = await writeRaw(`${DEAD_PID}.json`, {
+      schemaVersion: 1,
+      pid: DEAD_PID,
+      procStart: null,
+      pidNamespace: 'not-our-namespace',
+      sessionId: 's-foreign-invisible',
+      cwd: '/w/app',
+      name: 'app-bb',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    expect(await listLiveSessions({ selfPid: process.ppid })).toEqual([]);
+    // Registration is startup-only and patchSessionRecord no-ops on a
+    // missing record, so an unlink here would hide a live session for the
+    // rest of its life. Both files must survive.
+    await expect(fs.stat(livePath)).resolves.toBeDefined();
+    await expect(fs.stat(deadPath)).resolves.toBeDefined();
+  });
+
+  it('leaves a record alone when its namespace is unrecorded', async () => {
+    // Written by a build that predates the namespace field. We cannot
+    // prove it is ours, so we cannot prove its PID is dead either.
+    const filePath = await writeRaw(`${DEAD_PID}.json`, {
+      schemaVersion: 1,
+      pid: DEAD_PID,
+      procStart: null,
+      sessionId: 's-unknown-ns',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    const live = await listLiveSessions();
+    if (readPidNamespaceId() === null) {
+      // No namespaces on this platform: nothing to disagree about, so the
+      // record is ours and the sweep proceeds as it always did.
+      expect(live).toEqual([]);
+      await expect(fs.stat(filePath)).rejects.toThrow();
+    } else {
+      expect(live).toEqual([]);
+      await expect(fs.stat(filePath)).resolves.toBeDefined();
+    }
+  });
+
   it('sorts newest first', async () => {
     await registerSession({
       sessionId: 's-self',
@@ -371,6 +480,7 @@ describe('listLiveSessions', () => {
     await writeRaw(`${process.ppid}.json`, {
       schemaVersion: 1,
       pid: process.ppid,
+      pidNamespace: readPidNamespaceId(),
       sessionId: 's-parent',
       cwd: '/w/other',
       name: 'other-bb',

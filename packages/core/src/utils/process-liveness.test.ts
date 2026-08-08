@@ -6,9 +6,11 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readlinkSync } from 'node:fs';
 import {
   isPidAlive,
   isSameProcess,
+  readPidNamespaceId,
   readProcStartToken,
 } from './process-liveness.js';
 
@@ -17,6 +19,9 @@ import {
  * else passes straight through to the real `node:fs`.
  */
 const procReadFails = vi.hoisted(() => ({ value: false }));
+
+/** The same, for the `/proc/self/ns/pid` readlink. */
+const nsReadFails = vi.hoisted(() => ({ value: false }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -32,6 +37,15 @@ vi.mock('node:fs', async (importOriginal) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (actual.readFileSync as any)(...args);
     }) as typeof actual.readFileSync,
+    readlinkSync: ((...args: unknown[]) => {
+      if (nsReadFails.value) {
+        throw Object.assign(new Error('EACCES: /proc unreadable'), {
+          code: 'EACCES',
+        });
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actual.readlinkSync as any)(...args);
+    }) as typeof actual.readlinkSync,
   };
 });
 
@@ -163,6 +177,42 @@ describe('isSameProcess', () => {
       expect(isSameProcess(process.pid, '123')).toBe(true);
     } finally {
       procReadFails.value = false;
+    }
+  });
+});
+
+describe('readPidNamespaceId', () => {
+  it('reads a stable inode on Linux and null everywhere else', () => {
+    const id = readPidNamespaceId();
+    if (process.platform === 'linux') {
+      // `/proc/self/ns/pid` reads `pid:[<inode>]`; only the inode is
+      // returned, and a process cannot change namespace under itself, so
+      // two reads in one process must agree.
+      expect(id).toMatch(/^\d+$/);
+      expect(readPidNamespaceId()).toBe(id);
+    } else {
+      expect(id).toBeNull();
+    }
+  });
+
+  it('agrees with the namespace this process actually reports', () => {
+    if (process.platform !== 'linux') return;
+    // Anchored against the real symlink rather than a second call to the
+    // function under test: a regression that returned a constant, or read
+    // the wrong ns entry, would otherwise stay green above.
+    const target = readlinkSync('/proc/self/ns/pid');
+    expect(target).toBe(`pid:[${readPidNamespaceId()}]`);
+    // The mount namespace is a different entry with the same shape, so a
+    // typo'd path is a live failure mode worth pinning against.
+    expect(target).not.toBe(readlinkSync('/proc/self/ns/mnt'));
+  });
+
+  it('returns null instead of throwing when the link cannot be read', () => {
+    nsReadFails.value = true;
+    try {
+      expect(readPidNamespaceId()).toBeNull();
+    } finally {
+      nsReadFails.value = false;
     }
   });
 });
