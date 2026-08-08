@@ -2302,9 +2302,24 @@ describe('bot comment markers', () => {
   // `--body-file`); markers at physical line start (heredocs, YAML block
   // scalars); markers mid-literal that only land at a rendered line start
   // after `\n` expansion (`printf 'x\n<!-- m -->prose'`); multi-line literals
-  // whose closing quote sits on a later line; and a line-wrapped printf whose
+  // whose closing quote sits on a later line; a line-wrapped printf whose
   // format opens with the marker (the `\n` exemption reads one physical
-  // line). All are latent — no workflow uses these shapes today.
+  // line); continuations after a marker-ending literal other than an
+  // adjacent quoted literal or bare `$(…)` — `$VAR` expansion, unquoted
+  // words, `$'…'` literals, backtick substitution, backslash-newline, and
+  // text after the closing `)` of a wrapping subshell assignment
+  // (`BODY="$(printf '<!-- m -->')prose"`); closing that shape needs a
+  // subshell discriminator that false-positives on legitimate jq
+  // `contains("<!-- … -->"))` references inside `$(…)` assignments;
+  // trailing end-of-line comments — the `#` skip only fires when the
+  // comment OPENS the physical line, so a glued marker quoted in a
+  // trailing comment is still flagged; YAML double-quoted scalars
+  // (`body: "<!-- m -->\nprose"`) — YAML expands `\n`, but the scanner
+  // cannot cheaply tell a YAML scalar from a shell literal where `\n`
+  // stays literal; and marker-headed bodies built outside
+  // `.github/workflows` — the `.github/scripts/*.mjs` comment builders
+  // (template literals and pushed marker lines) are not scanned. All are
+  // latent — nothing glues a marker today.
   const dir = '.github/workflows';
   const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
 
@@ -2313,11 +2328,12 @@ describe('bot comment markers', () => {
     const offenders = [];
     for (const file of files) {
       const text = readFileSync(join(dir, file), 'utf8');
-      // `[^>\n]` and not `[^>]`: a `<!--` inside a nearby comment would
-      // otherwise let one match span lines, swallow the real marker, and get
-      // discarded by the comment skip below — the guard would then pass with
-      // the very regression present.
-      const re = /<!--[^>\n]*-->/g;
+      // The class excludes `\n` so a `<!--` inside a nearby comment cannot
+      // let one match span lines, swallow the real marker, and get discarded
+      // by the comment skip below — the guard would then pass with the very
+      // regression present. `>` stays allowed inside a marker (lazy match to
+      // the first `-->` on the line) so arrow-style markers are covered too.
+      const re = /<!--[^\n]*?-->/g;
       let m;
       while ((m = re.exec(text)) !== null) {
         const lineStart = text.lastIndexOf('\n', m.index) + 1;
@@ -2356,7 +2372,10 @@ describe('bot comment markers', () => {
         // END of the prefix — an unrelated printf earlier on the same line
         // must not bless a plain double-quoted assignment, where `\n` stays
         // a literal backslash-n and the prose stays on the marker's line.
-        if (glued.startsWith('\\n') && /printf\s+['"]$|\$'$/.test(prefix)) {
+        if (
+          glued.startsWith('\\n') &&
+          /printf\s+(?:-\S+\s+(?:\S+\s+)?|--\s+)?['"]$|\$'$/.test(prefix)
+        ) {
           continue;
         }
         offenders.push(
