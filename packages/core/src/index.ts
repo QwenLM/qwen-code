@@ -591,7 +591,6 @@ export { finalizeToolResponses } from './utils/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
-export * from './utils/advisor-utils.js';
 export * from './utils/forkedAgent.js';
 export * from './utils/sideQuery.js';
 

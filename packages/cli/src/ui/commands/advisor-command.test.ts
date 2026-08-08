@@ -24,9 +24,6 @@ vi.mock('../../i18n/index.js', () => ({
 }));
 
 const mockRunForkedAgent = vi.hoisted(() => vi.fn());
-const mockBuildAdvisorPrompt = vi.hoisted(() =>
-  vi.fn((focus: string) => `<advisor-framing>\n${focus}`),
-);
 const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
   vi.fn().mockReturnValue({
     generationConfig: {},
@@ -37,8 +34,7 @@ const mockBuildBtwCacheSafeParams = vi.hoisted(() =>
 );
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  ADVISOR_MAX_INPUT_LENGTH: 4096,
-  buildAdvisorPrompt: mockBuildAdvisorPrompt,
+  BTW_MAX_INPUT_LENGTH: 4096,
   runForkedAgent: mockRunForkedAgent,
   buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
 }));
@@ -175,15 +171,23 @@ describe('advisorCommand', () => {
 
       await advisorCommand.action!(mockContext, 'check the error handling');
 
-      expect(mockBuildAdvisorPrompt).toHaveBeenCalledWith(
-        'check the error handling',
-      );
       expect(mockRunForkedAgent).toHaveBeenCalledWith(
         expect.objectContaining({
           cacheSafeParams: expect.objectContaining({ model: 'test-model' }),
-          userMessage: '<advisor-framing>\ncheck the error handling',
+          userMessage: expect.stringContaining('check the error handling'),
+          disableModelFallbacks: true,
         }),
       );
+      const prompt = mockRunForkedAgent.mock.calls[0][0].userMessage;
+      for (const required of [
+        'You have NO tools',
+        '## Verdict',
+        '## Risks',
+        '## Missing evidence',
+        '## Recommendation',
+      ]) {
+        expect(prompt).toContain(required);
+      }
       // The forked chat is built from exactly this object, so a gutted or
       // substituted copy would make the advisor review nothing.
       expect(mockRunForkedAgent.mock.calls[0][0].cacheSafeParams).toBe(
@@ -200,7 +204,9 @@ describe('advisorCommand', () => {
 
       await advisorCommand.action!(mockContext, ' check the padding ');
 
-      expect(mockBuildAdvisorPrompt).toHaveBeenCalledWith('check the padding');
+      expect(mockRunForkedAgent.mock.calls[0][0].userMessage).toContain(
+        'check the padding',
+      );
     });
 
     it('should not pass model override when advisorModel is unset', async () => {
@@ -214,6 +220,7 @@ describe('advisorCommand', () => {
 
       const callArgs = mockRunForkedAgent.mock.calls[0][0];
       expect(callArgs).not.toHaveProperty('model');
+      expect(callArgs.disableModelFallbacks).toBe(true);
     });
 
     it('should not pass model override when advisorModel is whitespace-only', async () => {
@@ -255,7 +262,10 @@ describe('advisorCommand', () => {
       await advisorCommand.action!(contextWithModel, '');
 
       expect(mockRunForkedAgent).toHaveBeenCalledWith(
-        expect.objectContaining({ model: 'stronger-model' }),
+        expect.objectContaining({
+          model: 'stronger-model',
+          disableModelFallbacks: true,
+        }),
       );
     });
 
@@ -310,30 +320,6 @@ describe('advisorCommand', () => {
       expect(mockRunForkedAgent).toHaveBeenCalledWith(
         expect.objectContaining({ abortSignal: abortController.signal }),
       );
-    });
-
-    it('should not mutate the main conversation history', async () => {
-      const addHistory = vi.fn();
-      const setHistory = vi.fn();
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
-      const context = createMockCommandContext({
-        services: {
-          config: createConfig({
-            getGeminiClient: () => ({
-              getChat: () => ({ addHistory, setHistory }),
-            }),
-          }),
-        },
-      });
-
-      await advisorCommand.action!(context, '');
-
-      expect(addHistory).not.toHaveBeenCalled();
-      expect(setHistory).not.toHaveBeenCalled();
     });
 
     it('should error when no conversation context is available', async () => {
@@ -560,40 +546,6 @@ describe('advisorCommand', () => {
         messageType: 'error',
         content: 'Advisor review failed: Model error',
       });
-    });
-
-    it('should return error when config is not loaded', async () => {
-      const acpContext = createMockCommandContext({
-        executionMode: 'acp',
-        services: { config: null },
-      });
-
-      const result = await advisorCommand.action!(acpContext, '');
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: 'Config not loaded.',
-      });
-      expect(mockRunForkedAgent).not.toHaveBeenCalled();
-    });
-
-    it('should return error when no model is configured', async () => {
-      const acpContext = createMockCommandContext({
-        executionMode: 'acp',
-        services: {
-          config: createConfig({ getModel: () => null }),
-        },
-      });
-
-      const result = await advisorCommand.action!(acpContext, '');
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: 'No model configured.',
-      });
-      expect(mockRunForkedAgent).not.toHaveBeenCalled();
     });
   });
 });

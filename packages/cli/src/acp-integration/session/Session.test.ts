@@ -12205,6 +12205,26 @@ describe('Session', () => {
         });
       });
 
+      it('does not record /advisor as an ACP user message', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Review complete.',
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+      });
+
       it('marks streamed slash-command messages with their source', async () => {
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,

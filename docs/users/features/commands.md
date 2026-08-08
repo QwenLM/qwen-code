@@ -262,7 +262,7 @@ The `/advisor` command runs an independent, read-only review of the conversation
   ╰──────────────────────────────────────────────────────╯
 ```
 
-The review renders in a bordered box whose header names the resolved reviewer model. An unknown `advisorModel` is not validated up front — if the provider rejects it, `/advisor` reports the failure, so check the model name; only unresolvable alias selectors (e.g. `fast` with no fast model configured) fall back to the main model.
+The review renders in a bordered box whose header names the resolved reviewer model. An unknown `advisorModel` is not validated up front — if the provider rejects it, `/advisor` reports the failure, so check the model name; only unresolvable alias selectors (e.g. `fast` with no fast model configured) fall back to the main model. Advisor requests do not use configured model fallbacks.
 
 **Supported Execution Modes:**
 

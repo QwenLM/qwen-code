@@ -539,7 +539,8 @@ export type HistoryItemBtw = HistoryItemBase & {
  * reviewer's markdown; `model` is the resolved model id that produced it,
  * shown in the header. An unknown `advisorModel` is passed to the provider
  * as-is and surfaces as an error if rejected; only unresolvable alias
- * selectors fall back to the main model.
+ * selectors fall back to the main model. Configured model fallbacks are not
+ * used for advisor requests.
  */
 export type HistoryItemAdvisor = HistoryItemBase & {
   type: 'advisor';

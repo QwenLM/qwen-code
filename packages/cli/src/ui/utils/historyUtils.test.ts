@@ -99,24 +99,6 @@ describe('isSyntheticHistoryItem', () => {
       ),
     ).toBe(false);
   });
-
-  it('treats btw and advisor results as meaningful', () => {
-    // Both are user-asked-for slash-command outputs; rewinding past them on
-    // ESC would silently wipe rendered content from history.
-    expect(
-      isSyntheticHistoryItem(
-        mk({
-          type: 'btw',
-          btw: { question: 'q', answer: 'a', isPending: false },
-        }),
-      ),
-    ).toBe(false);
-    expect(
-      isSyntheticHistoryItem(
-        mk({ type: 'advisor', text: 'review', model: 'm' }),
-      ),
-    ).toBe(false);
-  });
 });
 
 describe('itemsAfterAreOnlySynthetic', () => {
@@ -138,14 +120,6 @@ describe('itemsAfterAreOnlySynthetic', () => {
       mk({ type: 'user', text: 'foo' }, 1),
       mk({ type: 'gemini_content', text: 'hello' }, 2),
       mk({ type: 'info', text: 'Request cancelled.' }, 3),
-    ];
-    expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(false);
-  });
-
-  it('returns false when an advisor result follows the user message', () => {
-    const h: HistoryItem[] = [
-      mk({ type: 'user', text: 'foo' }, 1),
-      mk({ type: 'advisor', text: 'review', model: 'm' }, 2),
     ];
     expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(false);
   });

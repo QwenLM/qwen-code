@@ -10,8 +10,6 @@ import type { BtwProps } from '../../types.js';
 import { Colors } from '../../colors.js';
 import { t } from '../../../i18n/index.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { normalizeCodeFences } from '../../utils/markdownUtilities.js';
-import { useRenderMode } from '../../contexts/RenderModeContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
 export interface BtwDisplayProps {
@@ -24,11 +22,19 @@ export interface BtwDisplayProps {
 // border(1)*2 + paddingX(1)*2 = 4
 const BTW_SELF_CHROME = 4;
 
+/**
+ * Ensure code fences (``` or ~~~) start on their own line so that
+ * MarkdownDisplay's line-based parser can detect them.  Models sometimes
+ * emit the opening fence right after prose text without a preceding newline.
+ */
+function normalizeCodeFences(text: string): string {
+  return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
+}
+
 const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
   btw,
   containerWidth,
 }) => {
-  const { renderMode } = useRenderMode();
   const { columns: terminalWidth } = useTerminalSize();
   const baseWidth = containerWidth ?? terminalWidth;
   const contentWidth = Math.max(2, baseWidth - BTW_SELF_CHROME);
@@ -64,9 +70,7 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
       ) : (
         <Box flexDirection="column" marginTop={1}>
           <MarkdownDisplay
-            text={normalizeCodeFences(btw.answer, {
-              mathFences: renderMode === 'render',
-            })}
+            text={normalizeCodeFences(btw.answer)}
             isPending={false}
             contentWidth={contentWidth}
           />

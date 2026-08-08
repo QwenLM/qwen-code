@@ -8,8 +8,6 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { Colors } from '../../colors.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { normalizeCodeFences } from '../../utils/markdownUtilities.js';
-import { useRenderMode } from '../../contexts/RenderModeContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
 export interface AdvisorDisplayProps {
@@ -29,7 +27,6 @@ const AdvisorMessageInternal: React.FC<AdvisorDisplayProps> = ({
   model,
   containerWidth,
 }) => {
-  const { renderMode } = useRenderMode();
   const { columns: terminalWidth } = useTerminalSize();
   const baseWidth = containerWidth ?? terminalWidth;
   const contentWidth = Math.max(2, baseWidth - ADVISOR_SELF_CHROME);
@@ -50,9 +47,7 @@ const AdvisorMessageInternal: React.FC<AdvisorDisplayProps> = ({
       </Box>
       <Box flexDirection="column" marginTop={1}>
         <MarkdownDisplay
-          text={normalizeCodeFences(text, {
-            mathFences: renderMode === 'render',
-          })}
+          text={text}
           isPending={false}
           contentWidth={contentWidth}
         />

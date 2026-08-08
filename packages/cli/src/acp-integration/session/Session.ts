@@ -237,7 +237,11 @@ import {
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
-import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import {
+  getSlashCommandFirstToken,
+  isSlashCommand,
+  SLASH_COMMANDS_SKIP_RECORDING,
+} from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import {
   isTerminalGoalStatusKind,
@@ -3123,6 +3127,12 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_CONTINUE_META_KEY
               ] === true;
+            const firstTextBlock = modelPromptBlocks.find(
+              (block) => block.type === 'text',
+            );
+            const inputText = firstTextBlock?.text || '';
+            const isSlashInput = !isContinue && isSlashCommand(inputText);
+            const slashCommandName = getSlashCommandFirstToken(inputText);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -3171,20 +3181,15 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
-            } else {
+            } else if (
+              !isSlashInput ||
+              !SLASH_COMMANDS_SKIP_RECORDING.has(slashCommandName)
+            ) {
               // record user message for session management
               this.config
                 .getChatRecordingService()
                 ?.recordUserMessage(promptText);
             }
-
-            // Check if the input contains a slash command
-            // Extract text from the first text block if present
-            const firstTextBlock = modelPromptBlocks.find(
-              (block) => block.type === 'text',
-            );
-            const inputText = firstTextBlock?.text || '';
-            const isSlashInput = !isContinue && isSlashCommand(inputText);
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
