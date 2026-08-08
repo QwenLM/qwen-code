@@ -977,6 +977,18 @@ describe('runBuildTest', () => {
     ).toContain(colored);
   });
 
+  it('rescues Maven goal-failure lines from a trimmed middle', () => {
+    // The swallowed-failure check runs on trimmed output; a fail-never
+    // plugin goal failure lost to the trim would read the run green.
+    const line =
+      '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check (validate) on project core: You have 1 Checkstyle violation.';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('goal failures');
+  });
+
   it('rescues Maven disk-failure lines from a trimmed middle', () => {
     // The launch-failure classification runs on trimmed output; an ENOSPC
     // line lost to the trim would file a disk failure against the PR (or,

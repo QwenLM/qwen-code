@@ -1783,6 +1783,40 @@ describe('runTestPlan', () => {
       }
     });
 
+    it('does not let a green finished sibling shadow an interrupted run with fresh failures', () => {
+      // The finished-run ranking used to win whenever ANY finished run
+      // matched: the claim read `reproduces` off the green sibling while
+      // the build-test report said ok:false with recorded failures.
+      const output =
+        '[maven-test-report] core/target/surefire-reports/TEST-A.xml: tests=2, failures=1, errors=0, skipped=0\n' +
+        '[maven-test-failure] core/target/surefire-reports/TEST-A.xml: example.ATest#fails';
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: null,
+            seconds: 3,
+            timedOut: true,
+            output,
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toContain('interrupted');
+    });
+
     it('does not contradict a -pl claim on an INTERRUPTED -am run of the same module set', () => {
       // The finished twin of this guard is pinned above; the interrupted
       // fresh-failure branch must apply the same scope asymmetry — the

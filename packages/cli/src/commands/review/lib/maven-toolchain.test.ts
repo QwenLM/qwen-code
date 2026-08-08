@@ -20,6 +20,7 @@ import type { CommandResult } from '../build-test.js';
 import { observedTestCounts } from '../test-plan.js';
 import {
   detectMavenOwnership,
+  isDependencyFailureLine,
   mavenExecutable,
   mavenToolchainAdapter,
   readMavenReactor,
@@ -251,7 +252,9 @@ describe('maven toolchain adapter', () => {
     expect(readMavenReactor(root).error).toContain('Cannot safely parse');
   });
 
-  it.skipIf(process.platform === 'win32')(
+  // win32 needs admin rights for symlinks; APFS resolves only ~16 symlink
+  // hops, and this fixture chains 30 — ELOOP on the macOS merge-queue job.
+  it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
     'deduplicates symlink-aliased reactor dirs by real path',
     () => {
       // Each level lists two symlinks to the next level: 2^depth distinct
@@ -2870,11 +2873,12 @@ describe('maven toolchain adapter', () => {
     expect(report.ok).toBe(true);
   }, 20_000);
 
-  it('caps the fresh reports one run parses, and discloses the omission', () => {
+  it('fails closed past the fresh-report evidence cap, and discloses the omission', () => {
     // The mtime freshness filter accepts any writer, so the PR's own
     // tests control how many reports exist at parse time. Past the cap
-    // the parse stops and the evidence block says so — nothing reads
-    // thousands of reports without a disclosure.
+    // the parse stops; the reports beyond it carry UNKNOWN failure
+    // status, so the run must not certify a clean pass over them — the
+    // evidence block discloses the omission and the verdict fails closed.
     writeReactor();
 
     const report = mavenToolchainAdapter.run({
@@ -2897,7 +2901,8 @@ describe('maven toolchain adapter', () => {
       },
     });
 
-    expect(report.ok).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('not certified as a pass');
     expect(report.test[0]?.output).toContain(
       '5 more fresh report(s) not parsed',
     );
@@ -3026,21 +3031,26 @@ describe('maven toolchain adapter', () => {
     });
   });
 
-  it('fails closed on reactor nesting deeper than the cap', () => {
-    // Real reactors nest a handful of levels; a deeper chain is a hostile
-    // checkout shape, and the walk must hand back the { error } contract
-    // instead of overflowing the stack.
-    let parent = '.';
-    for (let i = 0; i < 600; i++) {
-      const name = `d${i}`;
-      writeProject(parent, [name]);
-      parent = parent === '.' ? name : `${parent}/${name}`;
-    }
-    writeProject(parent);
+  // The 600-level fixture path reaches ~2.9KB — past macOS PATH_MAX
+  // (1024), where setup dies with ENAMETOOLONG.
+  it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'fails closed on reactor nesting deeper than the cap',
+    () => {
+      // Real reactors nest a handful of levels; a deeper chain is a hostile
+      // checkout shape, and the walk must hand back the { error } contract
+      // instead of overflowing the stack.
+      let parent = '.';
+      for (let i = 0; i < 600; i++) {
+        const name = `d${i}`;
+        writeProject(parent, [name]);
+        parent = parent === '.' ? name : `${parent}/${name}`;
+      }
+      writeProject(parent);
 
-    const parsed = readMavenReactor(root);
-    expect(parsed.error).toContain('deeper than 512 levels');
-  });
+      const parsed = readMavenReactor(root);
+      expect(parsed.error).toContain('deeper than 512 levels');
+    },
+  );
 
   it('treats a changed named parent POM as a dependency input', () => {
     // Ownership routing models named parent files as build inputs; the
@@ -3494,5 +3504,175 @@ describe('maven toolchain adapter', () => {
     expect(report.note).toContain('granted budget (5s) is below the');
     expect(report.note).toContain('15s minimum');
     expect(report.note).not.toContain('was spent');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed when a POM is not a regular file',
+    () => {
+      // A symlink to /dev/zero or a FIFO reports size 0, passes the
+      // size-only cap, and readFileSync reads it forever — a PR-controlled
+      // hang. A symlink to a directory is the portable non-regular shape.
+      writeProject('.', ['core']);
+      writeProject('core');
+      rmSync(join(root, 'core', 'pom.xml'));
+      symlinkSync(join(root, 'core'), join(root, 'core', 'pom.xml'));
+
+      expect(readMavenReactor(root).error).toContain('not a regular file');
+    },
+  );
+
+  it('scopes the heirs of a DELETED parent POM inside a module tree', () => {
+    // Deleting `core/parent/pom.xml` kills `app`'s parent resolution
+    // (Non-resolvable parent POM), but no file on disk backs the edge any
+    // more: the heir must still join the changed-parent closure, or the
+    // PR-caused death ships green.
+    writeProject('.', ['core', 'app']);
+    writeProject('core');
+    writeProject('app');
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../core/parent/pom.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.reactor?.inheritors['core/parent/pom.xml']).toEqual(['app']);
+    expect(parsed.reactor?.parentPomFiles).toContain('core/parent/pom.xml');
+    expect(parsed.reactor?.declaredParentFiles).toContain(
+      'core/parent/pom.xml',
+    );
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(root, ['core/parent/pom.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'core'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('records an absent directory-spelled parent under both deletion spellings', () => {
+    // `../parent` with nothing at the path: disk no longer says whether it
+    // named a file or a directory, and a deletion reports `parent` or
+    // `parent/pom.xml` respectively — the edge lands under both.
+    writeProject('.', ['app']);
+    writeProject('app');
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../parent'),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.reactor?.inheritors['parent']).toEqual(['app']);
+    expect(parsed.reactor?.inheritors['parent/pom.xml']).toEqual(['app']);
+  });
+
+  it('keys a directory-spelled relativePath heir on the parent dir', () => {
+    // `../parent` resolving onto the DIRECTORY `parent/pom.xml` used to key
+    // the heir edge on `parent/pom.xml` — the stale pre-append flag — where
+    // the closure for a changed parent dir never looks, silently dropping
+    // the heir out of the -pl scope.
+    writeProject('.', ['app']);
+    writeProject('app');
+    writeProject('parent');
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../parent'),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.reactor?.inheritors).toEqual({ parent: ['app'] });
+    expect(parsed.reactor?.declaredParentFiles).toContain('parent/pom.xml');
+  });
+
+  it.each([
+    ['[ERROR] Non-resolvable import POM for example:bom:1 at line 42'],
+    ['[ERROR] Failure to find example:core:jar:1 in central was cached'],
+    ['[ERROR] Could not find artifact example:core:jar:1 in central'],
+  ])('classifies %s as a dependency failure', (line) => {
+    expect(isDependencyFailureLine(line)).toBe(true);
+  });
+
+  it('falls back to mvn for an EMPTY executable wrapper', () => {
+    // An empty ./mvnw passes the existence/exec-bit gates and exits 0 over
+    // a build that never started — the run would read green.
+    writeProject('.');
+    writeFileSync(join(root, 'mvnw'), '');
+    chmodSync(join(root, 'mvnw'), 0o755);
+    expect(mavenExecutable(root, 'linux')).toBe('mvn');
+
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    expect(mavenExecutable(root, 'linux')).toBe('./mvnw');
+  });
+
+  it('reads a fail-never plugin goal failure as a swallowed failure', () => {
+    // Under fail-never Maven exits 0 over ANY failed goal, and only the
+    // compile/dependency/launch classes were recognized before: a
+    // checkstyle goal failure read green.
+    writeReactor();
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] BUILD SUCCESS\n' +
+            '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check (validate) on project core: You have 1 Checkstyle violation.',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.swallowedFailure).toBe(true);
+    expect(report.note).toContain('fail-never');
+  });
+
+  it('keeps a swallowed dependency goal failure infrastructure', () => {
+    // `Failed to execute goal on project …` matches the goal framing too;
+    // a dependency-class death must keep its acquisition carve-out.
+    writeReactor();
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[ERROR] Failed to execute goal on project core: Could not resolve dependencies for project example:core:jar:1',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+    expect(report.note).toContain('infrastructure evidence');
+  });
+
+  it('discloses the unscopable npm half of a mixed root', () => {
+    // npm's gate refused this root package.json (an unmodeled glob), so
+    // Maven was selected ALONE — the green run must not certify files no
+    // Maven module owns.
+    writeReactor();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'frontend', workspaces: ['packages/**'] }),
+    );
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => result(command),
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.note).toContain('files outside the Maven reactor');
+    expect(report.note).toContain('were NOT verified');
   });
 });

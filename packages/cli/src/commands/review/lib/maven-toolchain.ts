@@ -53,10 +53,11 @@ export interface MavenReactor {
    */
   inheritors: Record<string, string[]>;
   /**
-   * Named parent POM files (any spelling other than `pom.xml`) that back a
-   * recorded inheritance edge. Maven accepts a parent FILE of any name, so a
-   * change to one is parent-config exactly like a change to the directory's
-   * `pom.xml` and must walk the inheritor closure too.
+   * Parent POM files backing a recorded inheritance edge: named files (any
+   * spelling other than `pom.xml`), plus ABSENT declared parents of either
+   * spelling — a deleted parent's `Non-resolvable parent POM` death still
+   * edges its heir. A change to one is parent-config exactly like a change
+   * to the directory's `pom.xml` and must walk the inheritor closure too.
    */
   parentPomFiles?: string[];
   /**
@@ -460,7 +461,14 @@ export function readMavenReactor(root: string): MavenReactorResult {
 
     let pom: string;
     try {
-      if (statSync(pomPath).size > MAX_POM_BYTES) {
+      const stats = statSync(pomPath);
+      // isFile(), not just size: a symlink to /dev/zero (or a FIFO) reports
+      // size 0, passes the cap, and readFileSync reads it forever — a
+      // PR-controlled hang. A symlink to a regular file still passes.
+      if (!stats.isFile()) {
+        return `Maven POM ${toPosix(relative(reactorRoot, pomPath))} is not a regular file, so it cannot be read safely.`;
+      }
+      if (stats.size > MAX_POM_BYTES) {
         return `Maven POM ${toPosix(relative(reactorRoot, pomPath))} is larger than the ${MAX_POM_BYTES}-byte read cap.`;
       }
       pom = readFileSync(pomPath, 'utf8');
@@ -524,6 +532,31 @@ export function readMavenReactor(root: string): MavenReactorResult {
   // disk, so a deleted file would otherwise stop being a dependency input
   // exactly when the resolution failure it causes is the diff's own doing.
   const declaredParentFiles = new Set<string>();
+  // A declared parent with NO file on disk — the diff deleted it, or it was
+  // never committed — still edges its heir: Maven dies on `Non-resolvable
+  // parent POM` exactly there, so the heir must join the closure of a change
+  // at the parent's path. The edge is keyed on the path git reports and
+  // joins parentPomFiles/declaredParentFiles, so the ownership closure and
+  // the dependency carve-out both see it. Over-scoping an heir costs one
+  // build; under-scoping it ships the resolution death green.
+  const recordAbsentDeclaredParent = (
+    resolvedParentPom: string,
+    heir: string,
+  ): void => {
+    const parentDir = dirname(resolvedParentPom);
+    if (!isInside(reactorRoot, parentDir)) return;
+    const key = toPosix(relative(reactorRoot, resolvedParentPom));
+    declaredParentFiles.add(key);
+    namedParentPoms.add(key);
+    const parentPath = toPosix(relative(reactorRoot, parentDir)) || '.';
+    if (parentPath === heir) return;
+    const inherited = inheritors.get(key);
+    if (inherited) {
+      if (!inherited.includes(heir)) inherited.push(heir);
+    } else {
+      inheritors.set(key, [heir]);
+    }
+  };
   const worklist: Array<{
     heir: string;
     fromDir: string;
@@ -569,18 +602,36 @@ export function readMavenReactor(root: string): MavenReactorResult {
       if (isInside(reactorRoot, parentPom)) {
         declaredParentFiles.add(toPosix(relative(reactorRoot, parentPom)));
       }
+      let present = false;
       let namedFile = false;
       try {
         namedFile = statSync(parentPom).isFile();
+        present = true;
       } catch {
-        // absent: keep the directory spelling
+        // absent
       }
+      const declared = parentPom;
       if (!namedFile) parentPom = join(parentPom, 'pom.xml');
+      if (!present) {
+        // The declared parent is ABSENT — the shape a deleting diff leaves:
+        // resolution dies as `Non-resolvable parent POM`, and the heirs the
+        // death reaches must stay in the changed-parent closure. Disk no
+        // longer says whether `../x` named a file or a directory, so the
+        // edge is recorded under BOTH spellings a deletion can report.
+        recordAbsentDeclaredParent(declared, item.heir);
+        recordAbsentDeclaredParent(parentPom, item.heir);
+        continue;
+      }
     }
     const parentDir = dirname(parentPom);
     if (!isInside(reactorRoot, parentDir)) continue;
     const parentPath = toPosix(relative(reactorRoot, parentDir)) || '.';
-    if (!namedParentFile && !structures.has(parentPath)) {
+    // Recomputed AFTER the directory->pom.xml append: a directory-spelled
+    // `../parent` arrives here as `parent/pom.xml` and takes the
+    // pom.xml-spelled treatment — declared-file recording and a
+    // directory-keyed inheritor edge — not its stale pre-append flag's.
+    const resolvedNamedFile = basename(parentPom) !== 'pom.xml';
+    if (!resolvedNamedFile && !structures.has(parentPath)) {
       // A `pom.xml` the reactor does not aggregate is a declared parent
       // too: record the FINAL resolved path, after the directory->pom.xml
       // append. Deleting it dies as `Non-resolvable parent POM`, and
@@ -612,7 +663,15 @@ export function readMavenReactor(root: string): MavenReactorResult {
       if (fileStructure === null) {
         let parentFile: string;
         try {
-          if (statSync(parentPom).size > MAX_POM_BYTES) {
+          const stats = statSync(parentPom);
+          // isFile() too: a symlink to /dev/zero or a FIFO passes the
+          // size-only cap and hangs the read (see the visit-side guard).
+          if (!stats.isFile()) {
+            return {
+              error: `Maven POM ${toPosix(relative(reactorRoot, parentPom))} is not a regular file, so it cannot be read safely.`,
+            };
+          }
+          if (stats.size > MAX_POM_BYTES) {
             return {
               error: `Maven POM ${toPosix(relative(reactorRoot, parentPom))} is larger than the ${MAX_POM_BYTES}-byte read cap.`,
             };
@@ -620,8 +679,11 @@ export function readMavenReactor(root: string): MavenReactorResult {
           parentFile = readFileSync(parentPom, 'utf8');
         } catch (error) {
           if (basename(parentPom) === 'pom.xml') {
-            // An absent `pom.xml` target: Maven falls back to repository
-            // resolution, so there is no local edge to model.
+            // An absent or unreadable `pom.xml` target MAY resolve from the
+            // repository, but a repo-internal parent dies as `Non-resolvable
+            // parent POM` — the shape a deleting diff leaves — so the edge
+            // is recorded anyway (see recordAbsentDeclaredParent).
+            recordAbsentDeclaredParent(parentPom, item.heir);
             continue;
           }
           return {
@@ -658,7 +720,7 @@ export function readMavenReactor(root: string): MavenReactorResult {
     // A named parent file inside the heir's own dir is parent config, not
     // an inheritor of itself.
     if (parentPath !== item.heir) {
-      const inheritorKey = namedParentFile
+      const inheritorKey = resolvedNamedFile
         ? toPosix(relative(reactorRoot, parentPom))
         : parentPath;
       const inherited = inheritors.get(inheritorKey);
@@ -1467,7 +1529,7 @@ function isLaunchFailure(output: string): boolean {
  * and a marker lost to the trim would file a network outage against the PR.
  */
 const DEPENDENCY_FAILURE_LINE_RE =
-  /^\[(?:ERROR|FATAL)\].*(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d))/i;
+  /^\[(?:ERROR|FATAL)\].*(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Could not find artifact|Failure to find|Non-resolvable parent POM|Non-resolvable import POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d))/i;
 
 export function isDependencyFailureLine(line: string): boolean {
   return DEPENDENCY_FAILURE_LINE_RE.test(line);
@@ -1499,6 +1561,26 @@ export function isSourceFailureLine(line: string): boolean {
 
 function isSourceFailure(output: string): boolean {
   return output.split('\n').some(isSourceFailureLine);
+}
+
+/**
+ * Maven's framing for ANY failed goal. Under fail-never Maven exits 0 over
+ * every plugin failure, and the class predicates above only recognize the
+ * compile/dependency/launch shapes: a checkstyle, enforcer, spotless, or
+ * jacoco-check goal failure matches none of them, and the zero exit would
+ * read green. Kept OUT of SOURCE_FAILURE_LINE_RE: a dependency failure's
+ * `Failed to execute goal on project …` framing must keep reaching the
+ * dependency class, and the acquisition carve-out negates only the narrow
+ * source predicate — this wider one feeds the swallowed-failure check.
+ */
+const GOAL_FAILURE_LINE_RE = /^\[(?:ERROR|FATAL)\] Failed to execute goal /i;
+
+export function isGoalFailureLine(line: string): boolean {
+  return GOAL_FAILURE_LINE_RE.test(line);
+}
+
+function isGoalFailure(output: string): boolean {
+  return output.split('\n').some(isGoalFailureLine);
 }
 
 function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
@@ -1561,10 +1643,20 @@ export function mavenExecutable(
   platform: string = process.platform,
 ): string {
   if (platform === 'win32') {
-    return existsSync(join(root, 'mvnw.cmd')) ? 'mvnw.cmd' : 'mvn';
+    try {
+      if (statSync(join(root, 'mvnw.cmd')).size > 0) return 'mvnw.cmd';
+    } catch {
+      // absent
+    }
+    return 'mvn';
   }
+  const wrapper = join(root, 'mvnw');
   try {
-    accessSync(join(root, 'mvnw'), constants.X_OK);
+    accessSync(wrapper, constants.X_OK);
+    // An EMPTY wrapper passes the existence/exec-bit gates, exits 0, and
+    // the run would certify a build that never started — fall back to
+    // system `mvn` exactly like the missing-bit case.
+    if (statSync(wrapper).size === 0) return 'mvn';
     return './mvnw';
   } catch {
     return 'mvn';
@@ -1585,8 +1677,11 @@ function mavenConfigDependencyInputs(root: string): string[] {
     // hundreds of MB of transient heap, scaling linearly to GitHub's
     // 100 MB per-file limit. Oversized configs fail closed like an
     // unreadable one — the `.mvn/` prefix still marks the config file
-    // itself as a dependency input in the changed-files check.
-    if (statSync(configPath).size > MAX_POM_BYTES) return [];
+    // itself as a dependency input in the changed-files check. The
+    // isFile() gate is the same shape as the POM reads: a symlink to
+    // /dev/zero or a FIFO reports size 0 and hangs readFileSync forever.
+    const stats = statSync(configPath);
+    if (!stats.isFile() || stats.size > MAX_POM_BYTES) return [];
     config = readFileSync(configPath, 'utf8');
   } catch {
     return [];
@@ -1919,6 +2014,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // `testFailureIgnore` (or `-Dmaven.test.failure.ignore`) lets `mvn test`
   // exit 0 over failing tests, and the verdict must read the evidence.
   const freshFailures = hasFreshTestFailure(summaries);
+  // Reports past the evidence cap were never parsed, so their failure
+  // status is UNKNOWN: certifying a clean pass over them reads a failed
+  // run green exactly as dropping them did. Fail closed instead.
+  const evidenceCapped = fresh.unparsed > 0;
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
   // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
@@ -1931,12 +2030,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !freshFailures &&
     (isSourceFailure(result.output) ||
       isDependencyFailure(result.output) ||
-      isLaunchFailure(result.output));
+      isLaunchFailure(result.output) ||
+      isGoalFailure(result.output));
   const ok =
     result.exitCode === 0 &&
     !result.timedOut &&
     !freshFailures &&
-    !swallowedFailure;
+    !swallowedFailure &&
+    !evidenceCapped;
   // Every carve-out carries a diff-inputs exception: when the PR changed
   // the wrapper or the dependency inputs, the failure may be the diff's own
   // doing and must not be laundered into an environmental result.
@@ -2022,6 +2123,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       `\`${result.command}\` exited 0 but fresh Surefire/Failsafe reports record ` +
       `${totals.failures} failure(s) and ${totals.errors} error(s) — a testFailureIgnore-style ` +
       'setting is swallowing them. Treat these as test failures, not a pass.';
+  } else if (!ok && result.exitCode === 0 && evidenceCapped) {
+    report.note =
+      `\`${result.command}\` exited 0, but ${fresh.unparsed} fresh Surefire/Failsafe report(s) ` +
+      `exceeded the ${MAX_FRESH_REPORTS}-report evidence cap and were not parsed — their ` +
+      'failure status is unknown, so the run is not certified as a pass.' +
+      (swallowedFailure
+        ? ' The output also records failures Maven did not fail on.'
+        : '');
   } else if (!ok && result.exitCode === 0) {
     report.note =
       `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +
@@ -2069,6 +2178,15 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
           '`mvn` instead of it, so the wrapper change itself was not exercised.'
         : ` Note: the diff changes the Maven wrapper, but this run executed \`${executable}\`, ` +
           'so the wrapper change itself was not exercised.';
+  }
+  if (existsSync(join(args.root, 'package.json'))) {
+    // A mixed root: npm's applies() refused the root package.json (an
+    // unmodeled workspace glob, a zero-package glob, or no build/test
+    // script), so Maven was selected ALONE — the npm half is unscopable
+    // here, and a green Maven run must not certify it.
+    report.note +=
+      ' Mixed root: a root package.json exists that this run did not scope — ' +
+      'files outside the Maven reactor (npm/frontend sources) were NOT verified.';
   }
   return report;
 }

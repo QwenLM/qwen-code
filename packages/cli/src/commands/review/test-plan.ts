@@ -1026,21 +1026,53 @@ function ruleCommand(
   // scoped run failed, the phase failed, and the bare claim must read
   // `contradicted` — the first match could be a green package that merely
   // sorted first, stating the opposite of the authoritative `ok: false`.
+  // A Maven run interrupted with fresh recorded failures OUT-RANKS a green
+  // finished sibling: the build-test report says ok:false with the recorded
+  // markers, and reading `reproduces` off the sibling states the opposite
+  // of the authoritative evidence. Ranked below a finished FAILED run —
+  // the stronger evidence — like the spawn-death ranking beside it.
+  const interruptedWithFailures = mavenRunnerClaim
+    ? matches.find(
+        (c) =>
+          (c.timedOut || c.exitCode === null) &&
+          freshTestFailures(c) &&
+          // The same scope asymmetry the `-am` guard above applies to
+          // finished runs: an interrupted `-am` run's fresh failures may
+          // live entirely in upstream modules the claim never tests, so it
+          // cannot contradict the claim either — unless the markers
+          // attribute a failure to a module inside the claimed set.
+          !(
+            settledBySameScope(c.command.trim()) &&
+            mavenHasAlsoMake(c.command) &&
+            !mavenHasAlsoMake(claimed) &&
+            !failureInsideClaim(c)
+          ),
+      )
+    : undefined;
   const ran =
     matches.find((c) => finished(c) && ranFailed(c)) ??
     // A spawn-level death (exitCode null, no deadline kill) is a failed run
     // for a non-Maven claim, ranked ABOVE any green finished sibling: one
     // green package must not shadow the death and read the claim
     // `reproduces` while the build-test report says `ok: false`. Maven
-    // claims keep the cascade below, which reports the same result as
-    // unchecked.
+    // claims rank their interrupted-with-failures run here instead.
     (!mavenRunnerClaim
       ? matches.find(
           (c) => !c.timedOut && c.exitCode === null && !c.infrastructure,
         )
-      : undefined) ??
+      : interruptedWithFailures) ??
     matches.find(finished);
   if (ran) {
+    if (ran === interruptedWithFailures) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'contradicted',
+        observed:
+          'interrupted, but fresh Surefire/Failsafe reports record failures',
+        note: `${runForm(ran.command.trim()).howItRan}; it was interrupted, but fresh test reports record failures`,
+      };
+    }
     const form = runForm(ran.command.trim());
     const howItRan = form.howItRan;
     if (ran.exitCode === 0 && ranFailed(ran)) {
@@ -1078,36 +1110,10 @@ function ruleCommand(
   }
 
   if (mavenRunnerClaim) {
-    // A deadline kill or spawn death does not excuse the failures
-    // Surefire/Failsafe recorded before it: the adapter's own note says to
-    // treat those as test failures, so the claim ruling cannot read the
-    // interruption as neutral while the build-test side reports ok:false.
-    const interruptedWithFailures = matches.find(
-      (c) =>
-        (c.timedOut || c.exitCode === null) &&
-        freshTestFailures(c) &&
-        // The same scope asymmetry the `-am` guard above applies to
-        // finished runs: an interrupted `-am` run's fresh failures may
-        // live entirely in upstream modules the claim never tests, so it
-        // cannot contradict the claim either — unless the markers
-        // attribute a failure to a module inside the claimed set.
-        !(
-          settledBySameScope(c.command.trim()) &&
-          mavenHasAlsoMake(c.command) &&
-          !mavenHasAlsoMake(claimed) &&
-          !failureInsideClaim(c)
-        ),
-    );
-    if (interruptedWithFailures) {
-      return {
-        kind: 'command',
-        text,
-        verdict: 'contradicted',
-        observed:
-          'interrupted, but fresh Surefire/Failsafe reports record failures',
-        note: `${runForm(interruptedWithFailures.command.trim()).howItRan}; it was interrupted, but fresh test reports record failures`,
-      };
-    }
+    // The interrupted-with-failures ruling is ranked into `ran` above: by
+    // the time this cascade runs, no such run matched — an interrupted run
+    // with fresh failures either already contradicted the claim there or
+    // was excluded by the same `-am` scope asymmetry.
     const timedOutRun = matches.find((c) => c.timedOut);
     if (timedOutRun) {
       return {

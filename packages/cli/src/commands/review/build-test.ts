@@ -45,6 +45,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isDependencyFailureLine,
   isDiskFailureLine,
+  isGoalFailureLine,
   isSourceFailureLine,
   mavenToolchainAdapter,
 } from './lib/maven-toolchain.js';
@@ -199,18 +200,20 @@ export function trimOutput(s: string): string {
         // Maven infra classification runs on this trimmed output; a
         // dependency-failure line lost to the trim would file a network
         // outage against the PR, a source-failure line lost there would
-        // launder a compile error into infrastructure, and a disk-failure
-        // line lost there would file an ENOSPC death against the PR (or,
-        // under fail-never, read the run green) — the exact errors this
-        // command prevents.
+        // launder a compile error into infrastructure, a goal-failure line
+        // lost there would read a fail-never plugin failure green, and a
+        // disk-failure line lost there would file an ENOSPC death against
+        // the PR (or, under fail-never, read the run green) — the exact
+        // errors this command prevents.
         isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')) ||
         isSourceFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+        isGoalFailureLine(l.replace(ANSI_SGR_RE, '')) ||
         isDiskFailureLine(l.replace(ANSI_SGR_RE, '')),
     )
     .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, disk failures, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
