@@ -5090,6 +5090,135 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('refuses a caller-supplied id that a restore still owns', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      // Sibling keeps the channel off the empty-reap path.
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'contested', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+
+      // While the restore is still active.
+      const duringActive = await bridge
+        .spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sessionId: 'contested',
+        })
+        .catch((error: unknown) => error);
+      expect(duringActive).toBeInstanceOf(RestoreInProgressError);
+      expect(duringActive).toMatchObject({ reason: 'restore_in_progress' });
+
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      // And after the deadline, while the abandoned restore is still fenced.
+      // Admitting it here would hand the new session an id whose events the
+      // fence silently drops and whose late cleanup would close it.
+      const duringAbandoned = await bridge
+        .spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sessionId: 'contested',
+        })
+        .catch((error: unknown) => error);
+      expect(duringAbandoned).toBeInstanceOf(RestoreInProgressError);
+      expect(duringAbandoned).toMatchObject({
+        reason: 'awaiting_abandoned_cleanup',
+      });
+    } finally {
+      lateRestore.reject(new Error('channel torn down'));
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('never closes or fences an id a live session has reclaimed', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    // A buggy or hostile child can hand back an id the bridge did not ask
+    // for, which is how a registration can still land on an abandoned id
+    // despite the request-level guard above.
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+      newSessionImpl: (p) =>
+        p.cwd === WS_A && handle.agent.newSessionCalls.length === 2
+          ? { sessionId: 'reclaimed' }
+          : {
+              sessionId: `sess:${p.cwd}#${handle.agent.newSessionCalls.length}`,
+            },
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'reclaimed', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      const usurper = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(usurper.sessionId).toBe('reclaimed');
+
+      // The fence must not outlive the abandoned attempt: this session owns
+      // the id now, and a standing fence would silently drop everything the
+      // child sends it.
+      const events = bridge
+        .subscribeEvents('reclaimed', { lastEventId: 0 })
+        [Symbol.asyncIterator]();
+      await expect(events.next()).resolves.toMatchObject({
+        value: { type: 'replay_complete' },
+      });
+      const delivered = events.next();
+      await handle.agentConnection.sessionUpdate({
+        sessionId: 'reclaimed',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'mine now' },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(delivered).resolves.toMatchObject({
+        value: { type: 'session_update' },
+      });
+
+      // The late result must not clean up an id it no longer owns.
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'reclaimed',
+        ),
+      ).toHaveLength(0);
+      expect(() => bridge.getSessionSummary('reclaimed')).not.toThrow();
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('closes a channel to fresh sessions when an abandoned restore outlives its grace', async () => {
     vi.useFakeTimers();
     const lateRestore = deferred<LoadSessionResponse>();

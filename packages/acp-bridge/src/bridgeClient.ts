@@ -2423,8 +2423,21 @@ export class BridgeClient implements Client {
     // A new explicit restore supersedes an older abandoned attempt for the
     // same persisted id. Until this point, keep the abandoned fence for the
     // lifetime of the channel rather than falling back to the short tombstone.
-    this.abandonedRestoreIds.delete(sessionId);
+    this.clearAbandonedRestoreFence(sessionId);
     this.inFlightRestoreIds.add(sessionId);
+  }
+
+  /**
+   * Drop the abandoned-restore fence for `sessionId`.
+   *
+   * The fence has no TTL and suppresses session updates, guardrail events,
+   * and child notifications, so it must not outlive the abandoned attempt it
+   * was raised for. The bridge clears it whenever a legitimate owner takes
+   * the id — a new restore, or `createSessionEntry` registering a session
+   * from any other route.
+   */
+  clearAbandonedRestoreFence(sessionId: string): void {
+    this.abandonedRestoreIds.delete(sessionId);
   }
 
   /**

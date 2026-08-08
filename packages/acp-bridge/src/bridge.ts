@@ -4120,6 +4120,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    // A legitimate owner supersedes any abandoned-restore fence on this id.
+    // The fence has no TTL by design, and it silently drops session updates,
+    // guardrail events, and notifications — so leaving it standing would hand
+    // this session a working id that never emits anything. `markRestoreInFlight`
+    // covers the re-restore path; this covers registration from any other
+    // route (fresh spawn with a caller-supplied id, branch, fork).
+    ci.client.clearAbandonedRestoreFence(entry.sessionId);
     touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
     emitSessionLifecycle({
@@ -4787,6 +4794,40 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         'qwen-code.daemon.acp_channel.id': channel.id,
         'session.id': req.sessionId,
       });
+      // Defense in depth behind the same-id spawn rejection above. An
+      // abandoned restore never reaches `createSessionEntry` — the deadline
+      // rejects before registration — so ANY live entry under this id belongs
+      // to someone else. Closing by bare id would tear down that owner and
+      // tombstone its id. Bail out and let the usurper's own lifecycle govern
+      // the child session instead.
+      const usurper = byId.get(req.sessionId);
+      if (usurper) {
+        writeStderrLine(
+          `qwen serve: skipping abandoned session/${action} cleanup for ${JSON.stringify(req.sessionId)}: the id is now owned by a live session`,
+        );
+        telemetry.event('session.restore.cleanup', {
+          'qwen-code.daemon.session_restore.action': action,
+          'qwen-code.daemon.session_restore.cleanup_result': 'id_reclaimed',
+          'qwen-code.daemon.session_restore.timeout_ms':
+            sessionRestoreTimeoutMs,
+          'qwen-code.daemon.acp_channel.id': channel.id,
+          'session.id': req.sessionId,
+        });
+        channel.unsettledAbandonedRestores.delete(req.sessionId);
+        const reclaimedTimer = channel.restoreSettlementTimers.get(
+          req.sessionId,
+        );
+        if (reclaimedTimer !== undefined) {
+          clearTimeout(reclaimedTimer);
+          channel.restoreSettlementTimers.delete(req.sessionId);
+        }
+        if (channel.unsettledAbandonedRestores.size === 0) {
+          channel.restoreSettlementOverdue = false;
+        }
+        releaseAdmissionOnce();
+        resolveSettlement();
+        return;
+      }
       try {
         if (channel.isDying || !aliveChannels.has(channel)) {
           await channel.channel.exited;
@@ -5758,6 +5799,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
 
+      // A caller-supplied id is used verbatim by the agent, so a fresh spawn
+      // can collide with a restore that owns the same id. Admitting it would
+      // hand the new session an id the restore lifecycle still controls: the
+      // abandoned notification fence would silently swallow its events, and a
+      // late `settleAbandonedRestore` would close it out from under its owner.
+      // Reject instead — the restore either completes and the caller attaches,
+      // or it settles and the id frees up.
+      if (req.sessionId !== undefined) {
+        const restoreOwner = inFlightRestores.get(req.sessionId);
+        if (restoreOwner) {
+          const abandoned = restoreOwner.lifecycle.phase === 'abandoned';
+          throw new RestoreInProgressError(
+            req.sessionId,
+            restoreOwner.action,
+            restoreOwner.action,
+            abandoned
+              ? {
+                  reason: 'awaiting_abandoned_cleanup',
+                  retryAfterSeconds: abandonedRestoreRetryAfterSeconds,
+                }
+              : undefined,
+          );
+        }
+      }
       // Cap check: count both registered sessions and in-flight spawns
       // (a fresh-spawn races that's about to register hasn't hit
       // `byId` yet but should still count toward the limit). Attaches

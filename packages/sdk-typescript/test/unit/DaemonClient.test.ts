@@ -2717,9 +2717,13 @@ describe('DaemonClient', () => {
         const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
         const restore = client.loadSession('slow-session');
         const outcome = restore.catch((error: unknown) => error);
-        await vi.advanceTimersByTimeAsync(30_000);
+        // Pin the exact boundary, not a range. The default is the 60s daemon
+        // budget plus 10s of headroom; collapsing it onto the server budget
+        // would make the client abort race the daemon's own deadline and cost
+        // the caller the structured retryable 504 this exists to deliver.
+        await vi.advanceTimersByTimeAsync(69_999);
         expect(signal?.aborted).toBe(false);
-        await vi.advanceTimersByTimeAsync(40_000);
+        await vi.advanceTimersByTimeAsync(1);
         expect(await outcome).toMatchObject({ name: 'TimeoutError' });
       } finally {
         vi.useRealTimers();

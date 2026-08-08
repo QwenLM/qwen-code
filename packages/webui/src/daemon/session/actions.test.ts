@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
+  type DaemonCapabilities,
   type DaemonSessionClient,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -125,6 +126,23 @@ describe('getConnectionAfterSessionClear', () => {
   });
 });
 
+/**
+ * A capabilities payload advertising a restore budget. Typed rather than cast
+ * so renaming or moving `limits.sessionRestoreTimeoutMs` fails typecheck here
+ * instead of silently falling back to the client defaults.
+ */
+function advertisingRestoreBudget(
+  sessionRestoreTimeoutMs: number,
+): DaemonCapabilities {
+  return {
+    v: 1,
+    mode: 'http-bridge',
+    features: [],
+    modelServices: [],
+    limits: { sessionRestoreTimeoutMs },
+  };
+}
+
 describe('resolveSessionRestoreTimeouts', () => {
   it('uses 70s request and 75s watchdog defaults for old daemons', () => {
     expect(resolveSessionRestoreTimeouts(undefined)).toEqual({
@@ -135,9 +153,7 @@ describe('resolveSessionRestoreTimeouts', () => {
 
   it('derives both client budgets from the advertised server timeout', () => {
     expect(
-      resolveSessionRestoreTimeouts({
-        limits: { sessionRestoreTimeoutMs: 90_000 },
-      } as never),
+      resolveSessionRestoreTimeouts(advertisingRestoreBudget(90_000)),
     ).toEqual({
       requestTimeoutMs: 100_000,
       watchdogTimeoutMs: 105_000,
@@ -146,9 +162,7 @@ describe('resolveSessionRestoreTimeouts', () => {
 
   it('disables derived timers that exceed the JavaScript timer ceiling', () => {
     expect(
-      resolveSessionRestoreTimeouts({
-        limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
-      } as never),
+      resolveSessionRestoreTimeouts(advertisingRestoreBudget(2_147_483_647)),
     ).toEqual({ requestTimeoutMs: 0, watchdogTimeoutMs: undefined });
   });
 });
@@ -335,6 +349,30 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current).toMatchObject({
       sessionId: 'session-b',
       requestTimeoutMs: 70_000,
+    });
+  });
+
+  it('carries the daemon-advertised restore budget into the load request', async () => {
+    // Live path for the whole chain: advertised capability -> connection ->
+    // resolveSessionRestoreTimeouts -> pending load. Dropping the capabilities
+    // argument at the real call site leaves every default-budget assertion
+    // green, so this is the only test that fails when the advertised budget
+    // stops reaching the SDK.
+    const existingSession = createMockSession('session-a');
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        capabilities: advertisingRestoreBudget(90_000),
+      },
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      requestTimeoutMs: 100_000,
     });
   });
 
