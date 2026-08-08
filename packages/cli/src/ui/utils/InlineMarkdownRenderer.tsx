@@ -11,6 +11,7 @@ import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
+  BARE_URL_PATTERN,
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -38,7 +39,7 @@ const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
 const INLINE_MARKDOWN_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
   'g',
 );
 
