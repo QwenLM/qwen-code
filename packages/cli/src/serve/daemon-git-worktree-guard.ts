@@ -29,8 +29,9 @@ import type {
 // writes files and textconv drivers run commands from target-repository
 // config. `grep` takes the same `--textconv` path, `status` refreshes the
 // target index and runs the target repository's core.fsmonitor, and
-// `describe` refreshes the target index even without `--dirty`, so none of
-// them is read-only here.
+// `describe --dirty`/`--broken` rewrite the target index whenever its stat
+// cache is stale (measured on git 2.47.3; a plain `describe` does not, but
+// the flag is one token away), so none of them is read-only here.
 const RELOCATED_READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'cat-file',
   'ls-files',

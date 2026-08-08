@@ -873,9 +873,11 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
-  // `describe` refreshes the target repository's index even without
-  // `--dirty`/`--broken`, so it does not qualify as read-only (verified with
-  // real git: the outside repo's .git/index is rewritten).
+  // `describe --dirty`/`--broken` rewrite the target repository's index
+  // whenever its stat cache is stale (measured on git 2.47.3: a plain
+  // `describe`/`--tags`/`--always` leaves .git/index untouched). The whole
+  // subcommand stays out of the read-only set because the flag is one token
+  // away from any describe a model writes.
   it.each([
     () => `git -C ${outsideRepo} describe`,
     () => `git -C ${outsideRepo} describe --tags`,
