@@ -53,6 +53,7 @@ const TUI_ONLY_SETTINGS = new Set([
 const WEB_SHELL_SETTINGS = new Set([
   'ui.compactMode',
   'voiceModel',
+  'model.reasoningPreferences',
   'mcpServers',
 ]);
 

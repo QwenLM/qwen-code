@@ -12596,6 +12596,120 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('setSessionConfigOption', () => {
+    /** Set up a channel where the agent records setSessionConfigOption calls. */
+    async function setup(response: Record<string, unknown> = {}) {
+      const configOptionCalls: Array<{
+        sessionId: string;
+        configId: string;
+        value: string;
+      }> = [];
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'setSessionConfigOption') {
+              return async (req: {
+                sessionId: string;
+                configId: string;
+                value: string;
+              }) => {
+                configOptionCalls.push({ ...req });
+                return response;
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      return { bridge, session, configOptionCalls };
+    }
+
+    it('forwards configId and value and overrides body sessionId', async () => {
+      const { bridge, session, configOptionCalls } = await setup({
+        configOptions: [],
+      });
+      const response = await bridge.setSessionConfigOption(session.sessionId, {
+        sessionId: 'spoofed',
+        configId: 'effort',
+        value: 'medium',
+      });
+      expect(response).toEqual({ configOptions: [] });
+      expect(configOptionCalls[0]).toEqual({
+        sessionId: session.sessionId,
+        configId: 'effort',
+        value: 'medium',
+      });
+      await bridge.shutdown();
+    });
+
+    it('publishes settings_changed for model.reasoningPreferences', async () => {
+      const { bridge, session } = await setup({ configOptions: [] });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      await bridge.setSessionConfigOption(session.sessionId, {
+        sessionId: session.sessionId,
+        configId: 'thinking',
+        value: 'off',
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.value?.type).toBe('settings_changed');
+      expect(next.value?.data).toEqual({
+        key: 'model.reasoningPreferences',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('rejects unregistered client ids', async () => {
+      const { bridge, session } = await setup();
+      await expect(
+        bridge.setSessionConfigOption(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            configId: 'effort',
+            value: 'low',
+          },
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session ids', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          throw new Error('factory should not be called');
+        },
+      });
+      await expect(
+        bridge.setSessionConfigOption('unknown', {
+          sessionId: 'unknown',
+          configId: 'thinking',
+          value: 'off',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+  });
+
   describe('executeShellCommand permission policy', () => {
     function mockShellExecute(output = 'ok') {
       return vi.spyOn(ShellExecutionService, 'execute').mockResolvedValue({

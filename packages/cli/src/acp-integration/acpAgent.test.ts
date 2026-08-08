@@ -190,6 +190,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
       .parseInvocationContext,
   ),
+  getModelReasoningControls: (model: string | undefined) =>
+    model === 'qwen3.8-max'
+      ? {
+          thinking: { defaultEnabled: true },
+          effort: {
+            supported: ['low', 'medium', 'xhigh'],
+            default: 'xhigh',
+          },
+        }
+      : undefined,
+  normalizeModelReasoningEffort: (
+    _registration: unknown,
+    effort: string | undefined,
+  ) =>
+    effort === 'low' || effort === 'medium' || effort === 'xhigh'
+      ? effort
+      : 'xhigh',
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
@@ -6266,6 +6283,214 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       context.state.models.availableModels.map((model) => model.modelId),
     ).toEqual(['main-model(api-key)']);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('exposes stable qwen3.8-max reasoning config options', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getReasoningEffortPreference: vi.fn().mockReturnValue('medium'),
+      isThinkingEnabled: vi.fn().mockReturnValue(false),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: 'api-key',
+        },
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max Snapshot',
+          authType: 'api-key',
+          isRuntimeModel: true,
+          runtimeSnapshotId: '$runtime|api-key|qwen3.8-max',
+        },
+      ]),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const created = (await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    })) as {
+      models: {
+        availableModels: Array<{
+          modelId: string;
+          _meta?: { reasoningControls?: unknown };
+        }>;
+      };
+      configOptions: Array<{
+        id: string;
+        currentValue: string;
+        options: Array<{ value: string }>;
+      }>;
+    };
+
+    expect(created.configOptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'thinking', currentValue: 'off' }),
+        expect.objectContaining({ id: 'effort', currentValue: 'medium' }),
+      ]),
+    );
+    expect(
+      created.configOptions
+        .find((option) => option.id === 'effort')
+        ?.options.map((option) => option.value),
+    ).toEqual(['low', 'medium', 'xhigh']);
+    expect(created.models.availableModels[0]?._meta?.reasoningControls).toEqual(
+      {
+        thinking: { defaultEnabled: true },
+        effort: {
+          supported: ['low', 'medium', 'xhigh'],
+          default: 'xhigh',
+        },
+      },
+    );
+    expect(
+      created.models.availableModels.find((model) =>
+        model.modelId.startsWith('$runtime|'),
+      )?._meta?.reasoningControls,
+    ).toBeUndefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('hides reasoning config options while a runtime snapshot is active', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getReasoningEffortPreference: vi.fn().mockReturnValue('xhigh'),
+      isThinkingEnabled: vi.fn().mockReturnValue(true),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: 'api-key',
+        },
+      ]),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue({
+        id: '$runtime|api-key|qwen3.8-max',
+        modelId: 'qwen3.8-max',
+        authType: 'api-key',
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const created = (await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+    })) as { configOptions: Array<{ id: string }> };
+
+    // A bare snapshot id colliding with a registered model must not expose
+    // thinking/effort for that registry model.
+    expect(created.configOptions.map((option) => option.id)).toEqual([
+      'mode',
+      'model',
+    ]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('routes setSessionConfigOption to the session reasoning setters', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getReasoningEffortPreference: vi.fn().mockReturnValue('xhigh'),
+      isThinkingEnabled: vi.fn().mockReturnValue(true),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: 'api-key',
+        },
+      ]),
+    });
+    const setThinking = vi.fn().mockResolvedValue(undefined);
+    const setEffort = vi.fn().mockResolvedValue(undefined);
+    const sendConfigOptionsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike & {
+      setSessionConfigOption: (params: {
+        sessionId: string;
+        configId: string;
+        value: string;
+      }) => Promise<{ configOptions: Array<{ id: string }> }>;
+    };
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    Object.assign(lastSessionMock!, {
+      setThinking,
+      setEffort,
+      sendConfigOptionsUpdate,
+    });
+
+    const thinkingResponse = await agent.setSessionConfigOption({
+      sessionId,
+      configId: 'thinking',
+      value: 'off',
+    });
+    expect(setThinking).toHaveBeenCalledWith('off');
+    expect(thinkingResponse.configOptions.map((option) => option.id)).toEqual(
+      expect.arrayContaining(['mode', 'model', 'thinking', 'effort']),
+    );
+    expect(sendConfigOptionsUpdate).toHaveBeenCalled();
+
+    await agent.setSessionConfigOption({
+      sessionId,
+      configId: 'effort',
+      value: 'medium',
+    });
+    expect(setEffort).toHaveBeenCalledWith('medium');
+
+    await expect(
+      agent.setSessionConfigOption({
+        sessionId,
+        configId: 'unknown',
+        value: 'x',
+      }),
+    ).rejects.toThrow('Unsupported configId: unknown');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -17581,6 +17806,91 @@ describe('sessionLanguage multi-session propagation', () => {
       {},
     );
     expect(cfg.refreshAuth).toHaveBeenCalledWith('openai');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('re-syncs reasoning preferences and notifies clients when workspace reload switches models', async () => {
+    let mergedSettings: Record<string, unknown> = {};
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        mergedSettings = { model: { name: 'qwen3.8-max' } };
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    let currentModel = 'qwen3-coder-plus';
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-reload-model'),
+      getAuthType: vi.fn().mockReturnValue('openai'),
+      getModel: vi.fn(() => currentModel),
+      switchModel: vi.fn(async () => {
+        currentModel = 'qwen3.8-max';
+      }),
+      getReasoningEffortPreference: vi.fn().mockReturnValue('xhigh'),
+      isThinkingEnabled: vi.fn().mockReturnValue(true),
+      getAllConfiguredModels: vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen3.8-max', label: 'Qwen 3.8 Max', authType: 'openai' },
+        ]),
+    });
+    const syncReasoningSettingsForCurrentModel = vi.fn();
+    const sendConfigOptionsUpdate = vi.fn().mockResolvedValue(undefined);
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-reload-model'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          syncReasoningSettingsForCurrentModel,
+          sendConfigOptionsUpdate,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+    expect(
+      (cfg as typeof cfg & { switchModel: ReturnType<typeof vi.fn> })
+        .switchModel,
+    ).toHaveBeenCalledWith('openai', 'qwen3.8-max');
+    expect(syncReasoningSettingsForCurrentModel).toHaveBeenCalled();
+    // config.switchModel publishes no model-update extNotification of its
+    // own; the reload branch must push the refreshed options itself.
+    expect(sendConfigOptionsUpdate).toHaveBeenCalledTimes(1);
+    const options = sendConfigOptionsUpdate.mock.calls[0]?.[0] ?? [];
+    expect(options.map((option: { id: string }) => option.id)).toEqual(
+      expect.arrayContaining(['thinking', 'effort']),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

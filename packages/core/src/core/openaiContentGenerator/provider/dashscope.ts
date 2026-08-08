@@ -22,6 +22,10 @@ import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
+import {
+  getModelReasoningControls,
+  normalizeModelReasoningEffort,
+} from '../../model-reasoning-controls.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
@@ -337,6 +341,16 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const reasoning = this.contentGeneratorConfig.reasoning;
     if (!reasoning || reasoning.effort === undefined) {
       return {};
+    }
+    const rawWireModel = model ?? this.contentGeneratorConfig.model ?? '';
+    const reasoningControls = getModelReasoningControls(rawWireModel);
+    if (reasoningControls?.effort) {
+      return {
+        reasoning_effort: normalizeModelReasoningEffort(
+          reasoningControls,
+          reasoning.effort,
+        ),
+      };
     }
     const wireModel = this.resolveWireModel(model);
     if (isTieredEffortWireModel(wireModel)) {

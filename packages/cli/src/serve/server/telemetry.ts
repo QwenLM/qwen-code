@@ -313,6 +313,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/config-option',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/config-option',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/language',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/language',

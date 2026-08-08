@@ -9,8 +9,10 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
+  getModelReasoningControls,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
+  resolveModelReasoningControls,
   resolveModelConfig,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
@@ -20,6 +22,7 @@ import {
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
+import { getModelReasoningPreference } from '../config/model-reasoning-preferences.js';
 import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
 
 /**
@@ -431,11 +434,88 @@ export function resolveCliGenerationConfig(
   // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
   // normalizes to undefined and is silently skipped below. Surface it as a
   // warning so the user isn't left wondering why /effort had no effect.
+  const reasoningRegistration = getModelReasoningControls(
+    resolved.config.model,
+  );
   const invalidReasoningEffortWarning =
-    rawReasoningEffort && !reasoningEffort
+    !reasoningRegistration && rawReasoningEffort && !reasoningEffort
       ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
       : undefined;
-  if (reasoningEffort && generationConfig.reasoning !== false) {
+  let invalidStoredReasoningEffortWarning: string | undefined;
+  let invalidPresetReasoningEffortWarning: string | undefined;
+  if (reasoningRegistration) {
+    const reasoningPreference = getModelReasoningPreference(
+      settings,
+      resolved.config.model || '',
+    );
+    const preferenceRecord =
+      reasoningPreference &&
+      typeof reasoningPreference === 'object' &&
+      !Array.isArray(reasoningPreference)
+        ? (reasoningPreference as Record<string, unknown>)
+        : undefined;
+    const thinkingPreference = preferenceRecord?.['thinkingEnabled'];
+    const storedEffort = preferenceRecord?.['effort'];
+    // List the tiers the registered model actually supports — the global
+    // ladder includes tiers this code path would silently clamp.
+    const supportedTiers = (
+      reasoningRegistration.effort?.supported ?? REASONING_EFFORT_TIERS
+    ).join(', ');
+    // A configured-but-unrecognized stored tier (e.g. a "hihg" typo in
+    // settings.json) normalizes to the registry default. Surface it the same
+    // way the global model.reasoningEffort path does — for any invalid value,
+    // not only strings.
+    invalidStoredReasoningEffortWarning =
+      storedEffort !== undefined &&
+      (typeof storedEffort !== 'string' ||
+        !normalizeReasoningEffort(storedEffort))
+        ? `Ignoring invalid model.reasoningPreferences effort "${String(storedEffort)}" for model "${resolved.config.model}"; expected one of: ${supportedTiers}.`
+        : undefined;
+    const presetReasoning = resolved.config.reasoning;
+    // The same typo in a generationConfig preset (settings
+    // model.generationConfig.reasoning or a modelProviders entry) is silently
+    // substituted with the registry default by the seed below; surface it too.
+    const presetEffort: unknown = presetReasoning
+      ? presetReasoning.effort
+      : undefined;
+    invalidPresetReasoningEffortWarning =
+      presetEffort !== undefined &&
+      (typeof presetEffort !== 'string' ||
+        !normalizeReasoningEffort(presetEffort))
+        ? `Ignoring invalid generationConfig reasoning effort "${String(presetEffort)}" for model "${resolved.config.model}"; expected one of: ${supportedTiers}.`
+        : undefined;
+    const resolvedReasoning = resolveModelReasoningControls(
+      resolved.config.model,
+      {
+        // Seed the resolver-supplied preset tier so an explicit provider
+        // generationConfig tier wins over the registry default; stored
+        // per-model preferences still override the preset.
+        ...(presetReasoning && presetReasoning.effort
+          ? { effort: presetReasoning.effort }
+          : {}),
+        ...(preferenceRecord ?? {}),
+      },
+    );
+    const canApplyRegisteredReasoning =
+      generationConfig.reasoning !== false ||
+      (reasoningRegistration.thinking &&
+        typeof thinkingPreference === 'boolean');
+    if (canApplyRegisteredReasoning) {
+      if (resolvedReasoning?.thinkingEnabled === false) {
+        generationConfig.reasoning = false;
+      } else if (resolvedReasoning?.effort) {
+        generationConfig.reasoning = {
+          ...(generationConfig.reasoning || {}),
+          effort: resolvedReasoning.effort,
+        };
+      } else if (
+        reasoningRegistration.thinking &&
+        generationConfig.reasoning === false
+      ) {
+        generationConfig.reasoning = undefined;
+      }
+    }
+  } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),
       effort: reasoningEffort,
@@ -454,6 +534,12 @@ export function resolveCliGenerationConfig(
     warnings: [
       ...resolved.warnings,
       ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
+      ...(invalidStoredReasoningEffortWarning
+        ? [invalidStoredReasoningEffortWarning]
+        : []),
+      ...(invalidPresetReasoningEffortWarning
+        ? [invalidPresetReasoningEffortWarning]
+        : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]

@@ -17,6 +17,7 @@ import type {
   SettingsValue,
 } from '../config/settingsSchema.js';
 import { getSettingsSchema } from '../config/settingsSchema.js';
+import { REASONING_EFFORT_TIERS } from '@qwen-code/qwen-code-core';
 import { t } from '../i18n/index.js';
 import { isAutoLanguage } from './languageUtils.js';
 
@@ -311,6 +312,42 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
 
 export const MAX_SETTING_STRING_VALUE_LENGTH = 1024;
 
+/**
+ * Enforce the `model.reasoningPreferences` jsonSchemaOverride shape on API
+ * writes: per-model objects with only a boolean `thinkingEnabled` and an
+ * `effort` from the canonical ladder. The generic object check above cannot
+ * see this deep shape, and an invalid entry persisted with a 200 would
+ * silently override provider presets on the next session start.
+ */
+function validateReasoningPreferencesValue(
+  value: Record<string, unknown>,
+): string | undefined {
+  for (const [modelId, entry] of Object.entries(value)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return `Preference for model "${modelId}" must be an object`;
+    }
+    for (const [field, fieldValue] of Object.entries(
+      entry as Record<string, unknown>,
+    )) {
+      if (field === 'thinkingEnabled') {
+        if (typeof fieldValue !== 'boolean') {
+          return `"thinkingEnabled" for model "${modelId}" must be a boolean`;
+        }
+      } else if (field === 'effort') {
+        if (
+          typeof fieldValue !== 'string' ||
+          !(REASONING_EFFORT_TIERS as readonly string[]).includes(fieldValue)
+        ) {
+          return `"effort" for model "${modelId}" must be one of: ${REASONING_EFFORT_TIERS.join(', ')}`;
+        }
+      } else {
+        return `Unknown reasoning preference "${field}" for model "${modelId}"`;
+      }
+    }
+  }
+  return undefined;
+}
+
 export function validateSettingValue(
   def: SettingDefinition,
   value: unknown,
@@ -350,6 +387,11 @@ export function validateSettingValue(
     case 'object':
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         return 'Value must be an object';
+      }
+      if (def.key === 'model.reasoningPreferences') {
+        return validateReasoningPreferencesValue(
+          value as Record<string, unknown>,
+        );
       }
       break;
     default:

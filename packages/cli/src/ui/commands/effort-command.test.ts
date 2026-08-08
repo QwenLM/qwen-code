@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { type CommandContext } from './types.js';
 import { effortCommand } from './effort-command.js';
+import { SettingScope } from '../../config/settings.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 // t() returns the key verbatim so assertions can match on the key text.
@@ -33,6 +34,7 @@ describe('effortCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
+          getModel: vi.fn().mockReturnValue('unregistered-model'),
           getReasoningEffort,
           setReasoningEffort,
         } as unknown as Config,
@@ -41,6 +43,8 @@ describe('effortCommand', () => {
           isTrusted: true,
           user: { settings: {} },
           workspace: { settings: {} },
+          merged: {},
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
         } as never,
       },
     });
@@ -97,6 +101,52 @@ describe('effortCommand', () => {
   it('normalizes aliases such as x-high', async () => {
     await effortCommand.action!(context, 'x-high');
     expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
+  });
+
+  it('normalizes and persists effort per registered model', async () => {
+    vi.mocked(context.services.config!.getModel).mockReturnValue('qwen3.8-max');
+    const res = await effortCommand.action!(context, 'max');
+    expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningPreferences',
+      { 'qwen3.8-max': { effort: 'xhigh' } },
+    );
+    expect((res as { content: string }).content).toContain('normalized');
+  });
+
+  it('persists registered-model preferences to the scope owning the model key', async () => {
+    // Workspace owns `model` (reasoningPreferences) but no `modelProviders`;
+    // the modelProviders-ownership fallback would pick the user scope and the
+    // write would be shadowed by the workspace entry.
+    const workspaceSettings = { model: { reasoningPreferences: {} } };
+    const scopedContext = createMockCommandContext({
+      services: {
+        config: {
+          getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+          getReasoningEffort,
+          setReasoningEffort,
+        } as unknown as Config,
+        settings: {
+          setValue,
+          isTrusted: true,
+          user: { settings: {} },
+          workspace: { settings: workspaceSettings },
+          merged: {},
+          forScope: vi.fn((scope: SettingScope) => ({
+            settings: scope === SettingScope.Workspace ? workspaceSettings : {},
+          })),
+        } as never,
+      },
+    });
+
+    await effortCommand.action!(scopedContext, 'medium');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'model.reasoningPreferences',
+      { 'qwen3.8-max': { effort: 'medium' } },
+    );
   });
 
   it('rejects an unknown tier without mutating config or settings', async () => {

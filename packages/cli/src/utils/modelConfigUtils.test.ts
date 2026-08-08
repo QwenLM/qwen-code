@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AuthType,
   resolveModelConfig,
+  type ModelReasoningPreference,
   type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -1824,6 +1825,204 @@ describe('modelConfigUtils', () => {
         const callArgs = vi.mocked(resolveModelConfig).mock.calls[0][0];
         expect(callArgs.env?.['OPENAI_MODEL']).toBeUndefined();
       });
+    });
+
+    describe('qwen3.8-max reasoning defaults', () => {
+      function resolveForModel(
+        model: string,
+        modelSettings: Settings['model'],
+        reasoning?:
+          | false
+          | { effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' },
+      ) {
+        vi.mocked(resolveModelConfig).mockReturnValue({
+          config: {
+            model,
+            apiKey: '',
+            baseUrl: '',
+            ...(reasoning !== undefined ? { reasoning } : {}),
+          },
+          sources: {},
+          warnings: [],
+        });
+
+        return resolveCliGenerationConfig({
+          argv: {},
+          settings: makeMockSettings({ model: modelSettings }),
+          selectedAuthType: AuthType.USE_OPENAI,
+        });
+      }
+
+      it.each([undefined, 'high', 'max'] as const)(
+        'normalizes %s to xhigh for the exact stable model',
+        (reasoningEffort) => {
+          expect(
+            resolveForModel('qwen3.8-max', {
+              name: 'qwen3.8-max',
+              ...(reasoningEffort
+                ? {
+                    reasoningPreferences: {
+                      'qwen3.8-max': { effort: reasoningEffort },
+                    },
+                  }
+                : {}),
+            }).generationConfig.reasoning,
+          ).toEqual({ effort: 'xhigh' });
+        },
+      );
+
+      it.each(['low', 'medium'] as const)('keeps %s unchanged', (effort) => {
+        expect(
+          resolveForModel('qwen3.8-max', {
+            name: 'qwen3.8-max',
+            reasoningPreferences: { 'qwen3.8-max': { effort } },
+          }).generationConfig.reasoning,
+        ).toEqual({ effort });
+      });
+
+      it('maps Thinking Off to reasoning false', () => {
+        expect(
+          resolveForModel('qwen3.8-max', {
+            name: 'qwen3.8-max',
+            reasoningPreferences: {
+              'qwen3.8-max': {
+                effort: 'medium',
+                thinkingEnabled: false,
+              },
+            },
+          }).generationConfig.reasoning,
+        ).toBe(false);
+      });
+
+      it('preserves an explicit provider reasoning opt-out by default', () => {
+        expect(
+          resolveForModel('qwen3.8-max', { name: 'qwen3.8-max' }, false)
+            .generationConfig.reasoning,
+        ).toBe(false);
+      });
+
+      it('lets an explicit model preference re-enable provider reasoning', () => {
+        expect(
+          resolveForModel(
+            'qwen3.8-max',
+            {
+              name: 'qwen3.8-max',
+              reasoningPreferences: {
+                'qwen3.8-max': {
+                  thinkingEnabled: true,
+                  effort: 'medium',
+                },
+              },
+            },
+            false,
+          ).generationConfig.reasoning,
+        ).toEqual({ effort: 'medium' });
+      });
+
+      it('keeps an explicit provider effort tier instead of the registry default', () => {
+        expect(
+          resolveForModel(
+            'qwen3.8-max',
+            { name: 'qwen3.8-max' },
+            { effort: 'low' },
+          ).generationConfig.reasoning,
+        ).toEqual({ effort: 'low' });
+      });
+
+      it('prefers a stored preference over the provider preset tier', () => {
+        expect(
+          resolveForModel(
+            'qwen3.8-max',
+            {
+              name: 'qwen3.8-max',
+              reasoningPreferences: { 'qwen3.8-max': { effort: 'medium' } },
+            },
+            { effort: 'low' },
+          ).generationConfig.reasoning,
+        ).toEqual({ effort: 'medium' });
+      });
+
+      it('does not inherit the global model.reasoningEffort into a registered model', () => {
+        const result = resolveForModel('qwen3.8-max', {
+          name: 'qwen3.8-max',
+          reasoningEffort: 'low',
+        });
+
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        expect(
+          result.warnings.filter((warning) =>
+            /reasoning|effort/i.test(warning),
+          ),
+        ).toEqual([]);
+      });
+
+      it('warns when a stored reasoning effort is unrecognized', () => {
+        const result = resolveForModel('qwen3.8-max', {
+          name: 'qwen3.8-max',
+          reasoningPreferences: {
+            'qwen3.8-max': {
+              effort: 'hihg',
+            } as unknown as ModelReasoningPreference,
+          },
+        });
+
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        const warning = result.warnings.find((w) =>
+          /Ignoring invalid model\.reasoningPreferences effort "hihg"/.test(w),
+        );
+        expect(warning).toBeDefined();
+        // Lists the registered model's tiers, not the global ladder
+        // ('high' and 'max' would appear as standalone tiers there).
+        expect(warning).toContain('low, medium, xhigh');
+        expect(warning).not.toContain('high, ');
+      });
+
+      it('warns when a stored reasoning effort is not a string', () => {
+        const result = resolveForModel('qwen3.8-max', {
+          name: 'qwen3.8-max',
+          reasoningPreferences: {
+            'qwen3.8-max': {
+              effort: 3,
+            } as unknown as ModelReasoningPreference,
+          },
+        });
+
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        expect(result.warnings).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(
+              /Ignoring invalid model\.reasoningPreferences effort "3"/,
+            ),
+          ]),
+        );
+      });
+
+      it('warns when a generationConfig preset effort is unrecognized', () => {
+        const result = resolveForModel(
+          'qwen3.8-max',
+          { name: 'qwen3.8-max' },
+          { effort: 'hihg' as unknown as 'high' },
+        );
+
+        // The seed substitutes the registry default for the typo.
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        expect(result.warnings).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(
+              /Ignoring invalid generationConfig reasoning effort "hihg"/,
+            ),
+          ]),
+        );
+      });
+
+      it.each(['qwen3.8-max-preview', 'qwen3.8-max-latest'])(
+        'does not apply stable defaults to %s',
+        (model) => {
+          expect(
+            resolveForModel(model, { name: model }).generationConfig.reasoning,
+          ).toBeUndefined();
+        },
+      );
     });
   });
 });

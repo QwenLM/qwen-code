@@ -4300,6 +4300,46 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('refreshAuth', () => {
+    it('preserves reasoning budget tokens across a thinking toggle', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          reasoning: { effort: 'medium', budget_tokens: 4096 },
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          authType: AuthType.USE_GEMINI,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'medium', budget_tokens: 4096 },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.USE_GEMINI);
+      const generationConfig = (
+        config as unknown as {
+          modelsConfig: {
+            getGenerationConfig(): ContentGeneratorConfig;
+          };
+        }
+      ).modelsConfig.getGenerationConfig();
+
+      config.setThinkingEnabled(false);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(generationConfig.reasoning).toBe(false);
+
+      config.setThinkingEnabled(true);
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'medium',
+        budget_tokens: 4096,
+      });
+      expect(generationConfig.reasoning).toEqual({
+        effort: 'medium',
+        budget_tokens: 4096,
+      });
+    });
+
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);
       const authType = AuthType.USE_GEMINI;
@@ -4416,6 +4456,257 @@ describe('Server Config (config.ts)', () => {
       expect(config.getReasoningEffort()).toBe('high');
     });
 
+    it('does not carry registered-model reasoning into a full-refresh switch', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'medium', budget_tokens: 4096 },
+        },
+      });
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+          reasoning: { effort: 'medium', budget_tokens: 4096 },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+
+      const generationConfig = config.getModelsConfig().getGenerationConfig();
+      delete generationConfig.reasoning;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-b',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(authType, true);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+    });
+
+    it('does not carry global reasoning into a registered full-refresh target', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          reasoning: { effort: 'high', budget_tokens: 4096 },
+        },
+      });
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-a',
+          authType,
+          reasoning: { effort: 'high', budget_tokens: 4096 },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+      // The real resolver never returns `reasoning` for a registered model
+      // (no provider preset defines it); resolution happens after the rebuild.
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(authType, true);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+    });
+
+    it('keeps a registered model thinking-off across an in-session auth refresh', async () => {
+      // Regression: reasoning === false carries no effort to capture, so the
+      // rebuild wiped it and the registered block re-enabled thinking at the
+      // registry default.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { model: 'qwen3.8-max', reasoning: false },
+      });
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.isThinkingEnabled()).toBe(false);
+
+      // A second same-model refresh (e.g. /auth re-auth) keeps it off too.
+      await config.refreshAuth(authType);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.isThinkingEnabled()).toBe(false);
+    });
+
+    it('keeps thinking-off across repeated registry-resolved auth refreshes', async () => {
+      // Regression: the repair must mirror `reasoning: false` into
+      // modelsConfig, the rebuildable source refreshAuth reads
+      // `priorReasoning` from. For a model resolvable against
+      // modelProviders, syncAfterAuthRefresh runs applyResolvedModelDefaults,
+      // which wipes `reasoning` on every refresh — so without the mirror the
+      // second refresh would read the preset back and silently re-enable
+      // thinking at the registry default tier.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'qwen3.8-max',
+          reasoning: false,
+          apiKey: 'test-key',
+          baseUrl: 'https://custom.example/v1',
+        },
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.8-max',
+              name: 'qwen3.8-max',
+              baseUrl: 'https://custom.example/v1',
+            },
+          ],
+        },
+      });
+      const authType = AuthType.USE_OPENAI;
+
+      await config.refreshAuth(authType);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.isThinkingEnabled()).toBe(false);
+
+      await config.refreshAuth(authType);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.isThinkingEnabled()).toBe(false);
+    });
+
+    it('does not carry thinking-off when an auth refresh changes models', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { model: 'coder-model', reasoning: false },
+      });
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+      expect(config.isThinkingEnabled()).toBe(true);
+    });
+
+    it('restores the global effort when switching back from a registered model', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'coder-model',
+          reasoning: { effort: 'high' },
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType: AuthType.QWEN_OAUTH,
+          model: 'coder-model',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+      expect(config.getReasoningEffort()).toBe('high');
+
+      const handleModelChange = (target: string) => {
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            authType: AuthType.QWEN_OAUTH,
+            model: target,
+            apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+          } as ContentGeneratorConfig,
+          sources: {},
+        });
+        return (
+          config as unknown as {
+            handleModelChange: (
+              authType: AuthType,
+              requiresRefresh: boolean,
+            ) => Promise<void>;
+          }
+        ).handleModelChange(AuthType.QWEN_OAUTH, false);
+      };
+
+      await handleModelChange('qwen3.8-max');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+
+      await handleModelChange('coder-model');
+      expect(config.getReasoningEffort()).toBe('high');
+    });
+
+    it('keeps the last effort preference while thinking is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'medium' } },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType: AuthType.USE_GEMINI,
+          reasoning: { effort: 'medium' },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.USE_GEMINI);
+
+      expect(config.getReasoningEffortPreference()).toBe('medium');
+      expect(config.isThinkingEnabled()).toBe(true);
+
+      config.setThinkingEnabled(false);
+      expect(config.isThinkingEnabled()).toBe(false);
+      expect(config.getReasoningEffort()).toBeUndefined();
+      expect(config.getReasoningEffortPreference()).toBe('medium');
+
+      config.setThinkingEnabled(true);
+      expect(config.isThinkingEnabled()).toBe(true);
+      expect(config.getReasoningEffort()).toBe('medium');
+    });
+
     it('should fire auth_success notification hook when hooks are enabled', async () => {
       const mockMessageBus = { request: vi.fn() };
       const config = new Config({
@@ -4489,6 +4780,91 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching optimization (QWEN_OAUTH)', () => {
+    it('does not carry registered-model thinking off through a hot switch', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'qwen3.8-max',
+          reasoning: false,
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType: AuthType.QWEN_OAUTH,
+          model: 'qwen3.8-max',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType: AuthType.QWEN_OAUTH,
+          model: 'coder-model',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        model: 'coder-model',
+      });
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+    });
+
+    it('uses registered target reasoning through a hot switch', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'coder-model',
+          reasoning: { effort: 'high' },
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType: AuthType.QWEN_OAUTH,
+          model: 'coder-model',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+      // The real resolver never returns `reasoning` for a registered model;
+      // the registry default must be resolved on the hot path itself.
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType: AuthType.QWEN_OAUTH,
+          model: 'qwen3.8-max',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+    });
+
     it('should switch qwen-oauth model in-place without refreshing auth when safe', async () => {
       const config = new Config(baseParams);
 

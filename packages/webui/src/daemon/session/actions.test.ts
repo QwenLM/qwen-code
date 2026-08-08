@@ -28,6 +28,9 @@ describe('getConnectionAfterSessionClear', () => {
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
         context: contextStatus('session-a'),
+        reasoning: {
+          effort: { value: 'medium', options: ['medium', 'xhigh'] },
+        },
         loadingTranscript: true,
         catchingUp: true,
         error: 'old error',
@@ -52,6 +55,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
+    expect(next).not.toHaveProperty('reasoning');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
     // commands (e.g. /review) keep autocompleting in the fresh deferred session
     // before its first prompt creates a session (mirrors #6153 / #6066).
@@ -306,6 +310,34 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
   });
 
+  it('drops session-scoped snapshots while switching to a different session', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        tokenCount: 3,
+        tokenUsage: { totalTokens: 3 },
+        supportedCommands: supportedCommandsStatus('session-a'),
+        context: contextStatus('session-a'),
+        reasoning: { thinking: { enabled: true } },
+      } as DaemonConnectionState,
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    // Session A's snapshots must not render on session B while B's own
+    // context() is in flight (possibly forever, if it rejects).
+    const next = getConnection();
+    expect(next).toMatchObject({ sessionId: 'session-b' });
+    expect(next.reasoning).toBeUndefined();
+    expect(next.context).toBeUndefined();
+    expect(next.supportedCommands).toBeUndefined();
+    expect(next.tokenUsage).toBeUndefined();
+    expect(next.tokenCount).toBeUndefined();
+  });
+
   it('detaches the old same-session attachment after its replacement loads', async () => {
     const existingSession = createMockSession('session-a');
     const { actions, getConnection, pendingSessionLoadRef, sessionRef, store } =
@@ -544,6 +576,124 @@ describe('createDaemonSessionActions', () => {
     await expect(actions.attachSession()).rejects.toThrow(
       'Daemon session is not connected',
     );
+  });
+
+  it('updates reasoning state from a config-option response', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: [
+        { id: 'thinking', currentValue: 'off' },
+        {
+          id: 'effort',
+          currentValue: 'medium',
+          options: [{ value: 'medium' }, { value: 'xhigh' }],
+        },
+      ],
+    });
+    const { actions, getConnection } = createActionsHarness({ session });
+
+    await actions.setConfigOption('thinking', 'off');
+
+    expect(session.setConfigOption).toHaveBeenCalledWith('thinking', 'off');
+    expect(getConnection().reasoning).toEqual({
+      thinking: { enabled: false },
+      effort: { value: 'medium', options: ['medium', 'xhigh'] },
+    });
+  });
+
+  it('clears the previous model reasoning state after a model switch', async () => {
+    const session = createMockSession('session-a');
+    session.setModel.mockResolvedValueOnce({ modelId: 'next-model' });
+    const { actions, getConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        currentModel: 'previous-model',
+        reasoning: {
+          thinking: { enabled: false },
+          effort: { value: 'medium', options: ['medium', 'xhigh'] },
+        },
+      },
+    });
+
+    await actions.setModel('next-model');
+
+    expect(getConnection()).toMatchObject({ currentModel: 'next-model' });
+    expect(getConnection().reasoning).toBeUndefined();
+  });
+
+  it('preserves target reasoning state received before the model response', async () => {
+    const session = createMockSession('session-a');
+    const targetReasoning = {
+      thinking: { enabled: true },
+      effort: {
+        value: 'xhigh' as const,
+        options: ['low', 'medium', 'xhigh'] as const,
+      },
+    };
+    const { actions, getConnection, setConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        currentModel: 'previous-model',
+      },
+    });
+    session.setModel.mockImplementationOnce(async () => {
+      setConnection((current) => ({
+        ...current,
+        currentModel: 'next-model',
+        reasoning: {
+          thinking: targetReasoning.thinking,
+          effort: {
+            value: targetReasoning.effort.value,
+            options: [...targetReasoning.effort.options],
+          },
+        },
+      }));
+      return { modelId: 'next-model' };
+    });
+
+    await actions.setModel('next-model');
+
+    expect(getConnection().reasoning).toEqual(targetReasoning);
+  });
+
+  it('preserves target reasoning received before model_switched', async () => {
+    const session = createMockSession('session-a');
+    const targetReasoning = {
+      thinking: { enabled: true },
+      effort: {
+        value: 'xhigh' as const,
+        options: ['low', 'medium', 'xhigh'] as const,
+      },
+    };
+    const { actions, getConnection, setConnection } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        currentModel: 'previous-model',
+      },
+    });
+    session.setModel.mockImplementationOnce(async () => {
+      setConnection((current) => ({
+        ...current,
+        reasoning: {
+          thinking: targetReasoning.thinking,
+          effort: {
+            value: targetReasoning.effort.value,
+            options: [...targetReasoning.effort.options],
+          },
+        },
+      }));
+      return { modelId: 'next-model' };
+    });
+
+    await actions.setModel('next-model');
+
+    expect(getConnection()).toMatchObject({
+      currentModel: 'next-model',
+      reasoning: targetReasoning,
+    });
   });
 
   it('reports getTasks failures by default', async () => {
@@ -807,6 +957,11 @@ function createActionsHarness(
     appendLocalUserMessage: vi.fn(),
     dispatch: vi.fn(),
   };
+  const setConnection: Parameters<
+    typeof createDaemonSessionActions
+  >[0]['setConnection'] = (update) => {
+    connection = typeof update === 'function' ? update(connection) : update;
+  };
   const actions = createDaemonSessionActions({
     store: store as never,
     sessionRef,
@@ -832,9 +987,7 @@ function createActionsHarness(
     restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
-    setConnection: (update) => {
-      connection = typeof update === 'function' ? update(connection) : update;
-    },
+    setConnection,
     setPromptStatus: vi.fn(),
     setRestoreSessionId: vi.fn(),
     setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
@@ -848,6 +1001,7 @@ function createActionsHarness(
     activePromptsRef,
     getConnection: () => connection,
     pendingSessionLoadRef,
+    setConnection,
     sessionRef,
     store,
   };
@@ -867,6 +1021,12 @@ function createMockSession(sessionId: string) {
     cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
+    setModel: vi.fn(async (modelId: string) => ({ modelId })),
+    setConfigOption: vi.fn(
+      async (): Promise<{ configOptions: unknown[] }> => ({
+        configOptions: [],
+      }),
+    ),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
   };
 }

@@ -7,11 +7,14 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonSessionContextStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
+  mapReasoningConfigOptions,
+  mapSessionContextModels,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
@@ -45,6 +48,191 @@ function applyEvent(
   });
   return next;
 }
+
+describe('reasoning config options', () => {
+  const configOptions = [
+    { id: 'thinking', currentValue: 'off' },
+    {
+      id: 'effort',
+      currentValue: 'medium',
+      options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+    },
+  ];
+
+  it('maps the ACP config option snapshot', () => {
+    expect(mapReasoningConfigOptions(configOptions)).toEqual({
+      thinking: { enabled: false },
+      effort: {
+        value: 'medium',
+        options: ['low', 'medium', 'xhigh'],
+      },
+    });
+  });
+
+  it('updates connection state from config_option_update', () => {
+    const next = applyEvent({ status: 'connected' }, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions,
+        },
+      },
+    } as DaemonEvent);
+    expect(next.reasoning).toEqual({
+      thinking: { enabled: false },
+      effort: {
+        value: 'medium',
+        options: ['low', 'medium', 'xhigh'],
+      },
+    });
+  });
+
+  it('maps thinking-only and effort-only option sets independently', () => {
+    expect(
+      mapReasoningConfigOptions([{ id: 'thinking', currentValue: 'on' }]),
+    ).toEqual({ thinking: { enabled: true } });
+    expect(
+      mapReasoningConfigOptions([
+        {
+          id: 'effort',
+          currentValue: 'max',
+          options: [{ value: 'high' }, { value: 'max' }],
+        },
+      ]),
+    ).toEqual({
+      effort: { value: 'max', options: ['high', 'max'] },
+    });
+  });
+
+  it('clears stale reasoning state when a peer switches models', () => {
+    const next = applyEvent(
+      {
+        status: 'connected',
+        currentModel: 'previous-model',
+        reasoning: {
+          effort: { value: 'medium', options: ['medium', 'xhigh'] },
+        },
+      },
+      {
+        v: 1,
+        type: 'model_switched',
+        data: { modelId: 'next-model' },
+      } as DaemonEvent,
+    );
+    expect(next.currentModel).toBe('next-model');
+    expect(next.reasoning).toBeUndefined();
+  });
+
+  it('preserves the target reasoning update when the model switch event follows it', () => {
+    const afterConfigUpdate = applyEvent(
+      {
+        status: 'connected',
+        currentModel: 'previous-model',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_reasoning_control'],
+          modelServices: [],
+        },
+      },
+      {
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions,
+          },
+        },
+      } as DaemonEvent,
+    );
+    const next = applyEvent(afterConfigUpdate, {
+      v: 1,
+      type: 'model_switched',
+      data: { modelId: 'next-model' },
+    } as DaemonEvent);
+
+    expect(next.currentModel).toBe('next-model');
+    expect(next.reasoning).toEqual({
+      thinking: { enabled: false },
+      effort: {
+        value: 'medium',
+        options: ['low', 'medium', 'xhigh'],
+      },
+    });
+  });
+});
+
+describe('mapSessionContextModels', () => {
+  function contextStatus(
+    currentModelId: string,
+    availableModels: Array<Record<string, unknown>>,
+  ): DaemonSessionContextStatus {
+    return {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      state: {
+        models: {
+          currentModelId,
+          availableModels,
+        },
+      },
+    } as DaemonSessionContextStatus;
+  }
+
+  it('maps reasoning controls from the model _meta', () => {
+    const rawSupported = ['low', 'medium', 'xhigh'];
+    const result = mapSessionContextModels(
+      contextStatus('qwen3.8-max(openai)', [
+        {
+          modelId: 'qwen3.8-max(openai)',
+          name: 'Qwen 3.8 Max',
+          _meta: {
+            reasoningControls: {
+              thinking: { defaultEnabled: true },
+              effort: {
+                supported: rawSupported,
+                default: 'xhigh',
+              },
+            },
+          },
+        },
+      ]),
+    );
+
+    expect(result?.models).toHaveLength(1);
+    const model = result?.models[0];
+    expect(model?.reasoningControls).toEqual({
+      thinking: { defaultEnabled: true },
+      effort: {
+        supported: ['low', 'medium', 'xhigh'],
+        default: 'xhigh',
+      },
+    });
+    // The mapper must hand out a copy, not the raw daemon record.
+    expect(model?.reasoningControls?.effort?.supported).not.toBe(rawSupported);
+  });
+
+  it('omits reasoningControls when the model has no reasoning controls meta', () => {
+    const result = mapSessionContextModels(
+      contextStatus('plain-model(openai)', [
+        { modelId: 'plain-model(openai)', name: 'Plain Model' },
+        {
+          modelId: 'meta-without-controls(openai)',
+          name: 'Meta Without Controls',
+          _meta: { contextLimit: 1000 },
+        },
+      ]),
+    );
+
+    expect(result?.models).toHaveLength(2);
+    expect(result?.models[0]).not.toHaveProperty('reasoningControls');
+    expect(result?.models[1]).not.toHaveProperty('reasoningControls');
+  });
+});
 
 function usageEvent(
   id: number,

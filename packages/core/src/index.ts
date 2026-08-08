@@ -65,6 +65,7 @@ export {
   runOutsideAgentContext,
 } from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
+export * from './core/model-reasoning-controls.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';

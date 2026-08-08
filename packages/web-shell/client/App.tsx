@@ -5099,6 +5099,21 @@ export function App({
   // re-creating on every render (and without an exhaustive-deps warning).
   const reloadProviders = providersState.reload;
   const [modelActionBusy, setModelActionBusy] = useState(false);
+  const [reasoningActionBusy, setReasoningActionBusy] = useState<
+    Partial<Record<'thinking' | 'effort', boolean>>
+  >({});
+  // Serialize thinking/effort writes: both merge into the same
+  // model.reasoningPreferences entry, so a concurrent pair computed from the
+  // same pre-write snapshot would silently drop the earlier toggle. Memoized
+  // so the derived object's identity stays stable across unrelated renders
+  // (ChatEditor is memo'd on these props).
+  const reasoningBusy = useMemo(
+    () =>
+      reasoningActionBusy.thinking || reasoningActionBusy.effort
+        ? { thinking: true, effort: true }
+        : {},
+    [reasoningActionBusy],
+  );
   const {
     settings: workspaceSettings,
     setValue: setWorkspaceSetting,
@@ -5113,6 +5128,69 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
     )?.values.effective === true;
+  const reasoningPreferencesSetting = workspaceSettings.find(
+    (setting) => setting.key === 'model.reasoningPreferences',
+  );
+  const persistedReasoningPreferences = useMemo(() => {
+    const value = reasoningPreferencesSetting?.values.effective;
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  }, [reasoningPreferencesSetting]);
+  const composerReasoningState = useMemo(() => {
+    if (connection.sessionId && connection.reasoning) {
+      return connection.reasoning;
+    }
+    const composerModelId = currentModel || connection.currentModel;
+    const model = connection.models?.find(
+      (candidate) => candidate.id === composerModelId,
+    );
+    const controls = model?.reasoningControls;
+    if (!controls) return undefined;
+    const rawPreference = model.baseModelId
+      ? persistedReasoningPreferences[model.baseModelId]
+      : undefined;
+    const preference =
+      rawPreference &&
+      typeof rawPreference === 'object' &&
+      !Array.isArray(rawPreference)
+        ? (rawPreference as Record<string, unknown>)
+        : undefined;
+    const storedEffort = preference?.['effort'];
+    return {
+      ...(controls.thinking
+        ? {
+            thinking: {
+              enabled:
+                typeof preference?.['thinkingEnabled'] === 'boolean'
+                  ? preference['thinkingEnabled']
+                  : controls.thinking.defaultEnabled,
+            },
+          }
+        : {}),
+      ...(controls.effort
+        ? {
+            effort: {
+              value:
+                typeof storedEffort === 'string' &&
+                controls.effort.supported.includes(
+                  storedEffort as (typeof controls.effort.supported)[number],
+                )
+                  ? (storedEffort as (typeof controls.effort.supported)[number])
+                  : controls.effort.default,
+              options: controls.effort.supported,
+            },
+          }
+        : {}),
+    };
+  }, [
+    connection.currentModel,
+    connection.models,
+    connection.reasoning,
+    connection.sessionId,
+    currentModel,
+    persistedReasoningPreferences,
+  ]);
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -8240,6 +8318,85 @@ export function App({
     [sessionActions, store, reportError, t, setPendingModel],
   );
 
+  const handleReasoningOptionSelect = useCallback(
+    (configId: 'thinking' | 'effort', value: string) => {
+      setReasoningActionBusy((current) => ({
+        ...current,
+        [configId]: true,
+      }));
+      const update = connectionRef.current.sessionId
+        ? sessionActions.setConfigOption(configId, value)
+        : (() => {
+            const scope = providersState.status?.modelConfigScope ?? 'user';
+            const scopedPreferences =
+              reasoningPreferencesSetting?.values[scope];
+            const currentScopedPreferences =
+              scopedPreferences &&
+              typeof scopedPreferences === 'object' &&
+              !Array.isArray(scopedPreferences)
+                ? (scopedPreferences as Record<string, unknown>)
+                : {};
+            const composerModelId =
+              currentModelRef.current || connectionRef.current.currentModel;
+            const model = connectionRef.current.models?.find(
+              (candidate) => candidate.id === composerModelId,
+            );
+            if (!model?.baseModelId) {
+              return Promise.reject(new Error('Current model is unavailable'));
+            }
+            const currentPreference =
+              currentScopedPreferences[model.baseModelId];
+            const updatedPreferences = {
+              ...currentScopedPreferences,
+              [model.baseModelId]: {
+                ...(currentPreference &&
+                typeof currentPreference === 'object' &&
+                !Array.isArray(currentPreference)
+                  ? currentPreference
+                  : {}),
+                ...(configId === 'thinking'
+                  ? { thinkingEnabled: value === 'on' }
+                  : { effort: value }),
+                ...(configId === 'thinking' && composerReasoningState?.effort
+                  ? { effort: composerReasoningState.effort.value }
+                  : {}),
+              },
+            };
+            return setWorkspaceSetting(
+              scope,
+              'model.reasoningPreferences',
+              updatedPreferences,
+            ).then(() =>
+              // The write already persisted; a failed reload would otherwise
+              // leave the switch rendering a stale position with no error.
+              reloadWorkspaceSettings().catch((error: unknown) => {
+                reportError(error, t('reasoning.updateFailed'));
+              }),
+            );
+          })();
+      void update
+        .catch((error: unknown) => {
+          reportError(error, t('reasoning.updateFailed'));
+        })
+        .finally(() =>
+          setReasoningActionBusy((current) => ({
+            ...current,
+            [configId]: false,
+          })),
+        );
+    },
+    [
+      composerReasoningState?.effort,
+      reasoningPreferencesSetting,
+      reloadWorkspaceSettings,
+      reportError,
+      providersState.status?.modelConfigScope,
+      sessionActions,
+      setWorkspaceSetting,
+      t,
+    ],
+  );
+
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
       setModelActionBusy(true);
@@ -10265,6 +10422,16 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          reasoningControlsSupported={
+                            workspace.capabilities?.features?.includes(
+                              'session_reasoning_control',
+                            ) ?? false
+                          }
+                          reasoningState={composerReasoningState}
+                          reasoningBusy={reasoningBusy}
+                          onSelectReasoningOption={
+                            handleReasoningOptionSelect
+                          }
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId

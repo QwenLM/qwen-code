@@ -18,6 +18,8 @@ import type {
   DaemonCommandInfo,
   DaemonConnectionState,
   DaemonModelInfo,
+  DaemonReasoningEffort,
+  DaemonReasoningState,
   DaemonTokenUsage,
 } from './types.js';
 
@@ -67,6 +69,9 @@ export function mapProviderStatus(
           : {}),
         ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
+        ...(model.reasoningControls !== undefined
+          ? { reasoningControls: model.reasoningControls }
+          : {}),
         ...(model.isRuntime ? { isRuntime: true } : {}),
       });
     }
@@ -103,6 +108,9 @@ export function mapSessionContextModels(
         getString(model, 'value');
       if (!modelId) continue;
       const meta = getRecord(model?.['_meta']);
+      const reasoningControls = mapReasoningControls(
+        meta?.['reasoningControls'],
+      );
       const modelContextWindow =
         getNumber(meta, 'contextLimit') ??
         getNumber(meta, 'contextWindow') ??
@@ -123,12 +131,100 @@ export function mapSessionContextModels(
         ...(modelContextWindow !== undefined
           ? { contextWindow: modelContextWindow }
           : {}),
+        ...(reasoningControls ? { reasoningControls } : {}),
       });
     }
   }
 
   if (!currentModel && models.length === 0) return undefined;
   return { models, currentModel, contextWindow };
+}
+
+export function mapReasoningConfigOptions(
+  configOptions: unknown,
+): DaemonReasoningState | undefined {
+  if (!Array.isArray(configOptions)) return undefined;
+  let thinking: string | undefined;
+  let effort: string | undefined;
+  let effortOptions: DaemonReasoningEffort[] | undefined;
+  for (const rawOption of configOptions) {
+    const option = getRecord(rawOption);
+    if (!option) continue;
+    const id = getString(option, 'id');
+    const currentValue = getString(option, 'currentValue');
+    if (id === 'thinking') thinking = currentValue;
+    if (id === 'effort') {
+      effort = currentValue;
+      const rawOptions = option['options'];
+      effortOptions = Array.isArray(rawOptions)
+        ? rawOptions
+            .map((raw) => getString(getRecord(raw), 'value'))
+            .filter(isReasoningEffort)
+        : undefined;
+    }
+  }
+  const state: DaemonReasoningState = {};
+  if (thinking === 'on' || thinking === 'off') {
+    state.thinking = { enabled: thinking === 'on' };
+  }
+  if (
+    isReasoningEffort(effort) &&
+    effortOptions?.length &&
+    effortOptions.includes(effort)
+  ) {
+    state.effort = { value: effort, options: effortOptions };
+  }
+  return state.thinking || state.effort ? state : undefined;
+}
+
+function isReasoningEffort(
+  value: string | undefined,
+): value is DaemonReasoningEffort {
+  return (
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max'
+  );
+}
+
+function mapReasoningControls(
+  value: unknown,
+): DaemonModelInfo['reasoningControls'] | undefined {
+  const record = getRecord(value);
+  if (!record) return undefined;
+  const thinking = getRecord(record['thinking']);
+  const effort = getRecord(record['effort']);
+  const defaultEnabled = thinking?.['defaultEnabled'];
+  const supported = Array.isArray(effort?.['supported'])
+    ? effort['supported']
+        .filter((item): item is string => typeof item === 'string')
+        .filter(isReasoningEffort)
+    : [];
+  const defaultEffort =
+    typeof effort?.['default'] === 'string' &&
+    isReasoningEffort(effort['default'])
+      ? effort['default']
+      : undefined;
+  const controls: NonNullable<DaemonModelInfo['reasoningControls']> = {};
+  if (typeof defaultEnabled === 'boolean') {
+    controls.thinking = { defaultEnabled };
+  }
+  if (
+    supported.length > 0 &&
+    defaultEffort &&
+    supported.includes(defaultEffort)
+  ) {
+    controls.effort = { supported, default: defaultEffort };
+  }
+  return controls.thinking || controls.effort ? controls : undefined;
+}
+
+export function mapSessionContextReasoning(
+  status: DaemonSessionContextStatus | undefined,
+): DaemonReasoningState | undefined {
+  return mapReasoningConfigOptions(status?.state?.configOptions);
 }
 
 export function mapSupportedCommands(
@@ -254,6 +350,10 @@ export function updateConnectionFromDaemonEvent(
         skills,
       }));
     }
+    if (getString(update, 'sessionUpdate') === 'config_option_update') {
+      const reasoning = mapReasoningConfigOptions(update?.['configOptions']);
+      setConnection((current) => ({ ...current, reasoning }));
+    }
     return;
   }
 
@@ -295,7 +395,17 @@ export function updateConnectionFromDaemonEvent(
     case 'model_switched': {
       const modelId = getString(getRecord(event.data), 'modelId');
       if (modelId) {
-        setConnection((current) => ({ ...current, currentModel: modelId }));
+        setConnection((current) => {
+          const supportsReasoningControl =
+            current.capabilities?.features.includes(
+              'session_reasoning_control',
+            );
+          return {
+            ...current,
+            currentModel: modelId,
+            reasoning: supportsReasoningControl ? current.reasoning : undefined,
+          };
+        });
       }
       break;
     }

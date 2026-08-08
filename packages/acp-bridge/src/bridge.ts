@@ -8003,6 +8003,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return response;
     },
 
+    async setSessionConfigOption(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const response = await Promise.race([
+        withTimeout(
+          entry.connection.setSessionConfigOption({ ...req, sessionId }),
+          initTimeoutMs,
+          'setSessionConfigOption',
+        ),
+        getTransportClosedReject(entry),
+      ]);
+      // Thinking/effort roundtrips persist `model.reasoningPreferences`
+      // child-side; broadcast settings_changed like setSessionModel does for
+      // `model.name` so other attached clients reload their settings caches.
+      if (req.configId === 'thinking' || req.configId === 'effort') {
+        broadcastWorkspaceEvent({
+          type: 'settings_changed',
+          data: { key: 'model.reasoningPreferences' },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+      return response;
+    },
+
     async setSessionLanguage(sessionId, params, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

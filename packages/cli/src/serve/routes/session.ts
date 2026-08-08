@@ -56,7 +56,11 @@ import {
   type AcpSessionBridge,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
-import type { SendBridgeError } from '../server/error-response.js';
+import {
+  errorMessage,
+  type SendBridgeError,
+} from '../server/error-response.js';
+import { RPC } from '../acp-http/json-rpc.js';
 import { resolvePromptDeadlineMs } from '../server/prompt-deadline.js';
 import {
   parseClientIdHeader,
@@ -445,6 +449,27 @@ function parseOptionalApprovalMode(
     return null;
   }
   return rawApprovalMode as ApprovalMode;
+}
+
+/**
+ * The session's current ACP-shaped config options, read from the child's own
+ * session state (the same read the ACP-HTTP dispatcher uses). Best-effort —
+ * an unreadable state yields an empty array so a successful write still
+ * returns its result.
+ */
+async function sessionConfigOptions(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+): Promise<unknown[]> {
+  try {
+    const ctx = (await bridge.getSessionContextStatus(sessionId)) as {
+      state?: { configOptions?: unknown };
+    };
+    const options = ctx?.state?.configOptions;
+    return Array.isArray(options) ? options : [];
+  } catch {
+    return [];
+  }
 }
 
 export function registerSessionRoutes(
@@ -4497,6 +4522,117 @@ export function registerSessionRoutes(
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/config-option',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/config-option',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const configId = body['configId'];
+        const value = body['value'];
+        if (
+          typeof configId !== 'string' ||
+          !configId ||
+          typeof value !== 'string' ||
+          !value
+        ) {
+          res.status(400).json({
+            error: '`configId` and `value` must be non-empty strings',
+            code: 'invalid_config_option',
+          });
+          return;
+        }
+        const persist = body['persist'];
+        if (persist !== undefined && typeof persist !== 'boolean') {
+          res.status(400).json({
+            error: '`persist` must be a boolean when provided',
+            code: 'invalid_persist_flag',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const context = clientId !== undefined ? { clientId } : undefined;
+        try {
+          // Mirror the ACP-HTTP dispatch split: model/mode changes must go
+          // through the queued bridge setters so they serialize with
+          // attach-driven roundtrips instead of racing them.
+          if (configId === 'model') {
+            const response = await runtime.bridge.setSessionModel(
+              sessionId,
+              { sessionId, modelId: value } as Parameters<
+                AcpSessionBridge['setSessionModel']
+              >[1],
+              context,
+            );
+            // Uniform shape across all configIds (ACP parity): clients
+            // refresh their option cache from this result.
+            res.status(200).json({
+              ...response,
+              configOptions: await sessionConfigOptions(
+                runtime.bridge,
+                sessionId,
+              ),
+            });
+            return;
+          }
+          if (configId === 'mode') {
+            if (!APPROVAL_MODES.includes(value as ApprovalMode)) {
+              res.status(400).json({
+                error: `invalid mode "${value}" (expected one of: ${APPROVAL_MODES.join(', ')})`,
+                code: 'invalid_config_option',
+              });
+              return;
+            }
+            const response = await runtime.bridge.setSessionApprovalMode(
+              sessionId,
+              value as ApprovalMode,
+              { persist: persist === true },
+              context,
+            );
+            res.status(200).json({
+              ...response,
+              configOptions: await sessionConfigOptions(
+                runtime.bridge,
+                sessionId,
+              ),
+            });
+            return;
+          }
+          if (configId !== 'thinking' && configId !== 'effort') {
+            res.status(400).json({
+              error: `Unknown configId: ${configId}`,
+              code: 'invalid_config_option',
+            });
+            return;
+          }
+          // `effort` is deliberately accepted while thinking is off — the UI
+          // disables the tier picker in that state, and the stored tier is what
+          // must be restored when thinking is re-enabled.
+          const response = await runtime.bridge.setSessionConfigOption(
+            sessionId,
+            { sessionId, configId, value },
+            context,
+          );
+          res.status(200).json(response);
+        } catch (err) {
+          // Agent-side semantic rejections (unsupported effort tier, thinking
+          // controls unavailable) arrive as JSON-RPC INVALID_PARAMS; report
+          // them as client errors instead of daemon faults.
+          if ((err as { code?: unknown })?.code === RPC.INVALID_PARAMS) {
+            res.status(400).json({
+              error: errorMessage(err),
+              code: 'invalid_config_option',
+            });
+            return;
+          }
+          throw err;
+        }
       },
     ),
   );

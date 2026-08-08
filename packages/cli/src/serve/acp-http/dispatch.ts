@@ -697,6 +697,15 @@ export function toRpcError(err: unknown): {
       },
     };
   }
+  // Agent-side RequestErrors (e.g. semantic rejections from
+  // session/set_config_option: unsupported effort tier, thinking controls
+  // unavailable) already carry a JSON-RPC code; pass it through instead of
+  // collapsing to a generic internal error, so both transport surfaces agree
+  // on error classification.
+  const rpcCode = (err as { code?: unknown } | null)?.code;
+  if (typeof rpcCode === 'number' && rpcCode <= -32000) {
+    return { code: rpcCode, message: errMsg(err) };
+  }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
     case 'SessionArchivedError':
@@ -2227,6 +2236,12 @@ export class AcpDispatcher {
                 sessionId,
                 rawValue as ApprovalMode,
                 { persist: params['persist'] === true },
+                ctx,
+              );
+            } else if (configId === 'thinking' || configId === 'effort') {
+              await this.bridge.setSessionConfigOption(
+                sessionId,
+                { sessionId, configId, value: rawValue },
                 ctx,
               );
             } else {

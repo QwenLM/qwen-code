@@ -94,6 +94,8 @@ import {
   refreshMemoryInstruction,
   extractDaemonTraceContext,
   withDaemonSpan,
+  getModelReasoningControls,
+  normalizeModelReasoningEffort,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -5207,7 +5209,11 @@ class QwenAgent implements Agent {
         `Session not found for id: ${params.sessionId}`,
       );
     }
-    return await session.setModel(params);
+    const response = await session.setModel(params);
+    await session.sendConfigOptionsUpdate(
+      this.buildConfigOptions(session.getConfig()),
+    );
+    return response;
   }
 
   async setSessionConfigOption(
@@ -5241,6 +5247,14 @@ class QwenAgent implements Agent {
         );
         break;
       }
+      case 'thinking': {
+        await session.setThinking(value as string);
+        break;
+      }
+      case 'effort': {
+        await session.setEffort(value as string);
+        break;
+      }
       default:
         throw RequestError.invalidParams(
           undefined,
@@ -5248,9 +5262,9 @@ class QwenAgent implements Agent {
         );
     }
 
-    return {
-      configOptions: this.buildConfigOptions(session.getConfig()),
-    };
+    const configOptions = this.buildConfigOptions(session.getConfig());
+    await session.sendConfigOptionsUpdate(configOptions);
+    return { configOptions };
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -11255,6 +11269,14 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.switchModel(authType, newModelName);
+                // Mirror Session.setModel: apply the reloaded per-model
+                // reasoning preferences for the new model, then notify
+                // attached clients (config.switchModel publishes no
+                // model-update extNotification of its own).
+                session.syncReasoningSettingsForCurrentModel(newMerged);
+                await session.sendConfigOptionsUpdate(
+                  this.buildConfigOptions(session.getConfig()),
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,
@@ -11983,14 +12005,20 @@ class QwenAgent implements Agent {
         : config.getCurrentModelRegistryBaseUrl?.(),
     );
 
-    const mappedAvailableModels = modelOptions.map(({ model, modelId }) => ({
-      modelId,
-      name: model.label,
-      description: model.description ?? null,
-      _meta: {
-        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
-      },
-    }));
+    const mappedAvailableModels = modelOptions.map(({ model, modelId }) => {
+      const reasoningControls = model.isRuntimeModel
+        ? undefined
+        : getModelReasoningControls(model.id);
+      return {
+        modelId,
+        name: model.label,
+        description: model.description ?? null,
+        _meta: {
+          contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
+          ...(reasoningControls ? { reasoningControls } : {}),
+        },
+      };
+    });
 
     return {
       currentModelId,
@@ -12061,7 +12089,50 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    return [modeConfigOption, modelConfigOption];
+    const configOptions = [modeConfigOption, modelConfigOption];
+    // Runtime snapshots are deliberately excluded from reasoning controls
+    // (mirrors buildAvailableModels): a snapshot can carry a bare id that
+    // collides with a registered model while pointing at a custom endpoint.
+    const reasoningControls = activeRuntimeSnapshot
+      ? undefined
+      : getModelReasoningControls(rawCurrentModelId);
+    if (reasoningControls?.thinking) {
+      configOptions.push({
+        id: 'thinking',
+        name: 'Thinking',
+        description: `Enable or disable thinking for ${rawCurrentModelId}`,
+        category: 'thought_level',
+        type: 'select' as const,
+        currentValue: config.isThinkingEnabled() ? 'on' : 'off',
+        options: [
+          { value: 'on', name: 'On', description: '' },
+          { value: 'off', name: 'Off', description: '' },
+        ],
+      });
+    }
+    if (reasoningControls?.effort) {
+      const effort = normalizeModelReasoningEffort(
+        reasoningControls,
+        config.getReasoningEffortPreference(),
+      )!;
+      configOptions.push({
+        id: 'effort',
+        name: 'Effort',
+        description: `Reasoning effort for ${rawCurrentModelId}`,
+        category: 'thought_level',
+        type: 'select' as const,
+        currentValue: effort,
+        options: reasoningControls.effort.supported.map((value) => ({
+          value,
+          name:
+            value === 'xhigh'
+              ? 'Extra High'
+              : value.charAt(0).toUpperCase() + value.slice(1),
+          description: '',
+        })),
+      });
+    }
+    return configOptions;
   }
 
   private buildSelectableModelOptions(config: Config) {

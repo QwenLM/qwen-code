@@ -161,6 +161,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // settings via the daemon's `loadedSettings` handle. SDK helper:
   // `DaemonClient.setSessionApprovalMode`.
   session_approval_mode_control: { since: 'v1' },
+  // ACP-backed session configuration mutation used by WebShell's registered
+  // model Thinking and Effort controls.
+  session_reasoning_control: { since: 'v1' },
   // `POST /workspace/tools/:name/enable` toggles a
   // tool name in the workspace's `tools.disabled` settings list. The
   // bridge writes the settings file directly (no ACP roundtrip) and

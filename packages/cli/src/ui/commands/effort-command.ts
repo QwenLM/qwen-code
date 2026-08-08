@@ -12,11 +12,17 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../../config/modelProvidersScope.js';
+import {
+  getModelReasoningControls,
+  normalizeModelReasoningEffort,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
+import { mergeModelReasoningPreference } from '../../config/model-reasoning-preferences.js';
 
 const TIER_LIST = REASONING_EFFORT_TIERS.join(', ');
 
@@ -97,24 +103,42 @@ export const effortCommand: SlashCommand = {
 
     // Apply at runtime (takes effect next turn) and persist for future sessions.
     // Provider adapters clamp the tier to what the active model supports.
-    config.setReasoningEffort(tier);
-    settings.setValue(
-      getPersistScopeForModelSelection(settings),
-      'model.reasoningEffort',
-      tier,
-    );
+    const registration = getModelReasoningControls(config.getModel());
+    const effectiveTier = registration?.effort
+      ? normalizeModelReasoningEffort(registration, tier)!
+      : tier;
+    config.setReasoningEffort(effectiveTier);
+    // `model.reasoningPreferences` is scoped independently from
+    // `modelProviders`; persist to the scope that owns the `model` key so the
+    // write cannot be shadowed by a higher-precedence scope's entry.
+    const scope =
+      getOwnKeyScope(settings, 'model') ??
+      getPersistScopeForModelSelection(settings);
+    if (registration?.effort) {
+      settings.setValue(
+        scope,
+        'model.reasoningPreferences',
+        mergeModelReasoningPreference(
+          settings.forScope(scope).settings,
+          config.getModel(),
+          { effort: effectiveTier },
+        ),
+      );
+    } else {
+      settings.setValue(scope, 'model.reasoningEffort', tier);
+    }
 
     // `setReasoningEffort` is a no-op when thinking is explicitly disabled
     // (`reasoning: false`), so effort cannot silently re-enable it. The tier is
     // still persisted for future sessions, but report that it won't take effect
     // yet instead of a misleading success message.
-    if (config.getReasoningEffort() !== tier) {
+    if (config.getReasoningEffort() !== effectiveTier) {
       return {
         type: 'message',
         messageType: 'info',
         content: t(
           'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-          { tier },
+          { tier: effectiveTier },
         ),
       };
     }
@@ -123,6 +147,16 @@ export const effortCommand: SlashCommand = {
     // per active model (e.g. 'max' → 'high' on most Anthropic models, xhigh/max
     // → HIGH on Gemini), and that resolution happens per request at send time,
     // so the actual tier on the wire may differ from what's shown here.
+    if (effectiveTier !== tier) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'Reasoning effort: {{tier}} (normalized from {{requested}} for the active model).',
+          { tier: effectiveTier, requested: tier },
+        ),
+      };
+    }
     return {
       type: 'message',
       messageType: 'info',

@@ -839,6 +839,7 @@ function normalizeSessionUpdate(
     case 'plan':
       return [normalizePlanUpdate(update, base)];
     case 'current_mode_update':
+    case 'config_option_update':
       return [];
     default:
       return [

@@ -108,6 +108,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(first).toMatchObject({
       initialized: true,
       acpChannelLive: false,
+      modelConfigScope: 'user',
       current: {
         authType: 'openai',
         modelId: 'model-a(openai)',
@@ -129,6 +130,49 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const second = await provider(workspace, false);
     expect(second.current?.modelId).toBe('model-b(openai)');
+  });
+
+  it('reports workspace scope when workspace settings own modelProviders', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {},
+      workspaceTrusted: true,
+    });
+    await writeWorkspaceSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'model-a' },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.initialized).toBe(true);
+    expect(result.modelConfigScope).toBe('workspace');
+  });
+
+  it('derives modelConfigScope from model-key ownership, not modelProviders', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {},
+      workspaceTrusted: true,
+    });
+    // The web-shell reads/writes `model.reasoningPreferences` under this
+    // scope. Workspace owns `model` here while user owns `modelProviders`;
+    // reporting the modelProviders scope would write to user and be
+    // shadowed by the workspace entry.
+    await writeWorkspaceSettings({
+      model: { reasoningPreferences: {} },
+    });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.modelConfigScope).toBe('workspace');
   });
 
   it('returns the workspace approval mode', async () => {
@@ -271,6 +315,30 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(modelIds).toContain('main-model(openai)');
     expect(modelIds).not.toContain('fast-model(openai)');
     expect(modelIds).not.toContain('voice-model(openai)');
+  });
+
+  it('publishes registered reasoning controls with the model catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [{ id: 'qwen3.8-max', name: 'Qwen 3.8 Max' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'qwen3.8-max');
+
+    expect(model?.reasoningControls).toEqual({
+      thinking: { defaultEnabled: true },
+      effort: {
+        supported: ['low', 'medium', 'xhigh'],
+        default: 'xhigh',
+      },
+    });
   });
 
   it('reports custom providerProtocol models under their resolved auth type', async () => {
@@ -565,6 +633,16 @@ describe('createWorkspaceProvidersStatusProvider', () => {
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
+      JSON.stringify(settings),
+      'utf8',
+    );
+  }
+
+  async function writeWorkspaceSettings(settings: Record<string, unknown>) {
+    const qwenDir = path.join(workspace, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    await fs.writeFile(
+      path.join(qwenDir, 'settings.json'),
       JSON.stringify(settings),
       'utf8',
     );

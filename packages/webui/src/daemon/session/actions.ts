@@ -26,7 +26,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus } from './httpErrors.js';
-import { mapSupportedCommands } from './mappers.js';
+import { mapReasoningConfigOptions, mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
   clearPassiveAssistantDoneTimer,
@@ -103,6 +103,7 @@ export function getConnectionAfterSessionClear(
     // check refetch fresh data for the next session.
     delete next.supportedCommands;
     delete next.context;
+    delete next.reasoning;
     // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
     // MCP-prompt and workflow slash commands all live at the workspace/config
     // level, not the session), so they stay valid after the session is
@@ -290,6 +291,15 @@ export function createDaemonSessionActions({
         missingSession: false,
         loadingTranscript: true,
         catchingUp: undefined,
+        // Drop the previous session's session-scoped snapshots (mirror the
+        // clear path): otherwise session A's reasoning/context state renders
+        // on session B until B's context() resolves — permanently if it
+        // rejects.
+        tokenUsage: undefined,
+        tokenCount: undefined,
+        supportedCommands: undefined,
+        context: undefined,
+        reasoning: undefined,
       }));
     }
     setPromptStatus('idle');
@@ -526,17 +536,50 @@ export function createDaemonSessionActions({
         'Set model failed',
         'switch_model',
       );
+      const reasoningBeforeSwitch = getConnection().reasoning;
       try {
         const result = await withActionTimeout(
           session.setModel(modelId),
           'Set model timed out',
         );
-        setConnection((current) => ({ ...current, currentModel: modelId }));
+        setConnection((current) => ({
+          ...current,
+          currentModel: modelId,
+          reasoning:
+            current.currentModel === modelId ||
+            current.reasoning !== reasoningBeforeSwitch
+              ? current.reasoning
+              : undefined,
+        }));
         return result;
       } catch (error) {
         throw dispatchActionError(
           addNotice,
           'Set model failed',
+          error,
+          'switch_model',
+        );
+      }
+    },
+
+    async setConfigOption(configId, value) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Update session option failed',
+        'switch_model',
+      );
+      try {
+        const result = await withActionTimeout(
+          session.setConfigOption(configId, value),
+          'Update session option timed out',
+        );
+        const reasoning = mapReasoningConfigOptions(result.configOptions);
+        setConnection((current) => ({ ...current, reasoning }));
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Update session option failed',
           error,
           'switch_model',
         );

@@ -56,6 +56,8 @@ import type {
   PromptRequest,
   PromptResponse,
   RequestPermissionResponse,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
@@ -457,6 +459,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
+  'session_reasoning_control',
   'workspace_tool_toggle',
   'workspace_skill_toggle',
   'workspace_skill_manage',
@@ -772,6 +775,11 @@ interface FakeBridgeOpts {
     previous: ApprovalMode;
     persisted: boolean;
   }>;
+  setConfigOptionImpl?: (
+    sessionId: string,
+    req: SetSessionConfigOptionRequest,
+    context?: BridgeClientRequestContext,
+  ) => Promise<SetSessionConfigOptionResponse>;
   generateSessionRecapImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -1036,6 +1044,11 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     mode: ApprovalMode;
     opts: { persist: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
+  setConfigOptionCalls: Array<{
+    sessionId: string;
+    req: SetSessionConfigOptionRequest;
     context?: BridgeClientRequestContext;
   }>;
   shellCalls: Array<{
@@ -1550,6 +1563,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       previous: ApprovalMode.DEFAULT,
       persisted: o.persist,
     }));
+  const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
+  const setConfigOptionImpl =
+    opts.setConfigOptionImpl ?? (async () => ({ configOptions: [] }));
   const generateSessionRecapCalls: FakeBridge['generateSessionRecapCalls'] = [];
   const generateSessionRecapImpl =
     opts.generateSessionRecapImpl ??
@@ -1754,6 +1770,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setModelCalls,
     setLanguageCalls,
     setApprovalModeCalls,
+    setConfigOptionCalls,
     shellCalls,
     generateSessionRecapCalls,
     generateSessionContentCalls,
@@ -2062,6 +2079,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return setApprovalModeImpl(sessionId, mode, o, context);
+    },
+    async setSessionConfigOption(sessionId, req, context) {
+      setConfigOptionCalls.push({
+        sessionId,
+        req,
+        ...(context ? { context } : {}),
+      });
+      return setConfigOptionImpl(sessionId, req, context);
     },
     async generateSessionRecap(sessionId, context) {
       generateSessionRecapCalls.push({
@@ -15359,6 +15384,190 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/config-option', () => {
+    // Mirrors the POST /session/:id/approval-mode harness: non-strict
+    // route exercised on a token-configured daemon with bearer auth.
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('200 and routes thinking to bridge.setSessionConfigOption', async () => {
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({
+          configOptions: [],
+          _meta: { applied: true },
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'thinking', value: 'off' });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ _meta: { applied: true } });
+      expect(bridge.setConfigOptionCalls).toHaveLength(1);
+      expect(bridge.setConfigOptionCalls[0]).toEqual({
+        sessionId: 'session-A',
+        req: { sessionId: 'session-A', configId: 'thinking', value: 'off' },
+      });
+      expect(bridge.setModelCalls).toHaveLength(0);
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('200 and routes effort through with client identity context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ configId: 'effort', value: 'medium' });
+      expect(res.status).toBe(200);
+      expect(bridge.setConfigOptionCalls).toHaveLength(1);
+      expect(bridge.setConfigOptionCalls[0]).toEqual({
+        sessionId: 'session-A',
+        req: { sessionId: 'session-A', configId: 'effort', value: 'medium' },
+        context: { clientId: 'client-1' },
+      });
+    });
+
+    it('200 and routes model to bridge.setSessionModel', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'model', value: 'some-model' });
+      expect(res.status).toBe(200);
+      expect(bridge.setModelCalls).toHaveLength(1);
+      expect(bridge.setModelCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.setModelCalls[0]?.req).toMatchObject({
+        sessionId: 'session-A',
+        modelId: 'some-model',
+      });
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('200 returns the session configOptions for model and mode (ACP parity)', async () => {
+      const modelOption = { id: 'model', currentValue: 'some-model' };
+      const thinkingOption = { id: 'thinking', currentValue: 'on' };
+      const bridge = fakeBridge({
+        sessionContextImpl: async (sessionId) => ({
+          v: 1 as const,
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          state: { configOptions: [modelOption, thinkingOption] },
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const modelRes = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'model', value: 'some-model' });
+      expect(modelRes.status).toBe(200);
+      expect(modelRes.body.configOptions).toEqual([
+        modelOption,
+        thinkingOption,
+      ]);
+
+      const modeRes = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'mode', value: 'yolo' });
+      expect(modeRes.status).toBe(200);
+      expect(modeRes.body.configOptions).toEqual([modelOption, thinkingOption]);
+    });
+
+    it('200 and routes a valid mode to setSessionApprovalMode (persist defaults to false)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'mode', value: 'yolo' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        previous: 'default',
+        persisted: false,
+        configOptions: [],
+      });
+      expect(bridge.setApprovalModeCalls).toHaveLength(1);
+      expect(bridge.setApprovalModeCalls[0]).toMatchObject({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        opts: { persist: false },
+      });
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+    });
+
+    it('forwards persist:true to bridge.setSessionApprovalMode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'mode', value: 'plan', persist: true });
+      expect(res.status).toBe(200);
+      expect(res.body.persisted).toBe(true);
+      expect(bridge.setApprovalModeCalls[0]?.opts).toEqual({ persist: true });
+    });
+
+    it('400 invalid_config_option on an invalid mode value', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'mode', value: 'super-yolo' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_config_option');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+    });
+
+    it('400 when persist is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'mode', value: 'yolo', persist: 'truthy' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_persist_flag');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_config_option on an unknown configId', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'temperature', value: '0.5' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_config_option');
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+      expect(bridge.setModelCalls).toHaveLength(0);
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_config_option when the bridge rejects with INVALID_PARAMS', async () => {
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => {
+          throw Object.assign(new Error('Unknown effort level "ultra"'), {
+            code: -32602,
+          });
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/config-option'),
+      ).send({ configId: 'effort', value: 'ultra' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Unknown effort level "ultra"',
+        code: 'invalid_config_option',
+      });
     });
   });
 

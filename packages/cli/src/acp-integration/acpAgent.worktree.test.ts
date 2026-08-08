@@ -102,6 +102,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     info: vi.fn(),
   }),
   registerAcpEventLoopLagGauge: vi.fn(),
+  getModelReasoningControls: vi.fn(() => undefined),
   startEventLoopLagMonitor: vi.fn(() => ({
     snapshot: vi.fn(() => ({
       meanMs: 0,

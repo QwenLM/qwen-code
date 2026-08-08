@@ -1333,6 +1333,15 @@ export class ModelsConfig {
         this._generationConfig.apiKeyEnvKey = runtimeModelSnapshot.apiKeyEnvKey;
       }
 
+      // The snapshot is the complete model config: reset every model-scoped
+      // generation field first so state the previous model left in the shared
+      // rebuild source (e.g. a registered model's `reasoning: false`) cannot
+      // leak into a snapshot that does not define the field.
+      for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+        delete (this._generationConfig as Record<string, unknown>)[field];
+        delete this.generationConfigSources[field];
+      }
+
       // Apply generation config
       if (runtimeModelSnapshot.generationConfig) {
         Object.assign(

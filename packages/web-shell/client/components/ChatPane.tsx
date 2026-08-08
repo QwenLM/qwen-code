@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
@@ -616,6 +623,36 @@ export function ChatPane({
     },
     [actions, reportError],
   );
+  const [reasoningBusy, setReasoningBusy] = useState<
+    Partial<Record<'thinking' | 'effort', boolean>>
+  >({});
+  // Serialize thinking/effort writes: both merge into the same per-model
+  // reasoning preference, so concurrent writes could drop each other.
+  // Memoized to keep ChatEditor's memoized props referentially stable.
+  const reasoningControlsBusy = useMemo(
+    () =>
+      reasoningBusy.thinking || reasoningBusy.effort
+        ? { thinking: true, effort: true }
+        : {},
+    [reasoningBusy],
+  );
+  const handleSelectReasoningOption = useCallback(
+    (configId: 'thinking' | 'effort', value: string) => {
+      setReasoningBusy((current) => ({ ...current, [configId]: true }));
+      actions
+        .setConfigOption(configId, value)
+        .catch((error: unknown) =>
+          reportError(error, t('reasoning.updateFailed')),
+        )
+        .finally(() =>
+          setReasoningBusy((current) => ({
+            ...current,
+            [configId]: false,
+          })),
+        );
+    },
+    [actions, reportError, t],
+  );
 
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
@@ -870,6 +907,14 @@ export function ChatPane({
           availableModels={availableModels}
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
+          reasoningControlsSupported={
+            workspace.capabilities?.features?.includes(
+              'session_reasoning_control',
+            ) ?? false
+          }
+          reasoningState={connection.reasoning}
+          reasoningBusy={reasoningControlsBusy}
+          onSelectReasoningOption={handleSelectReasoningOption}
           dialogOpen={approvalActive}
           disabled={approvalActive}
           voiceTarget={hidden ? undefined : voiceTarget}

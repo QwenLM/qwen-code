@@ -114,6 +114,61 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('exposes and persists model reasoning preferences', async () => {
+    const { app, persistSetting } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    expect(
+      read.body.settings.find(
+        (setting: { key?: string }) =>
+          setting.key === 'model.reasoningPreferences',
+      ),
+    ).toMatchObject({
+      default: {},
+      requiresRestart: false,
+      values: { effective: {} },
+    });
+
+    const write = await request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'user',
+        key: 'model.reasoningPreferences',
+        value: { 'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' } },
+      });
+    expect(write.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      expect.any(String),
+      'model.reasoningPreferences',
+      { 'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' } },
+    );
+  });
+
+  it('rejects reasoning preferences that violate the schema shape', async () => {
+    const { app, persistSetting } = makeApp();
+
+    // An invalid entry persisted with a 200 would silently override provider
+    // presets for the model on the next session start.
+    const invalidValues = [
+      { 'qwen3.8-max': 'garbage' },
+      { 'qwen3.8-max': [{ effort: 'low' }] },
+      { 'qwen3.8-max': { effort: 'hihg' } },
+      { 'qwen3.8-max': { thinkingEnabled: 'no' } },
+      { 'qwen3.8-max': { budget: 3 } },
+    ];
+    for (const value of invalidValues) {
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key: 'model.reasoningPreferences',
+        value,
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_value');
+    }
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     let generationOpen = true;
     const { app, broadcastSettingsChanged } = makeApp({

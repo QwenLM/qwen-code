@@ -172,8 +172,14 @@ import {
   approxBase64Bytes,
   runWithRuntimeContentGenerator,
   getInvocationContext,
+  getModelReasoningControls,
+  resolveModelReasoningControls,
   runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
+import {
+  getModelReasoningPreference,
+  mergeModelReasoningPreference,
+} from '../../config/model-reasoning-preferences.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
@@ -226,6 +232,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionConfigOption,
   SessionUpdate,
   SetSessionModeRequest,
   SetSessionModeResponse,
@@ -233,7 +240,11 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  SettingScope,
+  type LoadedSettings,
+  type Settings,
+} from '../../config/settings.js';
 import {
   insertAfterFunctionResponses,
   normalizePartList,
@@ -1483,6 +1494,7 @@ export class Session implements SessionContext {
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
+    this.syncReasoningSettingsForCurrentModel();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -7016,6 +7028,148 @@ export class Session implements SessionContext {
       });
   }
 
+  async setThinking(value: string): Promise<void> {
+    const model = this.config.getModel();
+    // Runtime snapshots are excluded from reasoning controls: a snapshot may
+    // carry a bare id colliding with a registered model while pointing at a
+    // custom endpoint, and persisting under that id would mutate the
+    // first-party registry model's preferences.
+    const registration = this.config.getActiveRuntimeModelSnapshot?.()
+      ? undefined
+      : getModelReasoningControls(model);
+    if (!registration?.thinking) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Thinking controls are not available for ${model}`,
+      );
+    }
+    if (value !== 'on' && value !== 'off') {
+      throw RequestError.invalidParams(
+        undefined,
+        `Unknown thinking value: ${value}`,
+      );
+    }
+    // Seed the live effort the UI is currently advertising so turning
+    // thinking off never substitutes the registry default for it ("Turning
+    // thinking off does not erase the tier"). Stored preferences still win.
+    const liveEffort = this.config.getReasoningEffortPreference();
+    const storedPreference = getModelReasoningPreference(
+      this.settings.merged,
+      model,
+    );
+    const resolved = resolveModelReasoningControls(model, {
+      ...(liveEffort ? { effort: liveEffort } : {}),
+      ...(storedPreference &&
+      typeof storedPreference === 'object' &&
+      !Array.isArray(storedPreference)
+        ? storedPreference
+        : {}),
+    });
+    this.config.setThinkingEnabled(value === 'on', resolved?.effort);
+    const scope = getPersistScopeForModelSelection(this.settings);
+    this.settings.setValue(
+      scope,
+      'model.reasoningPreferences',
+      mergeModelReasoningPreference(
+        this.settings.forScope(scope).settings,
+        model,
+        {
+          thinkingEnabled: value === 'on',
+          ...(resolved?.effort ? { effort: resolved.effort } : {}),
+        },
+      ),
+    );
+  }
+
+  /**
+   * Apply explicitly stored per-model reasoning settings (on session restore
+   * and after model switches). A model without stored preferences keeps
+   * whatever state its resolved config already carries, so registry defaults
+   * cannot override an explicit provider opt-out (`reasoning: false`).
+   */
+  syncReasoningSettingsForCurrentModel(settingsOverride?: Settings): void {
+    const model = this.config.getModel();
+    const registration = getModelReasoningControls(model);
+    if (!registration) return;
+    const rawPreference = getModelReasoningPreference(
+      settingsOverride ?? this.settings.merged,
+      model,
+    );
+    const preference =
+      rawPreference &&
+      typeof rawPreference === 'object' &&
+      !Array.isArray(rawPreference)
+        ? (rawPreference as Record<string, unknown>)
+        : undefined;
+    const hasStoredThinking =
+      registration.thinking &&
+      typeof preference?.['thinkingEnabled'] === 'boolean';
+    const hasStoredEffort =
+      registration.effort && preference?.['effort'] !== undefined;
+    if (!hasStoredThinking && !hasStoredEffort) return;
+    const resolved = resolveModelReasoningControls(model, rawPreference);
+    if (hasStoredEffort && resolved?.effort) {
+      this.config.setReasoningEffort(resolved.effort);
+    }
+    if (hasStoredThinking && resolved?.thinkingEnabled !== undefined) {
+      this.config.setThinkingEnabled(
+        resolved.thinkingEnabled,
+        hasStoredEffort ? resolved.effort : undefined,
+      );
+    }
+  }
+
+  async setEffort(value: string): Promise<void> {
+    const model = this.config.getModel();
+    // See setThinking: runtime snapshots are excluded from reasoning controls.
+    const registration = this.config.getActiveRuntimeModelSnapshot?.()
+      ? undefined
+      : getModelReasoningControls(model);
+    if (!registration?.effort) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Effort controls are not available for ${model}`,
+      );
+    }
+    if (
+      !registration.effort.supported.includes(
+        value as (typeof registration.effort.supported)[number],
+      )
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Unknown effort for ${model}: ${value}`,
+      );
+    }
+    const effort = value as (typeof registration.effort.supported)[number];
+    this.config.setReasoningEffort(effort);
+    const scope = getPersistScopeForModelSelection(this.settings);
+    this.settings.setValue(
+      scope,
+      'model.reasoningPreferences',
+      mergeModelReasoningPreference(
+        this.settings.forScope(scope).settings,
+        model,
+        {
+          effort,
+        },
+      ),
+    );
+  }
+
+  async sendConfigOptionsUpdate(
+    configOptions: SessionConfigOption[],
+  ): Promise<void> {
+    try {
+      await this.sendUpdate({
+        sessionUpdate: 'config_option_update',
+        configOptions,
+      });
+    } catch (error) {
+      debugLogger.debug('config-option update notification failed', error);
+    }
+  }
+
   /**
    * Sets the model for the current session.
    * Validates the model ID and switches the model via Config.
@@ -7070,6 +7224,7 @@ export class Session implements SessionContext {
       parsed.modelId,
       switchOptions,
     );
+    this.syncReasoningSettingsForCurrentModel();
 
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;

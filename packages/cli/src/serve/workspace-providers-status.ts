@@ -9,6 +9,7 @@ import {
   APPROVAL_MODES,
   createDebugLogger,
   ModelsConfig,
+  getModelReasoningControls,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { AuthType } from '@qwen-code/qwen-code-core';
@@ -19,8 +20,12 @@ import type {
   ServeWorkspaceProvidersStatus,
 } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
-import { loadSettings } from '../config/settings.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
 import type { Settings } from '../config/settings.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../config/modelProvidersScope.js';
 import {
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
@@ -161,9 +166,11 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
+      const baseModelId = parseAcpBaseModelId(effectiveModelId);
+      const reasoningControls = getModelReasoningControls(baseModelId);
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
-        baseModelId: parseAcpBaseModelId(effectiveModelId),
+        baseModelId,
         name: model.label,
         ...(model.description !== undefined
           ? { description: model.description }
@@ -176,6 +183,23 @@ function buildWorkspaceProvidersStatus(
           ? { baseUrl: sanitizeProviderBaseUrl(model.baseUrl) }
           : {}),
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
+        ...(reasoningControls
+          ? {
+              reasoningControls: {
+                ...(reasoningControls.thinking
+                  ? { thinking: reasoningControls.thinking }
+                  : {}),
+                ...(reasoningControls.effort
+                  ? {
+                      effort: {
+                        supported: [...reasoningControls.effort.supported],
+                        default: reasoningControls.effort.default,
+                      },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         isCurrent,
         isRuntime: false,
       };
@@ -198,6 +222,14 @@ function buildWorkspaceProvidersStatus(
       acpChannelLive,
       ...(current ? { current } : {}),
       approvalMode,
+      // The web-shell reads/writes `model.reasoningPreferences` under this
+      // scope; that key is scoped independently from `modelProviders`, so
+      // derive it from ownership of the `model` key itself.
+      modelConfigScope:
+        (getOwnKeyScope(loaded, 'model') ??
+          getPersistScopeForModelSelection(loaded)) === SettingScope.Workspace
+          ? 'workspace'
+          : 'user',
       providers: [...providers.values()],
       ...(resolvedCliConfig.warnings.length > 0
         ? {

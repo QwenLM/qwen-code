@@ -188,6 +188,8 @@ export type {
   DaemonTokenUsage,
   /** Model descriptor: id, display label, context window size. */
   DaemonModelInfo,
+  /** Active model controls and their current values. */
+  DaemonReasoningState,
   /** Classified notice category for host-owned UI routing. */
   DaemonNoticeCategory,
   /** Fine-grained operation associated with a session notice. */

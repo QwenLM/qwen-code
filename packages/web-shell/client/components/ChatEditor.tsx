@@ -13,7 +13,10 @@ import type { ReactNode, RefObject } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
-import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonReasoningState,
+  UseDaemonFollowupSuggestionReturn,
+} from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionGroupPresetColor,
   DaemonWorkspaceGitStatus,
@@ -65,7 +68,11 @@ import {
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
-import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FolderClosedIcon,
+} from 'lucide-react';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
@@ -74,6 +81,7 @@ import {
   PopoverTrigger,
 } from './ui/popover';
 import { Input } from './ui/input';
+import { Switch } from './ui/switch';
 import {
   Tooltip,
   TooltipContent,
@@ -170,6 +178,13 @@ interface ChatEditorProps {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  reasoningControlsSupported?: boolean;
+  reasoningState?: DaemonReasoningState;
+  reasoningBusy?: Partial<Record<'thinking' | 'effort', boolean>>;
+  onSelectReasoningOption?: (
+    configId: 'thinking' | 'effort',
+    value: string,
+  ) => void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -652,6 +667,8 @@ function ToolbarPopover({
   searchable = false,
   searchLabel,
   noResultsLabel,
+  header,
+  submenu,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -664,13 +681,23 @@ function ToolbarPopover({
   searchable?: boolean;
   searchLabel?: string;
   noResultsLabel?: (query: string) => string;
+  header?: ReactNode;
+  submenu?: {
+    triggerLabel: string;
+    triggerAriaLabel: string;
+    sectionLabel: string;
+  };
 }) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [submenuOpen, setSubmenuOpen] = useState(false);
   const [collisionBoundary, setCollisionBoundary] =
     useState<HTMLElement | null>(null);
   const selectionRef = useRef(false);
   const handoffRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const submenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const returningFromSubmenuRef = useRef(false);
   const hasRichItems = items.some((item) => item.description || item.icon);
   const visibleItems = searchable
     ? filterToolbarDropdownItems(items, searchQuery)
@@ -679,10 +706,97 @@ function ToolbarPopover({
   useEffect(() => {
     if (!open) {
       setSearchQuery('');
+      setSubmenuOpen(false);
+      returningFromSubmenuRef.current = false;
     }
   }, [open]);
 
+  useEffect(() => {
+    if (open && submenuOpen) {
+      searchInputRef.current?.focus();
+      return;
+    }
+    if (open && returningFromSubmenuRef.current) {
+      returningFromSubmenuRef.current = false;
+      submenuTriggerRef.current?.focus();
+    }
+  }, [open, submenuOpen]);
+
   const hasCheckItems = hasRichItems || showCheck;
+  const dropdownItems = (
+    <div
+      className={`${styles.dropdownList} ${
+        hasRichItems
+          ? styles.dropdownRich
+          : showCheck
+            ? styles.dropdownCheck
+            : ''
+      } ${searchable ? styles.dropdownListConstrained : ''}`}
+    >
+      {visibleItems.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={`${styles.dropdownItem} ${
+            item.id === activeId ? styles.dropdownItemActive : ''
+          }`}
+          title={item.label}
+          onClick={() => {
+            selectionRef.current = true;
+            onSelect(item.id);
+          }}
+        >
+          {hasCheckItems ? (
+            <>
+              {hasRichItems && (
+                <span className={styles.dropdownItemIcon}>{item.icon}</span>
+              )}
+              <span className={styles.dropdownItemContent}>
+                <span className={styles.dropdownItemLabel}>{item.label}</span>
+                {item.description && (
+                  <span className={styles.dropdownItemDesc}>
+                    {item.description}
+                  </span>
+                )}
+              </span>
+              <span className={styles.dropdownItemCheck}>
+                {item.id === activeId ? <CheckIcon /> : null}
+              </span>
+            </>
+          ) : (
+            item.label
+          )}
+        </button>
+      ))}
+      {visibleItems.length === 0 && noResultsLabel && (
+        <div className={styles.dropdownEmpty} role="status">
+          {noResultsLabel(searchQuery)}
+        </div>
+      )}
+    </div>
+  );
+  const searchableItems = (
+    <>
+      {searchable && (
+        <Input
+          ref={searchInputRef}
+          type="search"
+          value={searchQuery}
+          aria-label={searchLabel}
+          placeholder={searchLabel}
+          autoComplete="off"
+          onChange={(event) => setSearchQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowLeft' || searchQuery) return;
+            event.preventDefault();
+            returningFromSubmenuRef.current = true;
+            setSubmenuOpen(false);
+          }}
+        />
+      )}
+      {dropdownItems}
+    </>
+  );
 
   return (
     <Popover
@@ -722,6 +836,16 @@ function ToolbarPopover({
         collisionBoundary={collisionBoundary ?? undefined}
         data-web-shell-toolbar-popover
         onClick={(event) => event.stopPropagation()}
+        onOpenAutoFocus={(event) => {
+          if (!submenu) return;
+          // Radix's default mount focus lands on the first tabbable element,
+          // which with the reasoning header is the Thinking switch — typing
+          // to filter would do nothing and Enter/Space would toggle thinking.
+          // Focus the model submenu trigger instead; flat mode keeps the
+          // default (the search input is already first).
+          event.preventDefault();
+          submenuTriggerRef.current?.focus();
+        }}
         onPointerDownOutside={(event) => {
           const target = event.target;
           if (
@@ -749,68 +873,63 @@ function ToolbarPopover({
           selectionRef.current = false;
         }}
       >
-        {searchable && (
-          <Input
-            type="search"
-            value={searchQuery}
-            aria-label={searchLabel}
-            placeholder={searchLabel}
-            autoComplete="off"
-            onChange={(event) => setSearchQuery(event.target.value)}
-          />
-        )}
-        <div
-          className={`${styles.dropdownList} ${
-            hasRichItems
-              ? styles.dropdownRich
-              : showCheck
-                ? styles.dropdownCheck
-                : ''
-          } ${searchable ? styles.dropdownListConstrained : ''}`}
-        >
-          {visibleItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`${styles.dropdownItem} ${
-                item.id === activeId ? styles.dropdownItemActive : ''
-              }`}
-              title={item.label}
-              onClick={() => {
-                selectionRef.current = true;
-                onSelect(item.id);
-              }}
-            >
-              {hasCheckItems ? (
-                <>
-                  {hasRichItems && (
-                    <span className={styles.dropdownItemIcon}>{item.icon}</span>
-                  )}
-                  <span className={styles.dropdownItemContent}>
-                    <span className={styles.dropdownItemLabel}>
-                      {item.label}
+        {submenu ? (
+          <>
+            {header}
+            <div className={styles.dropdownSubmenuSection}>
+              <div className={styles.reasoningSectionTitle}>
+                {submenu.sectionLabel}
+              </div>
+              <Popover
+                open={submenuOpen}
+                onOpenChange={(nextOpen) => {
+                  setSubmenuOpen(nextOpen);
+                  if (!nextOpen) setSearchQuery('');
+                }}
+              >
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    ref={submenuTriggerRef}
+                    className={`${styles.dropdownItem} ${styles.dropdownSubmenuTrigger}`}
+                    data-web-shell-model-submenu-trigger
+                    aria-haspopup="dialog"
+                    aria-expanded={submenuOpen}
+                    aria-label={submenu.triggerAriaLabel}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'ArrowRight') return;
+                      event.preventDefault();
+                      setSubmenuOpen(true);
+                    }}
+                  >
+                    <span title={submenu.triggerLabel}>
+                      {submenu.triggerLabel}
                     </span>
-                    {item.description && (
-                      <span className={styles.dropdownItemDesc}>
-                        {item.description}
-                      </span>
-                    )}
-                  </span>
-                  <span className={styles.dropdownItemCheck}>
-                    {item.id === activeId ? <CheckIcon /> : null}
-                  </span>
-                </>
-              ) : (
-                item.label
-              )}
-            </button>
-          ))}
-          {visibleItems.length === 0 && noResultsLabel && (
-            <div className={styles.dropdownEmpty} role="status">
-              {noResultsLabel(searchQuery)}
+                    <ChevronRightIcon aria-hidden="true" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  side="right"
+                  align="end"
+                  alignOffset={-10}
+                  sideOffset={15}
+                  collisionPadding={8}
+                  collisionBoundary={collisionBoundary ?? undefined}
+                  data-web-shell-toolbar-popover
+                  data-web-shell-model-submenu
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {searchableItems}
+                </PopoverContent>
+              </Popover>
             </div>
-          )}
-        </div>
+          </>
+        ) : (
+          <>
+            {header}
+            {searchableItems}
+          </>
+        )}
       </PopoverContent>
     </Popover>
   );
@@ -1178,6 +1297,10 @@ export const ChatEditor = memo(
       availableModels = [],
       onSelectMode,
       onSelectModel,
+      reasoningControlsSupported = false,
+      reasoningState,
+      reasoningBusy,
+      onSelectReasoningOption,
       workspaces,
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
@@ -1648,8 +1771,11 @@ export const ChatEditor = memo(
         ? t('mode.label.planReview')
         : getModeLabel(currentMode, t);
 
+    const currentModelInfo = availableModels.find(
+      (model) => model.id === currentModel,
+    );
     const currentModelLabel = currentModel
-      ? (availableModels.find((model) => model.id === currentModel)?.label ??
+      ? (currentModelInfo?.label ??
         (currentModel.startsWith('qwen-route:')
           ? ''
           : getModelDisplayName(currentModel)))
@@ -1658,6 +1784,25 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
+    const showReasoningOptions = Boolean(
+      reasoningControlsSupported &&
+        reasoningState &&
+        onSelectReasoningOption &&
+        (reasoningState.thinking || reasoningState.effort),
+    );
+    const reasoningEffortLabel = reasoningState?.effort
+      ? t(`reasoning.effort.${reasoningState.effort.value}`)
+      : '';
+    const modelChipLabel = showReasoningOptions
+      ? `${modelLabel} · ${
+          reasoningState?.thinking?.enabled === false
+            ? t('reasoning.thinkingOff')
+            : reasoningEffortLabel
+        }`
+      : modelLabel;
+    const normalizedModelChipLabel = modelChipLabel.endsWith(' · ')
+      ? modelLabel
+      : modelChipLabel;
     const selectedWorkspace = workspaces?.find((entry) =>
       selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
     );
@@ -1853,9 +1998,9 @@ export const ChatEditor = memo(
       gitBranch,
       gitBranchVisible,
       isRunning,
-      modelLabel,
       modelLabelReady,
       modeLabel,
+      normalizedModelChipLabel,
       sessionName,
       showModelAction,
       showModeAction,
@@ -2261,6 +2406,87 @@ export const ChatEditor = memo(
                         noResultsLabel={(query) =>
                           t('model.noMatch', { query })
                         }
+                        submenu={
+                          showReasoningOptions
+                            ? {
+                                triggerLabel: modelLabel,
+                                triggerAriaLabel: `${t('model.select')}: ${modelLabel}`,
+                                sectionLabel: t('model.section'),
+                              }
+                            : undefined
+                        }
+                        header={
+                          showReasoningOptions ? (
+                            <div className={styles.reasoningOptions}>
+                              <div className={styles.reasoningSectionTitle}>
+                                {t('reasoning.options')}
+                              </div>
+                              {reasoningState?.thinking ? (
+                                <div className={styles.reasoningThinkingRow}>
+                                  <span>{t('reasoning.thinking')}</span>
+                                  <Switch
+                                    checked={reasoningState.thinking.enabled}
+                                    disabled={reasoningBusy?.thinking}
+                                    aria-label={t('reasoning.thinking')}
+                                    onCheckedChange={(checked) =>
+                                      onSelectReasoningOption?.(
+                                        'thinking',
+                                        checked ? 'on' : 'off',
+                                      )
+                                    }
+                                  />
+                                </div>
+                              ) : null}
+                              {reasoningState?.thinking &&
+                              reasoningState.effort ? (
+                                <div className={styles.reasoningDivider} />
+                              ) : null}
+                              {reasoningState?.effort ? (
+                                <>
+                                  <div className={styles.reasoningSectionTitle}>
+                                    {t('reasoning.effort')}
+                                  </div>
+                                  {reasoningState.effort.options.map(
+                                    (effort) => (
+                                      <button
+                                        key={effort}
+                                        type="button"
+                                        className={styles.reasoningEffortRow}
+                                        disabled={
+                                          reasoningBusy?.effort ||
+                                          reasoningState.thinking?.enabled ===
+                                            false
+                                        }
+                                        aria-pressed={
+                                          reasoningState.effort?.value ===
+                                          effort
+                                        }
+                                        onClick={() =>
+                                          onSelectReasoningOption?.(
+                                            'effort',
+                                            effort,
+                                          )
+                                        }
+                                      >
+                                        <span>
+                                          {t(`reasoning.effort.${effort}`)}
+                                        </span>
+                                        <span
+                                          className={styles.dropdownItemCheck}
+                                        >
+                                          {reasoningState.effort?.value ===
+                                          effort ? (
+                                            <CheckIcon />
+                                          ) : null}
+                                        </span>
+                                      </button>
+                                    ),
+                                  )}
+                                </>
+                              ) : null}
+                            </div>
+                          ) : undefined
+                        }
                         trigger={
                           <button
                             className={`${styles.toolBtn} ${styles.modelToolBtn} ${
@@ -2274,15 +2500,15 @@ export const ChatEditor = memo(
                               core.closeAtMenu();
                               setQuickActionsOpen(false);
                             }}
-                            aria-label={`${t('model.select')}: ${modelLabel}`}
-                            title={modelLabel}
+                            aria-label={`${t('model.select')}: ${normalizedModelChipLabel}`}
+                            title={normalizedModelChipLabel}
                           >
                             <span className={styles.toolBtnModelIcon}>
                               <ModelIcon />
                             </span>
                             {showModelLabel && (
                               <span className={styles.toolBtnText}>
-                                {modelLabel}
+                                {normalizedModelChipLabel}
                               </span>
                             )}
                             <span className={styles.toolBtnArrow}>
@@ -2573,7 +2799,9 @@ export const ChatEditor = memo(
                 <span className={styles.toolBtnModelIcon}>
                   <ModelIcon />
                 </span>
-                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnText}>
+                  {normalizedModelChipLabel}
+                </span>
                 <span className={styles.toolBtnArrow}>
                   <ChevronDownIcon />
                 </span>
@@ -2585,7 +2813,9 @@ export const ChatEditor = memo(
                 <span className={styles.toolBtnModelIcon}>
                   <ModelIcon />
                 </span>
-                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnText}>
+                  {normalizedModelChipLabel}
+                </span>
                 <span className={styles.toolBtnArrow}>
                   <ChevronDownIcon />
                 </span>

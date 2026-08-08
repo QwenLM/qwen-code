@@ -924,6 +924,10 @@ export interface DaemonSessionState {
   [key: string]: unknown;
 }
 
+export interface DaemonSessionConfigOptionResult {
+  configOptions: unknown[];
+}
+
 /** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
@@ -1671,6 +1675,21 @@ export interface DaemonWorkspaceProviderCurrent {
   fastModelId?: string;
 }
 
+export type DaemonModelReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
+export interface DaemonModelReasoningControls {
+  thinking?: { defaultEnabled: boolean };
+  effort?: {
+    supported: DaemonModelReasoningEffort[];
+    default: DaemonModelReasoningEffort;
+  };
+}
+
 export interface DaemonWorkspaceProviderModel {
   modelId: string;
   baseModelId: string;
@@ -1685,6 +1704,7 @@ export interface DaemonWorkspaceProviderModel {
   };
   baseUrl?: string;
   envKey?: string;
+  reasoningControls?: DaemonModelReasoningControls;
   isCurrent: boolean;
   isRuntime: boolean;
 }
@@ -1703,6 +1723,7 @@ export interface DaemonWorkspaceProvidersStatus {
   acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
   approvalMode?: DaemonApprovalMode;
+  modelConfigScope?: 'workspace' | 'user';
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];
 }
