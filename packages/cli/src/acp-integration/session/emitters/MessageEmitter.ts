@@ -5,7 +5,7 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
-import type { SubagentMeta } from '../types.js';
+import { hasFullSessionContext, type SubagentMeta } from '../types.js';
 import {
   createTranscriptMessageUpdate,
   createTranscriptUsageUpdate,
@@ -234,6 +234,39 @@ export class MessageEmitter extends BaseEmitter {
         },
       }),
     );
+
+    // ACP clients such as JetBrains render context occupancy from the
+    // standard usage_update frame rather than Qwen's private `_meta.usage`.
+    // Emit it only for a live main-session model round: replay frames do not
+    // have a duration, and subagent usage describes a separate context window
+    // that must not replace the parent session's indicator.
+    if (
+      !Number.isFinite(durationMs) ||
+      subagentMeta ||
+      !hasFullSessionContext(this.ctx)
+    ) {
+      return;
+    }
+
+    const used =
+      usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
+    const size = this.ctx.config.getContentGeneratorConfig()?.contextWindowSize;
+    if (
+      typeof used !== 'number' ||
+      !Number.isSafeInteger(used) ||
+      used < 0 ||
+      typeof size !== 'number' ||
+      !Number.isSafeInteger(size) ||
+      size <= 0
+    ) {
+      return;
+    }
+
+    await this.sendUpdate({
+      sessionUpdate: 'usage_update',
+      used,
+      size,
+    });
   }
 
   /**

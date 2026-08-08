@@ -47,11 +47,13 @@ import {
 const debugLogger = createDebugLogger('COMPRESSION');
 
 /**
- * Hard cap on compression generation. The cold path disables thinking; the
- * cache-sharing path inherits the main request's cache-sensitive thinking
- * setting while keeping this same provider output ceiling. Mirrors
- * claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY (autoCompact.ts:30), which is
- * based on p99.99 of real compaction outputs.
+ * Hard cap on compression generation. The cold path asks providers to omit
+ * returned thoughts. The cache-sharing path preserves Anthropic's
+ * cache-sensitive thinking setting and makes the same returned-thought request
+ * for Google GenAI. On Google this does not disable thinking or prevent its
+ * tokens from sharing the output budget. Mirrors claude-code's
+ * MAX_OUTPUT_TOKENS_FOR_SUMMARY (autoCompact.ts:30), which is based on p99.99
+ * of real compaction outputs.
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
@@ -320,13 +322,18 @@ function buildCompressionSystemPrompt(
 
 function supportsCompressionCacheSharing(config: Config): boolean {
   const provider = config.getContentGeneratorConfig();
+  // Google GenAI prefix caching is implicit. `enableCacheControl` configures
+  // explicit provider cache markers, so it must not disable Gemini/Vertex
+  // cache sharing as an unrelated side effect.
+  if (
+    provider.authType === AuthType.USE_GEMINI ||
+    provider.authType === AuthType.USE_VERTEX_AI
+  ) {
+    return true;
+  }
   if (provider.enableCacheControl === false) return false;
   if (provider.authType === AuthType.USE_ANTHROPIC) return true;
-  return (
-    (provider.authType === AuthType.QWEN_OAUTH ||
-      provider.authType === AuthType.USE_OPENAI) &&
-    supportsOpenAIPrefixCaching(provider)
-  );
+  return supportsOpenAIPrefixCaching(provider);
 }
 
 function hasStateSnapshot(summary: string): boolean {
@@ -660,7 +667,14 @@ export class ChatCompressionService {
     const usesMainModel = effectiveCompactionModel === config.getModel();
     const providerSupportsCacheSharing =
       supportsCompressionCacheSharing(config);
-    const hasProviderTokenCount = (chat.getLastPromptTokenCount?.() ?? 0) > 0;
+    // The anchor must be provider-reported, not merely non-zero: an
+    // estimate-derived count misses the ~15-20K system/tools overhead the
+    // shared request actually carries, so `sharedRequestFits` could approve
+    // a request that overflows the window. Estimate-only sessions stay on
+    // the cold path until provider usage arrives.
+    const hasProviderTokenCount =
+      (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
+      chat.isLastPromptTokenCountEstimated?.() !== true;
     const sharedRequestFits =
       sharedPromptTokenCount +
         sharedDirectiveTokenCount +
@@ -677,7 +691,7 @@ export class ChatCompressionService {
         : !providerSupportsCacheSharing
           ? 'provider does not support cache sharing'
           : !hasProviderTokenCount
-            ? 'no provider token-count anchor'
+            ? 'no provider-reported token-count anchor'
             : `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
               `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
               `window=${contextLimit}`;
@@ -692,6 +706,7 @@ export class ChatCompressionService {
         const mainSystemInstruction = generationConfig.systemInstruction;
         delete generationConfig.systemInstruction;
         delete generationConfig.abortSignal;
+        const authType = config.getContentGeneratorConfig().authType;
         const sharedResult = await config.getBaseLlmClient().generateText({
           contents: [
             ...sideQueryHistory,
@@ -708,7 +723,7 @@ export class ChatCompressionService {
           systemInstruction: mainSystemInstruction,
           config: {
             ...generationConfig,
-            ...(contentGeneratorConfig.authType === AuthType.USE_ANTHROPIC
+            ...(authType === AuthType.USE_ANTHROPIC
               ? {
                   thinkingConfig: {
                     ...generationConfig.thinkingConfig,
@@ -718,13 +733,22 @@ export class ChatCompressionService {
                     thinkingBudget: COMPACT_MAX_OUTPUT_TOKENS - 1,
                   },
                 }
-              : {}),
+              : authType === AuthType.USE_GEMINI ||
+                  authType === AuthType.USE_VERTEX_AI
+                ? {
+                    thinkingConfig: {
+                      ...generationConfig.thinkingConfig,
+                      includeThoughts: false,
+                    },
+                  }
+                : {}),
             maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
           },
           abortSignal,
           promptId,
           stream: true,
           maxAttempts: 1,
+          promptCacheSharing: true,
         });
         if (!sharedResult.hadToolCall && hasStateSnapshot(sharedResult.text)) {
           summaryResult = sharedResult;
@@ -1092,6 +1116,7 @@ export class ChatCompressionService {
         info: {
           originalTokenCount,
           newTokenCount,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
           ...(compactionWarning && { warning: compactionWarning }),

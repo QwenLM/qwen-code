@@ -914,6 +914,8 @@ export interface ToolInfoConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   prompt: string;
+  /** Display the prompt literally instead of interpreting inline Markdown. */
+  renderPromptAsPlainText?: boolean;
   urls?: string[];
   /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
   permissionRules?: string[];

@@ -178,6 +178,80 @@ const nodeSetupSteps =
   workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
 
+// GitHub Actions expressions return operand VALUES from &&/||, not
+// booleans: && yields the first falsy operand (else the last operand), ||
+// the first truthy (else the last), '' is falsy, and && binds tighter
+// than ||. A ternary can therefore read right and evaluate wrong, which
+// text pins cannot see — so the cache choice is also pinned semantically
+// with this minimal evaluator.
+function evalGhaExpression(expression, facts) {
+  let pos = 0;
+  const truthy = (value) =>
+    value !== false && value !== null && value !== 0 && value !== '';
+  const skipSpace = () => {
+    while (/\s/.test(expression[pos] ?? '')) {
+      pos += 1;
+    }
+  };
+  const parsePrimary = () => {
+    skipSpace();
+    if (expression[pos] === "'") {
+      const end = expression.indexOf("'", pos + 1);
+      const value = expression.slice(pos + 1, end);
+      pos = end + 1;
+      return value;
+    }
+    const name = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(expression.slice(pos))[0];
+    pos += name.length;
+    if (name === 'true') {
+      return true;
+    }
+    if (name === 'false') {
+      return false;
+    }
+    if (name === 'null') {
+      return null;
+    }
+    return facts[name];
+  };
+  const parseComparison = () => {
+    const left = parsePrimary();
+    skipSpace();
+    const op = expression.slice(pos, pos + 2);
+    if (op !== '==' && op !== '!=') {
+      return left;
+    }
+    pos += 2;
+    const right = parsePrimary();
+    return op === '==' ? left === right : left !== right;
+  };
+  const parseAnd = () => {
+    let left = parseComparison();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '&&') {
+        return left;
+      }
+      pos += 2;
+      const right = parseComparison();
+      left = truthy(left) ? right : left;
+    }
+  };
+  const parseOr = () => {
+    let left = parseAnd();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '||') {
+        return left;
+      }
+      pos += 2;
+      const right = parseAnd();
+      left = truthy(left) ? left : right;
+    }
+  };
+  return parseOr();
+}
+
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
@@ -339,11 +413,19 @@ describe('qwen-autofix workflow', () => {
     // that it exists AND still binds below MAX_TARGETS_PER_SCAN is pinned by
     // 'bounds fleet-wide simultaneity below the per-scan target budget'.
     // Asserting the literal number here only detected edits, not breakage.
-    expect(workflow).toMatch(/max-parallel: \d+/);
+    expect(workflow).toMatch(
+      /max-parallel: '\$\{\{ fromJSON\(vars\.QWEN_AUTOFIX_MAX_PARALLEL \|\| \d+\) \}\}'/,
+    );
     // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
     // bounds runtime and API usage, not just matrix size), the deferral is
     // LOGGED, and the next scan picks up the remainder.
-    expect(workflow).toContain("MAX_TARGETS_PER_SCAN: '10'");
+    // Operator-tunable via a repository variable so the loop can be re-sized
+    // as the takeover pool grows without a code change; the literal is the
+    // fallback. Both halves are asserted so the knob cannot silently lose
+    // either its variable or its default.
+    expect(workflow).toMatch(
+      /MAX_TARGETS_PER_SCAN: '\$\{\{ vars\.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN \|\| \d+ \}\}'/,
+    );
     expect(reviewScanJob).toContain(
       'deferring the remaining candidates to the next scan',
     );
@@ -1313,10 +1395,17 @@ describe('qwen-autofix workflow', () => {
     // raising it to the target budget, both let one backlog open every agent
     // run at once — which is the thing the cap exists to prevent, and neither
     // would fail any other test.
+    // Both are repository variables now, so what is checkable here is the
+    // FALLBACK pair — the values that apply until an operator sets them.
+    // Keeping the relation true for the fallbacks means an unconfigured repo
+    // is still correctly bounded; for configured ones it is an operator
+    // invariant, stated at both definitions.
     expect(reviewAddressJob).toContain('matrix:');
-    const parallel = Number(reviewAddressJob.match(/max-parallel: (\d+)/)?.[1]);
+    const parallel = Number(
+      reviewAddressJob.match(/max-parallel:.*?\|\|\s*(\d+)/)?.[1],
+    );
     const targetBudget = Number(
-      workflow.match(/MAX_TARGETS_PER_SCAN: '(\d+)'/)?.[1],
+      workflow.match(/MAX_TARGETS_PER_SCAN:.*?\|\|\s*(\d+)/)?.[1],
     );
     expect(Number.isInteger(parallel)).toBe(true);
     expect(parallel).toBeGreaterThan(0);
@@ -1804,13 +1893,13 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain(
       'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
     );
-    // In-repo PRs are managed only when the bot authored them; forks only
-    // under the scan's takeover rules (allow-edits + bot fork or the label).
+    // In-repo PRs are managed only when the bot authored them. Forks are not
+    // managed from this event at all — it carries no repository secrets, so
+    // nothing downstream of it could authenticate ('declines fork PRs at the
+    // real-time review trigger' replays that).
     expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
-    expect(routeStep).toContain('.maintainerCanModify == true');
-    expect(routeStep).toContain('index($t) != null');
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
     );
@@ -1818,7 +1907,7 @@ describe('qwen-autofix workflow', () => {
       "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
     );
     expect(routeStep).toContain(
-      'review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits',
+      'fork review noted for #${PR_NUMBER_EVENT} — this event carries no repository secrets',
     );
   });
 
@@ -1842,7 +1931,11 @@ describe('qwen-autofix workflow', () => {
     // Per-TARGET keys: cron ticks coalesce with each other; review events
     // coalesce per PR (near-simultaneous reviews on one PR route once, without
     // events on OTHER PRs cancelling this one); issue events per issue;
-    // dispatches unique and never cancelled.
+    // dispatches unique and never cancelled — fork-bridge dispatches
+    // included: `source` is a public workflow_dispatch input, so no dispatch
+    // may claim trusted per-PR coalescing by asserting an origin; fork-review
+    // bursts coalesce upstream instead (the signal per PR, the bridge per
+    // conclusion+head).
     expect(routeJob).toContain("'qwen-autofix-route-cron'");
     expect(routeJob).toContain(
       "format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
@@ -1853,6 +1946,12 @@ describe('qwen-autofix workflow', () => {
     expect(routeJob).toContain(
       "format('qwen-autofix-route-{0}', github.run_id)",
     );
+    // The public `source` marker must not buy any dispatch a shared group or
+    // cancellation rights: pin the forkbridge branch OUT (order-blind
+    // substring pins cannot see a re-added disjunct before the run-id
+    // fallback, but an absent one cannot hide).
+    expect(routeJob).not.toContain('forkbridge');
+    expect(routeJob).not.toContain("inputs.source == 'fork-bridge'");
     expect(routeJob).toContain(
       "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
     );
@@ -2780,9 +2879,27 @@ describe('qwen-autofix workflow', () => {
     // spammed 7 refusals on #7836 — those stay covered by the
     // once-per-window pause notice. No dedup on the dispatch itself: the
     // shepherd sends at most one per head, and a human asking twice
-    // deserves two answers.
+    // deserves two answers. fork-bridge dispatches are the one
+    // dispatch-shaped exception — they are fork-PR reviews laundered into
+    // dispatch form, so answering each one loudly would post one refusal
+    // per review on a capped fork PR (the exact #7836 spam this gate
+    // prevents). But `source` is a public workflow_dispatch input a manual
+    // dispatch can set, so the silence is honored ONLY on positive proof of
+    // origin: a recent SUCCESSFUL fork-bridge run whose title names this
+    // exact PR. Unverified markers are answered like explicit dispatches.
     expect(reviewScanJob).toContain(
-      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+      "DISPATCH_SOURCE: \"${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}\"",
+    );
+    expect(reviewScanJob).toContain('FORK_BRIDGE_VERIFIED=false');
+    expect(reviewScanJob).toContain(
+      '--workflow qwen-autofix-fork-bridge.yml --limit 20 --json conclusion,createdAt,displayTitle',
+    );
+    expect(reviewScanJob).toContain(
+      'startswith("fork-bridge: fork-signal: PR \\($pr) reviewed by ")',
+    );
+    expect(reviewScanJob).toContain('fork-bridge provenance unverified');
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' && "${FORK_BRIDGE_VERIFIED}" != \'true\' ]]; then',
     );
     expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
     expect(reviewScanJob).toContain('Dispatch refused');
@@ -2790,25 +2907,76 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'cap-refused notice skipped: PAT authenticates as',
     );
+    // Provenance is a GitHub-records check: success conclusion, a title
+    // naming the exact PR (no prefix collisions), and a recent createdAt.
+    // Replay the extracted jq program VERBATIM so a dropped predicate fails
+    // the test, not just a substring.
+    const provenanceJq = reviewScanJob.match(
+      /jq -e --arg pr "\$\{PR\}" --arg cutoff "\$\{BRIDGE_CUTOFF\}" '([\s\S]*?)' <<< "\$\{BRIDGE_RUNS\}"/,
+    )?.[1];
+    expect(provenanceJq).toBeTruthy();
+    const verifies = (runs, pr = '7836', cutoff = '2026-08-07T04:00:00Z') =>
+      spawnSync(
+        'jq',
+        ['-e', '--arg', 'pr', pr, '--arg', 'cutoff', cutoff, provenanceJq],
+        {
+          input: JSON.stringify(runs),
+          encoding: 'utf8',
+        },
+      ).status === 0;
+    const bridgeRun = (displayTitle, over = {}) => ({
+      conclusion: 'success',
+      createdAt: '2026-08-07T10:00:00Z',
+      displayTitle,
+      ...over,
+    });
+    const MATCHING = 'fork-bridge: fork-signal: PR 7836 reviewed by wenshao';
+    expect(verifies([bridgeRun(MATCHING)])).toBe(true);
+    // A different PR's bridge run proves nothing.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 999 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // No prefix collision: PR 78366 is not PR 7836.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 78366 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // Only SUCCESSFUL bridge runs count, and only recent ones.
+    expect(verifies([bridgeRun(MATCHING, { conclusion: 'failure' })])).toBe(
+      false,
+    );
+    expect(
+      verifies([bridgeRun(MATCHING, { createdAt: '2026-08-07T03:00:00Z' })]),
+    ).toBe(false);
+    expect(verifies([])).toBe(false);
     // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
-    // for trusted review submissions). Replay the guard VERBATIM so a
-    // dropped EVENT_NAME condition fails the test, not just a substring: a
-    // dispatch is answered, a review submission is left to the pause notice.
+    // for trusted review submissions) and EXCLUDES only PROVENANCE-VERIFIED
+    // fork-bridge dispatches. Replay the guard VERBATIM so a dropped
+    // condition fails the test, not just a substring: an explicit dispatch
+    // is answered, a verified fork-bridge dispatch stays silent, and a
+    // fork-bridge MARKER without verification is answered like an explicit
+    // dispatch (the replay cannot call the API — verification state rides
+    // FORK_BRIDGE_VERIFIED, set by the jq program replayed above).
     const refusedGuard = reviewScanJob.match(
-      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' && "\$\{FORK_BRIDGE_VERIFIED\}" != 'true' \]\]; then)/,
     )?.[1];
     expect(refusedGuard).toBeTruthy();
-    const refuses = (eventName) =>
+    const refuses = (eventName, forkBridgeVerified = 'false') =>
       execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
         env: {
           ...process.env,
           FORCED_PR: '7836',
           PR: '7836',
           EVENT_NAME: eventName,
+          FORK_BRIDGE_VERIFIED: forkBridgeVerified,
         },
         encoding: 'utf8',
       }).trim();
     expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('workflow_dispatch', 'true')).not.toContain('REFUSED');
     expect(refuses('pull_request_review')).not.toContain('REFUSED');
     // The standard-mode pause and the refusal both point at the actual
     // recovery command as a printf ARG (the takeover variant keeps its
@@ -4425,11 +4593,12 @@ exit 1
     expect(routeStep).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
-    // Non-main targets are rejected; forks are admitted only under the scan's
-    // own takeover rules (allow-edits + bot fork or takeover label).
+    // Non-main targets are rejected, and so is every fork — this event holds
+    // no repository secrets, so an admitted fork PR reaches a scan that cannot
+    // authenticate. The scheduled scan owns them instead.
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
-    expect(routeStep).toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
     // Must set ROUTE_PR from the event payload.
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
@@ -4449,13 +4618,18 @@ exit 1
     );
   });
 
-  it('admits managed fork PRs to the real-time review trigger, not just in-repo bot PRs', () => {
-    // The */10 schedule is throttled to 40-70min on this repo, so a takeover PR
-    // that only the scan could pick up waited up to an hour for feedback the
-    // event already carried. Real-time pickup now applies the scan's OWN fork
-    // admission (allow-edits + the bot's own fork or an explicit takeover
-    // label); review-address still re-verifies allow-edits, a live write+
-    // author and a matching head repo before touching the branch.
+  it('declines fork PRs at the real-time review trigger, admits in-repo bot PRs', () => {
+    // Real-time pickup for fork PRs was intended to spare a takeover PR the
+    // 40-70min the throttled */10 schedule really takes — but it could never
+    // work: GitHub gives a run tied to a fork PR NO repository secrets
+    // (`Secret source: None`), so CI_DEV_BOT_PAT was empty and the admitted
+    // PR reached a review-scan that failed three unauthenticated metadata
+    // reads and exited 1 on metadata_fetch_failed. Every review of a fork PR
+    // reddened the workflow while changing nothing.
+    // Route declines here instead, mirroring the pull_request label branch,
+    // which already refuses forks for the same reason. The latency it was
+    // trying to remove comes back until a credentialed lane exists; nothing
+    // that ever functioned is lost.
     const block = routeStep.match(
       /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request_review' \]\]; then[\s\S]*?\n {14}fi/,
     )?.[0];
@@ -4533,41 +4707,80 @@ exit 1
     expect(run({ headRepo: IN_REPO, author: 'someone' })).toContain(
       'DO_REVIEW=false',
     );
-    // NEW: the bot's own fork, and a takeover-labelled human fork, are admitted
-    // in real time and route to that exact PR.
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'DO_REVIEW=true',
-    );
-    expect(
-      run({ headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] }),
-    ).toContain('DO_REVIEW=true');
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'ROUTE_PR=7259',
-    );
-    // Still rejected: no allow-edits, an unlabelled human fork, a non-main
-    // base, and an untrusted sender.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false }),
-    ).toContain('DO_REVIEW=false');
-    expect(run({ headRepo: FORK, author: 'wenshao' })).toContain(
-      'DO_REVIEW=false',
-    );
+    // Every fork shape is declined now — including the two that used to be
+    // admitted. The bot's own fork and a takeover-labelled human fork were the
+    // whole point of the removed branch, so they are the cases that prove it
+    // is gone rather than merely narrowed.
+    for (const forkCase of [
+      { headRepo: FORK, author: 'qwen-code-dev-bot' },
+      { headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] },
+      { headRepo: FORK, author: 'wenshao' },
+      { headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false },
+    ]) {
+      const out = run(forkCase);
+      expect(out).toContain('DO_REVIEW=false');
+      expect(out).toContain('ROUTE_PR=');
+      expect(out).not.toContain('ROUTE_PR=7259');
+    }
+    // Declined without asking the API anything. The removed branch spent a
+    // `gh pr view` and a collaborator-permission call to reach a verdict this
+    // event can never act on; a decline that still paid for them would be the
+    // same waste with a quieter log.
+    expect(routeStep).not.toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
+    // In-repo routing is untouched: a non-main base and an untrusted sender
+    // are still refused, so this change narrowed the fork case alone.
     expect(
       run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', base: 'release' }),
     ).toContain('DO_REVIEW=false');
     expect(
-      run({
-        headRepo: FORK,
-        author: 'wenshao',
-        labels: ['autofix/takeover'],
-        perm: 'read',
-      }),
+      run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', perm: 'read' }),
     ).toContain('DO_REVIEW=false');
-    // A metadata read failure fails CLOSED: the event is ignored rather than
-    // admitting a fork whose allow-edits/labels could not be verified.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
-    ).toContain('DO_REVIEW=false');
+  });
+
+  it('reds an unauthenticated scan instead of reporting an empty fleet', () => {
+    // Route declines the one event GitHub is known to run without secrets, but
+    // no job `if:` can read the `secrets` context, so a deleted or renamed
+    // CI_DEV_BOT_PAT — or a lane nobody has modelled — is invisible until the
+    // step itself looks. It must stop there: unauthenticated `gh pr list`
+    // answers as if the repository held no PRs, and the scan would read that
+    // as a healthy fleet of zero and stay green while the loop is dead.
+    const credGuard = reviewScanJob.match(
+      /(if \[\[ -z "\$\{GITHUB_TOKEN\}" \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(credGuard).toBeTruthy();
+    // Worthless once an API call has already been made and believed.
+    expect(reviewScanJob.indexOf(credGuard)).toBeLessThan(
+      reviewScanJob.indexOf('gh pr view'),
+    );
+
+    const runGuard = (token) =>
+      spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            credGuard.replace(/\n {10}/g, '\n'),
+            // Reached only by a guard that falls through.
+            'echo SCANNED',
+          ].join('\n'),
+        ],
+        {
+          env: { ...process.env, EVENT_NAME: 'schedule', GITHUB_TOKEN: token },
+          encoding: 'utf8',
+        },
+      );
+
+    const missing = runGuard('');
+    expect(missing.status).toBe(1);
+    expect(missing.stdout).toContain('::error::CI_DEV_BOT_PAT is empty');
+    expect(missing.stdout).not.toContain('SCANNED');
+    // Negative control: a present PAT falls straight through, so the guard
+    // cannot swallow a scan that was going to work.
+    const present = runGuard('ghp_stub');
+    expect(present.status).toBe(0);
+    expect(present.stdout).toContain('SCANNED');
   });
 
   it('refuses a takeover on a non-main base out loud instead of only in the job log', () => {
@@ -6085,7 +6298,19 @@ exit 1
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
-    expect(workflow).not.toContain("runner.environment == 'self-hosted'");
+    // What this line guarded is the STEP the dedicated-runner design added —
+    // a `command -v node` check gated on `runner.environment == 'self-hosted'`
+    // that duplicated setup-node and was removed in #6261. That step is
+    // pinned out by name on the next line, so guarding the bare expression as
+    // a substring only forbids the `runner` context by accident: this same
+    // test requires `RUNNER_ENVIRONMENT: '${{ runner.environment }}'` below,
+    // and the npm-cache choice reads the same fact. Guard the shape that was
+    // actually reverted — an `if:` that tests that fact — in every spelling:
+    // single-line or block scalar, wrapped `${{ }}`, extra conjuncts, either
+    // operand order, arbitrary spacing.
+    expect(workflow).not.toMatch(
+      /if:\s*(?:\|-\s*)?\$\{\{[^}]*(?:runner\.environment\s*==\s*'self-hosted'|'self-hosted'\s*==\s*runner\.environment)/,
+    );
     expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
     expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
     expect(workflow).toContain(
@@ -6214,15 +6439,22 @@ exit 1
     // Node bump applied to two of the three jobs) must not ship green.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
-      // Unconditional: re-adding the hosted-only `if` skips setup-node on
-      // every ECS-routed run and leaves the job on whatever Node the pool
-      // image happens to ship, while every recipe assertion stays green.
-      expect(step).not.toContain("runner.environment == 'github-hosted'");
+      // Unconditional: any `if:` skips setup-node on one of the pools and
+      // leaves that job on whatever Node its image happens to ship, while
+      // every recipe assertion stays green.
+      expect(step).not.toMatch(/^\s*if:/m);
       expect(step).toContain(
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
       expect(step).toContain("node-version: '22.x'");
-      expect(step).toContain("cache: 'npm'");
+      // The cache is the one input that is NOT the same on both pools — see
+      // 'does not restore the remote npm cache on the persistent pool'. The
+      // inputs are still identical across the three steps, which is what
+      // this test is for.
+      expect(step).toContain(
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      );
+      expect(step).toContain('package-manager-cache: false');
       expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
@@ -6973,6 +7205,40 @@ exit 1
       expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not restore the remote npm cache on the persistent pool', () => {
+    // Measured on one review-address leg: `Set up Node.js` took 339s, of
+    // which Node itself was free (already in the runner tool cache) and
+    // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
+    // an `npm ci` that took 29s in the very next step. Every leg pays it,
+    // up to ten per scan, plus build-cli and issue-autofix.
+    // All three consumers, so a fourth job with a hardcoded cache fails
+    // here rather than quietly paying 2.65 GB per run — counted by step
+    // name, so no choice of inputs can dodge the capture.
+    expect(nodeSetupSteps).toHaveLength(3);
+    for (const step of nodeSetupSteps) {
+      expect(step).toContain(
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      );
+    }
+    // Text pins cannot tell a ternary that works from one that GHA's
+    // operand-value &&/|| semantics defeat — this PR's first attempt read
+    // correctly and still restored the cache on BOTH pools. Evaluate the
+    // pinned expression the way Actions does: '' on the persistent pool,
+    // 'npm' on the ephemeral hosted fallback.
+    const cacheExpression =
+      nodeSetupSteps[0].match(/cache: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
+    for (const [environment, expected] of [
+      ['self-hosted', ''],
+      ['github-hosted', 'npm'],
+    ]) {
+      expect(
+        evalGhaExpression(cacheExpression, {
+          'runner.environment': environment,
+        }),
+      ).toBe(expected);
     }
   });
 
