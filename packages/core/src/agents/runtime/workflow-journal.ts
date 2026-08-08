@@ -251,7 +251,16 @@ interface JournalParentGuard {
 
 function assertSafeJournalFile(stat: Stats, journalPath: string): void {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
-    throw new Error(`Unsafe workflow journal path: ${journalPath}`);
+    // Name the invariant that failed. This message is the only thing that
+    // survives into the durable checkpoint `error` and the `/workflows`
+    // resumeBlockedReason, so a bare "unsafe" leaves an operator (or a CI
+    // failure) with no way to tell a symlink swap from a stray hard link.
+    const why = !stat.isFile()
+      ? `not a regular file (mode 0o${(stat.mode & 0o170000).toString(8)})`
+      : stat.isSymbolicLink()
+        ? 'symbolic link'
+        : `hard link count ${stat.nlink}, expected 1`;
+    throw new Error(`Unsafe workflow journal path: ${journalPath} (${why})`);
   }
 }
 
@@ -460,7 +469,15 @@ async function readCommittedPrefix(
     ) {
       bytes = Buffer.alloc(0);
     } else {
-      throw new Error(`Workflow journal is truncated: ${errorMessage(error)}`);
+      // Only the byteLength shortfall below is genuine truncation. Safety
+      // rejections (unsafe path, parent changed) and I/O errors (EACCES) reach
+      // here too, and this message ends up verbatim in the durable checkpoint
+      // `error` and in the `/workflows` resumeBlockedReason — calling them
+      // "truncated" tells the operator they lost data when the read was in
+      // fact refused.
+      throw new Error(
+        `Workflow journal recovery failed: ${errorMessage(error)}`,
+      );
     }
   }
   if (bytes.byteLength < checkpoint.byteLength) {

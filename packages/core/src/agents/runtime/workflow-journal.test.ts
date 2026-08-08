@@ -406,6 +406,28 @@ describe('WorkflowJournal', () => {
     await expect(j.load(checkpoint)).rejects.toThrow(/hash/i);
   });
 
+  it('does not call a refused read "truncated", and names the invariant', async () => {
+    const journalPath = path.join(dir, 'refused', 'journal.jsonl');
+    const j = new WorkflowJournal(journalPath);
+    await j.append({ type: 'started', key: 'v2:k1', agentId: '1' });
+    const checkpoint = await j.flush();
+
+    // Same bytes, same length, same hash — only the file's identity is unsafe,
+    // so nothing here is truncation.
+    const canary = path.join(dir, 'refused-canary.jsonl');
+    await fs.copyFile(journalPath, canary);
+    await fs.rm(journalPath);
+    await fs.link(canary, journalPath);
+
+    const failure = await j.load(checkpoint).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure?.message).toMatch(/recovery failed/i);
+    expect(failure?.message).not.toMatch(/truncated/i);
+    expect(failure?.message).toMatch(/hard link count 2, expected 1/);
+  });
+
   it.each([
     ['invalid JSON', '{not-json}\n'],
     ['invalid entry', '{"type":"started","key":3,"agentId":"1"}\n'],
