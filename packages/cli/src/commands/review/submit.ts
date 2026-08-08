@@ -48,7 +48,7 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
-import { ghWithInput, setGhHost } from './lib/gh.js';
+import { ghWithInput, resolveGhHost, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
@@ -170,12 +170,8 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
     repo: args.repo,
     // The EFFECTIVE host, not merely the flag: with --host absent the gh
     // child inherits an operator-exported GH_HOST, so that is where this
-    // write would route — and what the gate must bind. Same resolution as
-    // publish-assets.
-    // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
-    // `??`, being non-nullish) must read as "no host", not as a host named
-    // "" that fails every comparison.
-    host: args.host ?? (process.env['GH_HOST']?.trim() || undefined),
+    // write would route — and what the gate must bind.
+    host: resolveGhHost(args.host),
   });
 }
 
