@@ -8,6 +8,7 @@
 - **Agent Client Protocol**: Full support for ACP enabling advanced IDE interactions
 - **Symbol management**: #-mention files to add them to the conversation context
 - **Conversation history**: Access to past conversations within the IDE
+- **Context usage**: See the current context-window occupancy while Qwen Code works
 
 ### Requirements
 

@@ -145,6 +145,10 @@ export class AcpFileSystemService implements FileSystemService {
       return this.fallback.readTextFile(params);
     }
 
+    // Everything below — including the localReadRoots retry in the catch — is
+    // unreachable under `qwen serve`, which advertises this capability as
+    // false. It guards only generic ACP hosts that keep delegation on. Do not
+    // read the retry as a live backstop for daemon reads.
     let response: ReadTextFileResponse;
     try {
       response = await this.connection.readTextFile(

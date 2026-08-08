@@ -11,14 +11,17 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import yargs from 'yargs';
+import type { Argv } from 'yargs';
 import { buildReport, type Finding } from './findings.js';
-import { saveReviewArtifact } from './save-artifact.js';
+import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test
 // can only run where the filesystem folds case. Probe once, at load time, so
@@ -34,7 +37,6 @@ const caseInsensitiveFs = (() => {
 })();
 
 let root: string;
-let previousProjectDir: string | undefined;
 
 const finding: Finding = {
   id: 'R1-1',
@@ -80,22 +82,21 @@ function fixture() {
   writeJson(composed, verdict);
   mkdirSync(join(root, '.qwen/reviews'), { recursive: true });
   writeFileSync(report, '# Review\n');
-  return { findings, composed, report, out };
+  // The workspace root is explicit here because the test process's cwd is the
+  // package directory, not the temp root — the same explicit-root path the
+  // skill's own Step 8 invocation takes.
+  return { findings, composed, report, out, workspaceRoot: root };
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'review-artifact-'));
-  previousProjectDir = process.env['QWEN_CODE_PROJECT_DIR'];
-  process.env['QWEN_CODE_PROJECT_DIR'] = root;
+  // realpath, because the cwd-default test below chdirs into the root and
+  // compares against process.cwd(), which returns the physical path — on
+  // macOS the temp dir is reached through a /var → /private/var symlink.
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'review-artifact-')));
 });
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
-  if (previousProjectDir === undefined) {
-    delete process.env['QWEN_CODE_PROJECT_DIR'];
-  } else {
-    process.env['QWEN_CODE_PROJECT_DIR'] = previousProjectDir;
-  }
 });
 
 describe('saveReviewArtifact', () => {
@@ -384,9 +385,9 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
-  it('resolves relative paths against the workspace root, not cwd', () => {
-    // The form SKILL.md documents. beforeEach points QWEN_CODE_PROJECT_DIR at
-    // the temp root while cwd stays the package directory, so the two roots
+  it('resolves relative paths against the explicit workspace root, not cwd', () => {
+    // The form the skill's Step 8 block uses. --workspace-root points at the
+    // temp root while cwd stays the package directory, so the two roots
     // differ and the resolution direction is observable.
     fixture();
 
@@ -397,17 +398,95 @@ describe('saveReviewArtifact', () => {
       out: '.qwen/reviews/review.json',
       target: 'pr-123',
       effort: 'high',
+      workspaceRoot: root,
     });
 
     expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
     // The registration value `record_artifact` wants, printed so the skill
-    // copies it verbatim — including from a PR worktree run where cwd (the
-    // disposable review worktree) differs from the workspace root.
+    // copies it verbatim.
     expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
     expect(JSON.parse(readFileSync(saved.path, 'utf8'))).toMatchObject({
       schemaVersion: 1,
       target: 'pr-123',
       markdownReportPath: '.qwen/reviews/review.md',
     });
+  });
+
+  it('resolves against cwd and never QWEN_CODE_PROJECT_DIR', () => {
+    // The default path, with the trap armed. No `workspaceRoot` is passed —
+    // an embedder that omits it must land on cwd — while the env var points
+    // at a decoy the removed preference would have taken: the variable names
+    // the session-storage directory under the runtime base, never the main
+    // checkout, and six of six measured CI reviews fumbled on it (DESIGN.md —
+    // The artifact root that pointed at qwen-home). Re-introducing
+    // `explicit ?? env ?? cwd` fails this test: resolution lands on the
+    // decoy, not on cwd.
+    const decoy = mkdtempSync(join(tmpdir(), 'review-artifact-decoy-'));
+    const savedCwd = process.cwd();
+    const previous = process.env['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = decoy;
+    try {
+      fixture();
+      process.chdir(root);
+      const saved = saveReviewArtifact({
+        findings: '.qwen/tmp/findings.json',
+        composed: '.qwen/tmp/composed.json',
+        report: '.qwen/reviews/review.md',
+        out: '.qwen/reviews/review.json',
+        target: 'pr-123',
+        effort: 'high',
+      });
+
+      expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
+      expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
+      expect(existsSync(join(decoy, '.qwen/reviews/review.json'))).toBe(false);
+    } finally {
+      process.chdir(savedCwd);
+      if (previous === undefined) {
+        delete process.env['QWEN_CODE_PROJECT_DIR'];
+      } else {
+        process.env['QWEN_CODE_PROJECT_DIR'] = previous;
+      }
+      rmSync(decoy, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the CLI option contract', () => {
+  // Every test above builds its args by hand — the same shape that let a
+  // flag-name bug into `test-plan`: yargs camel-cases the flag, a field named
+  // for the flag read `undefined` on every real invocation, and the suite
+  // stayed green because nothing went through yargs. `--workspace-root` is
+  // this command's only multi-word flag AND its trust anchor (it roots the
+  // containment checks), so this test does not assert the parsed shape and
+  // stop — it feeds the yargs-parsed object straight into saveReviewArtifact
+  // and asserts on a write only reachable when the root actually arrived
+  // from the flag: cwd stays the package directory, where none of the
+  // fixture inputs exist.
+  it('parses --workspace-root into the field saveReviewArtifact actually reads', () => {
+    fixture();
+
+    const parsed = (saveArtifactCommand.builder as (y: Argv) => Argv)(
+      yargs([]),
+    ).parseSync([
+      '--findings',
+      '.qwen/tmp/findings.json',
+      '--composed',
+      '.qwen/tmp/composed.json',
+      '--report',
+      '.qwen/reviews/review.md',
+      '--target',
+      'pr-123',
+      '--effort',
+      'high',
+      '--out',
+      '.qwen/reviews/review.json',
+      '--workspace-root',
+      root,
+    ]) as unknown as Parameters<typeof saveReviewArtifact>[0];
+
+    const saved = saveReviewArtifact(parsed);
+    expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
+    expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
   });
 });
