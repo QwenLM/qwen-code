@@ -72,6 +72,8 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
+  findBoundaryAtOrBefore,
+  isReplayTurnStartType,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -219,6 +221,7 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { ActiveWorkReporter } from './active-work-reporter.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
@@ -308,6 +311,12 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  clampActiveWorkIntervalMs,
+  type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
@@ -717,7 +726,37 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
 }
 
 function isHistoryTurnStart(record: ChatRecord): boolean {
-  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
+  return isReplayTurnStartType(record.type, record.subtype);
+}
+
+// A bulk page can safely start at a turn start or at the assistant record
+// owning any following tool results, mirroring the core reader's page-start
+// rule. Realtime records interleave at wall-clock time and own no tool
+// results, so the pair walk passes through them instead of splitting them.
+function isHistoryPageStart(record: ChatRecord): boolean {
+  return (
+    record.subtype !== 'realtime_message' &&
+    (record.type === 'assistant' || isHistoryTurnStart(record))
+  );
+}
+
+// True when the first tool_result in records[start, end) lost its owning
+// call below `start`, i.e. the selection begins mid-pair. Only the first
+// result needs checking: later results belong to calls at or after it, all
+// inside the page once the first pair is whole.
+function historyOrphansToolResult(
+  records: ChatRecord[],
+  start: number,
+  end: number,
+): boolean {
+  for (let i = start; i < end; i++) {
+    if (records[i]!.type !== 'tool_result') continue;
+    for (let owner = i - 1; owner >= start; owner--) {
+      if (isHistoryPageStart(records[owner]!)) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function selectRecentHistoryRecords(
@@ -734,8 +773,39 @@ function selectRecentHistoryRecords(
       break;
     }
   }
-  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
-    start--;
+  // Turn-boundary alignment may expand the page past the requested window,
+  // but never without bound: a history dominated by a single long in-flight
+  // turn would otherwise replay the WHOLE history in one payload and report
+  // hasMore=false, leaving the client unable to page backward. Allow at
+  // most one extra window of expansion, and only when it reaches a real
+  // turn start; otherwise keep the requested window so pages inside a long
+  // turn stay bounded and chainable.
+  const expansionFloor = Math.max(0, records.length - 2 * pageSize);
+  const aligned = findBoundaryAtOrBefore(
+    records,
+    start,
+    expansionFloor,
+    isHistoryTurnStart,
+  );
+  if (isHistoryTurnStart(records[aligned]!)) {
+    start = aligned;
+  }
+  // Backward replay renders each page independently, so a page that starts
+  // mid-pair (on a tool_result whose owning call lies below) would show the
+  // completed call as failed and its result as an orphan block. When the
+  // bounded selection starts on an orphaned tool_result, extend down to the
+  // owning record within one further window, mirroring the core reader.
+  if (start > 0 && historyOrphansToolResult(records, start, records.length)) {
+    const pairFloor = Math.max(0, start - pageSize);
+    const owner = findBoundaryAtOrBefore(
+      records,
+      start,
+      pairFloor,
+      isHistoryPageStart,
+    );
+    if (isHistoryPageStart(records[owner]!)) {
+      start = owner;
+    }
   }
   return { records: records.slice(start), hasMore: start > 0 };
 }
@@ -3533,6 +3603,8 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
+  /** Set once the daemon negotiates active-work reporting; one per channel. */
+  private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
     | 'uninitialized'
     | 'trusted'
@@ -4089,6 +4161,9 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // A Session missing from the next snapshot is how the daemon learns the
+    // child released it — including when it never saw our close response.
+    this.activeWorkReporter?.notifyChanged();
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -4208,12 +4283,19 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      /**
+       * Close only if the Session holds no active work — the daemon's
+       * automatic-cleanup path. Explicit close, kill, and shutdown leave this
+       * unset and keep their force semantics.
+       */
+      onlyIfUnheld?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
-      return;
+      // Already gone is the outcome the caller wanted, not a refusal.
+      return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
@@ -4226,6 +4308,19 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    // Checked under the close gate and before anything destructive runs. The
+    // gate is what makes this atomic: with it held the Session admits no new
+    // prompt and starts no new automatic turn, so a hold cannot appear between
+    // this read and the teardown below. Without it, a caller that asked
+    // "anything running?" and then closed would race exactly the work it was
+    // trying to protect.
+    if (opts?.onlyIfUnheld) {
+      const holds = session.collectActiveWorkHolds();
+      if (holds.length > 0) {
+        cancelClose();
+        return { closed: false, holds };
+      }
+    }
     for (const [requestId, generation] of this.generationControllers) {
       if (generation.sessionId !== sessionId) continue;
       generation.controller.abort();
@@ -4281,6 +4376,7 @@ class QwenAgent implements Agent {
     } finally {
       if (!removedFromStore) cancelClose();
     }
+    return { closed: true, holds: [] };
   }
 
   private async discardStoredSessionIfCurrent(
@@ -4300,6 +4396,8 @@ class QwenAgent implements Agent {
   }
 
   async disposeSessions(): Promise<void> {
+    this.activeWorkReporter?.dispose();
+    this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -4519,6 +4617,30 @@ class QwenAgent implements Agent {
       !Array.isArray(requestedProfile) &&
       (requestedProfile as Record<string, unknown>)['v'] ===
         CHANNEL_STARTUP_PROFILE_VERSION;
+    const requestedActiveWork = args._meta?.[ACTIVE_WORK_HEARTBEAT_META_KEY];
+    const activeWorkRequested =
+      requestedActiveWork !== null &&
+      typeof requestedActiveWork === 'object' &&
+      !Array.isArray(requestedActiveWork) &&
+      (requestedActiveWork as Record<string, unknown>)['v'] ===
+        ACTIVE_WORK_HEARTBEAT_VERSION;
+    // The daemon proposes a cadence; we answer with the one we will actually
+    // use, clamped into the range both sides agree on. The daemon clamps the
+    // echo again — neither side trusts the other to pick a sane number, and a
+    // flood or a multi-hour interval would each break freshness in its own way.
+    const activeWorkIntervalMs = activeWorkRequested
+      ? clampActiveWorkIntervalMs(
+          (requestedActiveWork as Record<string, unknown>)['intervalMs'],
+        )
+      : undefined;
+    if (activeWorkIntervalMs !== undefined) {
+      this.activeWorkReporter?.dispose();
+      this.activeWorkReporter = new ActiveWorkReporter(
+        (method, params) => this.connection.extNotification(method, params),
+        () => this.sessions.values(),
+        activeWorkIntervalMs,
+      );
+    }
 
     const responseMeta: Record<string, unknown> = {
       ...(this.managedToolInvocationGuard
@@ -4529,6 +4651,15 @@ class QwenAgent implements Agent {
         : {}),
       ...(profileRequested && startupProfile
         ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
+        : {}),
+      ...(activeWorkIntervalMs !== undefined
+        ? {
+            [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+              v: ACTIVE_WORK_HEARTBEAT_VERSION,
+              intervalMs: activeWorkIntervalMs,
+              categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+            },
+          }
         : {}),
     };
     return Object.keys(responseMeta).length > 0
@@ -5199,6 +5330,12 @@ class QwenAgent implements Agent {
         this.activePromptCalls.delete(params.sessionId);
       }
       settleCall();
+      // Order a fresh snapshot ahead of this response on the same stream. The
+      // daemon drops its own pending-prompt count the instant the response
+      // lands, so any hold this prompt left behind — a background agent it
+      // started, its terminal notification — has to already be on the wire or
+      // the daemon sees an idle Session for as long as the next report takes.
+      await this.activeWorkReporter?.flush();
     }
   }
 
@@ -9323,13 +9460,18 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        await this.closeStoredSession(sessionId, {
+        const outcome = await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
             ? { drainTimeoutMs: rawDrainTimeoutMs }
             : {}),
         });
-        return { sessionId, closed: true };
+        // `holds` rides along only on a refusal, so the response every existing
+        // caller already parses keeps its exact shape.
+        return outcome.closed
+          ? { sessionId, closed: true }
+          : { sessionId, closed: false, holds: outcome.holds };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -11753,8 +11895,17 @@ class QwenAgent implements Agent {
       throw new Error(`Session ${sessionId} is already active.`);
     }
 
-    const session = new Session(sessionId, config, this.connection, settings);
+    const session = new Session(
+      sessionId,
+      config,
+      this.connection,
+      settings,
+      () => this.activeWorkReporter?.notifyChanged(),
+    );
     this.sessions.set(sessionId, session);
+    // The Session set itself is part of the snapshot: publish so the daemon
+    // learns about this Session from a report rather than inferring it.
+    this.activeWorkReporter?.notifyChanged();
     this.initializingConfigs.delete(config);
     try {
       if (options.enableLiveScreenContext) {

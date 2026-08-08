@@ -55,13 +55,25 @@ import {
   chunkIdsProblem,
   type DiffChunk,
 } from './lib/diff-plan.js';
-import { recordPrompt, writeBrief } from './lib/prompt-record.js';
+import {
+  recordPrompt,
+  writeBrief,
+  writeFindingsFile,
+} from './lib/prompt-record.js';
 import {
   REVERSE_AUDIT_MAX_ROUNDS,
   scheduleReverseAuditRound,
   type RoundSchedule,
 } from './lib/retirement.js';
-import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
+import {
+  BRIEFS,
+  isRepositoryContextRoleId,
+  type RoleId,
+} from './lib/agent-briefs.js';
+import {
+  repositoryContextOf,
+  type RepositoryContext,
+} from './lib/repository-context.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
   requiredAgents,
@@ -86,10 +98,11 @@ interface AgentPromptArgs {
   allChunks?: boolean;
   rules?: string;
   /**
-   * A file of findings to fold into a verify/reverse-audit prompt, so the caller
-   * pastes one block instead of hand-prepending the list. Folded into BOTH the
-   * printed prompt and the record (keyed per findings digest) — a launch that
-   * drops the list matches no record.
+   * A file of findings for a verify/reverse-audit prompt, so the caller
+   * pastes one block instead of hand-prepending the list. The list is copied
+   * to a digest-named file the printed block points at (keyed per findings
+   * digest, like the record) — a launch that drops the read matches no
+   * record, and the block stays small however long the list grows.
    */
   findings?: string;
   /**
@@ -113,6 +126,7 @@ interface PlanReport {
   ownerRepo?: unknown;
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -366,6 +380,11 @@ export function buildChunkAgentPrompt(
     parts.push('', '## Project rules', '', rules.trim());
   }
 
+  const repositoryContext = repositoryContextOf(report);
+  if (repositoryContext) {
+    parts.push('', ...repositoryContextBlock(repositoryContext));
+  }
+
   // Deliberately NOT included: a sentence for the agent to recite when it finds
   // nothing. Every real launch handed the agent its own receipt text — `If you
   // find no issues, say "No issues found — reviewed chunk 13 (...)"` — and an
@@ -483,7 +502,13 @@ export function buildWholeDiffBlock(
   rules?: string,
 ): string {
   const diffPath = requireDiffPath(report);
-  return [...diffReadingBlock(report, diffPath), ...tail(rules)].join('\n');
+  const parts = [...diffReadingBlock(report, diffPath)];
+  const repositoryContext = repositoryContextOf(report);
+  if (repositoryContext) {
+    parts.push('', ...repositoryContextBlock(repositoryContext));
+  }
+  parts.push(...tail(rules));
+  return parts.join('\n');
 }
 
 /** The diff path, or the error this whole command exists to make impossible. */
@@ -724,6 +749,42 @@ function invariantFileBlock(
   return parts;
 }
 
+function contextList(values: string[]): string[] {
+  return values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
+}
+
+function repositoryContextBlock(context: RepositoryContext): string[] {
+  return [
+    `## ${context.label} repository context`,
+    '',
+    `Domains: ${context.domains.join(', ') || '(none)'}`,
+    '',
+    'Related paths:',
+    ...contextList(context.relatedPaths),
+    '',
+    `Recommended tests: ${context.recommendedTests.join(', ') || '(none)'}`,
+    `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
+    '',
+    'Unverified dimensions:',
+    ...contextList(context.unverifiedDimensions),
+    '',
+    'Verification notes:',
+    ...contextList(context.verificationNotes),
+  ];
+}
+
+function repositoryBuildBoundary(context: RepositoryContext): string[] {
+  return [
+    '## Repository-specific verification boundary',
+    '',
+    `Recommended tests: ${context.recommendedTests.join(', ') || '(none)'}`,
+    `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
+    '',
+    'Verification notes:',
+    ...contextList(context.verificationNotes),
+  ];
+}
+
 /**
  * The launch prompt for any role that is not a territory agent.
  *
@@ -769,6 +830,20 @@ export function buildRoleBrief(
   }
 
   parts.push('## Your dimension', '', brief.brief);
+  const repositoryContext = repositoryContextOf(report);
+  if (role === '7') {
+    if (repositoryContext) {
+      parts.push('', ...repositoryBuildBoundary(repositoryContext));
+    }
+  } else if (
+    brief.reviewsCode ||
+    (isRepositoryContextRoleId(role) &&
+      repositoryContext?.requiredAgents.includes(role))
+  ) {
+    if (repositoryContext) {
+      parts.push('', ...repositoryContextBlock(repositoryContext));
+    }
+  }
 
   // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
   // one, and the degradation used to be a sentence the orchestrator was told to add
@@ -1107,16 +1182,27 @@ export function buildRoleLaunchPrompt(
 }
 
 /**
- * The findings block folded above a verify / reverse-audit launch prompt, so the
- * caller pastes one thing instead of hand-assembling it.
+ * The findings section folded above a verify / reverse-audit launch prompt, so
+ * the caller pastes one thing instead of hand-assembling it.
  *
- * This is folded into the printed prompt AND the record alike — the record is
- * the exact printed block, keyed per findings digest, so a launch that drops or
- * rewrites this section matches no record. (The first design recorded the
- * findings-free block for a shared key; that receipt could be satisfied by
- * delivering only the tail.) Its closing line restates that the brief is
- * authoritative — the exact sentence the orchestrator truncated when it used to
- * build this by hand.
+ * The list itself rides a file the block points at (`findingsFile`), named by
+ * the same findings digest that keys the record — the block stays a few hundred
+ * characters however long the list grows. The list used to be inlined here, and
+ * the inlining was the point: the record is the exact printed block, keyed per
+ * findings digest, so a launch that drops or rewrites this section matches no
+ * record. Inlined in EVERY block of a 12-14-auditor round, though, the list made
+ * the launch one 65-82 KB assistant message, and the stream generating it never
+ * completed (issue #8597). The pointer keeps the guarantee — a launch that drops
+ * it matches no record, and the delivery floor counts the read it instructs
+ * exactly as it counts the brief's — at a size the orchestrator will actually
+ * carry. Each branch also restates, above the pointer, that the brief is
+ * authoritative ("this list does not replace the brief; read it first") — the
+ * exact sentence the orchestrator truncated when it used to build this by hand.
+ *
+ * When the findings write failed (`findingsFile` null, non-empty list), the
+ * section falls back to inlining the list — pointing at a file that was never
+ * written would run the whole round against a dead path, while the inline
+ * list keeps the recorded prompt self-contained exactly as it was pre-#8597.
  *
  * Each `acceptsFindings` role has its own framing, and the branches are explicit: a
  * future role that opts into `--findings` but has no framing here throws, rather than
@@ -1124,30 +1210,63 @@ export function buildRoleLaunchPrompt(
  * for any role not hunting gaps. (Same reasoning as the no-role guard message, which
  * also derives from `acceptsFindings` so a new role cannot leave it stale.)
  */
-export function findingsSection(role: RoleId, content: string): string {
+export function findingsSection(
+  role: RoleId,
+  content: string,
+  findingsFile: string | null,
+): string {
   const body = content.trim();
+  let listRef: string | null = null;
+  if (body.length > 0) {
+    if (findingsFile === null) {
+      // The findings write failed (writeFindingsFile said so on stderr):
+      // inline the list — the pre-#8597 shape — rather than point the block
+      // at a file that does not exist. The recorded prompt carries the list
+      // itself then, the delivery check compares it verbatim as before, and
+      // the floor owes no separate findings read (findingsPointerOf finds
+      // none). The pointer shape below is the happy path; this is the
+      // degraded one that still reviews with what it was launched.
+      listRef = body;
+    } else {
+      listRef = [
+        // The line count makes under-reading visible: `read_file` truncates,
+        // so an agent told only "read ALL of it" can stop after the first
+        // page and never know it saw a fraction of the list. Count from the
+        // UNtrimmed content — that is what writeFindingsFile writes — but
+        // drop one trailing newline's empty segment, so the number matches
+        // the real lines a newline-terminated file holds.
+        `The list is a file (${content.replace(/\n$/, '').split('\n').length} lines). Read ALL ` +
+          'of it, right after your brief — page with a larger `offset` if a ' +
+          'read comes back `isTruncated`:',
+        '',
+        '```',
+        `read_file(file_path="${findingsFile}")`,
+        '```',
+      ].join('\n');
+    }
+  }
   if (role === 'verify') {
     return [
       '## The findings you are ruling on',
       '',
-      'Rule on each below — one verdict, traced through the real code, as your brief ' +
+      'Rule on each — one verdict, traced through the real code, as your brief ' +
         'defines. This list does not replace the brief; read it first.',
       '',
-      body || '(no findings were provided — there is nothing to verify)',
+      listRef ?? '(no findings were provided — there is nothing to verify)',
     ].join('\n');
   }
   if (role === 'reverse-audit') {
     // The list is what NOT to re-report. Empty is meaningful — an early round on a
     // clean review has nothing confirmed yet, and must be told so rather than handed
     // a bare heading.
-    return body
+    return listRef !== null
       ? [
           '## Already confirmed — do not re-report these',
           '',
           'These are already on the review; a gap that repeats one is not a gap. Your ' +
             'job is what they missed. This list does not replace the brief; read it first.',
           '',
-          body,
+          listRef,
         ].join('\n')
       : [
           '## Nothing is confirmed yet',
@@ -1248,7 +1367,12 @@ function findingsDigest(content: string, rules: string | undefined): string {
  * context wrap lands ABOVE it instead of replacing it, and the delivery check
  * keeps its first anchor line.
  */
-function foldFindings(role: RoleId, content: string, prompt: string): string {
+function foldFindings(
+  role: RoleId,
+  content: string,
+  prompt: string,
+  findingsFile: string | null,
+): string {
   const nl = prompt.indexOf('\n');
   const identity = nl === -1 ? prompt : prompt.slice(0, nl);
   // The split is anchored on line one BEING the identity line —
@@ -1264,7 +1388,40 @@ function foldFindings(role: RoleId, content: string, prompt: string): string {
     );
   }
   const rest = nl === -1 ? '' : prompt.slice(nl + 1);
-  return `${identity}\n\n${findingsSection(role, content)}\n${rest}`;
+  return `${identity}\n\n${findingsSection(role, content, findingsFile)}\n${rest}`;
+}
+
+/**
+ * The round suffix baked into every findings-role record key and findings
+ * file name. Spelled once here and shared by `runAllChunks`, the single
+ * build, and `findingsFileFor` — three sites deriving it independently
+ * means a change to how a round is spelled updates two of three, and the
+ * findings file and the record stop describing the same launch, silently.
+ */
+function roundPartOf(round: number | undefined): string {
+  return round !== undefined ? `--round-${round}` : '';
+}
+
+/**
+ * Write the findings list a findings-role launch is built from and return the
+ * path the printed block points at — one file per (role, round, digest), so
+ * every block of an --all-chunks round points at the SAME list. An empty list
+ * gets no file: the inline "nothing is confirmed yet" note carries it. Null
+ * on a failed write: findingsSection then inlines the list instead.
+ */
+function findingsFileFor(
+  planPath: string,
+  role: RoleId,
+  round: number | undefined,
+  digest: string,
+  content: string,
+): string | null {
+  if (content.trim().length === 0) return null;
+  return writeFindingsFile(
+    planPath,
+    `${role}${roundPartOf(round)}--${digest}`,
+    content,
+  );
 }
 
 /**
@@ -1525,7 +1682,16 @@ function runAllChunks(
   const skipped = schedule?.skipped ?? [];
 
   const digest = findingsDigest(findingsContent, rules);
-  const roundPart = round !== undefined ? `--round-${round}` : '';
+  const roundPart = roundPartOf(round);
+  // One findings file per round, shared by every block below — the list
+  // itself never crosses the orchestrator's context.
+  const findingsFile = findingsFileFor(
+    planPath,
+    role,
+    round,
+    digest,
+    findingsContent,
+  );
   const blocks = dueChunks.map((c, i) => {
     const key = `${role}--chunk-${c.id}${roundPart}--${digest}`;
     const { prompt } = buildLaunch(
@@ -1534,7 +1700,7 @@ function runAllChunks(
       { role, chunk: c.id, key, round },
       rules,
     );
-    const printed = foldFindings(role, findingsContent, prompt);
+    const printed = foldFindings(role, findingsContent, prompt, findingsFile);
     recordPrompt(planPath, key, printed);
     // The cold-check tag lives in the SEPARATOR label, never in the prompt:
     // separators are display, and the delivery check compares prompts.
@@ -1693,7 +1859,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           `role "${role}" does not take --file.`,
       );
     }
-    // `--findings` folds a findings list into the printed prompt, for the two roles
+    // `--findings` hands a findings list to the printed block, for the two roles
     // that take one: the verifier rules on findings, the reverse auditor avoids
     // re-reporting them. Declared on the brief (`acceptsFindings`), like `acceptsChunk`.
     // A role that TAKES findings must be GIVEN them. Without this the command still
@@ -1706,10 +1872,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // yet passes an empty file — the command says so in the prompt.
     if (!hasFindings && BRIEFS[role]?.acceptsFindings) {
       bad(
-        `--role ${role} needs --findings <file>: it is launched with a findings ` +
-          `list folded in, and this command builds that block so there is nothing ` +
-          `for you to assemble. Write the list to a file and pass it — an early ` +
-          `reverse-audit round with nothing confirmed yet passes an empty file.`,
+        `--role ${role} needs --findings <file>: it is launched against a ` +
+          `findings list, and this command builds that block (a pointer to the ` +
+          `digest-named list file) so there is nothing for you to assemble. ` +
+          `Write the list to a file and pass it — an early reverse-audit round ` +
+          `with nothing confirmed yet passes an empty file.`,
       );
     }
     if (hasFindings && !BRIEFS[role]?.acceptsFindings) {
@@ -1717,8 +1884,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         (r) => BRIEFS[r].acceptsFindings,
       );
       bad(
-        `--findings folds a findings list into the prompt, only for a role that ` +
-          `takes one (${findingRoles.join(', ')}); role "${role}" does not.`,
+        `--findings hands a findings list to the printed block, only for a ` +
+          `role that takes one (${findingRoles.join(', ')}); role "${role}" ` +
+          `does not.`,
       );
     }
     // `--round` labels a repeat launch of a findings role. Only those roles run
@@ -1765,8 +1933,8 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       (r) => BRIEFS[r].acceptsFindings,
     );
     bad(
-      `--findings folds a findings list into a ` +
-        `${findingRoles.map((r) => `--role ${r}`).join(' / ')} prompt; ` +
+      `--findings hands a findings list to a ` +
+        `${findingRoles.map((r) => `--role ${r}`).join(' / ')} block; ` +
         'it needs one of those roles.',
     );
   } else if (args.allChunks) {
@@ -1980,6 +2148,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
 
   let prompt: string;
   let key: string;
+  let findingsFile: string | null = null;
   if (args.wholeDiff) {
     prompt = buildWholeDiffBlock(report, rules);
     key = 'whole-diff';
@@ -2005,8 +2174,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       // the digest: two rounds are two launches, two briefs, two receipts —
       // sharing one record is what pushed the orchestrator to hand-label the
       // identity line in the first place.
-      const roundPart = args.round !== undefined ? `--round-${args.round}` : '';
-      keyOverride = `${base}${roundPart}--${findingsDigest(findingsContent, rules)}`;
+      const roundPart = roundPartOf(args.round);
+      const digest = findingsDigest(findingsContent, rules);
+      keyOverride = `${base}${roundPart}--${digest}`;
+      findingsFile = findingsFileFor(
+        args.plan,
+        args.role as RoleId,
+        args.round,
+        digest,
+        findingsContent,
+      );
     }
     ({ key, prompt } = buildLaunch(
       report,
@@ -2025,10 +2202,12 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   }
 
   // The record IS the printed prompt. Anything less is a receipt a partial
-  // delivery can satisfy — the findings-free record was exactly that.
+  // delivery can satisfy — the findings-free record was exactly that. The
+  // findings list itself rides the file `findingsFile` names; the pointer is
+  // part of the printed prompt, so a launch that drops it matches no record.
   const printed =
     findingsContent !== undefined && args.role
-      ? foldFindings(args.role as RoleId, findingsContent, prompt)
+      ? foldFindings(args.role as RoleId, findingsContent, prompt, findingsFile)
       : prompt;
   recordPrompt(args.plan, key, printed);
   writeStdoutLine(printed);
@@ -2119,12 +2298,13 @@ export const agentPromptCommand: CommandModule = {
       .option('findings', {
         type: 'string',
         describe:
-          'Path to a file of findings to fold into a --role verify (the shard it ' +
-          'rules on) / --role reverse-audit (the cumulative confirmed list) prompt, ' +
-          'so you paste ONE block. The findings are part of the recorded prompt ' +
-          '(keyed per findings digest), so a launch that drops them matches no ' +
-          'record — paste the whole output verbatim, do not add a round number ' +
-          'or reword it.',
+          'Path to a file of findings for a --role verify (the shard it ' +
+          'rules on) / --role reverse-audit (the cumulative confirmed list) build. ' +
+          'The list is copied to a digest-named file the printed block points ' +
+          'at, so you paste ONE short block however long the list is. The ' +
+          'pointer is part of the recorded prompt (keyed per findings digest), ' +
+          'so a launch that drops the read matches no record — paste the whole ' +
+          'output verbatim, do not add a round number or reword it.',
       })
       .option('round', {
         type: 'number',

@@ -166,6 +166,7 @@ import {
   type GoalRuntime,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
@@ -7440,6 +7441,7 @@ export class Config {
       journal: this.chatRecordingService,
       evidenceSource: this.chatRecordingService,
       verifier: createGoalVerifier(this),
+      checkpointVerifier: createGoalCheckpointVerifier(this),
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

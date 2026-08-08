@@ -9,9 +9,16 @@
 // sessions: 81% waited with `sleep`, 74% captured one screenful with no way to
 // know the command had finished, 87% cleaned up by hand.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -20,9 +27,28 @@ import {
   sentinelExitCode,
   trimCapture,
   shellQuote,
+  driveCommand,
   DRIVE_SENTINEL,
   type ExecResult,
 } from './drive.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import { reviewSourceRoots, reviewSourcesDigest } from './lib/stale-bundle.js';
+import {
+  FOREIGN_DIGEST,
+  makeStaleBundleFixture,
+  stampDigest,
+} from './lib/test-utils.js';
+
+// The handler's output goes through the same helpers the parse-args suite
+// mocks; the wiring tests below intercept them so no real terminal is touched.
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
+}));
 
 const ok = (stdout = ''): ExecResult => ({ status: 0, stdout, stderr: '' });
 const fail = (stderr = ''): ExecResult => ({ status: 1, stdout: '', stderr });
@@ -494,5 +520,99 @@ describe('a partial observation is never presented as a whole one', () => {
     expect(r.exitCode).toBeNull();
     expect(r.note).toContain('PARTIAL');
     expect(r.note).toContain('not evidence that the run produced nothing');
+  });
+});
+
+describe('drive warns when the bundle is not built from these sources', () => {
+  // The wiring is what is under test: the notice derives from
+  // `process.argv[1]` and leaves through `writeStderrLineSafe` BEFORE
+  // `runDrive` runs — a missing seam there would ship while every `runDrive`
+  // test above stayed green. tmux is gated off through the exec seam, so the
+  // drive itself goes nowhere and nothing real is spawned.
+  let repo: string;
+  let argv1: string;
+
+  const exec = (cmd: string, args: string[]): ExecResult =>
+    cmd === 'tmux' && args[0] === '-V'
+      ? { status: 1, stdout: '', stderr: '' }
+      : { status: 0, stdout: '', stderr: '' };
+
+  // Real bindings by construction: this file never mocks `node:fs`.
+  const realFs = { mkdtempSync, mkdirSync, writeFileSync };
+
+  beforeEach(() => {
+    ({ repo, argv1 } = makeStaleBundleFixture(realFs, 'drive-stale-'));
+    vi.mocked(writeStderrLineSafe).mockClear();
+    vi.mocked(writeStdoutLine).mockClear();
+  });
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  const stamp = (digest: string) => stampDigest(realFs, repo, digest);
+  const run = () => {
+    const originalArgv = process.argv[1];
+    const originalExit = process.exitCode;
+    process.argv[1] = argv1;
+    try {
+      (driveCommand.handler as (a: unknown) => void)({
+        script: 'true',
+        cwd: repo,
+        readyTimeout: 1,
+        timeout: 1,
+        server: 'wiring',
+        exec,
+        _: ['review', 'drive'],
+      });
+    } finally {
+      process.argv[1] = originalArgv;
+      process.exitCode = originalExit;
+    }
+  };
+
+  it('warns when the stamp does not match the sources', () => {
+    stamp(FOREIGN_DIGEST);
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'NOT built from the review sources',
+    );
+    // …and BEFORE the first result: relocating the loop below `runDrive`
+    // keeps every substring assertion green while the warning lands only once
+    // the reviewer has already consumed results measured from the stale
+    // bundle — the failure mode this check exists to prevent.
+    expect(
+      vi.mocked(writeStderrLineSafe).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(writeStdoutLine).mock.invocationCallOrder[0]);
+  });
+
+  it('says nothing when the stamp matches', () => {
+    stamp(reviewSourcesDigest(repo, reviewSourceRoots(repo))!);
+    run();
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('says it could not check when sources exist but the stamp does not', () => {
+    // The brief unmeasured form: the state of every existing checkout the
+    // day this ships — sources on disk, no stamp beside the bundle yet.
+    run();
+    const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
+    expect(line).toContain('could not check whether the bundle is current');
+    expect(line).toContain('Rebuild with `npm run bundle` to record one.');
+  });
+
+  it('prints the one-line form — the full paragraph belongs to parse-args', () => {
+    // One review can invoke `drive` many times, and each invocation prints
+    // into an agent's tool output; the repeat keeps the trigger and the
+    // remedy and drops the explanation.
+    stamp(FOREIGN_DIGEST);
+    run();
+    const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
+    expect(line).toContain('NOT built from the review sources');
+    expect(line).toContain('npm run bundle');
+    expect(line).not.toContain('runs the BUILT bundle, not the working tree');
+  });
+
+  it('still drives — the notice is a diagnostic, not a gate', () => {
+    stamp(FOREIGN_DIGEST);
+    run();
+    expect(writeStdoutLine).toHaveBeenCalled();
   });
 });
