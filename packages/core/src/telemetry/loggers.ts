@@ -140,6 +140,7 @@ import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsag
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -201,6 +202,7 @@ function runToolTelemetrySink(sink: () => void): void {
 export function logStartSession(
   config: Config,
   event: StartSessionEvent,
+  previousSessionId?: string,
 ): void {
   QwenLogger.getInstance(config)?.logStartSessionEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -235,6 +237,12 @@ export function logStartSession(
     attributes,
   };
   logger.emit(logRecord);
+  emitSessionStart(config.getSessionId(), previousSessionId);
+}
+
+export function logSessionEnd(config: Config): void {
+  if (!isTelemetrySdkInitialized()) return;
+  emitSessionEnd(config.getSessionId());
 }
 
 export function logUserPrompt(config: Config, event: UserPromptEvent): void {

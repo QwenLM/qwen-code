@@ -129,6 +129,7 @@ import {
   shutdownTelemetry,
   refreshSessionContext,
   logStartSession,
+  logSessionEnd,
   logRipgrepFallback,
   RipgrepFallbackEvent,
   StartSessionEvent,
@@ -3795,7 +3796,15 @@ export class Config {
     });
 
     const previousSessionId = this.sessionId;
-    this.sessionId = sessionId ?? randomUUID();
+    const nextSessionId = sessionId ?? randomUUID();
+    // Resuming the session the user is already in keeps the same id. That is
+    // not a lifecycle transition: ending it here would record session.end for
+    // a live session and pair it with a duplicate session.start.
+    const isSessionTransition = nextSessionId !== previousSessionId;
+    if (isSessionTransition) {
+      logSessionEnd(this);
+    }
+    this.sessionId = nextSessionId;
     // Unconditional: startNewSession is only called on the canonical Config
     // instance (the one that already claimed via sessionEnvClaimed), so this
     // correctly updates the env var to reflect the new active session.
@@ -3841,7 +3850,11 @@ export class Config {
     // one, and the "N-shotted" PR label would span sessions.
     CommitAttributionService.resetInstance();
     if (this.initialized) {
-      logStartSession(this, new StartSessionEvent(this));
+      logStartSession(
+        this,
+        new StartSessionEvent(this),
+        sessionData && isSessionTransition ? previousSessionId : undefined,
+      );
     }
 
     // Refresh the runtime.json sidecar so external observers (terminal
@@ -3857,7 +3870,7 @@ export class Config {
     // sidecar that happens to share the outgoing session id
     // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
-    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
+    if (this.runtimeStatusEnabled && isSessionTransition) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
       const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
       const cliVersion = this.cliVersion ?? null;
