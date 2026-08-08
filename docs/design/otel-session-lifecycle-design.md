@@ -42,8 +42,49 @@ additive and are emitted through the configured OpenTelemetry logs pipeline.
 continuation, the new `session.start` record includes
 `session.previous_id`; replacement sessions do not claim continuation.
 
-The outgoing session is ended before the new session starts. Telemetry
-shutdown ends the currently active session before shutting down the SDK.
+The outgoing session is ended before the new session starts. Resuming the
+session the user is already in (same `session.id`) records no lifecycle
+transition at all. Telemetry shutdown ends the currently active session
+before shutting down the SDK.
+
+## Session id reuse on `/resume`
+
+Qwen Code's session model predates this design: `/resume` restores a
+persisted conversation under its original session id instead of minting a new
+one. Two consequences follow for the lifecycle stream:
+
+- A resumed id can carry more than one disjoint
+  `session.start`/`session.end` window within a single process (for example:
+  start `A`, `/clear` to `B`, then `/resume` back to `A`).
+- `session.previous_id` points from the resumed id to the session that was
+  active at resume time. That session may have been created _after_ the
+  resumed id, so lineage edges can point backwards in time and can form
+  cycles.
+
+This is the reverse of the OTel General Session convention's id-rotation
+model, in which a freshly minted id points back at the retired one. Backends
+counting sessions or computing durations should key on
+(`session.id`, `session.start` timestamp) windows rather than `session.id`
+alone. Whether `/resume` should mint a new id instead is a session-model
+decision outside this design.
+
+## Known limitations (daemon / ACP)
+
+Daemon-spawned ACP sessions build a fresh `Config` per session
+(`loadCliConfig()`) and never flow through `Config.startNewSession()`, so in
+that path today:
+
+- a conversation session receives `session.start` from its `Config`
+  initialization but no `session.end` when the session is later switched or
+  disposed, and
+- process shutdown ends the session id last recorded in the telemetry session
+  context — in an ACP child that is the boot-time session, not the
+  conversation session.
+
+A single ACP child can also host several concurrent sessions, which the
+single process-level "current session" tracked by the context cannot
+represent. Closing this gap requires lifecycle design for multi-session
+processes and is deferred to a follow-up.
 
 ## Compatibility and safety
 

@@ -2236,7 +2236,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
-    it('does not self-link a resumed session when the id is unchanged', async () => {
+    it('records no lifecycle transition when resuming the current session id', async () => {
       const sessionId = 'same-session-id';
       const config = new Config({ ...baseParams, sessionId });
       await config.initialize({
@@ -2246,12 +2246,14 @@ describe('Server Config (config.ts)', () => {
         skipSkillManager: true,
         skipFileCheckpointing: true,
       });
+      vi.mocked(logSessionEnd).mockClear();
       vi.mocked(logStartSession).mockClear();
 
       config.startNewSession(sessionId, {
         conversation: { messages: [] },
       } as unknown as ResumedSessionData);
 
+      expect(logSessionEnd).not.toHaveBeenCalled();
       expect(logStartSession).toHaveBeenCalledWith(
         config,
         expect.anything(),
