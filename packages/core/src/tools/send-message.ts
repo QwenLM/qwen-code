@@ -409,8 +409,12 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send a message to a teammate or another Qwen Code session on this machine (use "to"), or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
-        'Set "to" to a bare teammate name (no @), or to a session name from list_agents — append its " [ref]" only when two sessions share a name. ' +
+      // Keep "completed tasks are revived" inside the first 157 characters:
+      // the deferred-tools reminder truncates this description at
+      // MAX_DEFERRED_TOOL_DESC_LEN, and environmentContext.test.ts guards that
+      // the revival clause survives that cut.
+      'Send a message to a teammate or peer session (use "to"), or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
+        'Set "to" to a bare teammate name (no @), or to the name of another Qwen Code session on this machine as shown by list_agents — append its " [ref]" only when two sessions share a name. ' +
         'A message to another session arrives there marked as coming from another agent, and its user may hold it for review before that session acts. ' +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +

@@ -283,13 +283,14 @@ describe('Team lifecycle E2E', () => {
         .some((m: string) => m.includes('review the auth')),
     ).toBe(true);
 
-    // Broadcast to all teammates.
+    // Broadcast is no longer a tool-level operation: `to: "*"` is rejected and
+    // the caller is told to send one message per recipient.
     const broadcastResult = await exec(sendTool, {
       to: '*',
       message: 'Standup in 5 minutes.',
     });
-    expect(broadcastResult.error).toBeUndefined();
-    expect(broadcastResult.llmContent).toContain('broadcast');
+    expect(broadcastResult.error).toBeDefined();
+    expect(broadcastResult.llmContent).toContain('no longer supported');
 
     // ── Step 7: Delete a task ────────────────────────────
     const deleteTaskResult = await exec(taskUpdateTool, {
