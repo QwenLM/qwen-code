@@ -158,9 +158,11 @@ describe('refineVoiceTranscript', () => {
     afterEach(() => vi.useRealTimers());
 
     it('falls back to raw when refinement exceeds the timeout', async () => {
+      let captured: AbortSignal | undefined;
       mockRunSideQuery.mockImplementation(
         (_config, opts: { abortSignal: AbortSignal }) =>
           new Promise((_resolve, reject) => {
+            captured = opts.abortSignal;
             opts.abortSignal.addEventListener('abort', () =>
               reject(new Error('aborted')),
             );
@@ -173,6 +175,33 @@ describe('refineVoiceTranscript', () => {
       );
       await vi.advanceTimersByTimeAsync(2500);
       await expect(pending).resolves.toBe('raw words');
+      // The deadline must signal TimeoutError: this signal reaches a model
+      // request, and a bare abort reads downstream as a user cancel — its
+      // api_error would be suppressed for what is really a hung fast model.
+      expect((captured?.reason as Error).name).toBe('TimeoutError');
+    });
+
+    it('forwards a user cancel as a bare abort, distinct from the deadline', async () => {
+      // The external-abort path is a genuine user cancel and must NOT carry
+      // the TimeoutError shape, or downstream would report the user's own
+      // Esc as a failed request.
+      let captured: AbortSignal | undefined;
+      mockRunSideQuery.mockImplementation(
+        (_config, opts: { abortSignal: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            captured = opts.abortSignal;
+            opts.abortSignal.addEventListener('abort', () =>
+              reject(new Error('aborted')),
+            );
+          }),
+      );
+      const user = new AbortController();
+      const pending = refineVoiceTranscript(config, 'raw words', user.signal);
+      user.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(pending).resolves.toBe('raw words');
+      expect(captured?.aborted).toBe(true);
+      expect((captured?.reason as Error).name).toBe('AbortError');
     });
   });
 });

@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger, runSideQuery } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  runSideQuery,
+  timeoutAbortReason,
+} from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('VOICE_REFINE');
@@ -53,7 +57,18 @@ export async function refineVoiceTranscript(
   const controller = new AbortController();
   const onExternalAbort = () => controller.abort();
   signal.addEventListener('abort', onExternalAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(), REFINE_TIMEOUT_MS);
+  // The external abort above stays bare — it forwards a genuine user cancel.
+  // The deadline signals TimeoutError so a hung fast model is reported as a
+  // failure downstream instead of being suppressed as a user cancel.
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        timeoutAbortReason(
+          `Voice transcript refinement timed out after ${REFINE_TIMEOUT_MS}ms`,
+        ),
+      ),
+    REFINE_TIMEOUT_MS,
+  );
 
   try {
     const { text } = await runSideQuery(config, {

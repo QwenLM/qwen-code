@@ -274,13 +274,18 @@ export class LoggingContentGenerator implements ContentGenerator {
     // `aborted && isAbortError`) is what keeps a timed-out internal side query
     // — a genuine failure that also aborts this signal — reported.
     if (isUserCancel(error, abortSignal)) {
-      // Leave a trace. `shouldSuppressErrorLogging` shares this predicate, so
-      // a misclassified abort would otherwise vanish from telemetry and the
-      // debug log at once, and the span cannot disambiguate either — to
-      // whoever is investigating, a suppressed cancel and no error at all
-      // look identical.
+      // Leave an attributed trace. `shouldSuppressErrorLogging` shares this
+      // predicate, so a misclassified abort would otherwise vanish from
+      // telemetry and the debug log at once, and the span cannot disambiguate
+      // either. The identifying fields matter: this line is the only
+      // debug-side evidence a suppression happened, and without them oncall
+      // can only correlate against spans by timing.
+      const reason: unknown = abortSignal?.reason;
       debugLogger.debug(
-        'Skipping api_error telemetry: request was cancelled by the caller',
+        `Skipping api_error telemetry: request was cancelled by the caller ` +
+          `(model=${model}, prompt_id=${prompt_id}, ` +
+          `error=${getErrorType(error)}, ` +
+          `reason=${reason instanceof Error ? reason.name : typeof reason})`,
       );
       return;
     }

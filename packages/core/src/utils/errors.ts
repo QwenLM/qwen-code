@@ -17,9 +17,11 @@ export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 /**
- * Check if the error is an abort error (user cancellation).
- * This handles DOMException-style AbortError, Node.js abort errors, and the
- * provider SDKs' `APIUserAbortError` (matched by class name).
+ * Check if the error is abort-shaped — a user cancel OR an internal deadline
+ * firing; the pinned SDKs reject abort-shaped for ANY aborted signal, so this
+ * alone cannot tell who aborted. For "the user cancelled", gate on
+ * `isUserCancel()` instead. Handles DOMException-style AbortError, Node.js
+ * abort errors, and the provider SDKs' `APIUserAbortError` (by class name).
  */
 export function isAbortError(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
@@ -93,8 +95,10 @@ export function isUserCancel(error: unknown, signal?: AbortSignal): boolean {
 /**
  * The abort reason an internal deadline must signal so `isUserCancel` can tell
  * it apart from a user cancel. This is the producer half of that contract:
- * every budget built from an `AbortController` plus a timer aborts with this
- * (`AbortSignal.timeout()` produces the same shape natively). A bare `abort()`
+ * budgets on model-request paths abort with this (`AbortSignal.timeout()`
+ * produces the same shape natively, and `combineAbortSignals(signals,
+ * { timeoutMs })` in `utils/abortController.ts` is the composed spelling
+ * when a parent signal is also involved). A bare `abort()`
  * or an `Error`-reason abort reads downstream as a user cancel, and the
  * timed-out request's api_error is silently suppressed.
  */

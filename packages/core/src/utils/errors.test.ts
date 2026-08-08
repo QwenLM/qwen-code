@@ -366,6 +366,18 @@ describe('isUserCancel', () => {
     expect(isUserCancel(new Error('rate limited'), signal)).toBe(false);
   });
 
+  it('returns true for a user cancel fired with a string reason (ACP/daemon path)', () => {
+    // The daemon/ACP cancel path aborts with the string 'qwen:user-cancel'
+    // rather than a bare abort — and #8356 was reported from exactly that
+    // configuration. Pins that reason discrimination stays negative-only
+    // (exclude TimeoutError) rather than positive (require AbortError), which
+    // would silently drop suppression for ACP cancels.
+    const controller = new AbortController();
+    controller.abort('qwen:user-cancel');
+
+    expect(isUserCancel(abortShaped(), controller.signal)).toBe(true);
+  });
+
   it('returns true when the user cancels a signal composed with a timeout', async () => {
     // Same composition, opposite source: the user cancels well before the
     // budget expires, so the reason is the user's AbortError and the cancel is
