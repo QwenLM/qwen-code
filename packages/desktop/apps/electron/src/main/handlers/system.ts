@@ -2,6 +2,7 @@ import { resolve } from 'path'
 import { join } from 'path'
 import { homedir } from 'os'
 import { execSync } from 'child_process'
+import { clipboard } from 'electron'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getGitBashPath, setGitBashPath, clearGitBashPath } from '@craft-agent/shared/config'
 import { isSafeExternalUrl } from '@craft-agent/shared/utils/url-safety'
@@ -21,6 +22,7 @@ export const CORE_HANDLED_CHANNELS = [
   RPC_CHANNELS.system.VERSIONS,
   RPC_CHANNELS.system.HOME_DIR,
   RPC_CHANNELS.system.IS_DEBUG_MODE,
+  RPC_CHANNELS.system.COPY_TO_CLIPBOARD,
   RPC_CHANNELS.debug.LOG,
   RPC_CHANNELS.shell.OPEN_URL,
   RPC_CHANNELS.shell.OPEN_FILE,
@@ -91,6 +93,10 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
   // Check if running in debug mode (from source)
   server.handle(RPC_CHANNELS.system.IS_DEBUG_MODE, async () => {
     return !deps.platform.isPackaged
+  })
+
+  server.handle(RPC_CHANNELS.system.COPY_TO_CLIPBOARD, async (_ctx, text: string) => {
+    clipboard.writeText(text)
   })
 
   // Release notes

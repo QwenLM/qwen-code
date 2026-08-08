@@ -276,6 +276,7 @@ const EXPECTED_CHANNELS: string[] = [
   'statuses:reorder',
   'system:homeDir',
   'system:isDebugMode',
+  'system:copyToClipboard',
   'system:versions',
   'tasks:getOutput',
   'theme:appChanged',
