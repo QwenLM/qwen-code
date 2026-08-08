@@ -4041,6 +4041,71 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s normalizes mixed-case caller UUIDs before restore',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        const mixedCaseSessionId = sessionId.toUpperCase();
+        await writeStoredSession(sessionId);
+
+        let restoredSessionId: string | undefined;
+        bridge.loadSession = async (req) => {
+          restoredSessionId = req.sessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+        bridge.resumeSession = async (req) => {
+          restoredSessionId = req.sessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-resume',
+            state: { resumed: true },
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 216,
+          method,
+          params: { sessionId: mixedCaseSessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 216 });
+        reader.close();
+
+        expect(restoredSessionId).toBe(sessionId);
+
+        const sessionStream = await openStream(connId, mixedCaseSessionId);
+        expect(sessionStream.status).toBe(200);
+        const sessionReader = frameReader(sessionStream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 217,
+          method: 'session/prompt',
+          params: {
+            sessionId: mixedCaseSessionId,
+            prompt: [{ type: 'text', text: 'continue after restore' }],
+          },
+        });
+        expect(await sessionReader.next()).toMatchObject({
+          id: 217,
+          result: { stopReason: 'end_turn' },
+        });
+        sessionReader.close();
+      });
+    },
+  );
+
   it('session/prompt reports an archive conflict while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440127';

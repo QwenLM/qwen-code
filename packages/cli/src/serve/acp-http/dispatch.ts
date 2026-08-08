@@ -79,7 +79,10 @@ import {
   readPermissionRuleSet,
 } from '../../config/permission-settings.js';
 import { loadSettings } from '../../config/settings.js';
-import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../../config/session-id.js';
 import { WorkspaceVoiceError } from '../../services/voice-service.js';
 import { SetupGithubError, setupGithub } from '../../services/setup-github.js';
 import {
@@ -1342,10 +1345,15 @@ export class AcpDispatcher {
     if (!isRequest(msg) && !isNotification(msg)) return;
 
     const method = msg.method;
-    const params = (isObject(msg.params) ? msg.params : {}) as Record<
-      string,
-      unknown
-    >;
+    const params = {
+      ...((isObject(msg.params) ? msg.params : {}) as Record<string, unknown>),
+    };
+    if (typeof params['sessionId'] === 'string') {
+      params['sessionId'] = normalizeSessionIdForLookup(params['sessionId']);
+    }
+    const normalizedSessionHeader = sessionHeader
+      ? normalizeSessionIdForLookup(sessionHeader)
+      : undefined;
     const id = isRequest(msg) ? msg.id : undefined;
 
     const generationScoped =
@@ -1378,9 +1386,9 @@ export class AcpDispatcher {
     // `sessionId` param MUST agree — reject divergence rather than let a
     // POST act on a session other than the one the header names.
     if (
-      sessionHeader &&
+      normalizedSessionHeader &&
       typeof params['sessionId'] === 'string' &&
-      params['sessionId'] !== sessionHeader
+      params['sessionId'] !== normalizedSessionHeader
     ) {
       if (id !== undefined) {
         conn.sendConn(
@@ -1557,7 +1565,9 @@ export class AcpDispatcher {
 
         case 'session/load':
         case 'session/resume': {
-          const sessionId = String(params['sessionId'] ?? '');
+          const sessionId = normalizeSessionIdForLookup(
+            String(params['sessionId'] ?? ''),
+          );
           if (!sessionId) {
             if (id !== undefined) {
               conn.sendConn(

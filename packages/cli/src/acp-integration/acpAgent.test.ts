@@ -14231,6 +14231,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         unstable_resumeSession: (
           args: Record<string, unknown>,
         ) => Promise<unknown>;
+        cancel: (args: Record<string, unknown>) => Promise<unknown>;
       })
     | undefined;
 
@@ -14257,6 +14258,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForCloseGateToRelease: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+        cancelPendingPrompt: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
       }
@@ -14494,6 +14496,39 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['load', 'resume'] as const)(
+    '%s normalizes mixed-case caller UUIDs before persisted lookup',
+    async (action) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      innerConfig.getSessionId.mockReturnValue(sessionId);
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: sessionId.toUpperCase(),
+          mcpServers: [],
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        const sessionService = vi.mocked(SessionService).mock.results[0]?.value;
+        expect(sessionService).toBeDefined();
+        expect(sessionService!.sessionExists).toHaveBeenCalledWith(sessionId);
+
+        await agent.cancel({ sessionId: params.sessionId });
+        expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('serializes non-live load and resume before settings or disk work', async () => {
     const innerConfig = bindRestoreMocks({ sessionExists: true });

@@ -262,6 +262,29 @@ describe('RequestedSessionIdAdmission', () => {
       .release();
   });
 
+  it('treats mixed-case caller UUIDs as the same restore claim', () => {
+    const firstBridge = fakeBridge();
+    const secondBridge = fakeBridge();
+    const admission = createRequestedSessionIdAdmission({
+      archiveCoordinator: new SessionArchiveCoordinator(),
+      getBridges: () => [firstBridge, secondBridge],
+      getPersistenceTargets: () => [],
+    });
+    const first = admission.reserveRestore(SESSION_ID, {
+      bridge: firstBridge,
+      workspaceCwd: '/one',
+    });
+
+    expect(() =>
+      admission.reserveRestore(SESSION_ID.toUpperCase(), {
+        bridge: secondBridge,
+        workspaceCwd: '/two',
+      }),
+    ).toThrowError(RequestedSessionIdAdmissionError);
+
+    first.release();
+  });
+
   it('accepts an equivalent workspace spelling on the same live bridge', () => {
     const bridge = fakeBridge([SESSION_ID]);
     const admission = createRequestedSessionIdAdmission({
