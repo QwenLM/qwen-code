@@ -19,7 +19,6 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hasShellSubstitution } from './shell-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -959,43 +958,13 @@ function processSafety(root: string, args: string[]): Safety {
   return 'write';
 }
 
-/**
- * True for `${parameter@operator}` expansions such as `${var@P}`.
- * tree-sitter-bash surfaces the transformation operator as a literal `@`
- * child of the `expansion` node. Array subscripts keep their `@` inside a
- * `subscript` child (`${arr[@]}` → `subscript` → `word`), so they do not
- * match here (#8582). `${!prefix@}` / `${!prefix*}` enumerate variable
- * names and cannot execute code — the same carve-out the scanner applies
- * (#8590 review).
- */
-function hasParameterTransformation(node: SyntaxNode): boolean {
-  for (let i = 0; i < node.childCount; i++) {
-    if (node.child(i)!.type === '@') {
-      return !/^\$\{!(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)[@*]\}$/.test(node.text);
-    }
-  }
-  return false;
-}
-
 function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
   const substitutions = collectDescendants(
     node,
     new Set(['command_substitution', 'process_substitution']),
     true,
   );
-  // `${var@P}` prompt expansion executes command substitution embedded in
-  // the value at expansion time, but tree-sitter produces no
-  // command_substitution node for it. Downgrade any `@`-transformed
-  // parameter expansion to unknown so it requires confirmation (#8582).
-  // Not outermost-only: the operator may sit in a nested expansion
-  // (`${a:-${b@P}}`).
-  const hasTransformedExpansion = collectDescendants(
-    node,
-    new Set(['expansion']),
-  ).some(hasParameterTransformation);
-  if (substitutions.length === 0) {
-    return hasTransformedExpansion ? 'unknown' : 'read-only';
-  }
+  if (substitutions.length === 0) return 'read-only';
   return mergeSafety(
     'unknown',
     ...substitutions
@@ -1134,42 +1103,16 @@ async function classifyInternal(command: string): Promise<Safety> {
   try {
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
-    const safety = mergeSafety(
-      ...root.namedChildren.map(evaluateStatementSafety),
-    );
-    // tree-sitter follows `\<newline>` inside comments that bash does not:
-    // bash ends the comment at the raw newline and executes the following
-    // line as a separate command, while the tree swallows that line's words
-    // into the enclosing node (a `command`, or a `file_redirect` under
-    // `redirected_statement`). The swallowed argument list is not
-    // trustworthy, so any comment nested below statement position downgrades
-    // the verdict (#8582, #8590 review). Statement-position comments already
-    // evaluated to `unknown`; merging (instead of overriding) preserves a
-    // `write` verdict — plan mode distinguishes it from `unknown` (#8590
-    // review).
-    const hasNestedContinuationComment = collectDescendants(
-      root,
-      new Set(['comment']),
-    ).some((comment) => comment.text.endsWith('\\'));
-    return hasNestedContinuationComment
-      ? mergeSafety(safety, 'unknown')
-      : safety;
+    return mergeSafety(...root.namedChildren.map(evaluateStatementSafety));
   } finally {
     tree.delete();
   }
 }
-
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  const classification = await classifyInternal(command).catch(
-    (): ShellCommandSafety => 'unknown',
-  );
-  // Preserve `write`: plan mode distinguishes it from `unknown`.
-  return classification === 'read-only' && hasShellSubstitution(command)
-    ? 'unknown'
-    : classification;
+  return classifyInternal(command).catch(() => 'unknown');
 }
 
 /**
@@ -1189,7 +1132,6 @@ export async function isShellCommandReadOnlyAST(
   command: string,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
-  if (hasShellSubstitution(command)) return false;
 
   // If the WASM parser is permanently unavailable (e.g. WASM file missing
   // after a symlinked install), fall back to the regex-based checker so the

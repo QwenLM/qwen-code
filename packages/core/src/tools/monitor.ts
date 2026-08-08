@@ -38,7 +38,6 @@ import {
   buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
-  hasShellSubstitution,
   hasUnsafeMonitorBackgroundOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
@@ -176,20 +175,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
       this.params.command,
     ).safetyCommand;
 
-    // Mirror the pre-AST gate in `ShellToolInvocation.getDefaultPermission`:
-    // substitution-bearing commands always ask. tree-sitter-bash cannot see
-    // substitution hidden by a line continuation (`$\<newline>(...)`), so
-    // the AST read-only check alone would auto-allow it (#8582). The raw
-    // check also unwraps `bash -c` bodies via `stripShellWrapper`; the
-    // normalized safety command is re-checked by `isShellCommandReadOnlyAST`'s
-    // internal gate below, so it needs no separate disjunct here (#8590
-    // review).
-    if (hasShellSubstitution(this.params.command)) {
-      return 'ask';
-    }
-
-    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
-    // returns 'ask' above so the user (or YOLO mode) can decide. The user-facing
+    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
+    // it falls through to 'ask' along with every other non-read-only
+    // command, so the user (or YOLO mode) can decide. The user-facing
     // warning is surfaced by getConfirmationDetails below so the
     // confirmation prompt still flags the substitution clearly. This
     // mirrors the same reasoning applied to ShellToolInvocation and

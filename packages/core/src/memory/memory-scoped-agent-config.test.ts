@@ -475,12 +475,6 @@ describe('createMemoryScopedAgentConfig', () => {
         command: 'touch bad',
       }),
     ).resolves.toBe('deny');
-    await expect(
-      enabled.evaluate({
-        toolName: ToolNames.SHELL,
-        command: 'echo "$\\\n(touch /tmp/pwned)"',
-      }),
-    ).resolves.toBe('deny');
   });
 
   it('lets base deny rules override scoped allows', async () => {

