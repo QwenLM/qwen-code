@@ -14,6 +14,7 @@ import {
   getSessionRegistryDir,
   listLiveSessions,
   patchSessionRecord,
+  readOwnSessionRecord,
   registerSession,
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
@@ -367,4 +368,50 @@ describe('listLiveSessions', () => {
     const live = await listLiveSessions({ includeSelf: true });
     expect(live.map((r) => r.sessionId)).toEqual(['s-parent', 's-self']);
   });
+});
+
+describe('readOwnSessionRecord', () => {
+  it('returns null when this process never registered', async () => {
+    expect(await readOwnSessionRecord()).toBeNull();
+  });
+
+  it('returns the record this process actually wrote', async () => {
+    await registerSession({
+      sessionId: 's-self',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+    });
+
+    expect(await readOwnSessionRecord()).toMatchObject({
+      sessionId: 's-self',
+      pid: process.pid,
+    });
+  });
+
+  // A SIGKILLed session leaves its record behind and the PID is then
+  // recycled by a session that never registered. Filename and schema both
+  // still check out, so only the start token can tell the two apart.
+  it.skipIf(process.platform !== 'linux')(
+    'refuses a record left by an earlier process on our PID',
+    async () => {
+      const filePath = await writeRaw(`${process.pid}.json`, {
+        schemaVersion: 1,
+        pid: process.pid,
+        procStart: '1',
+        sessionId: 's-dead',
+        cwd: '/w/app',
+        name: 'app-aa',
+        kind: 'interactive',
+        startedAt: Date.now(),
+        ipcPath: '/tmp/dead.sock',
+      });
+
+      expect(await readOwnSessionRecord()).toBeNull();
+      // Enumeration hides it too, but must not delete it: our PID is alive,
+      // so nothing here proves the record dead.
+      expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+      await expect(fs.stat(filePath)).resolves.toBeDefined();
+    },
+  );
 });

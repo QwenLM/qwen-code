@@ -223,11 +223,24 @@ export async function patchSessionRecord(
  * The sending side needs it: a message carries this session's reply
  * address and display name, and both live here rather than being
  * threaded down from the UI layer.
+ *
+ * Provenance is checked, not assumed. A record filed under our PID is
+ * not necessarily ours: a session that was SIGKILLed leaves its record
+ * behind, and the PID can then be recycled by a session that never
+ * registered (`registerSession` tolerates ENOSPC/EROFS, and headless
+ * runs skip it). Without this check that session would adopt the dead
+ * one's identity — passing the peer-send gate on the dead `ipcPath`
+ * and stamping frames with the dead `from`/`fromName`, so replies and
+ * receipts dial a socket nobody is listening on. On platforms with no
+ * start token this degrades to the previous trust-by-PID behaviour,
+ * which is all the platform can support.
  */
 export async function readOwnSessionRecord(
   pid: number = process.pid,
 ): Promise<SessionRegistryRecord | null> {
-  return readRecord(getSessionRecordPath(pid));
+  const record = await readRecord(getSessionRecordPath(pid));
+  if (record === null) return null;
+  return isSameProcess(record.pid, record.procStart) ? record : null;
 }
 
 /** Remove this process's record. Safe to call when none was written. */
@@ -297,9 +310,15 @@ export async function listLiveSessions(
         if (`${record.pid}.json` !== name) return;
 
         if (record.pid === selfPid) {
-          // Trust our own record without probing: `isSameProcess` on self
-          // is always true, and the token read is pure overhead.
-          if (includeSelf) live.push(record);
+          // Never sweep a record filed under our own PID: that PID is
+          // alive by definition, so nothing here can prove the record
+          // dead, and deleting it would race a sibling that legitimately
+          // owns it. Enumeration still has to check provenance — a
+          // recycled PID means the record may predate this process (see
+          // `readOwnSessionRecord`) — it just declines to delete it.
+          if (includeSelf && isSameProcess(record.pid, record.procStart)) {
+            live.push(record);
+          }
           return;
         }
 
