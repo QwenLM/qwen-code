@@ -28,55 +28,117 @@ interface SessionLine {
   message?: { role?: string; parts?: SessionPart[] };
 }
 
-export function transcriptToEvents(jsonl: string): StreamEvent[] {
+export interface TranscribeOptions {
+  /** Maps a raw tool name to a display title (e.g. registry displayName). */
+  toolTitle?: (name: string) => string | undefined;
+}
+
+export interface TranscriptResult {
+  events: StreamEvent[];
+  prompts: string[];
+}
+
+export function transcriptToEvents(
+  jsonl: string,
+  opts: TranscribeOptions = {},
+): StreamEvent[] {
+  return transcribeSession(jsonl, opts).events;
+}
+
+export function transcribeSession(
+  jsonl: string,
+  opts: TranscribeOptions = {},
+): TranscriptResult {
   const events: StreamEvent[] = [];
+  const prompts: string[] = [];
   let toolSeq = 0;
   for (const line of jsonl.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let o: SessionLine;
+    const t = line.trim();
+    if (!t) continue;
+    let o: SessionLine & {
+      subtype?: string;
+      systemPayload?: { phase?: string; rawCommand?: string };
+      toolCallResult?: {
+        callId?: string;
+        status?: string;
+        resultDisplay?: unknown;
+      };
+    };
     try {
-      o = JSON.parse(trimmed) as SessionLine;
+      o = JSON.parse(t) as typeof o;
     } catch {
       continue;
     }
     const parts = o.message?.parts ?? [];
     if (o.type === 'user') {
+      if (o.subtype) continue; // skip subtyped user records (goal_runtime etc.)
       const text = parts
         .filter((p) => p.text && !p.thought)
         .map((p) => p.text as string)
         .join('');
-      if (text) events.push({ type: 'user', text });
+      if (text) {
+        events.push({ type: 'user', text });
+        prompts.push(text);
+      }
+      continue;
+    }
+    if (o.type === 'system') {
+      if (o.subtype === 'slash_command' && o.systemPayload?.rawCommand) {
+        const cmd = o.systemPayload.rawCommand;
+        events.push({ type: 'user', text: cmd });
+        prompts.push(cmd);
+      }
+      continue;
+    }
+    if (o.type === 'tool_result') {
+      const r = o.toolCallResult ?? {};
+      const id = r.callId ?? `tool-${++toolSeq}`;
+      if (r.resultDisplay) {
+        events.push({
+          type: 'tool-output',
+          id,
+          delta: String(r.resultDisplay),
+        });
+      }
+      const ok = (r.status ?? 'success') !== 'error';
+      events.push({
+        type: 'tool-end',
+        id,
+        success: ok,
+        summary: ok ? 'ok' : 'error',
+      });
       continue;
     }
     if (o.type === 'assistant') {
+      let sawThought = false;
+      let closed = false;
       for (const p of parts) {
         if (p.thought && p.text) {
           events.push({ type: 'thinking', delta: p.text });
-        } else if (p.functionCall) {
-          events.push({
-            type: 'tool-start',
-            id: p.functionCall.id ?? `tool-${++toolSeq}`,
-            tool: p.functionCall.name ?? 'tool',
-            title: p.functionCall.name ?? 'tool',
-          });
-        } else if (p.functionResponse) {
-          events.push({
-            type: 'tool-end',
-            id: p.functionResponse.id ?? `tool-${toolSeq}`,
-            success: true,
-            summary: 'ok',
-          });
-        } else if (p.text) {
-          events.push({ type: 'text', delta: p.text });
+          sawThought = true;
+        } else {
+          if (sawThought && !closed) {
+            events.push({ type: 'thinking-end' });
+            closed = true;
+          }
+          if (p.functionCall) {
+            const name = p.functionCall.name ?? 'tool';
+            events.push({
+              type: 'tool-start',
+              id: p.functionCall.id ?? `tool-${++toolSeq}`,
+              tool: name,
+              title: opts.toolTitle?.(name) ?? name,
+            });
+          } else if (p.text) {
+            events.push({ type: 'text', delta: p.text });
+          }
         }
       }
-      // close thought between assistant turns
-      events.push({ type: 'thinking-end' });
+      if (sawThought && !closed) events.push({ type: 'thinking-end' });
     }
   }
   events.push({ type: 'done' });
-  return events;
+  return { events, prompts };
 }
 
 export function loadTranscriptEvents(path: string): StreamEvent[] {
