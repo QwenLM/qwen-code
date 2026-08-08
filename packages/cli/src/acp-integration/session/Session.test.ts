@@ -51,7 +51,6 @@ import type {
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
-import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../../serve/live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../../serve/live/live-speak-to-user.js';
@@ -384,6 +383,7 @@ describe('Session', () => {
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordUserMessage: ReturnType<typeof vi.fn>;
+    recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
@@ -394,6 +394,7 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    flush: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -438,6 +439,16 @@ describe('Session', () => {
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
   };
+  let mockGoalRuntime: {
+    getSnapshot: ReturnType<typeof vi.fn>;
+    subscribe: ReturnType<typeof vi.fn>;
+    beginTurn: ReturnType<typeof vi.fn>;
+    releaseTurn: ReturnType<typeof vi.fn>;
+    permitForTurn: ReturnType<typeof vi.fn>;
+    getVerifierFeedback: ReturnType<typeof vi.fn>;
+    finishTurn: ReturnType<typeof vi.fn>;
+  };
+  let boundGoalHost: core.GoalTurnHost | undefined;
 
   function mockConfirmingTool(
     name: string,
@@ -609,6 +620,7 @@ describe('Session', () => {
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
+      recordGoalRuntimeMessage: vi.fn(),
       recordMidTurnUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
@@ -619,7 +631,22 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      flush: vi.fn().mockResolvedValue(undefined),
     };
+    mockGoalRuntime = {
+      getSnapshot: vi.fn().mockReturnValue({
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      }),
+      subscribe: vi.fn().mockReturnValue(() => {}),
+      beginTurn: vi.fn(),
+      releaseTurn: vi.fn().mockResolvedValue(false),
+      permitForTurn: vi.fn(),
+      getVerifierFeedback: vi.fn(),
+      finishTurn: vi.fn().mockResolvedValue(undefined),
+    };
+    boundGoalHost = undefined;
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
       getSnapshots: vi.fn().mockReturnValue([]),
@@ -702,6 +729,14 @@ describe('Session', () => {
       // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
+      bindGoalTurnHost: vi.fn().mockImplementation((host) => {
+        boundGoalHost = host;
+        return () => {
+          if (boundGoalHost === host) boundGoalHost = undefined;
+        };
+      }),
       getBackgroundTaskRegistry: vi
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
@@ -13277,204 +13312,435 @@ describe('Session', () => {
         });
       });
 
-      it('keeps goal terminal observer after ACP /goal set', async () => {
+      it('emits canonical Goal state for an ACP /goal status query', async () => {
+        const snapshot: core.GoalSnapshotV2 = {
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
         ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
+          type: 'goal_control',
+          operation: { kind: 'status' },
+          response: { snapshot },
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/goal' }],
+        });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: snapshot,
+            },
+          },
+        });
+      });
+
+      it('publishes a mutating ACP /goal result only through the runtime subscription', async () => {
+        const snapshot: core.GoalSnapshotV2 = {
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
+        const listener = mockGoalRuntime.subscribe.mock.calls[0]?.[0] as (
+          snapshot: core.GoalSnapshotV2,
+          cause?: core.GoalStateCause,
+        ) => void;
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          listener(snapshot, 'create');
+          return {
+            type: 'goal_control',
+            operation: { kind: 'set', objective: 'check weather' },
+            response: { snapshot },
+            cause: 'create',
+          };
+        });
 
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: '/goal check weather' }],
         });
-
-        core.notifyGoalTerminal('test-session-id', {
-          kind: 'achieved',
-          condition: 'check weather',
-          iterations: 1,
-          durationMs: 5000,
-          lastReason: 'Weather checked.',
-        });
-
         await vi.waitFor(() => {
-          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-            sessionId: 'test-session-id',
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: '' },
-              _meta: {
-                goalTerminal: {
-                  kind: 'achieved',
-                  condition: 'check weather',
-                  iterations: 1,
-                  durationMs: 5000,
-                  lastReason: 'Weather checked.',
-                },
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: snapshot,
+              goalStatus: {
+                kind: 'set',
+                condition: 'check weather',
+                iterations: 0,
+                setAt: 1234,
+                durationMs: 0,
               },
             },
-          });
-        });
-      });
-
-      const recordedGoalCards = () =>
-        mockChatRecordingService.recordSlashCommand.mock.calls
-          .map((call) => call[0] as { outputHistoryItems?: unknown[] })
-          .flatMap((payload) => payload.outputHistoryItems ?? [])
-          .filter(
-            (item) =>
-              (item as { type?: string }).type === MessageType.GOAL_STATUS,
-          );
-
-      it('persists a cleared card, so resume cannot revive a goal the user dropped', () => {
-        // The `sessionGoalClear` ext method reaches the transcript through this
-        // method. Without the record, the last persisted card stays `set` and
-        // the next resume re-registers a goal the user explicitly cleared.
-        session.emitGoalStatus({
-          kind: 'cleared',
-          condition: 'check weather',
-          iterations: 2,
-          durationMs: 5000,
-        });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'cleared',
-            condition: 'check weather',
-            iterations: 2,
-            durationMs: 5000,
           },
-        ]);
+        });
       });
 
-      it('persists the cleared card when /goal clear arrives as a prompt', async () => {
-        // The web shell clears via the `sessionGoalClear` ext method, but an ACP
-        // client (Zed) can send `/goal clear` as a prompt. That returns a
-        // `message` result, whose `outputHistoryItems` still carry the cleared
-        // card — `#emitGoalStatusItems` runs before the switch — so the card is
-        // persisted on this path too.
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'message',
-          messageType: 'info',
-          content: 'Goal cleared: check weather',
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'cleared',
-              condition: 'check weather',
-              iterations: 2,
-              durationMs: 5000,
-            },
-          ],
-        });
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal clear' }],
-        });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'cleared',
-            condition: 'check weather',
-            iterations: 2,
-            durationMs: 5000,
+      it('preserves canonical Goal state publication order', async () => {
+        const listener = mockGoalRuntime.subscribe.mock.calls[0]?.[0] as (
+          snapshot: core.GoalSnapshotV2,
+          cause?: core.GoalStateCause,
+        ) => void;
+        let releaseFirst!: () => void;
+        const publishedActivities: string[] = [];
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async (params) => {
+            publishedActivities.push(
+              params.update._meta?.['goalState']?.activity ?? 'missing',
+            );
+            if (publishedActivities.length === 1) {
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+            }
           },
-        ]);
+        );
+        const goal = {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'check weather',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        };
+
+        listener({ v: 2, activity: 'idle', goal }, 'create');
+        listener({ v: 2, activity: 'running', goal }, 'turn_finished');
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+        });
+        releaseFirst();
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+        });
+        expect(publishedActivities).toEqual(['idle', 'running']);
       });
 
-      it('persists the goal card so a resumed session can restore the hook', async () => {
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
+      it('runs a host-scheduled Goal turn with the canonical permit', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-1',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
         });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-1' ? permit : undefined,
+        );
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValue(createEmptyStream());
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal check weather' }],
-        });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'set',
-            condition: 'check weather',
-            setAt: 1234,
-          },
-        ]);
-      });
-
-      it('persists the terminal goal card so resume does not revive a finished goal', async () => {
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
-        });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal check weather' }],
-        });
-
-        core.notifyGoalTerminal('test-session-id', {
-          kind: 'achieved',
-          condition: 'check weather',
-          iterations: 1,
-          durationMs: 5000,
-          lastReason: 'Weather checked.',
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
         });
 
         await vi.waitFor(() => {
-          expect(recordedGoalCards()).toContainEqual({
-            type: MessageType.GOAL_STATUS,
-            kind: 'achieved',
-            condition: 'check weather',
-            iterations: 1,
-            durationMs: 5000,
-            lastReason: 'Weather checked.',
-          });
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
         });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          currentModel,
+          expect.objectContaining({
+            message: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Continue working on the active Goal.',
+                ),
+              }),
+            ]),
+          }),
+          expect.any(String),
+          permit,
+        );
+        expect(
+          mockChatRecordingService.recordGoalRuntimeMessage,
+        ).toHaveBeenCalledWith(expect.any(Array), permit);
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+      });
+
+      it('drains a queued Goal turn after a background notification settles', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-after-notification',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+        let releaseNotification!: () => void;
+        const notificationGate = new Promise<void>((resolve) => {
+          releaseNotification = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            (async function* () {
+              await notificationGate;
+              yield* [];
+            })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        const notificationCallback = mockBackgroundTaskRegistry
+          .setNotificationCallback.mock.calls[0]?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+
+        notificationCallback(
+          'Background task completed.',
+          'background result',
+          { agentId: 'agent-1', status: 'completed' },
+        );
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await Promise.resolve();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+        releaseNotification();
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+          2,
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          permit,
+        );
+      });
+
+      it('admits an ordinary ACP prompt into the active Goal turn', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn-1',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.beginTurn.mockReturnValue(permit);
+        mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockGoalRuntime.beginTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          permit,
+        );
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'hello',
+          permit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+
+      it('gives a new user prompt priority over an automatic Goal turn', async () => {
+        session.dispose();
+        const automaticPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'automatic-turn',
+        };
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn',
+        };
+        let currentTurnKey = 'goal-runtime:automatic-turn';
+        let queuedTurnKey: string | undefined;
+        const listeners: Array<() => void> = [];
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.subscribe.mockImplementation((listener: () => void) => {
+          listeners.push(listener);
+          return () => {
+            const index = listeners.indexOf(listener);
+            if (index >= 0) listeners.splice(index, 1);
+          };
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === currentTurnKey
+            ? currentTurnKey.startsWith('goal-runtime:')
+              ? automaticPermit
+              : userPermit
+            : undefined,
+        );
+        mockGoalRuntime.beginTurn.mockImplementation((turnKey: string) => {
+          queuedTurnKey = turnKey;
+          return undefined;
+        });
+        mockGoalRuntime.finishTurn.mockImplementation(async (permit) => {
+          if (permit.turnId === automaticPermit.turnId) {
+            currentTurnKey = queuedTurnKey!;
+            queuedTurnKey = undefined;
+            for (const listener of [...listeners]) listener();
+          }
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            async (_model, request: { config: { abortSignal: AbortSignal } }) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* createEmptyStream();
+              })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit: automaticPermit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+
+        expect(mockGoalRuntime.beginTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+          2,
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          userPermit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
+          automaticPermit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });
     });
 
