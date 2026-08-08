@@ -11,6 +11,7 @@ import {
   matchTurnEvent,
   normalizePendingPromptLimit,
   type CreateSessionRequest,
+  type DaemonSseConnectReason,
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
@@ -24,6 +25,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -106,7 +108,11 @@ export interface DaemonSessionClientOptions {
   maxPendingPromptsPerSession?: number | null;
 }
 
-export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
+export interface DaemonSessionSubscribeOptions
+  extends Omit<
+    SubscribeOptions,
+    'clientId' | 'previousSseStreamId' | 'onSseStreamAccepted'
+  > {
   /**
    * Reuse this client's last seen SSE event id when `lastEventId` is not
    * supplied. Defaults to true so reconnecting client adapters get replay
@@ -154,6 +160,8 @@ export class DaemonSessionClient {
    * subscription's `X-Qwen-Event-Epoch` response header.
    */
   private lastSeenEpoch: string | undefined;
+  private hasAcceptedRestStream = false;
+  private lastAcceptedRestStreamId: string | undefined;
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
@@ -613,6 +621,14 @@ export class DaemonSessionClient {
     });
   }
 
+  async removeMidTurnMessage(
+    messageId: string,
+  ): Promise<DaemonRemoveMidTurnMessageResult> {
+    return await this.client.removeMidTurnMessage(this.sessionId, messageId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
   async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
     return await this.client.getPendingPrompts(this.sessionId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
@@ -808,7 +824,17 @@ export class DaemonSessionClient {
     release: () => void,
   ): AsyncGenerator<DaemonEvent, void, unknown> {
     try {
-      const { resume = true, ...subscribeOpts } = opts;
+      const {
+        resume = true,
+        sseConnectReason: requestedConnectReason,
+        ...sessionSubscribeOpts
+      } = opts;
+      // `Omit` protects TypeScript callers; sanitize the runtime object too so
+      // untyped JavaScript cannot override session-owned REST stream identity.
+      const subscribeOpts: SubscribeOptions = { ...sessionSubscribeOpts };
+      delete subscribeOpts.clientId;
+      delete subscribeOpts.previousSseStreamId;
+      delete subscribeOpts.onSseStreamAccepted;
       const lastEventId =
         subscribeOpts.lastEventId ??
         (resume ? this.lastSeenEventId : undefined);
@@ -817,10 +843,29 @@ export class DaemonSessionClient {
       const epoch =
         subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
       const callerOnEpoch = subscribeOpts.onEpoch;
+      const restSubscription = this.client.transport.type === 'rest';
+      if (!restSubscription) {
+        this.hasAcceptedRestStream = false;
+        this.lastAcceptedRestStreamId = undefined;
+      }
+      const sseConnectReason: DaemonSseConnectReason =
+        requestedConnectReason ??
+        (this.hasAcceptedRestStream ? 'resume' : 'initial');
 
       for await (const event of this.client.subscribeEvents(this.sessionId, {
         ...subscribeOpts,
         lastEventId,
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+        sseConnectReason,
+        ...(this.lastAcceptedRestStreamId
+          ? {
+              previousSseStreamId: this.lastAcceptedRestStreamId,
+            }
+          : {}),
+        onSseStreamAccepted: (streamId: string | undefined) => {
+          this.hasAcceptedRestStream = true;
+          this.lastAcceptedRestStreamId = streamId;
+        },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
           this.lastSeenEpoch = learned;

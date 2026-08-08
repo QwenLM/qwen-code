@@ -17,7 +17,11 @@ import {
   type SessionTranscriptCursorState,
   type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
-import { EventBus, type BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  EventBus,
+  type BridgeEvent,
+  type EventBusSubscriberDiagnostic,
+} from '@qwen-code/acp-bridge/eventBus';
 import { createTranscriptMessageUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
 import { replayTranscriptRecordPage } from '../acp-integration/session/history-replay-page.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
@@ -29,6 +33,15 @@ const TARGET_RETENTION_MS = 60_000;
 interface VirtualSubagentSessionKey {
   parentSessionId: string;
   agentId: string;
+}
+
+interface VirtualSubagentSubscribeOptions {
+  signal: AbortSignal;
+  lastEventId?: number;
+  maxQueued?: number;
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
 }
 
 interface ResolvedAgentTask {
@@ -649,11 +662,9 @@ class VirtualSubagentTarget {
     };
   }
 
-  private async *iterate(opts: {
-    signal: AbortSignal;
-    lastEventId?: number;
-    maxQueued?: number;
-  }): AsyncIterableIterator<BridgeEvent> {
+  private async *iterate(
+    opts: VirtualSubagentSubscribeOptions,
+  ): AsyncIterableIterator<BridgeEvent> {
     if (this.retentionTimer) {
       clearTimeout(this.retentionTimer);
       this.retentionTimer = undefined;
@@ -682,11 +693,7 @@ class VirtualSubagentTarget {
     }
   }
 
-  subscribe(opts: {
-    signal: AbortSignal;
-    lastEventId?: number;
-    maxQueued?: number;
-  }): AsyncIterable<BridgeEvent> {
+  subscribe(opts: VirtualSubagentSubscribeOptions): AsyncIterable<BridgeEvent> {
     return {
       [Symbol.asyncIterator]: () => this.iterate(opts),
     };
@@ -735,10 +742,8 @@ export class VirtualSubagentSessions {
       };
     }
 
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
+    const projectDir = Storage.runWithResolvedRuntimeBaseDir(
+      runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
     const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
@@ -785,10 +790,8 @@ export class VirtualSubagentSessions {
   ): Promise<ResolvedAgentTask | undefined> {
     // Pre-toolUseId transcripts cannot be linked exactly. This score is only a
     // best-effort compatibility path and identical parallel launches may tie.
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
+    const projectDir = Storage.runWithResolvedRuntimeBaseDir(
+      runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
     const parentRecords = await readJsonl<ChatRecord>(
@@ -882,10 +885,8 @@ export class VirtualSubagentSessions {
     parentSessionId: string,
     toolCallId: string,
   ): Promise<ToolCallMetrics> {
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
+    const projectDir = Storage.runWithResolvedRuntimeBaseDir(
+      runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
     const records = await readJsonl<ChatRecord>(
@@ -903,6 +904,9 @@ export class VirtualSubagentSessions {
       runtime,
       parentSessionId,
       (candidate) =>
+        // /fork has no parent transcript tool call, so its task ID is the
+        // stable reference used by Web Shell.
+        candidate.id === toolCallId ||
         candidate.toolUseId === toolCallId ||
         candidate.id.endsWith(`-${toolCallId}`),
     );
@@ -973,7 +977,7 @@ export class VirtualSubagentSessions {
   async subscribe(
     runtime: WorkspaceRuntime,
     sessionId: string,
-    opts: { signal: AbortSignal; lastEventId?: number; maxQueued?: number },
+    opts: VirtualSubagentSubscribeOptions,
   ): Promise<AsyncIterable<BridgeEvent> | undefined> {
     return (await this.getTarget(runtime, sessionId))?.subscribe(opts);
   }

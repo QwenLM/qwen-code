@@ -108,8 +108,20 @@ describe('BackgroundAgentResumeService', () => {
     // mocks the override helper throws and every resume test fails.
     const stubToolRegistry = {
       copyDiscoveredToolsFrom: vi.fn(),
+      registerFactory: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
-      getAllToolNames: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi
+        .fn()
+        .mockReturnValue(
+          (
+            options.currentForkRuntime?.registeredTools ??
+            options.currentForkRuntime?.advertisedTools ??
+            []
+          )
+            .map((declaration) => declaration.name)
+            .filter((name): name is string => Boolean(name)),
+        ),
+      getTool: vi.fn(),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
       getDeferredToolSummary: vi
@@ -2028,11 +2040,38 @@ describe('BackgroundAgentResumeService', () => {
         },
         tools: [{ name: 'Bash' }, { name: 'mcp__removed__search' }],
       },
+      executionAllowedTools: ['Read', ToolNames.ASK_USER_QUESTION] as
+        | string[]
+        | undefined,
+      includeDisplayImage: false,
+      deniedTool: 'Edit',
+      expectedExecutionAllowedTools: ['Read'],
     },
-    { format: 'history-only bootstrap', legacyCapabilities: {} },
+    {
+      format: 'history-only bootstrap',
+      legacyCapabilities: {},
+      executionAllowedTools: undefined as string[] | undefined,
+      includeDisplayImage: false,
+      deniedTool: ToolNames.ASK_USER_QUESTION,
+      expectedExecutionAllowedTools: ['Read', 'Edit'],
+    },
+    {
+      format: 'legacy fork without a persisted display policy',
+      legacyCapabilities: {},
+      executionAllowedTools: undefined as string[] | undefined,
+      includeDisplayImage: true,
+      deniedTool: ToolNames.DISPLAY_IMAGE,
+      expectedExecutionAllowedTools: ['Read', 'Edit'],
+    },
   ])(
     'resumes fork agents with the current parent prompt and live tool registry ($format)',
-    async ({ legacyCapabilities }) => {
+    async ({
+      legacyCapabilities,
+      executionAllowedTools,
+      includeDisplayImage,
+      deniedTool,
+      expectedExecutionAllowedTools,
+    }) => {
       const sessionId = 'session-fork-resume';
       const agentId = 'agent-fork-resume';
       const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -2049,6 +2088,9 @@ describe('BackgroundAgentResumeService', () => {
         status: 'running',
         subagentName: FORK_SUBAGENT_TYPE,
         resolvedApprovalMode: 'default',
+        ...(executionAllowedTools !== undefined
+          ? { executionAllowedTools }
+          : {}),
       });
       fs.writeFileSync(
         outputFile,
@@ -2113,38 +2155,88 @@ describe('BackgroundAgentResumeService', () => {
         isBackgrounded: true,
       });
 
-      const execute = vi.fn(async (_context: unknown) => undefined);
-      const subagent = {
-        execute,
-        setExternalMessageProvider: vi.fn(),
-        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-        getExecutionSummary: () => ({
-          totalTokens: 0,
-          outputTokens: 0,
-          totalDurationMs: 0,
-        }),
-        getTerminateMode: () => AgentTerminateMode.GOAL,
-        getFinalText: () => 'done',
-      };
-
+      const originalCreate = AgentHeadless.create;
+      let executeContext: unknown;
+      let deniedError: unknown;
       const createSpy = vi
         .spyOn(AgentHeadless, 'create')
-        .mockResolvedValue(subagent as unknown as AgentHeadless);
+        .mockImplementation(async (...args) => {
+          const subagent = await originalCreate(...args);
+          vi.spyOn(subagent, 'execute').mockImplementation(async (context) => {
+            executeContext = context;
+            const denial = await subagent
+              .getCore()
+              .processFunctionCalls(
+                [{ id: 'call-denied', name: deniedTool, args: {} }],
+                new AbortController(),
+                'resume-policy-test',
+                1,
+                [
+                  { name: 'Read' },
+                  ...(includeDisplayImage
+                    ? [{ name: ToolNames.DISPLAY_IMAGE }]
+                    : []),
+                  { name: 'Edit' },
+                  { name: ToolNames.ASK_USER_QUESTION },
+                ],
+              );
+            deniedError =
+              denial.messages[0]?.parts?.[0]?.functionResponse?.response?.[
+                'error'
+              ];
+          });
+          vi.spyOn(subagent, 'getTerminateMode').mockReturnValue(
+            AgentTerminateMode.GOAL,
+          );
+          vi.spyOn(subagent, 'getFinalText').mockReturnValue('done');
+          return subagent;
+        });
       const currentSystemInstruction: Content = {
         role: 'system',
         parts: [{ text: 'current parent system instruction' }],
       };
-      const { service, subagentManager } = createService({
+      const { service, subagentManager, stubToolRegistry } = createService({
         currentForkRuntime: {
           systemInstruction: currentSystemInstruction,
           advertisedTools: [
             { name: 'Read', description: 'advertised current schema' },
+            ...(includeDisplayImage
+              ? [
+                  {
+                    name: ToolNames.DISPLAY_IMAGE,
+                    description: 'advertised display schema',
+                  },
+                ]
+              : []),
+            { name: 'Edit', description: 'advertised edit schema' },
+            {
+              name: ToolNames.ASK_USER_QUESTION,
+              description: 'advertised interactive question schema',
+            },
             { name: 'mcp__removed__search' },
           ],
           registeredTools: [
             { name: 'Read', description: 'registered current schema' },
+            ...(includeDisplayImage
+              ? [
+                  {
+                    name: ToolNames.DISPLAY_IMAGE,
+                    description: 'registered display schema',
+                  },
+                ]
+              : []),
+            { name: 'Edit', description: 'registered edit schema' },
+            {
+              name: ToolNames.ASK_USER_QUESTION,
+              description: 'registered interactive question schema',
+            },
           ],
         },
+      });
+      const deniedBuild = vi.fn();
+      stubToolRegistry.getTool.mockReturnValue({
+        name: 'Edit',
+        build: deniedBuild,
       });
       const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
@@ -2166,12 +2258,16 @@ describe('BackgroundAgentResumeService', () => {
         max_turns: FORK_DEFAULT_MAX_TURNS,
       });
       expect(createArgs?.[5]).toEqual({
-        tools: ['Read'],
+        tools: [
+          'Read',
+          ...(includeDisplayImage ? [ToolNames.DISPLAY_IMAGE] : []),
+          'Edit',
+          ToolNames.ASK_USER_QUESTION,
+        ],
+        executionAllowedTools: expectedExecutionAllowedTools,
       });
-      expect(execute).toHaveBeenCalledTimes(1);
-      const executeCall = execute.mock.calls[0];
-      expect(executeCall).toBeDefined();
-      const contextArg = executeCall?.[0] as
+      expect(executeContext).toBeDefined();
+      const contextArg = executeContext as
         | { get(key: string): unknown }
         | undefined;
       expect(contextArg).toBeDefined();
@@ -2182,6 +2278,16 @@ describe('BackgroundAgentResumeService', () => {
         'Earlier capability listings in the conversation history are obsolete',
       );
       expect(contextArg.get('task_prompt')).toContain('continue');
+      expect(deniedError).toContain('execution allowlist');
+      expect(deniedError).not.toContain('not found');
+      expect(stubToolRegistry.getTool).not.toHaveBeenCalled();
+      expect(deniedBuild).not.toHaveBeenCalled();
+      if (includeDisplayImage) {
+        expect(stubToolRegistry.registerFactory).toHaveBeenCalledWith(
+          ToolNames.DISPLAY_IMAGE,
+          expect.any(Function),
+        );
+      }
       createSpy.mockRestore();
     },
   );

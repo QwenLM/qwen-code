@@ -18,11 +18,14 @@ import { glob as globAsync } from 'glob';
 // don't repeat the regression.
 
 import {
+  CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
   StandardFileSystemService,
+  TextScanBudgetExceededError,
   decodeBufferWithEncodingInfoAsync,
   detectLineEnding,
   encodeTextFileContentAsync,
+  isUtf8CompatibleEncoding,
   loadIgnoreRules,
   isWithinRoot,
   type Ignore,
@@ -37,6 +40,11 @@ import {
 } from './audit.js';
 import { FsError, wrapAsFsError, type FsErrorKind } from './errors.js';
 import {
+  assertCursorMatchesFile,
+  decodeTextCursor,
+  encodeTextCursor,
+} from './text-cursor.js';
+import {
   canonicalizeWorkspaces,
   resolveWithinWorkspace,
   type Intent,
@@ -45,6 +53,7 @@ import {
 import {
   BINARY_PROBE_BYTES,
   MAX_READ_BYTES,
+  MAX_TEXT_SCAN_BYTES,
   assertTrustedForIntent,
   enforceReadSize,
   enforceWriteSize,
@@ -83,11 +92,33 @@ export interface ReadMeta {
   truncated?: boolean;
   matchedIgnore?: 'file' | 'directory';
   originalLineCount?: number;
+  /**
+   * Resume token for the next page. Present only when content remains *and* a
+   * file byte offset is derivable — a non-UTF-8 snapshot read has more to give
+   * but cannot be paged by byte, which is why `hasMore` is a separate field
+   * rather than a restatement of this one.
+   */
+  nextCursor?: string;
+  /** Whether content remains beyond what was returned, for any reason. */
+  hasMore?: boolean;
 }
 
+/**
+ * Above `MAX_READ_BYTES` at least one of these must be set. Any of them is
+ * the caller stating it accepts partial content, which is all the streamed
+ * path returns; with none of them the read is refused rather than silently
+ * handing back a truncated "whole file". Which one is set does not affect
+ * cost — that is bounded by `MAX_TEXT_SCAN_BYTES`.
+ */
 export interface ReadTextOptions {
   /** Returned-byte cap in [1, MAX_READ_BYTES]; defaults to MAX_READ_BYTES. */
   maxBytes?: number;
+  /**
+   * Opaque resume token from a previous read's `meta.nextCursor`. Mutually
+   * exclusive with `line` — both name a starting point. Reaches any offset in
+   * O(1), where `line` must scan from byte 0.
+   */
+  cursor?: string;
   /**
    * 1-based starting line for partial reads. `1` returns the file
    * from its first line. The boundary converts to the 0-based slice
@@ -471,6 +502,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         throw new FsError(
           'parse_error',
           `limit must be a positive integer, got ${opts.limit}`,
+        );
+      }
+      // Both name a starting point; honouring one and ignoring the other
+      // would silently return the wrong window.
+      if (opts.cursor !== undefined && opts.line !== undefined) {
+        throw new FsError(
+          'parse_error',
+          'cursor and line are mutually exclusive; a cursor already encodes where to resume',
         );
       }
       if (
@@ -1375,13 +1414,34 @@ async function readTextFromResolvedFile(
     throw new FsError('parse_error', `path is not a regular file: ${p}`);
   }
 
-  if (pre.size > MAX_READ_BYTES && opts.limit !== undefined) {
-    return readLargeTextWindowFromResolvedFile(
-      p,
-      pre,
-      { ...opts, limit: opts.limit },
-      lowFs,
-    );
+  // Any explicit window argument is the caller stating it accepts partial
+  // content, which is what the large-file path returns. Gating on `limit`
+  // alone got this backwards in both directions: `{ line: 900_000_000,
+  // limit: 20 }` was admitted despite costing a full scan, while
+  // `{ maxBytes: 4096 }` — satisfiable from the first 4 KiB — was refused.
+  // Cost is bounded by MAX_TEXT_SCAN_BYTES, not by which knob was set.
+  //
+  // A read with no window argument at all still fails: an agent that
+  // believes it holds the whole file may write it back truncated. The
+  // omitted `hash` blocks that for `editText`/`writeTextAtomic`, but
+  // `writeTextOverwrite` takes no hash, so `truncated: true` is the only
+  // signal on that path — refusing the unbounded read keeps the caller
+  // from ever being in that position by accident.
+  // Cursor reads branch before the size check, not by widening `wantsWindow`.
+  // Adding `cursor` there would fix only large files: a cursor read of a file
+  // *under* MAX_READ_BYTES would still land on the snapshot path, which knows
+  // only `line`/`limit` and would silently ignore the cursor and return from
+  // line 0 — a wrong answer, worse than the refusal the large case would give.
+  if (opts.cursor !== undefined) {
+    return readTextCursorWindowFromResolvedFile(p, pre, opts, lowFs);
+  }
+
+  const wantsWindow =
+    opts.limit !== undefined ||
+    opts.maxBytes !== undefined ||
+    opts.line !== undefined;
+  if (pre.size > MAX_READ_BYTES && wantsWindow) {
+    return readLargeTextWindowFromResolvedFile(p, pre, opts, lowFs);
   }
   return readTextSnapshotFromResolvedFile(p, opts, pre);
 }
@@ -1430,10 +1490,16 @@ async function readTextSnapshotFromResolvedFile(
   const maxOutputBytes = opts.maxBytes ?? MAX_READ_BYTES;
   const sizeOutcome = enforceReadSize(raw.length, maxOutputBytes);
   let content = sliced.content;
+  let byteTruncated = false;
   const meta: TextSnapshot['meta'] = {
     encoding: decoded.encoding,
     bom: decoded.bom,
-    lineEnding: detectLineEnding(content),
+    // Detected across the whole decoded file, not the returned slice. A slice
+    // holding one CRLF line arrives as text ending in '\r' with the '\n'
+    // consumed as its terminator, so testing the slice reports 'lf' — and one
+    // page of a cursor sequence would then disagree with the next about the
+    // same file.
+    lineEnding: detectLineEnding(decoded.content),
     sizeBytes: raw.length,
     originalLineCount: sliced.originalLineCount,
     hash: hashBuffer(raw),
@@ -1442,8 +1508,8 @@ async function readTextSnapshotFromResolvedFile(
   const output = Buffer.from(content, 'utf-8');
   if (output.length > maxOutputBytes) {
     content = safeUtf8Truncate(output, maxOutputBytes).toString('utf-8');
-    meta.lineEnding = detectLineEnding(content);
     meta.truncated = true;
+    byteTruncated = true;
   }
   if (sizeOutcome.truncated) {
     meta.truncated = true;
@@ -1457,30 +1523,231 @@ async function readTextSnapshotFromResolvedFile(
     meta.truncated = true;
   }
 
+  const pageableLineCount =
+    sliced.originalLineCount - (decoded.content.endsWith('\n') ? 1 : 0);
+  meta.hasMore = byteTruncated || sliced.endLine < pageableLineCount;
+  // A byte offset into the file is only derivable when the decoded text and
+  // the file agree byte-for-byte. For GBK, Shift_JIS, or UTF-16 the decoded
+  // string is a UTF-8 re-encoding whose lengths are unrelated to the file's,
+  // so a cursor built from it would point at the wrong byte. Such a read still
+  // reports `hasMore` honestly — it has more to give, it just cannot be paged.
+  // A byte-truncated slice ends mid-line, so there is no line start to resume
+  // from; `hasMore` still says content remains. Every cursor this boundary
+  // mints points at a line start, so a client following cursors never skips
+  // the tail of a line it was only shown part of.
+  const bomBytes = decoded.bom ? 3 : 0;
+  const decodedBytesMatchSource =
+    isUtf8CompatibleEncoding(decoded.encoding) &&
+    Buffer.from(decoded.content, 'utf-8').equals(raw.subarray(bomBytes));
+  if (meta.hasMore && !byteTruncated && decodedBytesMatchSource) {
+    // `decodeBufferWithEncodingInfoAsync` strips the BOM, so decoded offsets
+    // run short by its length. A BOM on a byte-compatible encoding is UTF-8,
+    // whose marker is three bytes.
+    const startByte = bomBytes + sliced.startByteOffset;
+    const contentBytes = Buffer.byteLength(content, 'utf-8');
+    // Whole lines consumed their terminator; a byte-truncated slice stopped
+    // mid-line and resumes at exactly what was returned.
+    const nextOffset = startByte + contentBytes + 1;
+    if (nextOffset < raw.length) {
+      meta.nextCursor = encodeTextCursor({
+        off: nextOffset,
+        size: raw.length,
+        dev: String(pre.dev),
+        ino: String(pre.ino),
+      });
+    }
+  }
+
   return { content, meta };
+}
+
+/**
+ * Stability check for a streamed *prefix* window.
+ *
+ * The full-snapshot path can demand byte-for-byte stability (`size` and
+ * `mtimeMs` unchanged) because it returns the whole file: any change
+ * invalidates the result. A line window does not return the whole file, so
+ * demanding whole-file stability rejects reads whose returned bytes are
+ * still perfectly valid — and the case it rejects is the one this feature
+ * exists for. Appending to a log does not change lines 1-20, but under an
+ * equality check every read of a live log is a coin flip.
+ *
+ * So the streamed path accepts growth, but rejects shrinkage and same-size
+ * version changes. The latter preserves the stable-read protection against
+ * in-place overwrites while still allowing append-only logs.
+ *
+ * The residual gap is a writer that changes existing bytes and grows past the
+ * original size inside one read window while keeping the same inode. Metadata
+ * cannot distinguish that from a pure append; hashing the prefix would make
+ * every page O(n), defeating the cursor.
+ */
+function assertStreamWindowStable(
+  before: {
+    size: number | bigint;
+    mtimeMs: number | bigint;
+    ctimeMs: number | bigint;
+  },
+  after: {
+    size: number | bigint;
+    mtimeMs: number | bigint;
+    ctimeMs: number | bigint;
+  },
+  p: ResolvedPath,
+  reason: string,
+): void {
+  const beforeSize = toBigInt(before.size);
+  const afterSize = toBigInt(after.size);
+  if (
+    afterSize < beforeSize ||
+    (afterSize === beforeSize &&
+      (after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs))
+  ) {
+    throw new FsError('hash_mismatch', `${reason}: ${p}`, {
+      hint: 'retry after re-reading the latest file',
+    });
+  }
+}
+
+/**
+ * Byte-cursor page. Reaches any offset in O(1), so `MAX_TEXT_SCAN_BYTES` does
+ * not apply here — that budget exists only because line offsets must be
+ * resolved by scanning.
+ *
+ * The fd-bound TOCTOU discipline is lifted verbatim from
+ * `readLargeTextWindowFromResolvedFile`. It is deliberately *not* copied from
+ * `readBytesWindow`, which sits next door and looks like the closer model but
+ * still demands `size`/`mtimeMs` equality after the read — the check `e784e6d`
+ * relaxed precisely because it fails every page of an actively-written log.
+ */
+async function readTextCursorWindowFromResolvedFile(
+  p: ResolvedPath,
+  pre: Awaited<ReturnType<typeof fsp.lstat>>,
+  opts: ReadTextOptions,
+  lowFs: StandardFileSystemService,
+): Promise<TextReadOutcome> {
+  const cursor = decodeTextCursor(opts.cursor as string);
+  const fh = await fsp.open(p as string, 'r');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let afterRead: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let window:
+    | Awaited<ReturnType<StandardFileSystemService['readTextCursorFromHandle']>>
+    | undefined;
+  let primaryError: unknown;
+  let hasPrimaryError = false;
+  try {
+    opened = await fh.stat();
+    assertSameFile(pre, opened, p as string, 'read');
+    assertStreamWindowStable(pre, opened, p, 'file changed before read');
+    assertCursorMatchesFile(cursor, opened, p as string);
+
+    try {
+      const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
+      if (probe.length > 0) {
+        const { bytesRead } = await fh.read(probe, 0, probe.length, 0);
+        if (looksBinary(probe.subarray(0, bytesRead))) {
+          throw new FsError('binary_file', `binary file: ${p}`, {
+            hint: 'use readBytes for binary content',
+          });
+        }
+      }
+
+      window = await lowFs.readTextCursorFromHandle({
+        fileHandle: fh,
+        startOffset: cursor.off,
+        fileSize: opened.size,
+        maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,
+        maxSnapBytes: MAX_TEXT_SCAN_BYTES,
+        ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+      });
+    } catch (err) {
+      hasPrimaryError = true;
+      primaryError = err;
+    }
+
+    afterRead = await fh.stat();
+  } finally {
+    await fh.close();
+  }
+
+  if (opened === undefined || afterRead === undefined) {
+    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
+  }
+  const post = await fsp.lstat(p as string);
+  if (post.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path was replaced with a symlink during read: ${p}`,
+      { hint: 'TOCTOU swap detected via post-read lstat' },
+    );
+  }
+  assertSameFile(opened, afterRead, p as string, 'read');
+  assertStreamWindowStable(opened, afterRead, p, 'file changed during read');
+  assertSameFile(opened, post, p as string, 'read');
+  assertStreamWindowStable(opened, post, p, 'file changed during read');
+
+  if (hasPrimaryError) {
+    if (primaryError instanceof LargeNonUtf8TextError) {
+      throw new FsError('binary_file', primaryError.message, {
+        cause: primaryError,
+        hint: 'convert the file to UTF-8, or use readBytes for the raw bytes',
+      });
+    }
+    // The offset is malformed, not the file oversized — a cursor this daemon
+    // issued always lands on a line start.
+    if (primaryError instanceof CursorNotAtLineBoundaryError) {
+      throw new FsError('parse_error', primaryError.message, {
+        cause: primaryError,
+        hint: 'pass a cursor returned by a previous read',
+      });
+    }
+    throw primaryError;
+  }
+  if (window === undefined) {
+    throw new FsError(
+      'internal_error',
+      `cursor text read returned no result: ${p}`,
+    );
+  }
+
+  const meta: TextReadOutcome['meta'] = {
+    encoding: window.encoding,
+    bom: window.bom,
+    lineEnding: window.lineEnding,
+    sizeBytes: opened.size,
+    truncated: true,
+    hasMore:
+      window.nextOffset !== undefined || window.truncatedByBytes === true,
+  };
+  if (window.nextOffset !== undefined) {
+    meta.nextCursor = encodeTextCursor({
+      off: window.nextOffset,
+      size: opened.size,
+      dev: String(opened.dev),
+      ino: String(opened.ino),
+    });
+  }
+  return { content: window.content, meta };
 }
 
 async function readLargeTextWindowFromResolvedFile(
   p: ResolvedPath,
   pre: Awaited<ReturnType<typeof fsp.lstat>>,
-  opts: ReadTextOptions & { limit: number },
+  opts: ReadTextOptions,
   lowFs: StandardFileSystemService,
 ): Promise<TextReadOutcome> {
   const fh = await fsp.open(p as string, 'r');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let afterRead: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let result:
+    | Awaited<ReturnType<StandardFileSystemService['readTextFileFromHandle']>>
+    | undefined;
+  let primaryError: unknown;
+  let hasPrimaryError = false;
   try {
-    const opened = await fh.stat();
+    opened = await fh.stat();
     assertSameFile(pre, opened, p as string, 'read');
-    if (didFileVersionChange(pre, opened)) {
-      throw new FsError('hash_mismatch', `file changed before read: ${p}`, {
-        hint: 'retry after re-reading the latest file',
-      });
-    }
+    assertStreamWindowStable(pre, opened, p, 'file changed before read');
 
-    let result:
-      | Awaited<ReturnType<StandardFileSystemService['readTextFileFromHandle']>>
-      | undefined;
-    let primaryError: unknown;
-    let hasPrimaryError = false;
     try {
       const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
       if (probe.length > 0) {
@@ -1493,91 +1760,94 @@ async function readLargeTextWindowFromResolvedFile(
       }
 
       result = await lowFs.readTextFileFromHandle({
-        path: p as string,
         fileHandle: fh,
-        stats: opened,
-        limit: opts.limit,
+        fileSize: opened.size,
+        limit: opts.limit ?? Number.POSITIVE_INFINITY,
         line: opts.line !== undefined ? opts.line - 1 : 0,
         maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,
+        maxScanBytes: MAX_TEXT_SCAN_BYTES,
       });
     } catch (err) {
       hasPrimaryError = true;
       primaryError = err;
     }
 
-    const afterRead = await fh.stat();
-    const post = await fsp.lstat(p as string);
-    if (post.isSymbolicLink()) {
-      throw new FsError(
-        'symlink_escape',
-        `path was replaced with a symlink during read: ${p}`,
-        { hint: 'TOCTOU swap detected via post-read lstat' },
-      );
-    }
-    assertSameFile(opened, afterRead, p as string, 'read');
-    assertSameFile(opened, post, p as string, 'read');
-    if (
-      didFileVersionChange(opened, afterRead) ||
-      didFileVersionChange(opened, post)
-    ) {
-      throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
-        hint: 'retry after re-reading the latest file',
-      });
-    }
-
-    if (hasPrimaryError) {
-      if (primaryError instanceof LargeNonUtf8TextError) {
-        throw new FsError('file_too_large', primaryError.message, {
-          cause: primaryError,
-          hint: 'convert the file to UTF-8 before requesting a large line window',
-        });
-      }
-      throw primaryError;
-    }
-
-    if (result === undefined) {
-      throw new FsError(
-        'internal_error',
-        `large text range read returned no result: ${p}`,
-      );
-    }
-
-    const meta: TextReadOutcome['meta'] = {
-      encoding: result._meta?.encoding,
-      bom: result._meta?.bom,
-      lineEnding: detectLineEnding(result.content),
-      sizeBytes: opened.size,
-      truncated: true,
-    };
-    if (
-      result._meta?.originalLineCountExact === true &&
-      result._meta.originalLineCount !== undefined
-    ) {
-      meta.originalLineCount = result._meta.originalLineCount;
-    }
-    return { content: result.content, meta };
+    afterRead = await fh.stat();
   } finally {
     await fh.close();
   }
-}
 
-function didFileVersionChange(
-  before: {
-    size: number | bigint;
-    mtimeMs: number | bigint;
-    ctimeMs: number | bigint;
-  },
-  after: {
-    size: number | bigint;
-    mtimeMs: number | bigint;
-    ctimeMs: number | bigint;
-  },
-): boolean {
-  return (
-    after.size !== before.size ||
-    after.mtimeMs !== before.mtimeMs ||
-    after.ctimeMs !== before.ctimeMs
-  );
+  if (opened === undefined || afterRead === undefined) {
+    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
+  }
+  const post = await fsp.lstat(p as string);
+  if (post.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path was replaced with a symlink during read: ${p}`,
+      { hint: 'TOCTOU swap detected via post-read lstat' },
+    );
+  }
+  assertSameFile(opened, afterRead, p as string, 'read');
+  assertStreamWindowStable(opened, afterRead, p, 'file changed during read');
+  assertSameFile(opened, post, p as string, 'read');
+  assertStreamWindowStable(opened, post, p, 'file changed during read');
+
+  if (hasPrimaryError) {
+    // An encoding the text route can't represent is the same class of refusal
+    // as sniffed-binary content, and `binary_file` already tells clients to
+    // fall back to `readBytes`.
+    if (primaryError instanceof LargeNonUtf8TextError) {
+      throw new FsError('binary_file', primaryError.message, {
+        cause: primaryError,
+        hint: 'convert the file to UTF-8, or use readBytes for the raw bytes',
+      });
+    }
+    if (primaryError instanceof TextScanBudgetExceededError) {
+      throw new FsError('file_too_large', primaryError.message, {
+        cause: primaryError,
+        hint: `line offsets are resolved by scanning from byte 0 and stop after ${MAX_TEXT_SCAN_BYTES} bytes; page with the cursor from a shallower read to reach this offset in O(1), or use readBytes for raw bytes`,
+      });
+    }
+    throw primaryError;
+  }
+  if (result === undefined) {
+    throw new FsError(
+      'internal_error',
+      `large text range read returned no result: ${p}`,
+    );
+  }
+  const content = result.content;
+  const readMeta = result._meta;
+
+  const meta: TextReadOutcome['meta'] = {
+    encoding: readMeta?.encoding,
+    bom: readMeta?.bom,
+    lineEnding: readMeta?.lineEnding ?? detectLineEnding(content),
+    // Size as of `open`, not as of now: it describes the snapshot the
+    // returned window was cut from. A file that grew during the read
+    // reports the smaller, consistent number.
+    sizeBytes: opened.size,
+    truncated: true,
+    hasMore:
+      readMeta?.nextByteOffset !== undefined ||
+      readMeta?.truncatedByBytes === true,
+  };
+  if (readMeta?.nextByteOffset !== undefined) {
+    meta.nextCursor = encodeTextCursor({
+      off: readMeta.nextByteOffset,
+      size: opened.size,
+      dev: String(opened.dev),
+      ino: String(opened.ino),
+    });
+  }
+  if (
+    readMeta?.originalLineCountExact === true &&
+    readMeta?.originalLineCount !== undefined
+  ) {
+    meta.originalLineCount = readMeta.originalLineCount;
+  }
+  return { content, meta };
 }
 
 async function readStableRegularFileBuffer(
@@ -1632,14 +1902,27 @@ function sliceDecodedText(
   content: string,
   startLine: number,
   limit: number,
-): { content: string; originalLineCount: number } {
+): {
+  content: string;
+  originalLineCount: number;
+  /** Byte offset of `startLine` within the decoded text (BOM excluded). */
+  startByteOffset: number;
+  /** Index just past the last returned line. */
+  endLine: number;
+} {
   const lines = content.split('\n');
   const originalLineCount = lines.length;
   const endLine = Math.min(startLine + limit, originalLineCount);
   const actualStartLine = Math.min(startLine, originalLineCount);
+  let startByteOffset = 0;
+  for (let i = 0; i < actualStartLine; i++) {
+    startByteOffset += Buffer.byteLength(lines[i]!, 'utf-8') + 1;
+  }
   return {
     content: lines.slice(actualStartLine, endLine).join('\n'),
     originalLineCount,
+    startByteOffset,
+    endLine,
   };
 }
 

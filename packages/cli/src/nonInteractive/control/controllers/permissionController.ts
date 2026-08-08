@@ -21,6 +21,7 @@ import type {
   ApprovalMode,
   TeammateApprovalRequestEvent,
   ToolConfirmationPayload,
+  WorkflowApproval,
 } from '@qwen-code/qwen-code-core';
 import {
   InputFormat,
@@ -257,6 +258,7 @@ export class PermissionController extends BaseController {
    * This is passed to executeToolCall to hook into CoreToolScheduler updates
    */
   getToolCallUpdateCallback(): (toolCalls: unknown[]) => void {
+    const turnSignal = this.getTurnRequestAbortSignal();
     return (toolCalls: unknown[]) => {
       for (const call of toolCalls) {
         if (
@@ -270,7 +272,7 @@ export class PermissionController extends BaseController {
             !this.pendingOutgoingRequests.has(awaiting.request.callId)
           ) {
             this.pendingOutgoingRequests.add(awaiting.request.callId);
-            void this.handleOutgoingPermissionRequest(awaiting);
+            void this.handleOutgoingPermissionRequest(awaiting, turnSignal);
           }
         }
       }
@@ -329,7 +331,7 @@ export class PermissionController extends BaseController {
     event: TeammateApprovalRequestEvent,
   ): Promise<void> {
     try {
-      if (this.context.abortSignal?.aborted) {
+      if (this.context.abortSignal.aborted) {
         await event.respond(ToolConfirmationOutcome.Cancel);
         return;
       }
@@ -421,6 +423,79 @@ export class PermissionController extends BaseController {
     }
   }
 
+  async handleWorkflowApproval(
+    runId: string,
+    approval: WorkflowApproval,
+    rawArgs: Record<string, unknown>,
+    approvalSignal: AbortSignal,
+  ): Promise<void> {
+    const registry = this.context.config.getWorkflowRunRegistry();
+    if (approvalSignal.aborted) {
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
+      return;
+    }
+    const inputFormat = this.context.config.getInputFormat?.();
+    if (inputFormat !== InputFormat.STREAM_JSON) {
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
+      return;
+    }
+    const signal = AbortSignal.any([this.context.abortSignal, approvalSignal]);
+    try {
+      const response = await this.sendControlRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: approval.name,
+          tool_use_id: approval.approvalId,
+          input: rawArgs,
+          permission_suggestions: buildPermissionSuggestions(
+            approval.confirmationDetails,
+          ),
+          blocked_path: null,
+        } as CLIControlPermissionRequest,
+        this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
+        signal,
+      );
+      const payload = (response.response || {}) as Record<string, unknown>;
+      const allowed =
+        response.subtype === 'success' &&
+        String(payload['behavior'] || '').toLowerCase() === 'allow';
+      const confirmationPayload = allowed
+        ? this.buildAllowConfirmationPayload(
+            approval.name,
+            payload['updatedInput'],
+          )
+        : typeof payload['message'] === 'string'
+          ? ({ cancelMessage: payload['message'] } as ToolConfirmationPayload)
+          : undefined;
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        allowed
+          ? ToolConfirmationOutcome.ProceedOnce
+          : ToolConfirmationOutcome.Cancel,
+        confirmationPayload,
+      );
+    } catch (error) {
+      this.debugLogger.error(
+        '[PermissionController] Workflow approval failed:',
+        error,
+      );
+      await registry.resolvePendingApproval(
+        runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.Cancel,
+      );
+    }
+  }
+
   /**
    * Handle outgoing permission request
    *
@@ -430,6 +505,7 @@ export class PermissionController extends BaseController {
    */
   private async handleOutgoingPermissionRequest(
     toolCall: WaitingToolCall,
+    signal: AbortSignal,
   ): Promise<void> {
     const requiresUserInteraction =
       toolCall.invocation?.requiresUserInteraction?.() === true;
@@ -439,7 +515,7 @@ export class PermissionController extends BaseController {
         : `The host could not present the required approval for "${toolCall.request.name}".`;
     try {
       // Check if already aborted
-      if (this.context.abortSignal?.aborted) {
+      if (signal.aborted) {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
         );
@@ -483,7 +559,7 @@ export class PermissionController extends BaseController {
           blocked_path: null,
         } as CLIControlPermissionRequest,
         this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
-        this.context.abortSignal,
+        signal,
       );
 
       if (response.subtype !== 'success') {

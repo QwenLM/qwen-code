@@ -15,7 +15,10 @@ import type {
   DaemonCapabilities,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -34,6 +37,7 @@ import type {
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionInstallResponse,
   ExtensionUpdateCheckResponse,
   DaemonInitWorkspaceResult,
@@ -201,6 +205,11 @@ export interface DaemonChannelPairingActions {
     name: string,
     code: string,
   ): Promise<DaemonChannelPairingApprovalResult>;
+  approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revoke(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+  ): Promise<DaemonChannelPairingRevocationResult>;
 }
 
 // ── Scheduled Tasks (durable cron, server-only) ─────────────────────
@@ -552,6 +561,10 @@ export interface DaemonWorkspaceActions {
   // Extensions
   installExtension(
     params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse>;
+  installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
     clientId?: string,
   ): Promise<ExtensionInstallResponse>;
   extensionOperationStatus(

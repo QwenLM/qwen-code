@@ -25,6 +25,7 @@ import {
   type ResumedSessionData,
   type LspClient,
   type ToolName,
+  type ToolInvocationGuard,
   ToolNames,
   NativeLspClient,
   createDebugLogger,
@@ -38,11 +39,13 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
@@ -112,6 +115,17 @@ const VALID_APPROVAL_MODE_VALUES = [
   'auto',
   'yolo',
 ] as const;
+
+const SKILL_LEVELS: readonly SkillLevel[] = [
+  'project',
+  'user',
+  'extension',
+  'bundled',
+];
+
+function isSkillLevel(value: unknown): value is SkillLevel {
+  return SKILL_LEVELS.includes(value as SkillLevel);
+}
 
 function formatApprovalModeError(value: string): Error {
   return new Error(
@@ -736,8 +750,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop', 'daemon'],
+          description:
+            'Channel identifier (VSCode, ACP, SDK, CI, desktop, daemon)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -1159,9 +1174,12 @@ export async function parseArguments(): Promise<CliArgs> {
     }
   }
 
-  // Apply ACP fallback: if acp or experimental-acp is present but no explicit --channel, treat as ACP
+  // Apply ACP fallback: if acp or experimental-acp is present but no explicit
+  // --channel, attribute the launch — daemon-spawned children carry the serve
+  // marker, the Tauri desktop shell additionally sets QWEN_CODE_DESKTOP.
   if ((result['acp'] || result['experimentalAcp']) && !result['channel']) {
-    (result as Record<string, unknown>)['channel'] = 'ACP';
+    (result as Record<string, unknown>)['channel'] =
+      resolveAcpChannelFallback();
   }
 
   return result as unknown as CliArgs;
@@ -1475,6 +1493,22 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+/**
+ * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
+ * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
+ * exits the process on a duplicate id, but that would kill a shared ACP child
+ * and every session on its channel — embedded callers catch this and fail the
+ * single request instead.
+ */
+export class SessionIdConflictError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, message: string) {
+    super(message);
+    this.name = 'SessionIdConflictError';
+    this.sessionId = sessionId;
+  }
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1519,6 +1553,21 @@ export async function loadCliConfig(
    * core decoupled from the CLI-owned `SettingsWatcher` implementation.
    */
   settingsWatcher?: { stopWatching(): void },
+  /**
+   * When true, a duplicate caller-supplied session id throws
+   * `SessionIdConflictError` instead of calling `process.exit(1)`. Embedded
+   * callers (ACP/daemon) set this so one conflicting `newSession` degrades a
+   * single request rather than terminating the shared child process.
+   */
+  throwOnSessionIdConflict = false,
+  /**
+   * Runtime-only host policy. This is deliberately not sourced from argv,
+   * settings, or the environment: only an embedding host that owns the Config
+   * construction may install the executor-boundary callback.
+   */
+  hostPolicy?: {
+    toolInvocationGuard?: ToolInvocationGuard;
+  },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -1997,6 +2046,9 @@ export async function loadCliConfig(
     );
     if (exists) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
+      if (throwOnSessionIdConflict) {
+        throw new SessionIdConflictError(argv['sessionId'], message);
+      }
       writeStderrLine(message);
       process.exit(1);
     }
@@ -2068,6 +2120,18 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    terminalImageRenderSupportProvider: interactive
+      ? async () => {
+          const { getTerminalImageRenderSupport } = await import(
+            '../ui/utils/terminal-image-renderer.js'
+          );
+          return getTerminalImageRenderSupport();
+        }
+      : undefined,
+    disabledSkillLevels:
+      bareMode || safeMode || !Array.isArray(settings.skills?.disabledLevels)
+        ? undefined
+        : settings.skills.disabledLevels.filter(isSkillLevel),
     customSkillDirs:
       bareMode || safeMode
         ? undefined
@@ -2091,6 +2155,7 @@ export async function loadCliConfig(
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
+    toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);
@@ -2286,10 +2351,12 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
+    memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
+    compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(

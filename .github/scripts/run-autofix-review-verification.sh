@@ -68,6 +68,36 @@ run_check() {
     reject_fix "${label}"
   fi
 }
+assert_verification_tree() {
+  if [[ "$(git rev-parse HEAD)" != "${VERIFICATION_HEAD}" ]]; then
+    reject_fix 'HEAD changed during deterministic verification'
+  fi
+  if [[ -n "$(git status --porcelain)" ]]; then
+    git status --short >> "${GATE_LOG}"
+    reject_fix 'workspace became dirty during deterministic verification'
+  fi
+}
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  git status --short >> "${GATE_LOG}"
+  reject_fix 'workspace is dirty before deterministic verification'
+fi
+VERIFICATION_HEAD="$(git rev-parse HEAD)"
+
+# The schema generator resolves '@qwen-code/qwen-code-core' to core's DIST
+# entry point, which the CLI bundle restored from the TRUSTED BASE. When the
+# branch itself changed core's sources, that base-built dist can disagree
+# with the branch's committed schema (changed runtime constants) or crash
+# the generator (changed exports) — the same false "settings schema is
+# stale" rejection class this gate exists to prevent. Rebuild core from
+# branch sources in that case: the gate already runs a full `npm run build`
+# on branch sources for every commit path, so this widens no trust surface,
+# and the build's git-ignored output cannot trip the dirty-tree asserts.
+if git diff --name-only "origin/main...${BRANCH}" \
+  | grep -Eq '^packages/core/(src/|index\.ts$)'; then
+  run_check 'core rebuild failed on the agent-committed fix' \
+    npm run build --workspace packages/core
+fi
 
 # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
 # no-op/unchanged return: on a stale-schema PR the agent can wrongly
@@ -87,6 +117,7 @@ run_check 'settings schema is stale on the agent-committed fix' \
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
 run_check 'cross-package contract verification failed' \
   bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
+assert_verification_tree
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   # No new commit. That is only legitimate as a deliberate no-action.
@@ -145,4 +176,6 @@ else
       npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
   done
 fi
+assert_verification_tree
+echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"
 echo "outcome=fixed" >> "${GITHUB_OUTPUT}"

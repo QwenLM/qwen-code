@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   tmpFile,
   probeWorktreePath,
@@ -39,24 +39,25 @@ describe('tmpFile — target is a single safe component', () => {
     // `src/` parent nobody created — ENOENT.
     const p = tmpFile('src/foo.ts', 'diff.txt');
     expect(p).not.toContain('src/foo.ts');
-    expect(p).toContain('.qwen/tmp/');
-    // No path separator after the temp dir.
-    expect(p.split('.qwen/tmp/')[1]).not.toContain('/');
+    expect(dirname(p)).toBe(join('.qwen', 'tmp'));
+    // The separator is flattened to an underscore, so the target survives as a
+    // single component directly under the temp dir.
+    expect(basename(p)).toBe('qwen-review-src_foo.ts-diff.txt');
   });
 
   it('refuses to escape the temp dir with a crafted target', () => {
     const p = tmpFile('../../evil', 'diff.txt');
-    expect(p).toContain('.qwen/tmp/');
+    expect(dirname(p)).toBe(join('.qwen', 'tmp'));
     expect(p).not.toContain('..');
-    expect(p.split('.qwen/tmp/')[1]).not.toContain('/');
+    // The dot-segment traversal is stripped to a plain component, not nested.
+    expect(basename(p)).toBe('qwen-review-evil-diff.txt');
   });
 });
 
 describe('probeWorktreePath', () => {
   it('appends -probe to an absolute worktree path', () => {
-    expect(probeWorktreePath('/a/b/review-pr-1')).toBe(
-      '/a/b/review-pr-1-probe',
-    );
+    const worktree = resolve('/a/b/review-pr-1');
+    expect(probeWorktreePath(worktree)).toBe(`${worktree}-probe`);
   });
 
   it('resolves a relative worktree to absolute so it never depends on cwd', () => {

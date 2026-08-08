@@ -8,7 +8,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
-import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
+import {
+  AUTO_MEMORY_PINNED_DIRNAME,
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -45,6 +49,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     getApprovalMode: vi.fn(),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+    getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -138,6 +143,38 @@ describe('runAutoMemoryExtractionByAgent', () => {
     );
   });
 
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
   it('returns empty touchedTopics when agent touches no files', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
@@ -183,6 +220,92 @@ describe('runAutoMemoryExtractionByAgent', () => {
         filePath: '/tmp/outside.md',
       }),
     ).toBe('deny');
+  });
+
+  it('protects pinned memory in both managed-memory scopes', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    const permissionManager = call?.config.getPermissionManager?.();
+    expect(permissionManager).toBeDefined();
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: `/tmp/auto-memory/${AUTO_MEMORY_PINNED_DIRNAME}/architecture.md`,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: `/tmp/auto-memory/${AUTO_MEMORY_PINNED_DIRNAME}/architecture.md`,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: `/tmp/user-memory/${AUTO_MEMORY_PINNED_DIRNAME}/preferences.md`,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: `/tmp/user-memory/${AUTO_MEMORY_PINNED_DIRNAME}/preferences.md`,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/tmp/auto-memory/project/ordinary.md',
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: '/tmp/user-memory/user/ordinary.md',
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: `/tmp/auto-memory/project/${AUTO_MEMORY_PINNED_DIRNAME}/notes.md`,
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: `/tmp/auto-memory/${AUTO_MEMORY_PINNED_DIRNAME}-notes/notes.md`,
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('instructs the extraction agent to preserve pinned memory', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.taskPrompt).toContain(
+      `top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory`,
+    );
+    expect(call?.taskPrompt).toContain(
+      'You may read them to avoid duplicates, but never modify, overwrite, rename, merge into, or delete',
+    );
+    expect(call?.taskPrompt).toContain(
+      'Prefer updating an existing writable memory file',
+    );
+    expect(call?.taskPrompt).toContain(
+      'do not intentionally remove their valid entries from `MEMORY.md`',
+    );
   });
 
   it('throws when getCacheSafeParams returns null', async () => {

@@ -362,9 +362,18 @@ describe('daemon UI normalizer and transcript reducer', () => {
         update: {
           sessionUpdate: 'plan',
           entries: [
-            { content: 'Task', status: 'completed', priority: 'medium' },
+            {
+              content: 'Task',
+              status: 'completed',
+              priority: 'medium',
+              _meta: {
+                qwenTodo: { id: 'task', blockedBy: ['prepare'] },
+              },
+            },
           ],
           _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'call-1' },
             stats: {
               promptTokens: 100,
               cachedTokens: 10,
@@ -381,7 +390,15 @@ describe('daemon UI normalizer and transcript reducer', () => {
       type: 'tool.update',
       toolName: 'todo_write',
       rawOutput: {
-        entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
+        entries: [
+          {
+            content: 'Task',
+            status: 'completed',
+            priority: 'medium',
+            _meta: { qwenTodo: { id: 'task', blockedBy: ['prepare'] } },
+          },
+        ],
+        plan: { id: 'plan-1', sourceCallId: 'call-1' },
         stats: {
           promptTokens: 100,
           cachedTokens: 10,
@@ -3522,7 +3539,10 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       expect.objectContaining({
         type: 'status',
         source: 'history_truncated',
-        text: expect.stringContaining('History truncated') as string,
+        text: expect.stringContaining(
+          'History truncated in replay history',
+        ) as string,
+        data: expect.objectContaining({ truncatedTurns: 2 }),
       }),
     ]);
 
@@ -3545,6 +3565,77 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     );
   });
 
+  it('describes live truncation precisely and preserves structured data', () => {
+    const data = {
+      reason: 'replay_window_exceeded',
+      scope: 'live_journal',
+      truncatedEvents: 16_371,
+      retainedEvents: 10_000,
+      maxBytes: 8_388_608,
+      maxEvents: 10_000,
+      fullTranscriptAvailable: true,
+    };
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data,
+    } as never);
+
+    expect(event).toMatchObject({
+      type: 'status',
+      source: 'history_truncated',
+      data,
+      text: expect.stringContaining(
+        'kept the latest 10000 events and dropped 16371 older replay events',
+      ) as string,
+    });
+    expect((event as { text: string }).text).toContain(
+      'Complete content remains available after the turn finishes.',
+    );
+  });
+
+  it('does not promise recovery when a full transcript is unavailable', () => {
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        scope: 'live_journal',
+        truncatedEvents: 1,
+        retainedEvents: 2,
+        maxBytes: 512,
+        maxEvents: 2,
+        fullTranscriptAvailable: false,
+      },
+    } as never);
+
+    expect((event as { text: string }).text).toContain(
+      'not available for automatic recovery',
+    );
+    expect((event as { text: string }).text).not.toContain(
+      'remains available after the turn finishes',
+    );
+  });
+
+  it('does not infer replay ownership for a future truncation scope', () => {
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        scope: 'future_scope',
+        truncatedEvents: 1,
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: true,
+      },
+    } as never);
+
+    expect((event as { text: string }).text).toContain('History truncated:');
+    expect((event as { text: string }).text).not.toContain('live turn');
+    expect((event as { text: string }).text).not.toContain('replay history');
+  });
+
   it('routes malformed history truncation payloads to debug', () => {
     const events = normalizeDaemonEvent({
       v: 1,
@@ -3564,6 +3655,29 @@ describe('daemon UI reducer state machine (PR-E)', () => {
         text: 'history_truncated: malformed history_truncated payload',
       }),
     ]);
+  });
+
+  it('routes malformed optional history truncation fields to debug', () => {
+    for (const extra of [{ scope: 5 }, { maxEvents: -1 }, { maxEvents: 1.5 }]) {
+      const events = normalizeDaemonEvent({
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 4,
+          retainedEvents: 2,
+          maxBytes: 512,
+          fullTranscriptAvailable: true,
+          ...extra,
+        },
+      } as never);
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'debug',
+          text: 'history_truncated: malformed history_truncated payload',
+        }),
+      ]);
+    }
   });
 
   it('mirrors approval mode from session.approval_mode.changed event', async () => {

@@ -25,25 +25,12 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 // error code rather than an ad-hoc bare `{ message }` object.
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
+import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
+import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import {
-  WorkflowOrchestrator,
-  WorkflowExecutionError,
-  createProductionDispatch,
-  type WorkflowAgentDispatch,
-  type WorkflowOrchestratorEmitter,
-} from '../../agents/runtime/workflow-orchestrator.js';
-import {
-  WorkflowBudgetImpl,
-  MAX_TOKENS_PER_WORKFLOW_ENV,
-} from '../../agents/runtime/workflow-budget.js';
-import { resolveSavedWorkflowScript } from '../../agents/runtime/workflow-saved.js';
-import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
-import type { JournalReplay } from '../../agents/runtime/workflow-journal.js';
-import { writeWorkflowSnapshot } from '../../agents/workflow-snapshot.js';
-import { logWorkflowRun } from '../../telemetry/loggers.js';
-import { WorkflowRunEvent } from '../../telemetry/types.js';
-import { createChildAbortController } from '../../utils/abortController.js';
-import { randomBytes } from 'node:crypto';
+  WorkflowRunner,
+  type WorkflowRunHandle,
+} from '../../agents/runtime/workflow-runner.js';
 import * as path from 'node:path';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
 
@@ -71,6 +58,8 @@ export interface WorkflowParams {
    * runs live and the run goes live for the remainder.
    */
   resumeFromRunId?: string;
+  /** Return after registration and continue the run under session ownership. */
+  run_in_background?: boolean;
 }
 
 export interface WorkflowToolOptions {
@@ -155,6 +144,12 @@ const WORKFLOW_PARAM_SCHEMA = {
         'first changed/missing call onward runs live. Pass the same script ' +
         'and args as the original run for the cache to apply.',
     },
+    run_in_background: {
+      type: 'boolean',
+      default: false,
+      description:
+        'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
+    },
   },
   // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
   // expressed as a plain `required` list, so it's enforced in
@@ -194,156 +189,57 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    // T40 (PR #4732 R4): child controller so dispatch sees caller aborts
-    // AND sandbox.ts wall-clock aborts (see setTimeout handler).
-    const dispatchController = createChildAbortController(signal);
-    // P5: per-run token tracker. Reads `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW`
-    // from the environment via the impl's `fromEnv` factory. When the env
-    // is unset (`budget.total === null`), the orchestrator's gate is a
-    // no-op and `budgetUpdated` events still fire so the registry can
-    // surface cumulative usage even on uncapped runs.
-    const budget = WorkflowBudgetImpl.fromEnv();
-    const dispatch =
-      this.toolOptions.dispatch ??
-      createProductionDispatch(
-        this.config,
-        dispatchController.signal,
-        // P5 T3: production-dispatch onTokens callback. Test-injected
-        // dispatches (`toolOptions.dispatch`) handle their own
-        // recording — they don't surface stats the same way.
-        (outputTokens) => budget.recordSpent(outputTokens),
-      );
-    const orchestrator = new WorkflowOrchestrator(dispatch);
-
-    // P7b: resolve the script source. A `/<name>` saved-workflow slash
-    // command dispatches `{scriptPath}` instead of inline `script`; read the
-    // file here (fresh, so edits to a saved workflow take effect on the next
-    // run). The resolved absolute path is recorded on the registry entry as
-    // run provenance — it is never re-read mid-run. `validateToolParamValues`
-    // has already guaranteed exactly one of `script` / `scriptPath` is set.
-    let resolvedScript = this.params.script ?? '';
-    let resolvedScriptPath = this.params.scriptPath;
-    if (this.params.scriptPath && this.params.script === undefined) {
-      const loaded = await resolveSavedWorkflowScript(
-        { scriptPath: this.params.scriptPath },
-        this.config,
-      );
-      resolvedScript = loaded.script;
-      resolvedScriptPath = loaded.scriptPath;
+    const runInBackground = this.params.run_in_background === true;
+    if (runInBackground && signal.aborted) {
+      return backgroundStartCancelledResult();
     }
-
-    // P4b: pre-generate the runId so the registry record exists before
-    // the first sandbox event fires. Without this, `agentDispatched` /
-    // `phaseStarted` callbacks would have no entry to update.
-    // P6: a resume reuses the prior run's id so it appends to the same
-    // journal; a fresh run gets a new id.
-    const runId =
-      this.params.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
-    // P6: per-run resume journal. Always created (any run is resumable);
-    // the replay maps are loaded only when resuming. Production storage
-    // path is `<projectDir>/workflows/<runId>/journal.jsonl`; the tool's
-    // test-injected dispatch path leaves `config.storage` undefined, so
-    // guard and skip journaling there.
-    let journal: WorkflowJournal | undefined;
-    let resumeReplay: JournalReplay | undefined;
-    const storage = this.config.storage;
-    if (storage) {
-      journal = new WorkflowJournal(storage.getWorkflowRunJournalPath(runId));
-      if (this.params.resumeFromRunId) {
-        resumeReplay = await journal.load();
-      }
-    }
-    const registry = this.config.getWorkflowRunRegistry?.();
-    const registryEntry = registry?.register({
-      runId,
-      meta: null, // populated after meta parses; safe default until then
-      status: 'running',
-      startTime: Date.now(),
-      outputFile: '', // P4b reserves the field but doesn't materialize
-      abortController: dispatchController,
-      // P5: seed the cap so the dialog can render the `M / N` form
-      // immediately, before the first `budgetUpdated` fires. Stays
-      // `null` when no env override.
-      tokenBudgetTotal: budget.total,
-      // P7b: carry the script source so a completed run can be snapshotted
-      // to disk and saved to `.qwen/workflows/<name>.js` from the dialog.
-      // `scriptPath` is set when the run was launched from a saved file (run
-      // provenance for the snapshot).
-      script: resolvedScript,
-      scriptPath: resolvedScriptPath,
-    });
-    // The emitter forwards sandbox + dispatch events into the registry
-    // AND fires `updateOutput` so the tool's renderDisplay block (a
-    // phase-tree-shaped JSON) refreshes live in the TUI. Each method
-    // is fail-safe: registry mutation errors are swallowed by the
-    // registry itself; updateOutput errors are caught here.
-    const emitter: WorkflowOrchestratorEmitter = {
-      phaseStarted: (title) => {
-        registry?.onPhaseStarted(runId, title);
-        safeEmitUpdate(updateOutput, registryEntry);
-      },
-      agentDispatched: () => {
-        registry?.onAgentDispatched(runId);
-        safeEmitUpdate(updateOutput, registryEntry);
-      },
-      agentCompleted: () => {
-        registry?.onAgentCompleted(runId);
-        // P5 R2 (#12): defer the UI re-render to the `budgetUpdated`
-        // callback that the orchestrator fires immediately after this
-        // one. Without this skip, every dispatch completion produces
-        // TWO `safeEmitUpdate` calls (one here + one in budgetUpdated)
-        // — over a 1000-agent workflow that's 2000 TUI redraws when
-        // 1000 suffices. The budget snapshot lands AFTER the agent
-        // counter increment, so the deferred render shows both updates
-        // atomically. Production callers always wire a budget
-        // (`WorkflowBudgetImpl.fromEnv()` in `execute()` above), so the
-        // deferral is unconditional; test paths that omit budget go
-        // through the injected dispatch shape and don't exercise this
-        // emitter wiring.
-      },
-      logAppended: () => {
-        // P4b: skip per-line emit; the tool snapshots logs at terminal
-        // via `registry.setRecentLogs` so the registry record reflects
-        // the final tail without per-line churn driving rerenders.
-      },
-      budgetUpdated: (spent, total) => {
-        registry?.onBudgetUpdated(runId, spent, total);
-        safeEmitUpdate(updateOutput, registryEntry);
-      },
-    };
-
+    let handle: WorkflowRunHandle;
     try {
-      const outcome = await orchestrator.run({
-        script: resolvedScript,
+      handle = await WorkflowRunner.start({
+        config: this.config,
+        signal,
+        script: this.params.script,
+        scriptPath: this.params.scriptPath,
         args: this.params.args,
-        abortOnTimeout: dispatchController,
-        runId,
-        emitter,
-        budget,
-        // P-nested: resolve `workflow('<name>')` / `workflow({scriptPath})`
-        // against the saved-workflow scripts in `.qwen/workflows/`.
-        resolveSavedWorkflow: (ref) =>
-          resolveSavedWorkflowScript(ref, this.config),
-        // P6: resume journal (always wired) + replay maps (resume only).
-        journal,
-        resumeReplay,
+        resumeFromRunId: this.params.resumeFromRunId,
+        dispatch: this.toolOptions.dispatch,
+        runInBackground,
+        onUpdate:
+          !runInBackground && updateOutput
+            ? (entry) => safeEmitUpdate(updateOutput, entry)
+            : undefined,
       });
-
-      // P4b: snapshot meta + logs onto the registry record so the dialog
-      // detail body reflects the final state once the run terminates.
-      if (registryEntry) {
-        registryEntry.meta = outcome.meta;
-        if (outcome.meta?.name && registryEntry.description === runId) {
-          registryEntry.description = outcome.meta.name;
-        }
+    } catch (error) {
+      if (runInBackground && signal.aborted) {
+        return backgroundStartCancelledResult();
       }
-      registry?.setRecentLogs(runId, outcome.logs);
-      registry?.complete(runId, outcome.result, Date.now());
-
+      throw error;
+    }
+    if (runInBackground) {
+      const status = handle.registry?.get(handle.runId)?.status ?? 'running';
       const usageBanner = resolveUsageBanner(
         this.config,
-        registry,
-        budget.total,
+        handle.registry,
+        handle.budget.total,
+      );
+      return {
+        llmContent: [
+          {
+            text: `Workflow started in background.\nRun ID: ${handle.runId}\nStatus: ${status}`,
+          },
+        ],
+        returnDisplay:
+          usageBanner +
+          `Workflow ${handle.runId} started in the background (status: ${status}). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
+      };
+    }
+    const settlement = await handle.completion;
+    if (settlement.ok) {
+      const { outcome } = settlement;
+      const usageBanner = resolveUsageBanner(
+        this.config,
+        handle.registry,
+        handle.budget.total,
       );
 
       // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
@@ -376,11 +272,11 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // tokens whenever ANY usage is reported OR a cap is set, not
         // only when spend > 0. A capped-but-zero-spend run still wants
         // the cap visible so the user sees the gate engaged.
-        ...(budget.spent() > 0 || budget.total !== null
+        ...(handle.budget.spent() > 0 || handle.budget.total !== null
           ? {
               tokens: {
-                spent: budget.spent(),
-                total: budget.total,
+                spent: handle.budget.spent(),
+                total: handle.budget.total,
               },
             }
           : {}),
@@ -390,7 +286,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         llmContent: [{ text: llmText }],
         returnDisplay: usageBanner + '```json\n' + displayJson + '\n```',
       };
-    } catch (err) {
+    } else {
       // FIX-H (Round 5 SEC Minor): surface only the message — never the
       // stack frame — to the LLM and the UI. Caller's stderr/debug log
       // can still see the full stack via standard logging mechanisms.
@@ -398,30 +294,15 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // Cross-realm `instanceof Error` is false for vm-realm Errors; use
       // duck-typed extraction so script-thrown errors aren't coerced to
       // their "Error: <msg>" toString() form.
-      const message = extractErrorMessage(err);
+      const { message, details } = settlement;
+      const { phases, logs, meta } = details ?? {};
       // T19 (PR #4732 R1): if the orchestrator preserved phases / logs
       // accumulated before the failure, include them in the display so
       // the user can see what ran before the error.
-      const phases =
-        err instanceof WorkflowExecutionError ? err.phases : undefined;
-      const logs = err instanceof WorkflowExecutionError ? err.logs : undefined;
       // P4: also surface the extracted meta on the failure path. The script
       // body may have thrown long after the meta declaration parsed
       // cleanly; keeping name/description/phases visible on failure helps
       // the user identify which workflow ran.
-      const meta = err instanceof WorkflowExecutionError ? err.meta : undefined;
-      // P4b: surface the failure / abort to the registry. A caller-aborted
-      // run (`signal.aborted === true`) becomes `cancelled` rather than
-      // `failed` so the dialog distinguishes user intent from script bugs.
-      if (registryEntry) {
-        if (meta && !registryEntry.meta) registryEntry.meta = meta;
-      }
-      if (logs) registry?.setRecentLogs(runId, logs);
-      if (signal.aborted) {
-        registry?.cancel(runId, Date.now());
-      } else {
-        registry?.fail(runId, message, Date.now());
-      }
       // P5 T7: banner is intentionally OMITTED on the failure path.
       // The scheduler's `createErrorResponse` (coreToolScheduler.ts:801)
       // hard-codes `resultDisplay: error.message` whenever a tool
@@ -450,39 +331,15 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // the same way as other execution-time tool errors.
         error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
-    } finally {
-      // T40: cancel any straggler subagent on natural completion.
-      dispatchController.abort();
-      // P7b: persist a snapshot of the terminal run so `/workflows` can show
-      // it after a CLI restart. Runs on every terminal path (success / fail /
-      // cancel) because the registry entry has already transitioned by here.
-      // Best-effort: the writer swallows its own errors. Skipped when there's
-      // no registry entry (test-injected configs) or the entry is somehow
-      // still running (defensive).
-      if (registryEntry && registryEntry.status !== 'running') {
-        await writeWorkflowSnapshot(this.config, registryEntry);
-        // P-telemetry: emit the terminal run event (no-op when telemetry is
-        // off). Best-effort: never let a logging failure mask the result.
-        try {
-          logWorkflowRun(
-            this.config,
-            new WorkflowRunEvent({
-              status: registryEntry.status,
-              agents_dispatched: registryEntry.agentsDispatched,
-              agents_completed: registryEntry.agentsCompleted,
-              phase_count: registryEntry.phases.length,
-              tokens_spent: registryEntry.tokensSpent,
-              duration_ms:
-                (registryEntry.endTime ?? registryEntry.startTime) -
-                registryEntry.startTime,
-            }),
-          );
-        } catch {
-          // swallow — telemetry must not affect tool output
-        }
-      }
     }
   }
+}
+
+function backgroundStartCancelledResult(): ToolResult {
+  return {
+    llmContent: 'Workflow was cancelled before it could start.',
+    returnDisplay: 'Workflow cancelled.',
+  };
 }
 
 /**
@@ -652,20 +509,6 @@ function safeStringifyDisplayPayload(payload: unknown): string {
   }
 }
 
-/**
- * Duck-typed extraction so vm-realm Errors (raised inside the sandbox)
- * don't coerce to "Error: <msg>" via toString(). See workflow-orchestrator.ts
- * for the matching helper on the orchestrator side.
- */
-function extractErrorMessage(err: unknown): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    const m = (err as { message: unknown }).message;
-    if (typeof m === 'string') return m;
-    return String(m);
-  }
-  return String(err);
-}
-
 export class WorkflowTool extends BaseDeclarativeTool<
   WorkflowParams,
   ToolResult
@@ -688,7 +531,10 @@ export class WorkflowTool extends BaseDeclarativeTool<
         'run — agent() calls whose rolling prefix-hash matches the journal are ' +
         'served from cache for the longest unchanged prefix. Runs are tracked ' +
         'in the background-tasks view and the `/workflows` dialog (live phase ' +
-        'tree, token usage, cancel). Scripts run in a node:vm sandbox without ' +
+        'tree, token usage, cooperative pause/resume, cancel). Set ' +
+        '`run_in_background: true` to return a ' +
+        'run handle immediately in the interactive TUI and receive completion ' +
+        'through the conversation. Scripts run in a node:vm sandbox without ' +
         'access to the filesystem or shell; all I/O happens through the ' +
         'spawned agents.',
       Kind.Other,
@@ -723,6 +569,17 @@ export class WorkflowTool extends BaseDeclarativeTool<
       !/^wf_[0-9a-f]+$/.test(params.resumeFromRunId)
     ) {
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
+    }
+    if (params.run_in_background === true) {
+      if (
+        !this.config.isInteractive() ||
+        this.config.getExperimentalZedIntegration?.() === true
+      ) {
+        return 'WorkflowTool: `run_in_background` is available only in the interactive TUI.';
+      }
+      if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
+        return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
+      }
     }
     return null;
   }

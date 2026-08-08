@@ -7,7 +7,11 @@
 import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
 import type { Config } from '../../config/config.js';
-import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
+import {
+  createWorkflowSandbox,
+  debugLogger,
+  type WorkflowSandbox,
+} from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
   WorkflowAgentResult,
@@ -31,7 +35,6 @@ import type {
   AgentToolResultEvent,
 } from './agent-events.js';
 import { ToolNames } from '../../tools/tool-names.js';
-import { createConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -47,6 +50,7 @@ import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
+import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -155,13 +159,14 @@ const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
 /**
  * disallowedTools mirror the upstream `Tg8` workflow-subagent config. These
  * tools would let a subagent break the "final text IS the return value"
- * contract: SendMessage would deliver the answer to the user instead of
- * the calling script, plan lifecycle tools would interrupt the workflow's
- * plan-mode intent, and MonitorTool depends on AgentTool-owned notification
- * callbacks that workflow subagents do not register. Defense-in-depth alongside
- * the workflow system prompt's return-value contract.
+ * contract: AskUserQuestion and SendMessage would interact outside the calling
+ * script, plan lifecycle tools would interrupt the workflow's plan-mode intent,
+ * and MonitorTool depends on AgentTool-owned notification callbacks that
+ * workflow subagents do not register. Defense-in-depth alongside the workflow
+ * system prompt's return-value contract.
  */
 const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
+  ToolNames.ASK_USER_QUESTION,
   ToolNames.SEND_MESSAGE,
   ToolNames.MONITOR,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
@@ -290,6 +295,8 @@ export interface WorkflowRunRequest {
    * live for the remainder ("first miss invalidates the suffix").
    */
   resumeReplay?: JournalReplay;
+  /** Per-run scheduler shared with the registry-owned run handle. */
+  scheduler?: WorkflowDispatchScheduler;
 }
 
 export interface WorkflowRunOutcome {
@@ -371,6 +378,7 @@ export function createProductionDispatch(
    * just without budget recording.
    */
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+  bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
@@ -385,15 +393,21 @@ export function createProductionDispatch(
       typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
     );
     return runStallResilient(
-      (attemptSignal, emitter) =>
-        runSingleDispatch(
-          config,
-          prompt,
-          opts,
-          attemptSignal,
-          emitter,
-          onTokens,
-        ),
+      async (attemptSignal, emitter) => {
+        const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        try {
+          return await runSingleDispatch(
+            config,
+            prompt,
+            opts,
+            attemptSignal,
+            emitter,
+            onTokens,
+          );
+        } finally {
+          cleanupApprovalBridge?.();
+        }
+      },
       {
         stallMs,
         signal,
@@ -1306,7 +1320,7 @@ export class WorkflowOrchestrator {
   async run(req: WorkflowRunRequest): Promise<WorkflowRunOutcome> {
     // Signal threading: createProductionDispatch closure-captures a signal
     // for subagent.execute cancellation. P2 additionally derives a per-run
-    // limiter from req.abortOnTimeout?.signal so wall-clock abort drains
+    // scheduler from req.abortOnTimeout?.signal so wall-clock abort drains
     // queued dispatches promptly. Sync-loop protection is the 30s vm
     // timeout in workflow-sandbox.ts; async-loop cancellation flows through
     // dispatch's subagent.execute path.
@@ -1331,14 +1345,31 @@ export class WorkflowOrchestrator {
     // the window sat at the thunk level, a nested parallel()/pipeline() — e.g.
     // a pipeline stage that fans out, the canonical /deep-research shape —
     // would hold every slot while awaiting inner work that can never acquire
-    // one. One shared limiter per run keeps total in-flight agents under the
+    // one. One shared scheduler per run keeps total in-flight agents under the
     // cap across all fan-out calls.
-    const limiter = createConcurrencyLimiter(resolveConcurrencyLimit(), signal);
+    const scheduler =
+      req.scheduler ??
+      new WorkflowDispatchScheduler(resolveConcurrencyLimit(), signal);
+
+    // R12 (doudouOUC): entry-gate rejections must settle through the pause
+    // gate like every other settlement path below. A bare Promise.reject
+    // delivers immediately while the run is `paused`, so a script that
+    // catches the rejection keeps executing during pause — silently
+    // ineffective pause on the budget / agent-cap path.
+    const rejectThroughPauseGate = (error: unknown): Promise<never> =>
+      scheduler.waitUntilRunning().then(
+        () => {
+          throw error;
+        },
+        () => {
+          throw error;
+        },
+      );
 
     // Every agent() call — sequential, parallel(), or pipeline() — funnels
     // through this one wrapped dispatch: the counter enforces the per-run agent
     // cap regardless of launch path (increment-then-check: calls 1..max pass,
-    // the (max+1)th throws), and limiter.run enforces the concurrency window.
+    // the (max+1)th throws), and scheduler.run enforces the dispatch window.
     let agentCount = 0;
     const emitter = req.emitter;
     const budget = req.budget;
@@ -1396,7 +1427,13 @@ export class WorkflowOrchestrator {
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
             }
-            return Promise.resolve(cached.result as WorkflowAgentResult);
+            // Resolve even if the gate aborts: rejecting an already-cached
+            // result at teardown would surface an unobserved rejection for
+            // fire-and-forget calls on a correctly-cancelled run.
+            return scheduler.waitUntilRunning().then(
+              () => cached.result as WorkflowAgentResult,
+              () => cached.result as WorkflowAgentResult,
+            );
           }
         }
         // First miss → suffix goes live; append a `started` marker so an
@@ -1428,12 +1465,12 @@ export class WorkflowOrchestrator {
       // `budget.total === null` (no cap), because `budget.remaining()`
       // returns `Infinity` — the check never fires.
       //
-      // P5 R1 (Critical #2): a SECOND gate fires inside `limiter.run` below.
+      // P5 R1 (Critical #2): a SECOND gate fires inside `scheduler.run` below.
       // Without it, a `parallel([N thunks])` queues all N gate checks
       // synchronously (spent=0 at check time) → every queued dispatch
       // passes the entry gate → budget overshoots by up to
       // `(N-1) × per_dispatch_tokens`, not the documented
-      // `(concurrency_window-1) × per_dispatch_tokens`. The intra-limiter
+      // `(concurrency_window-1) × per_dispatch_tokens`. The in-scheduler
       // re-check observes budget mutations from already-completed in-flight
       // dispatches, restoring the documented overshoot bound.
       if (budget && budget.total !== null && budget.remaining() <= 0) {
@@ -1441,7 +1478,7 @@ export class WorkflowOrchestrator {
           `[Workflow] budget gate refused dispatch at entry: ` +
             `runId=${runId} spent=${budget.spent()} total=${budget.total}`,
         );
-        return Promise.reject(
+        return rejectThroughPauseGate(
           new WorkflowBudgetExceededError(runId, budget.total, budget.spent()),
         );
       }
@@ -1449,13 +1486,13 @@ export class WorkflowOrchestrator {
       // See the reordering rationale at the top of countedDispatch.
       agentCount += 1;
       if (agentCount > maxAgents) {
-        return Promise.reject(
+        return rejectThroughPauseGate(
           new Error(
             `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
           ),
         );
       }
-      // P4b: emit dispatch-start outside the limiter so the registry
+      // P4b: emit dispatch-start outside the scheduler so the registry
       // sees "queued" the moment the script issued the call, not after
       // a slot frees. Symmetric agentCompleted fires after the dispatch
       // settles (success or thrown) — defensive try/catch on both so a
@@ -1466,36 +1503,43 @@ export class WorkflowOrchestrator {
       } catch (e) {
         debugLogger.warn('emitter.agentDispatched threw:', e);
       }
-      return limiter
-        .run(() => {
-          // P5 R1 (Critical #2): re-check the gate at slot-acquire time so
-          // queued thunks see budget updates from already-completed in-
-          // flight dispatches. Without this, the entry gate above is
-          // bypassed by `parallel()` (all N thunks fire-check-queue in one
-          // microtask burst with spent=0). The throw here propagates through
-          // the same `.then(error)` arm as a dispatch-level rejection, so
-          // `agentCompleted` still fires with the error and the
-          // `parallel()` batch records this slot as `null`.
-          if (budget && budget.total !== null && budget.remaining() <= 0) {
-            debugLogger.warn(
-              `[Workflow] budget gate refused dispatch at slot-acquire: ` +
-                `runId=${runId} spent=${budget.spent()} total=${budget.total}`,
-            );
-            throw new WorkflowBudgetExceededError(
-              runId,
-              budget.total,
-              budget.spent(),
-            );
-          }
-          return this.dispatch(prompt, opts);
-        })
-        .then(
-          (result) => {
-            try {
-              emitter?.agentCompleted?.(label);
-            } catch (e) {
-              debugLogger.warn('emitter.agentCompleted threw:', e);
+      let completionEmitted = false;
+      const emitCompletion = (error?: unknown): void => {
+        if (completionEmitted) return;
+        completionEmitted = true;
+        const message =
+          error === undefined
+            ? undefined
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        try {
+          emitter?.agentCompleted?.(label, message);
+        } catch (e) {
+          debugLogger.warn('emitter.agentCompleted threw:', e);
+        }
+      };
+      return scheduler
+        .run(async () => {
+          try {
+            // P5 R1 (Critical #2): re-check the gate at slot-acquire time so
+            // queued thunks see budget updates from already-completed in-
+            // flight dispatches. Without this, the entry gate above is
+            // bypassed by `parallel()` (all N thunks fire-check-queue in one
+            // microtask burst with spent=0).
+            if (budget && budget.total !== null && budget.remaining() <= 0) {
+              debugLogger.warn(
+                `[Workflow] budget gate refused dispatch at slot-acquire: ` +
+                  `runId=${runId} spent=${budget.spent()} total=${budget.total}`,
+              );
+              throw new WorkflowBudgetExceededError(
+                runId,
+                budget.total,
+                budget.spent(),
+              );
             }
+            const result = await this.dispatch(prompt, opts);
+            emitCompletion();
             // P6: append the live result to the journal so a later resume
             // serves it from cache. Only JSON-serializable results are
             // resumable; a non-serializable result is skipped (the next
@@ -1526,14 +1570,8 @@ export class WorkflowOrchestrator {
               }
             }
             return result;
-          },
-          (err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            try {
-              emitter?.agentCompleted?.(label, msg);
-            } catch (e) {
-              debugLogger.warn('emitter.agentCompleted threw:', e);
-            }
+          } catch (err) {
+            emitCompletion(err);
             // P5 R3 (bot #1): the dispatch's reportTokens runs in a
             // `finally` (R3 #6), so `budget.spent()` advances even when
             // the dispatch throws. Mirror that mutation to the registry
@@ -1553,6 +1591,32 @@ export class WorkflowOrchestrator {
               }
             }
             throw err;
+          }
+        })
+        .then(
+          // Resolve even if the gate aborts: a successful dispatch must not
+          // turn into a teardown rejection — for a fire-and-forget call the
+          // script never attached a handler, so the rejection would surface
+          // as a spurious process-level unhandledRejection alarm on a
+          // correctly-cancelled run.
+          (result) =>
+            scheduler.waitUntilRunning().then(
+              () => result,
+              () => result,
+            ),
+          (error) => {
+            // A queued job can be rejected by scheduler abort without ever
+            // invoking its thunk. Settle the issued counter here as well;
+            // emitCompletion's latch keeps dispatch/slot failures exactly-once.
+            emitCompletion(error);
+            return scheduler.waitUntilRunning().then(
+              () => {
+                throw error;
+              },
+              () => {
+                throw error;
+              },
+            );
           },
         );
     };
@@ -1564,12 +1628,18 @@ export class WorkflowOrchestrator {
     // wired at the top level (when a resolver is provided). The nested
     // sandbox shares THIS run's countedDispatch (so agentCount cap + budget
     // gate are global across parent + nested), the same concurrency window
-    // (parallelImpl / pipelineImpl close over the shared `signal`/limiter),
+    // (every leaf dispatch closes over the shared scheduler),
     // the same budget, and the same emitter (nested phase()/log() and token
     // spend roll into the same registry entry). Crucially the nested sandbox
     // is created WITHOUT a `workflow` impl — that throws on a second-level
     // `workflow()` call, enforcing the single-level nesting limit.
     const resolveSavedWorkflow = req.resolveSavedWorkflow;
+    // The parent sandbox is created after this closure but before any
+    // script can invoke workflow(), so the late binding is always set
+    // by the time it runs.
+    const parentSandboxRef: { current: WorkflowSandbox | undefined } = {
+      current: undefined,
+    };
     const workflowImpl = resolveSavedWorkflow
       ? async (
           nameOrRef: string | { scriptPath: string },
@@ -1578,23 +1648,39 @@ export class WorkflowOrchestrator {
           const resolved = await resolveSavedWorkflow(nameOrRef);
           const nestedSandbox = createWorkflowSandbox({
             args: nestedArgs,
+            runId,
             dispatch: countedDispatch,
             parallel: parallelImpl,
             pipeline: pipelineImpl,
             abortOnTimeout: req.abortOnTimeout,
             emitter,
             budget,
+            scheduler,
             // No `workflow` — single-level nesting limit.
           });
-          // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
-          // rejection crosses back to the parent script's `await workflow()`
-          // so the parent can try/catch it like any other async failure.
-          return nestedSandbox.run(resolved.script);
+          try {
+            // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
+            // rejection crosses back to the parent script's `await workflow()`
+            // so the parent can try/catch it like any other async failure.
+            return await nestedSandbox.run(resolved.script);
+          } finally {
+            // Nested logs (script log() lines AND the unconsumed-
+            // rejection mirror) reach no production surface on their
+            // own — getLogs() is only ever read on the top-level
+            // sandbox and the production emitter's logAppended is a
+            // deliberate no-op. Merge them into the parent run's logs
+            // at nested settlement (after the nested flush ran) so a
+            // failed nested dispatch leaves a visible trace.
+            for (const line of nestedSandbox.getLogs()) {
+              parentSandboxRef.current?.appendLog(line);
+            }
+          }
         }
       : undefined;
 
     const sandbox = createWorkflowSandbox({
       args: req.args,
+      runId,
       dispatch: countedDispatch,
       parallel: parallelImpl,
       pipeline: pipelineImpl,
@@ -1602,7 +1688,9 @@ export class WorkflowOrchestrator {
       abortOnTimeout: req.abortOnTimeout,
       emitter,
       budget,
+      scheduler,
     });
+    parentSandboxRef.current = sandbox;
     try {
       const result = await sandbox.run(req.script);
       return {
@@ -1638,7 +1726,7 @@ export class WorkflowOrchestrator {
  * `Promise.resolve().then(t)` funnels a synchronously-throwing thunk into the
  * rejection path. The ONE thing that rejects the whole batch is an abort, so
  * an aborted run surfaces a rejection rather than a silent array of nulls.
- * Concurrency is bounded at the dispatch layer (limiter.run in countedDispatch),
+ * Concurrency is bounded at the dispatch layer (scheduler.run in countedDispatch),
  * not here — so nesting a parallel()/pipeline() inside a thunk cannot deadlock.
  *
  * Abort responsiveness: this function awaits `Promise.allSettled` which only
@@ -1646,7 +1734,7 @@ export class WorkflowOrchestrator {
  * because the dispatch signal (workflow-orchestrator.ts countedDispatch +
  * createProductionDispatch) is threaded through to `subagent.execute(ctx,
  * signal)`, so each in-flight thunk reacts to abort and rejects promptly. The
- * limiter's separate `addEventListener('abort')` listener drains the
+ * scheduler's separate `addEventListener('abort')` listener drains the
  * not-yet-started queued thunks instantly. So the apparent "wait for all to
  * complete" is in reality "wait for all to reach an abort-aware rejection",
  * which fires immediately after the signal — not after each subagent's full
@@ -1662,7 +1750,7 @@ async function settleToNullArray(
   const settled = await Promise.allSettled(
     thunks.map((t) => Promise.resolve().then(t)),
   );
-  // Use DOMException('AbortError') for consistency with the limiter's
+  // Use DOMException('AbortError') for consistency with the scheduler's
   // abort path so HOST-side callers seeing this rejection directly can
   // classify it via isAbortError() (utils/errors.ts). NOTE: this name is
   // NOT preserved across the vm boundary — vmAsync (workflow-sandbox.ts)
