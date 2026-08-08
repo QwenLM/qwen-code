@@ -21,7 +21,6 @@ export function createMockWorkspaceContext(
   additionalDirs: string[] = [],
 ): WorkspaceContext {
   const allDirs = [rootDir, ...additionalDirs];
-  const canonicalDirs = allDirs.map(canonicalizeForContainment);
 
   const mockWorkspaceContext = {
     addDirectory: vi.fn(),
@@ -29,9 +28,9 @@ export function createMockWorkspaceContext(
     isPathWithinWorkspace: vi.fn().mockImplementation((path: string) => {
       try {
         const canonicalPath = canonicalizeForContainment(path);
-        return canonicalDirs.some((dir) =>
-          isPathWithinRoot(canonicalPath, dir),
-        );
+        return allDirs
+          .map(canonicalizeForContainment)
+          .some((dir) => isPathWithinRoot(canonicalPath, dir));
       } catch {
         return false;
       }

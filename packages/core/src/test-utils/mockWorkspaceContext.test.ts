@@ -41,6 +41,40 @@ describe('createMockWorkspaceContext', () => {
     ).toBe(true);
   });
 
+  it('canonicalizes workspace aliases for containment checks', () => {
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    const aliasDir = path.join(
+      os.tmpdir(),
+      `qwen-workspace-alias-${Date.now()}`,
+    );
+    symlinkSync(rootDir, aliasDir);
+
+    try {
+      const workspace = createMockWorkspaceContext(aliasDir);
+
+      expect(
+        workspace.isPathWithinWorkspace(path.join(rootDir, 'missing.txt')),
+      ).toBe(true);
+    } finally {
+      rmSync(aliasDir, { force: true });
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects dangling leaf symlinks', () => {
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    const danglingPath = path.join(rootDir, 'dangling');
+    symlinkSync(path.join(rootDir, 'missing-target'), danglingPath);
+
+    try {
+      const workspace = createMockWorkspaceContext(rootDir);
+
+      expect(workspace.isPathWithinWorkspace(danglingPath)).toBe(false);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects paths through a symlink cycle', () => {
     const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
     const cyclePath = path.join(rootDir, 'cycle');
