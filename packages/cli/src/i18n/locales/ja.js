@@ -1580,6 +1580,19 @@ export default {
   'Tool Approval Mode': 'ツール承認モード',
   'Ask a quick side question without affecting the main conversation':
     'メインの会話に影響を与えずに、ちょっとした質問をする',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'レビューモデルに現在の会話についてのセカンドオピニオンを求める',
+  'Consulting advisor...': 'アドバイザーに相談中...',
+  'Advisor review failed: {{error}}':
+    'アドバイザーレビューに失敗しました：{{error}}',
+  'No conversation context available for /advisor':
+    '/advisor に使用できる会話コンテキストがありません',
+  'Focus too long (max {{max}} chars)':
+    'フォーカスが長すぎます（最大 {{max}} 文字）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '別の操作が進行中です。完了するまで待ってから /advisor を実行してください',
+  'No response received.': '応答がありませんでした。',
+  'No model configured.': 'モデルが設定されていません。',
   'Manage Arena sessions': 'Arena セッションを管理',
   'Start an Arena session with multiple models competing on the same task':
     '同じタスクで複数モデルを競わせる Arena セッションを開始',

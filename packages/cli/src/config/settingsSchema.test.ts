@@ -207,6 +207,16 @@ describe('SettingsSchema', () => {
       expect(imageModel.showInDialog).toBe(false);
     });
 
+    it('should define the advisor model setting', () => {
+      const advisorModel = getSettingsSchema().advisorModel;
+
+      expect(advisorModel.type).toBe('string');
+      expect(advisorModel.category).toBe('Model');
+      expect(advisorModel.default).toBe('');
+      expect(advisorModel.requiresRestart).toBe(false);
+      expect(advisorModel.showInDialog).toBe(true);
+    });
+
     it('should define the built-in Explore model setting', () => {
       const exploreModel =
         getSettingsSchema().agents.properties.builtin.properties.exploreModel;

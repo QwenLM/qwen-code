@@ -73,6 +73,7 @@ import {
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
+  SLASH_COMMANDS_SKIP_RECORDING,
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
@@ -107,18 +108,6 @@ function serializeHistoryItemForRecording(
   return clone;
 }
 
-const SLASH_COMMANDS_SKIP_RECORDING = new Set([
-  'quit',
-  'exit',
-  'clear',
-  'reset',
-  'new',
-  'resume',
-  'delete',
-  'branch',
-  'btw',
-  'history',
-]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
 
 function getSkillCommandName(command: SlashCommand): string {

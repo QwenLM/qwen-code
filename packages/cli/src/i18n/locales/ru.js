@@ -1988,6 +1988,18 @@ export default {
   'not updatable': 'обновление недоступно',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Получить второе мнение о текущем разговоре от модели-рецензента',
+  'Consulting advisor...': 'Консультация с советником...',
+  'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
+  'No conversation context available for /advisor':
+    'Нет контекста разговора, доступного для /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Фокус слишком длинный (макс. {{max}} символов)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Выполняется другая операция, дождитесь её завершения перед запуском /advisor',
+  'No response received.': 'Ответ не получен.',
+  'No model configured.': 'Модель не настроена.',
   'Manage Arena sessions': 'Управлять сессиями Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Запустить сессию Arena, где несколько моделей соревнуются на одной и той же задаче',

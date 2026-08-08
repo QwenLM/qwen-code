@@ -565,6 +565,7 @@ export const handleSlashCommand = async (
 
   const context: CommandContext = {
     executionMode,
+    abortSignal: abortController.signal,
     services: {
       config,
       settings,

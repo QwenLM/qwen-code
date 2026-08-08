@@ -2060,6 +2060,17 @@ export default {
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '讓審查模型對目前對話給出第二意見',
+  'Consulting advisor...': '正在諮詢審查模型...',
+  'Advisor review failed: {{error}}': '審查失敗：{{error}}',
+  'No conversation context available for /advisor':
+    '沒有可供 /advisor 使用的對話上下文',
+  'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一個操作正在進行中，請等待其完成後再執行 /advisor',
+  'No response received.': '未收到回覆。',
+  'No model configured.': '未設定模型。',
   'Manage Arena sessions': '管理 Arena 會話',
   'Start an Arena session with multiple models competing on the same task':
     '啟動一個 Arena 會話，讓多個模型在同一任務上競爭',

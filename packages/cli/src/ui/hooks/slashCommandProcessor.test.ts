@@ -2751,6 +2751,27 @@ describe('useSlashCommandProcessor', () => {
       expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
     });
 
+    it('does not record /advisor via the chat recorder', async () => {
+      const advisorCmd = createTestCommand({
+        name: 'advisor',
+        action: vi.fn().mockResolvedValue(undefined),
+      });
+      const result = setupProcessorHook([advisorCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/advisor check my work');
+      });
+
+      expect(advisorCmd.action).toHaveBeenCalled();
+      expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
+    });
+
     it('still records unrelated commands via the chat recorder (control)', async () => {
       const testCmd = createTestCommand({
         name: 'regular',
