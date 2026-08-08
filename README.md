@@ -148,6 +148,8 @@ https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/.qwen/skills/
 Then follow the instructions inside to install, authenticate, and use Qwen Code via acpx for all coding tasks.
 ```
 
+- [**Aliyun Model Studio CLI**](https://github.com/modelstudioai/cli) — Official CLI for Aliyun's AI platform (`bailian-cli`). Extends Qwen Code with image/video generation, knowledge retrieval, app orchestration, and model deployment. Qwen Code acts as the "brain" for intent understanding and task orchestration; the CLI acts as the "hands" for executing AI capabilities. Install with `npm install -g bailian-cli && npx skills add modelstudioai/cli --all -g`.
+
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
