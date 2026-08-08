@@ -5784,6 +5784,58 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('drains a settlement-overdue channel without waiting on its wedged child', async () => {
+    // Regression for the interaction between the active-work close protocol
+    // and the abandoned-restore bound. `confirmChildUnheld` normally asks the
+    // child before closing a detached session, but a child wedged in a
+    // non-cancellable restore is exactly the one that cannot answer — and on
+    // an overdue channel that drain IS the teardown that releases the hung
+    // request. If the drain waits on the child, the bound never fires.
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      initializeImpl: () => activeWorkInitializeResponse(),
+      loadSessionImpl: () => lateRestore.promise,
+      // The wedged child never answers the close-if-unheld probe. Its plain
+      // close still works: the point is that the probe is what stalls.
+      extMethodImpl: (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+        params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true
+          ? new Promise<Record<string, unknown>>(() => {})
+          : Promise.resolve({}),
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelIdleTimeoutMs: 60_000,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'wedged', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      // One further budget with no settlement marks the channel overdue.
+      await vi.advanceTimersByTimeAsync(20);
+      expect(handle.killed).toBe(false);
+
+      // The last client leaves the sibling. The child cannot confirm, but the
+      // channel is already condemned, so teardown proceeds locally and the
+      // drain reaps the child.
+      await bridge.detachClient(sibling.sessionId, sibling.clientId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.killed).toBe(true);
+    } finally {
+      lateRestore.reject(new Error('channel torn down'));
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('refuses a caller-supplied id that a restore still owns', async () => {
     vi.useFakeTimers();
     const lateRestore = deferred<LoadSessionResponse>();

@@ -1954,6 +1954,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const info = channelInfoForEntry(entry);
     if (!info?.activeWork) return true;
     if (info.isDying) return false;
+    // A channel the restore lifecycle has already condemned is waiting to be
+    // reaped as soon as its visible work drains — that teardown is the only
+    // thing that can release a non-cancellable restore we have given up on.
+    // Deferring to the child here would make the drain depend on the very
+    // process we have declared unreliable, and a child wedged mid-restore is
+    // precisely the one that cannot answer this round trip inside
+    // `ACTIVE_WORK_CLOSE_TIMEOUT_MS`. Nothing is attached to this session
+    // (`maybeCloseIdleSession` gates on that), so proceed to local teardown.
+    if (info.isQuarantined || info.restoreSettlementOverdue) return true;
     try {
       const response = await withTimeout(
         entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
