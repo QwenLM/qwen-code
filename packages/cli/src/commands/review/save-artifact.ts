@@ -66,15 +66,30 @@ interface SaveArtifactArgs {
   target: string;
   effort: ReviewEffort;
   out: string;
+  workspaceRoot?: string;
 }
 
-// Every path resolves against the daemon workspace root, not cwd: in PR
-// worktree mode cwd is the disposable review worktree, while the durable
-// output and `markdownReportPath` must stay relative to the main project for
-// Web Shell's `readWorkspaceFile` to find them. The skill threads that root
-// through its subprocesses as QWEN_CODE_PROJECT_DIR.
-function workspaceRoot(): string {
-  return resolve(process.env['QWEN_CODE_PROJECT_DIR'] ?? process.cwd());
+// Every path resolves against the main checkout, because the durable output
+// and `markdownReportPath` must stay relative to the main project for Web
+// Shell's `readWorkspaceFile` to find them. That root arrives as
+// `--workspace-root`: the skill passes the main project directory explicitly
+// on every run (SKILL.md Step 8), because the root anchors the containment
+// checks — `isWithin` and the symlink walk below — and an ambient cwd is only
+// as trustworthy as wherever the command happened to run. Cwd is the fallback
+// when the flag is absent, right whenever the caller runs from the main
+// checkout — in PR worktree mode the worktree-resident inputs arrive as
+// absolute paths that still sit under the main project's `.qwen/tmp/`.
+//
+// This used to prefer `QWEN_CODE_PROJECT_DIR`, believing it named that
+// checkout. It never does: the harness exports it as the session-storage
+// directory under the runtime base (`Storage.getProjectDir()` — where the
+// harness's transcripts live), in every environment. Every measured CI review
+// resolved its containment root there, refused its own inputs, and burned
+// minutes working around it (DESIGN.md — The artifact root that pointed at
+// qwen-home). An ambient variable that is wrong 100% of the time it is
+// consulted is not a fallback; it is a trap, so it is not consulted at all.
+function workspaceRoot(explicit?: string): string {
+  return resolve(explicit ?? process.cwd());
 }
 
 function isWithin(parent: string, child: string): boolean {
@@ -259,7 +274,7 @@ function validateFindingsReport(value: unknown): FindingsReport {
 export function saveReviewArtifact(
   args: SaveArtifactArgs,
 ): SavedReviewArtifact {
-  const root = workspaceRoot();
+  const root = workspaceRoot(args.workspaceRoot);
   const findingsPath = workspacePath(root, args.findings, 'Findings input');
   const composedPath = workspacePath(root, args.composed, 'Composed input');
   const reportPath = workspacePath(root, args.report, 'Markdown report');
@@ -378,6 +393,12 @@ export const saveArtifactCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Output path under .qwen/reviews/',
+      })
+      .option('workspace-root', {
+        type: 'string',
+        describe:
+          'Root that containment and relative paths resolve against ' +
+          '(default: the working directory — run from the main checkout)',
       }),
   handler: (argv) => {
     const saved = saveReviewArtifact(argv as unknown as SaveArtifactArgs);

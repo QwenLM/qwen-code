@@ -17,7 +17,11 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
-import { mcpTransportOf, type McpTransportKind } from './mcp-pool-key.js';
+import {
+  connectionIdOf,
+  mcpTransportOf,
+  type McpTransportKind,
+} from './mcp-pool-key.js';
 import {
   type ConnectionId,
   type PoolEntryState,
@@ -95,6 +99,8 @@ export function defaultPoolEntryOptions(
  */
 export interface PooledConnection {
   readonly id: ConnectionId;
+  /** Stable transport identity; unlike `id`, this is stable for unpooled handles. */
+  readonly transportId: ConnectionId;
   readonly serverName: string;
   readonly entryIndex: number;
   readonly client: McpClient;
@@ -104,6 +110,8 @@ export interface PooledConnection {
   readonly promptsSnapshot: readonly DiscoveredMCPPrompt[];
   /** Current canonical resource snapshot. Re-issued on `resourcesChanged`. */
   readonly resourcesSnapshot: readonly DiscoveredMCPResource[];
+  /** Re-project per-session metadata against the current snapshots. */
+  updateConfig(cfg: MCPServerConfig): void;
   on(event: 'event', listener: (e: PoolEvent) => void): this;
   off(event: 'event', listener: (e: PoolEvent) => void): this;
   /** Release this session's reference; pool starts drain when refs=0. */
@@ -208,8 +216,12 @@ export class PoolEntry {
    */
   private suppressNextStatusEcho = false;
 
+  /** Transport identity captured at spawn, separate from unpooled lifecycle id. */
+  readonly transportId: ConnectionId;
+
   /**
-   * @param id Stable ConnectionId (`name::fingerprint`).
+   * @param id Lifecycle identity. Pooled entries use `name::fingerprint`;
+   *   unpooled entries use a unique `name::unpooled-N` value.
    * @param serverName Server name as advertised in `MCPServerConfig`.
    * @param entryIndex Opaque, monotonic-within-name-group index for
    *   status-route exposure. Stable across reconnect / drain
@@ -245,6 +257,9 @@ export class PoolEntry {
     private readonly onClosed: (id: ConnectionId) => void,
     private readonly aggregateStatusByName: (name: string) => MCPServerStatus,
   ) {
+    // Capture rather than recompute from the caller-owned config object: a
+    // later in-place mutation must not make an old transport appear current.
+    this.transportId = connectionIdOf(serverName, cfg);
     // Unbounded listener count — N session views may attach.
     this.emitter.setMaxListeners(0);
 
@@ -584,11 +599,9 @@ export class PoolEntry {
     // Snapshot replay: synchronously apply current state so the new
     // view doesn't see a transient empty state.
     //
-    // skipReplay = true for the unpooled path (`createUnpooledConnection`)
-    // — the session's McpClient has already registered tools/prompts
-    // directly via the legacy `discover()` flow, and the view's
-    // snapshot is empty. Without this gate, `applyTools([])` would
-    // call `removeMcpToolsByServer` and wipe those registrations.
+    // `skipReplay` is reserved for callers that have already projected the
+    // snapshot into their registries. Current pooled and unpooled acquisition
+    // paths both replay here so SessionMcpView remains authoritative.
     if (this.state === 'active' && opts?.skipReplay !== true) {
       try {
         view.applyTools(this.toolsSnapshot);
@@ -625,6 +638,31 @@ export class PoolEntry {
     const handle = new PooledConnectionImpl(this, sessionId, opts?.release);
     this.subscriberHandles.set(sessionId, handle);
     return handle;
+  }
+
+  /**
+   * Refresh one attached session's metadata without reconnecting the shared
+   * transport. The view owns filtering and per-session tool decoration; the
+   * entry remains the single source of truth for discovery snapshots.
+   */
+  updateSessionConfig(sessionId: string, cfg: MCPServerConfig): void {
+    if (this.isTerminated()) {
+      throw new Error(
+        `Cannot update config on PoolEntry ${this.id} in state ${this.state}`,
+      );
+    }
+    const view = this.subscribers.get(sessionId);
+    if (!view) {
+      throw new Error(
+        `Cannot update config for detached session ${sessionId} on PoolEntry ${this.id}`,
+      );
+    }
+    if (!view.updateConfig(cfg)) return;
+    if (this.state === 'active') {
+      view.applyTools(this.toolsSnapshot);
+      view.applyPrompts(this.promptsSnapshot);
+      view.applyResources(this.resourcesSnapshot);
+    }
   }
 
   /**
@@ -1245,6 +1283,9 @@ class PooledConnectionImpl implements PooledConnection {
   get id(): ConnectionId {
     return this.entry.id;
   }
+  get transportId(): ConnectionId {
+    return this.entry.transportId;
+  }
   get serverName(): string {
     return this.entry.serverName;
   }
@@ -1262,6 +1303,15 @@ class PooledConnectionImpl implements PooledConnection {
   }
   get resourcesSnapshot(): readonly DiscoveredMCPResource[] {
     return this.entry.resourcesSnapshot;
+  }
+
+  updateConfig(cfg: MCPServerConfig): void {
+    if (this.released) {
+      throw new Error(
+        `Cannot update config on released MCP connection ${this.id}`,
+      );
+    }
+    this.entry.updateSessionConfig(this.sessionId, cfg);
   }
 
   on(event: 'event', listener: (e: PoolEvent) => void): this {
