@@ -182,6 +182,10 @@ describe('createGoalCheckpointVerifier', () => {
     // The abort signal is the only cancellation mechanism for the side
     // query, so the timeout must actually abort it.
     expect(captured?.aborted).toBe(true);
+    // TimeoutError-shaped, mirroring goal-verifier: a plain-Error reason
+    // reads downstream as a user cancel and the timeout's api_error is
+    // suppressed instead of reported.
+    expect((captured?.reason as Error).name).toBe('TimeoutError');
   });
 
   it('measures the claim limit after trimming, in code points', () => {
