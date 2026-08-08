@@ -287,6 +287,57 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('reads an uploaded archive from a local path without persisting that path', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'uploaded-extension');
+        },
+      );
+      const manager = createExtensionManager();
+
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: 'upload:uploaded.zip' },
+        localSourcePath: archivePath,
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+
+      expect(mockExtractArchiveFile).toHaveBeenLastCalledWith(
+        archivePath,
+        expect.any(String),
+        undefined,
+      );
+      expect(prepared.installMetadata.source).toBe('upload:uploaded.zip');
+
+      await manager.commitPreparedExtension(prepared);
+      const metadata = manager.loadInstallMetadata(
+        path.join(userExtensionsDir, 'uploaded-extension'),
+      );
+      expect(metadata?.source).toBe('upload:uploaded.zip');
+      await manager.disposePreparedExtension(prepared);
+      expect(fs.existsSync(archivePath)).toBe(true);
+    });
+
+    it('rejects a local source path for non-local installs', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      const manager = createExtensionManager();
+
+      await expect(
+        manager.prepareExtensionInstall({
+          installMetadata: {
+            type: 'git',
+            source: 'https://example.com/extension.git',
+          },
+          localSourcePath: archivePath,
+          initialActivation: { scope: 'user' },
+          requestConsent: async () => {},
+        }),
+      ).rejects.toThrow('A local source path requires a local install.');
+    });
+
     it('signals the durable commit before runtime refresh completes', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'commit-boundary.zip');
       fs.writeFileSync(archivePath, 'archive');
@@ -2916,6 +2967,20 @@ describe('extension tests', () => {
         const metadata = { type: 'local' as const, source: '/path/to/ext' };
         const id = getExtensionId(config, metadata);
         expect(id).toBe(hashValue('/path/to/ext'));
+      });
+
+      it('gives same-named uploads distinct ids', () => {
+        const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
+        const first = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:first:extension.zip',
+        });
+        const second = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:second:extension.zip',
+        });
+
+        expect(first).not.toBe(second);
       });
 
       it('should use GitHub URL for git install', () => {
