@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -55,6 +55,15 @@ function task(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
 }
 
 describe('toSnapshot', () => {
+  it.each(['running', 'pausing', 'paused'] as const)(
+    'rejects an active %s workflow',
+    (status) => {
+      expect(() => toSnapshot(task({ status }))).toThrow(
+        'Cannot snapshot active workflow wf_a.',
+      );
+    },
+  );
+
   it('flattens perPhaseTokens Map into [phaseOrNull, tokens] pairs', () => {
     const s = toSnapshot(task());
     expect(s.perPhaseTokens).toEqual([
@@ -133,6 +142,32 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       ['Plan', 200],
       [null, 50],
     ]);
+  });
+
+  it('freezes the snapshot projection before the first fs await', async () => {
+    // R11-27: in-flight dispatches keep mutating the live entry across
+    // the fs yields — a projection captured after the first await would
+    // freeze the snapshot at an fs-timing-dependent point mid-drain
+    // (agents_completed reading higher than the settlement value).
+    const config = fakeConfig(projectDir);
+    const t = task({ runId: 'wf_freeze', agentsCompleted: 1 });
+    const realMkdir = fs.mkdir.bind(fs);
+    const mkdirSpy = vi
+      .spyOn(fs, 'mkdir')
+      .mockImplementation(async (...args: Parameters<typeof fs.mkdir>) => {
+        // Simulate an in-flight dispatch draining across the yield.
+        t.agentsCompleted += 1;
+        return realMkdir(...args);
+      });
+    try {
+      await writeWorkflowSnapshot(config, t);
+    } finally {
+      mkdirSpy.mockRestore();
+    }
+    const list = await listWorkflowSnapshots(config);
+    expect(list).toHaveLength(1);
+    // The settlement value, not the post-await drained value.
+    expect(list[0].agentsCompleted).toBe(1);
   });
 
   it('lists newest-first by startTime', async () => {
