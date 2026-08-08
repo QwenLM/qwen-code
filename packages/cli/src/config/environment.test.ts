@@ -50,6 +50,8 @@ const TRACKED_ENV = [
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_RUNTIME_DIR',
   'QWEN_SERVER_TOKEN',
+  'qwen_server_token',
+  'tmpdir',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -682,6 +684,38 @@ describe('loadEnvironment', () => {
     expect(process.env['Qwen_Cli_Entry']).toBeUndefined();
     expect(process.env['Node_Extra_Ca_Certs']).toBeUndefined();
     expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+  });
+
+  // The reload-only tier (QWEN_SERVER_TOKEN, PATH, HOME, TMPDIR, …) must
+  // match case-folded for the same reason: on Windows a lowercase twin
+  // names the same OS variable, so an exact-case gate would let a
+  // mid-session settings.env/.env edit rotate the daemon token or rewrite
+  // PATH.
+  it('rejects case variants of reload-only excluded keys', () => {
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(envPath, 'tmpdir=/workspace-a/first\n');
+
+    loadEnvironment(
+      testSettings({ env: { qwen_server_token: 'spoofed-token' } }),
+      workspace,
+    );
+    // The full loader never takes the daemon token from settings.env — the
+    // case variant must not slip the gate either.
+    expect(process.env['qwen_server_token']).toBeUndefined();
+    // The initial .env load predates the reload tier, so the lowercase twin
+    // applies as a distinct POSIX variable; the reload tier is what must
+    // keep a mid-session edit from moving it (on Windows the twin IS the
+    // uppercase variable).
+    expect(process.env['tmpdir']).toBe('/workspace-a/first');
+
+    fs.writeFileSync(envPath, 'tmpdir=/workspace-a/second\n');
+    reloadEnvironment(
+      testSettings({ env: { qwen_server_token: 'spoofed-token' } }),
+      workspace,
+    );
+    expect(process.env['qwen_server_token']).toBeUndefined();
+    expect(process.env['tmpdir']).toBe('/workspace-a/first');
   });
 
   // The daemon reaches per-workspace .env files only through

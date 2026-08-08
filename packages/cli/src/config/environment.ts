@@ -51,6 +51,18 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'TEMP',
 ]);
 
+// Windows env lookup is case-insensitive, so a reload matching only the
+// exact spellings would let `path`/`qwen_server_token`/... case variants
+// through on the platform where they name the same variable. Same treatment
+// as the hardcoded tier (isHardcodedProjectEnvExclusion).
+const RELOAD_EXCLUDED_KEYS_CASEFOLDED: ReadonlySet<string> = new Set(
+  [...RELOAD_EXCLUDED_KEYS].map((key) => key.toLowerCase()),
+);
+
+function isReloadExcludedKey(key: string): boolean {
+  return RELOAD_EXCLUDED_KEYS_CASEFOLDED.has(key.toLowerCase());
+}
+
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
 const lastReloadSnapshot = new Map<string, string>();
@@ -391,7 +403,7 @@ function canApplyParsedEnvKey(
   // repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
   // #8653 cross-workspace vector.
   if (isLoaderEnvKey(key)) return false;
-  if (options.reload && RELOAD_EXCLUDED_KEYS.has(key)) return false;
+  if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;
   }
@@ -464,7 +476,7 @@ export function buildRuntimeEnvironment(
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
-      if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+      if (isReloadExcludedKey(key)) continue;
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
@@ -550,7 +562,7 @@ export function loadEnvironment(
       if (isLoaderEnvKey(key)) {
         continue;
       }
-      if (RELOAD_EXCLUDED_KEYS.has(key)) {
+      if (isReloadExcludedKey(key)) {
         continue;
       }
       if (isHardcodedProjectEnvExclusion(key)) {
@@ -637,7 +649,7 @@ export function reloadEnvironment(
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
-      if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+      if (isReloadExcludedKey(key)) continue;
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (typeof value !== 'string') continue;
       const dotEnvValue = newDotEnvKeys.get(key);
@@ -675,7 +687,7 @@ export function reloadEnvironment(
       ...settingsEnvSourcedKeys,
     ]);
     for (const key of previouslyKnown) {
-      if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
+      if (!allNewKeys.has(key) && !isReloadExcludedKey(key)) {
         delete process.env[key];
         removedKeys.push(key);
       }
