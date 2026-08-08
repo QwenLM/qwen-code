@@ -48,9 +48,14 @@ describe('WorkflowTool', () => {
     expect(tool.name).toBe(ToolNames.WORKFLOW);
     expect(tool.displayName).toBe(ToolDisplayNames.WORKFLOW);
     const schema = tool.schema.parametersJsonSchema as {
-      properties: { run_in_background: { default?: boolean } };
+      properties: {
+        run_in_background: { default?: boolean; description?: string };
+      };
     };
     expect(schema.properties.run_in_background.default).toBe(false);
+    expect(schema.properties.run_in_background.description).toContain(
+      'cooperatively pause/resume',
+    );
   });
 
   // The description is what makes the model pick pipeline() over a barrier
@@ -96,6 +101,12 @@ describe('WorkflowTool', () => {
     expect(description).toMatch(/30-minute wall-clock cap/);
     expect(description).toMatch(/nests one level only/);
     expect(description).toMatch(/read `budget\.total`/);
+    // The `/workflows` capability list is the one part of the description
+    // that trails the runtime: #8320 added cooperative pause/resume to the
+    // dialog while this branch was moving the description into a constant,
+    // and the base merge conflicted exactly here. Nothing else asserts the
+    // control set, so dropping one on the next merge would be silent.
+    expect(description).toMatch(/cooperative pause\/resume/);
   });
 
   it('rejects build() when script is missing', () => {
@@ -275,7 +286,7 @@ describe('WorkflowTool', () => {
       },
     ]);
     expect(result.returnDisplay).toBe(
-      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe or stop it.`,
+      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
     );
     expect(updateOutput).not.toHaveBeenCalled();
 

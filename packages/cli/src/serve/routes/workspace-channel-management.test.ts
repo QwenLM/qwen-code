@@ -178,6 +178,45 @@ describe('workspace Channel management routes', () => {
     );
   });
 
+  it('advertises the exact nested object descriptor shape on the wire', async () => {
+    const { app } = mount();
+
+    const response = await request(app).get('/workspace/channel-types');
+
+    expect(response.status).toBe(200);
+    const dingtalk = (
+      response.body as Array<{ type: string; fields: unknown[] }>
+    ).find((entry) => entry.type === 'dingtalk');
+    expect(dingtalk?.fields).toContainEqual({
+      key: 'interactiveCards',
+      label: 'Interactive Cards',
+      kind: 'object',
+      properties: [
+        { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+        {
+          key: 'statusCard',
+          label: 'Status Card',
+          kind: 'object',
+          properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
+        },
+        {
+          key: 'questionCard',
+          label: 'Question Card',
+          kind: 'object',
+          properties: [
+            { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+            {
+              key: 'timeoutMs',
+              label: 'Timeout (ms)',
+              kind: 'number',
+              exclusiveMinimum: 0,
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it('routes strict CRUD and lifecycle mutations to the primary service', async () => {
     const { app, primaryService } = mount();
 

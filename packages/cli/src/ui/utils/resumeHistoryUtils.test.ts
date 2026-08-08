@@ -232,6 +232,7 @@ describe('resumeHistoryUtils', () => {
         message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
         systemPayload: {
           displayText: 'my prompt',
+          hookContext: 'injected hook context',
         },
       });
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
@@ -251,6 +252,7 @@ describe('resumeHistoryUtils', () => {
         },
         systemPayload: {
           displayText: 'my prompt',
+          hookContext: 'injected hook context',
         },
       });
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
@@ -465,6 +467,171 @@ describe('resumeHistoryUtils', () => {
       text: 'save logs',
       sentToModel: false,
     });
+  });
+
+  it('restores ordinary user messages from clean display text', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'expanded model prompt' } as Part,
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 30);
+
+    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+  });
+
+  it('projects the user turn when legacy @-command metadata has no userText', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'at_command',
+          systemPayload: { filesRead: [], status: 'success' },
+        },
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'expanded model prompt' } as Part,
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items.find((item) => item.type === 'user')).toMatchObject({
+      text: 'expanded model prompt',
+    });
+    expect(JSON.stringify(items)).not.toContain('hook-only context');
+  });
+
+  it('strips a complete final hook-context part without metadata', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'user prompt' } as Part,
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([{ id: 31, type: 'user', text: 'user prompt' }]);
+  });
+
+  it('keeps legacy bare hook context when no reliable boundary exists', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'user prompt' } as Part,
+              { text: 'legacy bare hook context' } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'user prompt\nlegacy bare hook context',
+      },
+    ]);
+  });
+
+  it('does not fall back to model-facing text for empty display metadata', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            hookContext: 'hook-only context',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([]);
   });
 
   it('marks tool results as error, omits thought text, and falls back when tool is missing', () => {

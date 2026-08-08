@@ -193,6 +193,124 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it('preserves cron display text and source metadata during replay', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('cron-1', 'user', {
+        subtype: 'cron',
+        message: {
+          role: 'user',
+          parts: [{ text: 'cron model text' }],
+        },
+        systemPayload: { displayText: 'Cron job fired' },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'Cron job fired' },
+        _meta: {
+          source: 'cron',
+          qwenTranscript: { sourceRecordIds: ['cron-1'] },
+        },
+      },
+    ]);
+  });
+
+  it('uses clean user display metadata while preserving image parts', () => {
+    const machine = createTranscriptReplayMachine();
+    const projected = updates(
+      machine,
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                data: 'image-data',
+                mimeType: 'image/png',
+              },
+            },
+            { text: 'expanded model prompt' },
+            {
+              text: [
+                '<qwen:user-prompt-submit-context>',
+                'hook-only context',
+                '</qwen:user-prompt-submit-context>',
+              ].join('\n'),
+            },
+          ],
+        },
+        systemPayload: {
+          displayText: 'raw @file prompt',
+          hookContext: 'hook-only context',
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'image',
+          data: 'image-data',
+          mimeType: 'image/png',
+        },
+      },
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'raw @file prompt' },
+      },
+    ]);
+  });
+
+  it('strips only a complete final tag-only context part', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'user prompt' },
+            {
+              text: [
+                '<qwen:user-prompt-submit-context>',
+                'hook-only context',
+                '</qwen:user-prompt-submit-context>',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      content: { type: 'text', text: 'user prompt' },
+    });
+  });
+
+  it('preserves legacy bare hook context without a reliable boundary', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'user prompt' },
+            { text: 'legacy bare hook context' },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      { content: { type: 'text', text: 'user prompt' } },
+      { content: { type: 'text', text: 'legacy bare hook context' } },
+    ]);
+  });
+
   it('preserves Live dialogue boundaries and source during replay', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(
@@ -223,10 +341,9 @@ describe('createTranscriptReplayMachine', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
 
-    it('prefers displayText over the tag-strip fallback and keeps image parts', () => {
-      // Without displayText the tag-strip path would also emit the middle
-      // "expanded extra" text part. displayText must win, and the image
-      // part must survive (the previous early-return path dropped it).
+    it('replaces text parts with displayText while preserving image parts', () => {
+      // displayText must replace all model-facing text while the image part
+      // survives (the previous early-return path dropped it).
       const projected = updates(
         createTranscriptReplayMachine(),
         record('user-1', 'user', {
@@ -246,6 +363,7 @@ describe('createTranscriptReplayMachine', () => {
           },
           systemPayload: {
             displayText: 'my prompt',
+            hookContext: 'injected hook context',
           },
         }),
       );
@@ -267,9 +385,8 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toHaveLength(2);
     });
 
-    it('appends displayText after images when the record has no text part to replace', () => {
-      // Exercises the !replaced fallback: after stripping the trailing tagged
-      // block, only the image remains, so displayText is appended.
+    it('appends displayText after an image-only record', () => {
+      // With no text part to replace, displayText is appended after the image.
       const projected = updates(
         createTranscriptReplayMachine(),
         record('user-img-only', 'user', {
@@ -282,11 +399,11 @@ describe('createTranscriptReplayMachine', () => {
                   mimeType: 'image/png',
                 },
               },
-              { text: tagged },
             ],
           },
           systemPayload: {
             displayText: 'my image prompt',
+            hookContext: 'injected hook context',
           },
         }),
       );
@@ -308,6 +425,43 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toHaveLength(2);
     });
 
+    it('does not append empty displayText after an image-only record', () => {
+      const onDiagnostic = vi.fn();
+      const projected = updates(
+        createTranscriptReplayMachine({ onDiagnostic }),
+        record('user-img-only-empty-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc',
+                  mimeType: 'image/png',
+                },
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            hookContext: 'injected hook context',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc',
+            mimeType: 'image/png',
+          },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+      expect(onDiagnostic).not.toHaveBeenCalled();
+    });
+
     it('strips a trailing whole-part tagged block when displayText is absent', () => {
       const projected = updates(
         createTranscriptReplayMachine(),
@@ -323,6 +477,128 @@ describe('createTranscriptReplayMachine', () => {
         {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text: 'my prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+    });
+
+    it('uses released single-field displayText when the final tag proves provenance', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-single-field-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: 'model-bound prompt' },
+              { text: 'legacy bare hook context' },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'raw @file prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(2);
+    });
+
+    it('does not trust bare displayText on plain user records', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-bare-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: 'model-bound prompt' },
+              { text: 'legacy bare hook context' },
+            ],
+          },
+          systemPayload: {
+            displayText: 'notification-style label',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'model-bound prompt' },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'legacy bare hook context' },
+        },
+      ]);
+      expect(projected).toHaveLength(3);
+    });
+
+    it('treats paired empty displayText as authoritative', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-empty-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'expanded model prompt' },
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            hookContext: 'injected hook context',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
         },
       ]);
       expect(projected).toHaveLength(1);

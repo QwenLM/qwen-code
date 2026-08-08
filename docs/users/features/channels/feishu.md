@@ -38,6 +38,15 @@ Enable the following permissions under **Permissions & Scopes** (权限管理):
 - `im:message:send_as_bot` — Send messages as bot
 - `im:resource` — Access message resources (images, files)
 
+To show user and group names instead of IDs in daemon-discovered contacts,
+optionally enable:
+
+- `contact:user.basic_profile:readonly` — Read user display names
+- `im:chat:readonly` — Read group names
+
+Without these optional permissions, messages still work and discovered contacts
+keep their Feishu user and chat IDs as labels.
+
 ### Publish the Application
 
 After configuring permissions and events, create a version and publish it. The bot won't work until the application is published and approved.
