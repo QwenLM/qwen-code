@@ -1164,7 +1164,13 @@ jobs:
             # or success. Leaving it off would silently swallow this job's own
             # ::error:: and the fallback comment's diagnostics for the rest of
             # the run, turning one broken review into a silent one.
-            echo "::${stop_token}::"
+            # Lead with a newline: the runner only recognises `::cmd::` at the
+            # start of a line, and `--kill-after` SIGKILLs the agent, which can
+            # leave a partial stream-json line with no trailing newline. An
+            # `echo` would append the resume to that fragment, where it is just
+            # text — parsing would stay off for the rest of the job, on exactly
+            # the path this guard exists to survive.
+            printf '\n::%s::\n' "$stop_token"
             set -e
             local qwen_status="${ps[0]}"
             local tee_status="${ps[1]}"
