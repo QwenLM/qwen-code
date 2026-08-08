@@ -217,6 +217,7 @@ export default {
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
+  'toolDisplayName.Tmux': 'toolDisplayName.Tmux',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
   'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',

@@ -51,6 +51,7 @@ import {
   type ExtraWsRoute,
 } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
+import { createTerminalWsConnectionHandler } from './terminal/terminal-ws.js';
 import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
@@ -2670,6 +2671,17 @@ export function createServeApp(
           env: primaryRuntimeEffectiveEnv,
           isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
           acquireVoiceLease: acquirePrimaryVoiceLease,
+        }),
+      },
+      // Browser live-terminal attach for tmux-backed shell tasks (the core
+      // tmux tool). Shares the upgrade listener's loopback/CSRF/bearer
+      // checks; the handler validates the task against the live registry
+      // before attaching.
+      {
+        path: '/terminal',
+        onConnection: createTerminalWsConnectionHandler({
+          workspaceRegistry,
+          daemonLog,
         }),
       },
     ],

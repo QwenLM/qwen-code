@@ -22,6 +22,8 @@ import {
   SquareTerminalIcon,
 } from 'lucide-react';
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -85,6 +87,14 @@ import {
   MonitorTaskDetail,
   ShellTaskDetail,
 } from '../messages/TasksStatusMessage';
+
+// Lazy-load the terminal panel so importing ArtifactPanel does not eagerly
+// pull @xterm into the module graph (it breaks non-jsdom test environments).
+const TerminalPanel = lazy(() =>
+  import('../terminal/TerminalPanel').then((module) => ({
+    default: module.TerminalPanel,
+  })),
+);
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -169,6 +179,13 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'terminal';
+      title: string;
+      task: DaemonSessionShellTaskStatus;
+      sessionId?: string;
+    }
+  | {
+      id: string;
       kind: 'side_task';
       title: string;
       sessionId?: string;
@@ -249,6 +266,10 @@ interface ArtifactPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  onOpenTerminal?: (
+    task: DaemonSessionShellTaskStatus,
+    sessionId?: string,
+  ) => void;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
 }
@@ -281,6 +302,7 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  onOpenTerminal,
   onClose,
   variant = 'docked',
 }: ArtifactPanelProps) {
@@ -380,7 +402,7 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
-                    ) : tab.kind === 'shell' ? (
+                    ) : tab.kind === 'shell' || tab.kind === 'terminal' ? (
                       <SquareTerminalIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
@@ -670,7 +692,23 @@ export function ArtifactPanel({
             key={activeTab.id}
             task={activeTab.task}
             actions={activeTab.sessionActions}
+            {...(onOpenTerminal
+              ? {
+                  onOpenTerminal: (task: DaemonSessionShellTaskStatus) =>
+                    onOpenTerminal(task, activeTab.sessionId),
+                }
+              : {})}
           />
+        ) : activeTab.kind === 'terminal' ? (
+          <Suspense fallback={null}>
+            <TerminalPanel
+              key={activeTab.id}
+              taskId={activeTab.task.id}
+              {...(activeTab.sessionId
+                ? { sessionId: activeTab.sessionId }
+                : {})}
+            />
+          </Suspense>
         ) : activeTab.kind === 'side_task' ? (
           <SideTaskPanel
             key={activeTab.id}

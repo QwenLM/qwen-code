@@ -209,6 +209,7 @@ export default {
   'toolDisplayName.SendMessage': '发送消息',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
+  'toolDisplayName.Tmux': '终端',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
   'toolDisplayName.ToolSearch': '工具搜索',
   'toolDisplayName.EnterWorktree': '进入 Worktree',

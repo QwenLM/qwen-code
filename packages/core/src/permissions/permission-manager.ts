@@ -573,6 +573,7 @@ export class PermissionManager {
     'loop_wakeup',
     'create_sub_session',
     'monitor',
+    'tmux',
   ]);
 
   /**

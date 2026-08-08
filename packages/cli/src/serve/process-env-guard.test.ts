@@ -205,6 +205,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       },
     },
   ],
+  [
+    'packages/cli/src/serve/terminal/terminal-ws.ts',
+    {
+      reason:
+        'The terminal attach pty uses the daemon environment as its base so `tmux` resolves on PATH and the tmux socket location is reachable.',
+      accesses: { whole: 1 },
+    },
+  ],
 ]);
 
 function listTypeScriptFiles(dir: string): string[] {

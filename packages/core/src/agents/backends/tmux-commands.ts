@@ -327,16 +327,48 @@ export async function tmuxSelectLayout(
 }
 
 /**
- * Capture the content of a pane (including ANSI escape codes).
+ * Capture the content of a pane.
  *
+ * @param opts.scrollbackLines - Include this many lines of scrollback
+ *   history (`-S -<n>`). Omit for the visible screen only.
+ * @param opts.includeEscapeCodes - Keep ANSI escape sequences (`-e`).
+ *   Defaults to true for back-compat with existing callers.
  * @returns The captured pane content as a string.
  */
 export async function tmuxCapturePaneContent(
   paneId: string,
   serverName?: string,
+  opts?: { scrollbackLines?: number; includeEscapeCodes?: boolean },
 ): Promise<string> {
   // -p: output to stdout, -e: include escape sequences
-  return await tmux(['capture-pane', '-t', paneId, '-p', '-e'], serverName);
+  const args = ['capture-pane', '-t', paneId, '-p'];
+  if (opts?.includeEscapeCodes !== false) {
+    args.push('-e');
+  }
+  if (opts?.scrollbackLines !== undefined) {
+    args.push('-S', `-${opts.scrollbackLines}`);
+  }
+  return await tmux(args, serverName);
+}
+
+/**
+ * Pipe a pane's output to a shell command (`pipe-pane -o`).
+ *
+ * The pipe follows the pane, not the process: it survives
+ * `respawn-pane -k` and keeps streaming until the pane is destroyed or
+ * `pipe-pane` is run again without `-o`. Typical use:
+ * `tmuxPipePane(paneId, "cat >> '/path/to/output'")`.
+ *
+ * @param command - Shell command that receives the pane's output on stdin.
+ */
+export async function tmuxPipePane(
+  paneId: string,
+  command: string,
+  serverName?: string,
+): Promise<void> {
+  // -o: only pipe new output; without it a second pipe-pane call would
+  // toggle any existing pipe off.
+  await tmux(['pipe-pane', '-o', '-t', paneId, command], serverName);
 }
 
 /**

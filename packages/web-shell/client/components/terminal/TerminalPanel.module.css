@@ -1,0 +1,55 @@
+.terminalPanel {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  background: var(--background, #1e1e1e);
+}
+
+.terminalContainer {
+  flex: 1;
+  min-height: 0;
+  padding: 4px;
+}
+
+.terminalContainer :global(.xterm) {
+  height: 100%;
+}
+
+.terminalOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground, #888);
+  background: color-mix(in srgb, var(--background, #1e1e1e) 80%, transparent);
+  font-size: 13px;
+}
+
+.terminalOverlayColumn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminalOverlayDetail {
+  font-size: 12px;
+  opacity: 0.8;
+  max-width: 360px;
+  text-align: center;
+}
+
+.terminalOverlayButton {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #444);
+  background: var(--secondary, #2d2d2d);
+  color: var(--foreground, #ddd);
+  cursor: pointer;
+}
+
+.terminalOverlayButton:hover {
+  background: var(--accent, #3a3a3a);
+}

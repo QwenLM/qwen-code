@@ -43,6 +43,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   send_message: 'SendMessage',
   structured_output: 'StructuredOutput',
   monitor: 'Monitor',
+  tmux: 'Tmux',
   notebook_edit: 'NotebookEdit',
   tool_search: 'ToolSearch',
   read_mcp_resource: 'ReadMcpResource',

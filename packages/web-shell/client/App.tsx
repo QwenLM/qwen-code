@@ -2938,6 +2938,28 @@ export function App({
     },
     [getDefaultReviewPanelWidth],
   );
+  const openTerminalPanel = useCallback(
+    (task: DaemonSessionShellTaskStatus, sourceSessionId?: string) => {
+      const tab: ArtifactPanelTab = {
+        id: sourceSessionId
+          ? `terminal:${sourceSessionId}:${task.id}`
+          : `terminal:${task.id}`,
+        kind: 'terminal',
+        title: task.command,
+        task,
+        ...(sourceSessionId ? { sessionId: sourceSessionId } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth],
+  );
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
       const rawOutput =
@@ -10486,6 +10508,7 @@ export function App({
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
                     sessionWorkflowEnabled={sessionWorkflowEnabled}
+                    onOpenTerminal={openTerminalPanel}
                     onClose={closeArtifactPanel}
                     variant="drawer"
                   />
@@ -10541,6 +10564,7 @@ export function App({
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
                     sessionWorkflowEnabled={sessionWorkflowEnabled}
+                    onOpenTerminal={openTerminalPanel}
                     onClose={closeArtifactPanel}
                   />
                 </div>

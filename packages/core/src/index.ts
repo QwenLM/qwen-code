@@ -349,6 +349,7 @@ export {
 } from './utils/terminalSafe.js';
 export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
+export * from './utils/getPty.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './agents/workflow-run-registry.js';

@@ -94,6 +94,7 @@ function serializeShellTask(
     ...optionalField('pid', entry.pid),
     ...optionalField('exitCode', entry.exitCode),
     ...optionalField('error', entry.error),
+    ...optionalField('terminal', entry.terminal),
   };
 }
 
