@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url';
 
 const OWNERS_FILE = '.github/issue-owners.json';
 const WRITE_PERMISSIONS = new Set(['admin', 'maintain', 'write']);
-const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const LOGIN = /^(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 
 function isStringArray(value) {
   return Array.isArray(value) && value.every((v) => typeof v === 'string');

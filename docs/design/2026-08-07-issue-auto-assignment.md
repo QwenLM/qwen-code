@@ -30,9 +30,11 @@ issues: labeled/unlabeled ──► assign-issue-owner.mjs ──► labels → 
 
 - `requireLabels` — every one must be present. Ships as `["need-discussion"]`, a
   deliberately conservative rollout. Widen or empty it to assign more issues.
-- `skipLabels` — any one blocks assignment (`welcome-pr`, `feature/need-help`,
-  `good first issue`, `help wanted`), keeping community-facing issues open to the
-  community.
+- `skipLabels` — any one blocks assignment. `welcome-pr`, `feature/need-help`,
+  `good first issue`, `help wanted` keep community-facing issues open to the
+  community; `autofix/approved` and `autofix/in-progress` keep autofix-owned
+  issues clear of a competing human assignment (autofix selects candidates
+  with `no:assignee`).
 - `areas` — ordered label→owners entries. First match wins.
 
 The initial `core` owners were seeded from `.github/CODEOWNERS`, but the map is

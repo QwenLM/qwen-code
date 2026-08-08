@@ -70,9 +70,10 @@ describe('assign-issue-owner: owner map', () => {
   });
 
   it('rejects a malformed login rather than passing it to gh', () => {
-    // GitHub logins cannot start or end with a hyphen; a trailing-hyphen typo
-    // would 404 on the permission check and be silently dropped at runtime.
-    for (const login of ['not a login', 'alice-', '-alice']) {
+    // GitHub logins cannot start or end with a hyphen or contain consecutive
+    // hyphens; a typo'd owner is only dropped at the runtime permission
+    // check, so reject the whole config up front instead.
+    for (const login of ['not a login', 'alice-', '-alice', 'a--b']) {
       const broken = JSON.parse(ownersRaw);
       broken.areas[0].owners = [login];
       assert.throws(() => loadPolicy(JSON.stringify(broken)), /invalid login/);
@@ -103,6 +104,50 @@ describe('assign-issue-owner: owner map', () => {
     const broken = JSON.parse(ownersRaw);
     broken.areas[0].labels = [];
     assert.throws(() => loadPolicy(JSON.stringify(broken)), /needs labels/);
+  });
+
+  it('rejects a root that is not an object', () => {
+    for (const raw of ['null', '[]', '"policy"']) {
+      assert.throws(() => loadPolicy(raw), /not an object/);
+    }
+  });
+
+  it('rejects non-array label lists', () => {
+    for (const key of ['requireLabels', 'skipLabels']) {
+      const broken = JSON.parse(ownersRaw);
+      broken[key] = 'need-discussion';
+      assert.throws(
+        () => loadPolicy(JSON.stringify(broken)),
+        /non-empty strings/,
+      );
+    }
+  });
+
+  it('rejects a missing, empty, or non-array areas list', () => {
+    for (const areas of [undefined, [], 'core']) {
+      const broken = JSON.parse(ownersRaw);
+      broken.areas = areas;
+      assert.throws(
+        () => loadPolicy(JSON.stringify(broken)),
+        /areas must be a non-empty array/,
+      );
+    }
+  });
+
+  it('rejects an unnamed area or an area with no owners', () => {
+    const nameless = JSON.parse(ownersRaw);
+    delete nameless.areas[0].name;
+    assert.throws(() => loadPolicy(JSON.stringify(nameless)), /needs a name/);
+
+    const ownerless = JSON.parse(ownersRaw);
+    ownerless.areas[0].owners = [];
+    assert.throws(() => loadPolicy(JSON.stringify(ownerless)), /needs owners/);
+  });
+
+  it('rejects a non-string owner entry', () => {
+    const broken = JSON.parse(ownersRaw);
+    broken.areas[0].owners = [42];
+    assert.throws(() => loadPolicy(JSON.stringify(broken)), /invalid login/);
   });
 });
 
@@ -292,9 +337,9 @@ const assignStep = assignJob.steps.find((s) => s.name === 'Assign area owner');
 
 describe('assign-issue-owner: workflow invariants', () => {
   it('runs only on the canonical repository', () => {
-    assert.match(
+    assert.equal(
       String(assignJob.if),
-      /github\.repository == 'QwenLM\/qwen-code'/,
+      "${{ github.repository == 'QwenLM/qwen-code' }}",
     );
   });
 
@@ -313,6 +358,11 @@ describe('assign-issue-owner: workflow invariants', () => {
       'job-level env exposes GH_TOKEN to every step',
     );
     assert.equal(assignStep.env.GH_TOKEN, '${{ github.token }}');
+    assert.equal(assignStep.env.DRY_RUN, "${{ inputs.dry_run || 'false' }}");
+    assert.equal(
+      assignStep.env.ISSUE_NUMBER,
+      '${{ github.event.issue.number || inputs.number }}',
+    );
     assert.equal(checkoutStep.with['persist-credentials'], false);
   });
 
@@ -326,6 +376,10 @@ describe('assign-issue-owner: workflow invariants', () => {
 
   it('fires on label changes without cancelling an in-flight assignment', () => {
     assert.deepEqual(doc.on.issues.types, ['labeled', 'unlabeled']);
+    assert.equal(
+      doc.concurrency.group,
+      'assign-issue-owner-${{ github.event.issue.number || inputs.number }}',
+    );
     assert.equal(doc.concurrency['cancel-in-progress'], false);
   });
 });
