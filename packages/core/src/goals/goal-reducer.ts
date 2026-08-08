@@ -5,9 +5,16 @@
  */
 
 import {
+  GOAL_CHECKPOINT_CLAIM_LIMIT,
+  GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
+  GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
+  GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
+  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  isGoalEvidenceProofKind,
   type GoalControlRequest,
+  type GoalEvidenceCheckpoint,
   type GoalRecord,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -97,6 +104,7 @@ export function reduceGoalControl(
       revision: current.revision + 1,
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
+      evidenceCheckpoint: undefined,
       lastReason: undefined,
     });
   }
@@ -125,7 +133,8 @@ export function reduceGoalControl(
   }
   if (
     current.status === 'usage_limited' &&
-    current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON
+    (current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON ||
+      current.lastReason === GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON)
   ) {
     throw new GoalInvalidTransitionError(
       'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
@@ -215,24 +224,46 @@ export function parseGoalStateRecordPayloadV2(
 ): GoalStateRecordPayloadV2 | undefined {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['v', 'cause', 'snapshot', 'blockedAudit']) ||
+    !hasOnlyKeys(value, [
+      'v',
+      'cause',
+      'snapshot',
+      'checkpointPending',
+      'blockedAudit',
+    ]) ||
     value['v'] !== GOAL_STATE_VERSION ||
     !isGoalStateCause(value['cause']) ||
+    !isCheckpointPending(value['checkpointPending']) ||
     !isBlockedAudit(value['blockedAudit'])
   ) {
     return undefined;
   }
   const parsedSnapshot = parseGoalSnapshotV2(value['snapshot']);
-  return parsedSnapshot?.activity === 'idle'
-    ? {
-        v: GOAL_STATE_VERSION,
-        cause: value['cause'],
-        snapshot: parsedSnapshot,
-        ...(value['blockedAudit']
-          ? { blockedAudit: structuredClone(value['blockedAudit']) }
-          : {}),
-      }
-    : undefined;
+  if (parsedSnapshot?.activity !== 'idle') return undefined;
+  const checkpointPending = value['checkpointPending'];
+  if (
+    checkpointPending &&
+    (parsedSnapshot.goal?.status !== 'active' ||
+      checkpointPending.permit.goalId !== parsedSnapshot.goal.goalId ||
+      checkpointPending.permit.revision !== parsedSnapshot.goal.revision ||
+      checkpointPending.recordUuid ===
+        parsedSnapshot.goal.evidenceCursor.recordId ||
+      (value['cause'] !== 'turn_finished' &&
+        value['cause'] !== 'verifier_reject'))
+  ) {
+    return undefined;
+  }
+  return {
+    v: GOAL_STATE_VERSION,
+    cause: value['cause'],
+    snapshot: parsedSnapshot,
+    ...(checkpointPending
+      ? { checkpointPending: structuredClone(checkpointPending) }
+      : {}),
+    ...(value['blockedAudit']
+      ? { blockedAudit: structuredClone(value['blockedAudit']) }
+      : {}),
+  };
 }
 
 export function parseGoalSnapshotV2(
@@ -257,6 +288,12 @@ export function parseGoalSnapshotV2(
   return goal
     ? { v: GOAL_STATE_VERSION, goal, activity: value['activity'] }
     : undefined;
+}
+
+export function parseGoalStateCause(
+  value: unknown,
+): GoalStateCause | undefined {
+  return isGoalStateCause(value) ? value : undefined;
 }
 
 function createGoal(
@@ -360,6 +397,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'activeTimeMs',
       'createdAt',
       'updatedAt',
+      'evidenceCheckpoint',
       'lastReason',
     ]) ||
     typeof value['goalId'] !== 'string' ||
@@ -374,8 +412,16 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isNonNegativeNumber(value['activeTimeMs']) ||
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
+    !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
     (value['lastReason'] !== undefined &&
       typeof value['lastReason'] !== 'string')
+  ) {
+    return undefined;
+  }
+  if (
+    value['evidenceCheckpoint'] &&
+    value['evidenceCursor'].recordId !==
+      value['evidenceCheckpoint'].checkpointId
   ) {
     return undefined;
   }
@@ -389,6 +435,11 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     activeTimeMs: value['activeTimeMs'],
     createdAt: value['createdAt'],
     updatedAt: value['updatedAt'],
+    ...(value['evidenceCheckpoint'] === undefined
+      ? {}
+      : {
+          evidenceCheckpoint: structuredClone(value['evidenceCheckpoint']),
+        }),
     ...(value['lastReason'] === undefined
       ? {}
       : { lastReason: value['lastReason'] }),
@@ -440,6 +491,7 @@ function isGoalStateCause(value: unknown): value is GoalStateCause {
     value === 'pause' ||
     value === 'resume' ||
     value === 'turn_finished' ||
+    value === 'checkpoint' ||
     value === 'verifier_accept' ||
     value === 'verifier_reject' ||
     value === 'complete' ||
@@ -447,6 +499,78 @@ function isGoalStateCause(value: unknown): value is GoalStateCause {
     value === 'usage_limited' ||
     value === 'clear' ||
     value === 'migrated'
+  );
+}
+
+function isGoalEvidenceCheckpoint(
+  value: unknown,
+): value is GoalEvidenceCheckpoint | undefined {
+  if (value === undefined) return true;
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['checkpointId', 'createdAt', 'claims']) ||
+    typeof value['checkpointId'] !== 'string' ||
+    value['checkpointId'].length === 0 ||
+    !isFiniteNumber(value['createdAt']) ||
+    !Array.isArray(value['claims']) ||
+    value['claims'].length === 0 ||
+    value['claims'].length > GOAL_CHECKPOINT_CLAIM_LIMIT
+  ) {
+    return false;
+  }
+  let checkpointBytes = 0;
+  for (const [index, claim] of value['claims'].entries()) {
+    if (
+      !isRecord(claim) ||
+      !hasOnlyKeys(claim, ['id', 'proofKind', 'claim', 'sourceRefs']) ||
+      claim['id'] !== `${value['checkpointId']}:${index + 1}` ||
+      !isGoalEvidenceProofKind(claim['proofKind']) ||
+      typeof claim['claim'] !== 'string' ||
+      claim['claim'].trim().length === 0 ||
+      [...claim['claim']].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS ||
+      !Array.isArray(claim['sourceRefs']) ||
+      claim['sourceRefs'].length === 0 ||
+      claim['sourceRefs'].length > GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT ||
+      new Set(claim['sourceRefs']).size !== claim['sourceRefs'].length ||
+      claim['sourceRefs'].some(
+        (reference) => typeof reference !== 'string' || reference.length === 0,
+      )
+    ) {
+      return false;
+    }
+    checkpointBytes += new TextEncoder().encode(claim['claim']).byteLength;
+    if (checkpointBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) return false;
+  }
+  return true;
+}
+
+function isCheckpointPending(
+  value: unknown,
+): value is GoalStateRecordPayloadV2['checkpointPending'] {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      hasOnlyKeys(value, ['permit', 'recordUuid']) &&
+      isGoalTurnPermit(value['permit']) &&
+      typeof value['recordUuid'] === 'string' &&
+      value['recordUuid'].length > 0)
+  );
+}
+
+function isGoalTurnPermit(value: unknown): value is {
+  goalId: string;
+  revision: number;
+  turnId: string;
+} {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['goalId', 'revision', 'turnId']) &&
+    typeof value['goalId'] === 'string' &&
+    value['goalId'].length > 0 &&
+    isNonNegativeInteger(value['revision']) &&
+    value['revision'] > 0 &&
+    typeof value['turnId'] === 'string' &&
+    value['turnId'].length > 0
   );
 }
 
