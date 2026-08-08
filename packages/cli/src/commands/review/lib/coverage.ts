@@ -490,6 +490,55 @@ export function coverageFromTranscripts(
   const superseded = (rec: AgentRecord, chunk: number | null): boolean =>
     chunk !== null ? chunkSatisfied(chunk, rec) : keySatisfied(rec);
 
+  // Parsed once per record: the gap scan also feeds the supersession check
+  // below, and the parse is not free on a long return.
+  const gapsMemo = new Map<AgentRecord, string[]>();
+  const gapsOf = (rec: AgentRecord): string[] => {
+    let g = gapsMemo.get(rec);
+    if (g === undefined) {
+      g = budgetGapDisclosures(rec.finalText);
+      gapsMemo.set(rec, g);
+    }
+    return g;
+  };
+  // A record's gaps are silenced only by a GAP-FREE superseding record — a
+  // genuine repair. Two relaunches that both hit the ceiling and both
+  // disclose would otherwise supersede each other and drop every gap.
+  const gapsSuperseded = (rec: AgentRecord, chunk: number | null): boolean => {
+    if (chunk !== null) {
+      const b = builtOf(`chunk-${chunk}`);
+      if (b === undefined) return false;
+      return records.some(
+        (r) =>
+          r !== rec &&
+          assignedChunk(r) === chunk &&
+          wasDeliveredVerbatim(r.launchPrompt, b) &&
+          r.diffToolCalls > 0 &&
+          gapsOf(r).length === 0,
+      );
+    }
+    // A whole-diff record: same shape as `keySatisfied`, plus the gap-free
+    // requirement on the record that would do the superseding.
+    for (const key of built.keys()) {
+      const b = builtOf(key);
+      if (b === undefined) continue;
+      if (!wasDeliveredVerbatim(rec.launchPrompt, b)) continue;
+      const needle = JSON.stringify(briefPath(planPath, key));
+      if (
+        records.some(
+          (r) =>
+            r !== rec &&
+            wasDeliveredVerbatim(r.launchPrompt, b) &&
+            r.successfulCallArgs.some((a) => a.includes(needle)) &&
+            gapsOf(r).length === 0,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   // Budget-gap disclosures (`Budget gap: <the check>` lines, the format the
   // tool-budget brief mandates and `budgetGapDisclosures` parses). Collected
   // inside the walk below so every guard the `Uncoverable:` claim earns
@@ -606,23 +655,32 @@ export function coverageFromTranscripts(
     // This record has passed every credit guard: it was given the diff, it
     // worked, and if it was pointed at lines it opened the file they live
     // in. Only now do its budget-gap lines count as disclosures.
-    const gaps = budgetGapDisclosures(rec.finalText);
-    if (gaps.length > 0 && !superseded(rec, chunk)) {
+    //
+    // Disclosing costs NO coverage credit, on purpose — an earlier draft
+    // narrowed a disclosing agent's credit to its ranged reads, and that
+    // punished exactly the honest agent: `rangeOf` records only reads that
+    // carry a positive `limit`, so a compliant offset-paged or whole-file
+    // read left a discloser with zero credit and a hard gate failure,
+    // while an agent that stopped WITHOUT disclosing kept its full `told`
+    // credit. An asymmetry that only ever bites the discloser teaches
+    // agents not to disclose. The `told` presumption is the same for every
+    // agent; what a disclosed gap changes is the RULING (Step 3D), not the
+    // arithmetic.
+    //
+    // Suppression is gap-aware: a superseding record silences this one's
+    // gaps only if it has none itself — a relaunch that hits the same
+    // ceiling and discloses again must not let two compliant records
+    // mutually supersede every disclosure into silence.
+    const gaps = gapsOf(rec);
+    if (gaps.length > 0 && !gapsSuperseded(rec, chunk)) {
       budgetGaps.push({ agent: name, gaps });
     }
 
-    // What it was told to read, plus what it demonstrably read — UNLESS it
-    // disclosed a budget stop. The `told` term credits the reading list on
-    // the presumption the agent walked it; a `Budget gap:` line is the agent
-    // saying it did not, so its credit narrows to the ranges the harness saw
-    // it open. Without this, one ranged read plus a disclosure would receipt
-    // a 63-chunk reading list — budget-driven early stopping invisible to
-    // the very gate whose purpose is "no agent read this". The disclosure is
-    // not punished: the uncredited chunks land in `missingChunks`, which is
-    // a relaunch, exactly what an unwalked reading list is owed.
-    const ranges = merge(
-      gaps.length > 0 ? [...rec.diffReads] : [...told, ...rec.diffReads],
-    );
+    // What it was told to read, plus what it demonstrably read. The second
+    // term is what lets an agent handed the bare diff path with no
+    // territory — a reverse-audit pass, a verifier — be credited for
+    // exactly the lines it opened and for no others.
+    const ranges = merge([...told, ...rec.diffReads]);
     if (ranges.length === 0) continue;
 
     const u = UNCOVERABLE_RE.exec(rec.finalText);

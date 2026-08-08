@@ -10,6 +10,7 @@ import {
   MIN_INLINE_ANGLES,
   VERIFY_SHARD,
   budgetGapDisclosures,
+  stripBudgetGapLines,
   launchToolBudget,
   reviewBudget,
 } from './budget.js';
@@ -218,43 +219,141 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     ]);
   });
 
-  it('tolerates the markdown furniture an LLM writes lists in', () => {
+  it('tolerates the markdown furniture an LLM writes its own lists in', () => {
     // A disclosure lost to a bullet point is unobservable: nothing
-    // downstream can tell "no gaps" from "gaps we failed to parse".
+    // downstream can tell "no gaps" from "gaps we failed to parse". The
+    // fullwidth colon is deliberate too — this skill's outputs are
+    // bilingual, and Chinese prose uses `：`.
     for (const line of [
       '- Budget gap: the check',
       '* Budget gap: the check',
       '1. Budget gap: the check',
-      '> Budget gap: the check',
       '**Budget gap:** the check',
       '`Budget gap: the check`',
+      'Budget gap：the check',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual(['the check']);
     }
   });
 
-  it('drops placeholders and non-answers instead of minting phantom gaps', () => {
-    // `Budget gap: none` and the brief's own template must not become gaps
-    // an orchestrator has to rule on.
+  it('does not read a QUOTATION of the format as a use of it', () => {
+    // This repo reviews its own PRs: an agent reviewing this very diff
+    // quotes these strings out of the brief and the skill. Blockquotes,
+    // fenced code and an unclosed code span are citations, not
+    // disclosures — the same self-reference hazard transcripts.ts guards
+    // for tool-call parsing.
+    expect(
+      budgetGapDisclosures('> Budget gap: the removed retry path in fetch-pr'),
+    ).toEqual([]);
+    expect(
+      budgetGapDisclosures(
+        '```\nBudget gap: inside a fence\n```\nafter the fence',
+      ),
+    ).toEqual([]);
+    expect(
+      budgetGapDisclosures(
+        '- `Budget gap: <the check>`, which check-coverage parses out of the transcripts',
+      ),
+    ).toEqual([]);
+  });
+
+  it('requires the gap on the SAME line as its marker', () => {
+    // A bare header used to capture the following line — turning an
+    // explicit denial into a phantom disclosure and swallowing the first
+    // item of a header-plus-list shape.
+    expect(
+      budgetGapDisclosures('Budget gap:\nNo further checks were cut short.'),
+    ).toEqual([]);
+    expect(
+      budgetGapDisclosures('**Budget gap:**\n- item one\n- item two'),
+    ).toEqual([]);
+  });
+
+  it('drops non-answers in any punctuation, not only bare tokens', () => {
+    // `Budget gap: None.` is the agent saying it has nothing to disclose;
+    // a phantom gap costs real rounds downstream (a chunk that never
+    // retires, an Approve that discloses "None." under its LGTM).
     for (const line of [
       'Budget gap: <the check>',
       'Budget gap: none',
-      'Budget gap: N/A',
+      'Budget gap: None.',
+      'Budget gap: None (all checks completed)',
+      'Budget gap: N/A - stayed under budget',
+      'Budget gap: nothing skipped',
+      'Budget gap: no gaps',
       'Budget gap:',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);
     }
   });
 
+  it('folds duplicate disclosures into one gap', () => {
+    // An agent commonly states its gap mid-return and restates it in the
+    // closing summary — one gap, not two, and duplicates must not consume
+    // the count cap either.
+    expect(
+      budgetGapDisclosures(
+        'Budget gap: second-order callers\n' +
+          'more prose\n' +
+          'Budget gap: Second-order callers',
+      ),
+    ).toEqual(['second-order callers']);
+  });
+
   it('sanitizes and caps what will reach a terminal and the posted body', () => {
-    const escaped = budgetGapDisclosures('Budget gap: x\u001b[2Jy')[0];
-    expect(escaped).not.toContain('\u001b');
+    // C1 controls, the Unicode line separators and the bidi overrides are
+    // as dangerous as C0 — and U+2028 must not silently truncate the gap.
+    const laundered = budgetGapDisclosures(
+      'Budget gap: first\u2028second \u009b\u202epart',
+    )[0];
+    expect(laundered).toBe('first second   part');
     const long = budgetGapDisclosures(`Budget gap: ${'a'.repeat(500)}`)[0];
-    expect(long.length).toBeLessThanOrEqual(161);
+    expect([...long].length).toBeLessThanOrEqual(161);
     const many = budgetGapDisclosures(
       Array.from({ length: 20 }, (_, i) => `Budget gap: check ${i}`).join('\n'),
     );
     expect(many).toHaveLength(8);
+  });
+
+  it('strips markdown wrappers only in pairs — never one side', () => {
+    // A trailing-only strip turned balanced Markdown into an orphan
+    // backtick that pairs with the next gap's on the joined line and
+    // swallows the text between them.
+    expect(budgetGapDisclosures('Budget gap: **trace the callers**')).toEqual([
+      'trace the callers',
+    ]);
+    expect(budgetGapDisclosures('Budget gap: callers of `parseFoo`')).toEqual([
+      'callers of `parseFoo`',
+    ]);
+  });
+
+  it('stays linear on pathological inputs', () => {
+    // The previous single multiline regex was measured at 5.8 s on 98 KB
+    // of newlines — quadratic backtracking from every line start. The
+    // line-based scan has no cross-line class to backtrack over.
+    const pathological = '-\n'.repeat(49_000) + ' \n> - '.repeat(20_000);
+    const t0 = performance.now();
+    expect(budgetGapDisclosures(pathological)).toEqual([]);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});
+
+describe('stripBudgetGapLines — the receipt judged without its disclosures', () => {
+  it('removes exactly the disclosure lines and keeps everything else', () => {
+    expect(
+      stripBudgetGapLines(
+        'No new issues found — re-walked the territory.\n' +
+          'Budget gap: the two remaining call-site traces\n' +
+          'Everything else held.',
+      ),
+    ).toBe(
+      'No new issues found — re-walked the territory.\nEverything else held.',
+    );
+  });
+
+  it('leaves quotations of the format in place', () => {
+    const text = '> Budget gap: quoted from the brief';
+    expect(stripBudgetGapLines(text)).toBe(text);
   });
 });
 

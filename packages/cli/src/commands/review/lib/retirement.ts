@@ -48,7 +48,7 @@ import {
   promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
-import { budgetGapDisclosures } from './budget.js';
+import { stripBudgetGapLines } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
@@ -320,21 +320,24 @@ function classifyReturn(
       return 'yielded';
     }
   }
-  // A budget-stopped audit is not a dry audit. The tool-budget brief has
-  // the auditor disclose each check its soft ceiling cut short as a
-  // `Budget gap:` line — an admission that part of this chunk's audit did
-  // not happen. Counted as dry, that admission would RETIRE the chunk that
-  // still owes the work (two such rounds print the clean-convergence
-  // certificate), and the disclosure text itself would double as the
-  // receipt's substantive clause — the agent's honesty doing the retiring.
-  // `unknown` instead: the chunk stays under audit, and the next round's
-  // auditor arrives with a fresh budget. Checked after the yield scan —
-  // a filed finding proves the territory hot whatever else the return
-  // discloses — and the loop's own deadline gate bounds the extra rounds.
-  if (budgetGapDisclosures(text).length > 0) {
-    return 'unknown';
-  }
-  const receipt = DRY_RECEIPT_RE.exec(text);
+  // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
+  // failure modes bound this from opposite sides. An auditor's admission of
+  // what its soft ceiling cut short must not double as the receipt's
+  // substantive clause — stripped, a return whose only substance was its
+  // disclosures reads `unknown` and the chunk stays under audit. But a
+  // receipt that is substantive WITHOUT them — a real walk of the
+  // territory, proven by the same tool-call and territory-read bar as
+  // ever, that found nothing new and separately disclosed exploration it
+  // did not take — still retires: an earlier draft read any gap-bearing
+  // return as `unknown`, and since a reverse auditor's ceiling is routinely
+  // met (its brief orders a 65-82 KB findings list read in full), that made
+  // convergence impossible and ran every budgeted loop to the round cap —
+  // the exact never-retire failure this module's own docstrings warn
+  // about. The gap itself is not lost: coverage reports it and Step 3D
+  // rules on it; retirement certifies the audit that DID happen, not the
+  // exploration that did not.
+  const judged = stripBudgetGapLines(text);
+  const receipt = DRY_RECEIPT_RE.exec(judged);
   if (
     rec.successfulToolCalls > 0 &&
     rec.diffToolCalls > 0 &&

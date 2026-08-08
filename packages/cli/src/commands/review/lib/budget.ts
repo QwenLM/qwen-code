@@ -218,49 +218,172 @@ export function launchToolBudget(
  * The disclosure an agent writes when the ceiling stopped a check, and the
  * one parser every reader of that disclosure shares. The brief mandates the
  * line form (`Budget gap: <the check>`); `check-coverage` reports the
- * parsed gaps; the reverse-audit retirement refuses to count a gap-bearing
- * return as a dry audit. One regex, one home — a second copy is how the
- * brief and its readers drift apart.
+ * parsed gaps; the reverse-audit retirement strips these lines out of a
+ * receipt before judging its substance. One matcher, one home — a second
+ * copy is how the brief and its readers drift apart.
  *
- * The line-start is tolerant of Markdown furniture on purpose: an LLM
- * writing a list of caveats writes `- Budget gap: …` or `**Budget gap:**
- * …`, and a disclosure lost to a bullet point is unobservable — nothing
- * downstream can tell "no gaps" from "gaps we failed to parse".
+ * The scan is LINE-BASED, three reviews' worth of reasons at once:
+ *
+ *  - A single multiline regex whose prefix class could cross `\n` was
+ *    measured at seconds-per-run on pathological-but-ordinary returns
+ *    (quoted diff hunks, banner comments) — quadratic backtracking from
+ *    every line start. Per-line matching cannot cross lines, so it cannot
+ *    backtrack across them.
+ *  - The gap must sit on the SAME line as its marker: a bare
+ *    `Budget gap:` header used to swallow the following line, turning an
+ *    explicit next-line denial into a phantom disclosure.
+ *  - QUOTING the format must not read as USING it: lines inside fenced
+ *    code blocks and blockquote lines are skipped — this repo reviews its
+ *    own PRs, and a reviewer of this very diff quotes these strings. (The
+ *    same hazard transcripts.ts guards for tool-call parsing.) Bullets and
+ *    numbering stay tolerated: lists are how an agent writes its own
+ *    disclosures, and a disclosure lost to a bullet is unobservable —
+ *    nothing downstream can tell "no gaps" from "gaps we failed to parse".
  */
-const BUDGET_GAP_RE =
-  /^[\s>*+-]*(?:\d+[.)]\s+)?[*_~`]{0,3}budget gap[*_~`]{0,3}\s*[:：][*_~`]{0,3}\s*(.+)$/gim;
+const BUDGET_GAP_LINE_RE =
+  /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*(`?)[*_~]{0,3}budget gap[*_~]{0,3}[ \t]*[:：][*_~]{0,3}[ \t]*(.+?)[ \t]*$/i;
 
-/** Templates and non-answers that must not become gaps someone rules on. */
-const PLACEHOLDER_GAP_RE = /^(?:<[^>]*>|none|n\/a|nothing|-|—)$/i;
+/** A cheap pre-filter so the line walk skips returns with nothing to find. */
+const GAP_HINT_RE = /budget gap/i;
+
+/**
+ * Templates and non-answers that must not become gaps someone rules on.
+ * Tested against the gap with trailing punctuation stripped, and matched on
+ * the LEADING token — `none.`, `None (all checks completed)` and
+ * `N/A - stayed under budget` are all the agent saying it has nothing to
+ * disclose, and a phantom gap costs real rounds downstream (a chunk that
+ * never retires, a body that discloses "None." on an Approve).
+ */
+const PLACEHOLDER_GAP_RE =
+  /^(?:<[^>]*>|none\b.*|n\/a\b.*|nothing\b.*|no (?:gaps?|checks?)\b.*|[-—*_~`]+)$/i;
 
 /** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
 const MAX_GAP_LENGTH = 160;
 const MAX_GAPS_PER_AGENT = 8;
 
 /**
+ * Dangerous codepoints stripped from a gap before it can reach a terminal
+ * or a posted body: C0 and C1 controls (U+009B is an 8-bit CSI), DEL, the
+ * Unicode line separators (U+2028/29 — ECMAScript line terminators, which
+ * would otherwise truncate silently downstream), and the bidi embedding /
+ * override range U+202A-U+202E.
+ */
+const DANGEROUS_CHARS_RE =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e]/g;
+
+/** Markdown wrapper pairs stripped only SYMMETRICALLY — never one side. */
+const WRAPPER_PAIRS: Array<[string, string]> = [
+  ['**', '**'],
+  ['__', '__'],
+  ['*', '*'],
+  ['_', '_'],
+  ['~', '~'],
+  ['`', '`'],
+];
+
+function stripWrappers(s: string): string {
+  let out = s;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [open, close] of WRAPPER_PAIRS) {
+      if (
+        out.length > open.length + close.length &&
+        out.startsWith(open) &&
+        out.endsWith(close)
+      ) {
+        out = out.slice(open.length, out.length - close.length).trim();
+        changed = true;
+      }
+    }
+  }
+  return out;
+}
+
+/** Truncate on code points — a slice through a surrogate pair is mojibake. */
+function truncateGap(s: string): string {
+  const points = [...s];
+  return points.length > MAX_GAP_LENGTH
+    ? `${points.slice(0, MAX_GAP_LENGTH).join('')}…`
+    : s;
+}
+
+/**
  * Every budget-gap disclosure in an agent's final return, sanitized for the
  * two places it lands: an operator's terminal (stderr NOTE) and the posted
- * review body. Control characters are stripped — agent-quoted text must not
- * carry a terminal escape into either — each gap is capped in length, the
- * list is capped in count, and placeholder text (the brief's own
- * `<the check>` template, `none`) is dropped rather than handed to the
- * orchestrator as a gap to rule on.
+ * review body. Dangerous codepoints are stripped, each gap is capped in
+ * length (on code points) and the list in count, duplicates are folded
+ * (an agent that states its gap mid-return and restates it in the summary
+ * disclosed one gap, not two), and placeholder text (the brief's own
+ * `<the check>` template, `none` in any punctuation) is dropped rather
+ * than handed to the orchestrator as a gap to rule on.
  */
 export function budgetGapDisclosures(finalText: string): string[] {
+  if (!GAP_HINT_RE.test(finalText)) return [];
   const gaps: string[] = [];
-  for (const m of finalText.matchAll(BUDGET_GAP_RE)) {
-    const raw = (m[1] ?? '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
-      .replace(/[*_~`]+\s*$/, '')
-      .trim();
-    if (raw.length === 0 || PLACEHOLDER_GAP_RE.test(raw)) continue;
-    gaps.push(
-      raw.length > MAX_GAP_LENGTH ? `${raw.slice(0, MAX_GAP_LENGTH)}…` : raw,
-    );
+  const seen = new Set<string>();
+  let inFence = false;
+  for (const line of finalText.split(/\r?\n/)) {
+    if (/^[ \t]*(?:```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    // A blockquote is a quotation by definition; the agent is citing the
+    // format (a brief, another agent's return), not using it.
+    if (/^[ \t]*>/.test(line)) continue;
+    // Sanitized BEFORE matching: U+2028/29 are line terminators to the
+    // regex dot, and a gap carrying one would otherwise fail the match and
+    // vanish — silent loss in a channel whose promise is delivery.
+    const m = BUDGET_GAP_LINE_RE.exec(line.replace(DANGEROUS_CHARS_RE, ' '));
+    if (!m) continue;
+    // A line written as a code span (`Budget gap: …`) is only taken when
+    // the backtick closes — and then unwrapped with its partner, so a
+    // symbol the gap itself names in backticks keeps both of its own.
+    let raw = m[2] ?? '';
+    if (m[1] === '`') {
+      if (!raw.endsWith('`')) continue;
+      raw = raw.slice(0, -1);
+    }
+    raw = stripWrappers(raw.trim()).trim();
+    const normalized = raw.replace(/[.!…,;:\s]+$/, '').trim();
+    if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(normalized)) {
+      continue;
+    }
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    gaps.push(truncateGap(raw));
     if (gaps.length >= MAX_GAPS_PER_AGENT) break;
   }
   return gaps;
+}
+
+/**
+ * `finalText` with its budget-gap disclosure lines removed — what the
+ * reverse-audit retirement judges a receipt on, so an agent's admission of
+ * what it skipped can neither serve as the receipt's substance nor block a
+ * receipt that is substantive without it.
+ */
+export function stripBudgetGapLines(finalText: string): string {
+  if (!GAP_HINT_RE.test(finalText)) return finalText;
+  const kept: string[] = [];
+  let inFence = false;
+  for (const line of finalText.split(/\r?\n/)) {
+    const fence = /^[ \t]*(?:```|~~~)/.test(line);
+    if (fence) inFence = !inFence;
+    if (
+      !fence &&
+      !inFence &&
+      !/^[ \t]*>/.test(line) &&
+      BUDGET_GAP_LINE_RE.test(line)
+    ) {
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
 }
 
 function sane(n: unknown): number {

@@ -213,7 +213,9 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         "diff with no line ranges covers nothing. Every rostered agent's " +
         'launch block — its diff reads included — comes from ' +
         `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${shellQuotePath(args.plan)} --roster\` ` +
-        '(or `--role <r>` for one); pass each verbatim. `--whole-diff` builds ' +
+        '(or `--role <r>` for one, `--chunk <id>` for a chunk agent — the ' +
+        'usual reader of a missing chunk, which `--role` cannot rebuild); ' +
+        'pass each verbatim. `--whole-diff` builds ' +
         'the reading block for an Agent 8 specialist alone — prepending it to ' +
         'a rostered brief double-budgets the agent.',
     );

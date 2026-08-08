@@ -135,10 +135,13 @@ interface PlanReport {
 interface HeavyFile {
   path: string;
   heavy?: boolean;
+  kind?: string;
   addedRanges?: Array<{ start: number; end: number }>;
   diffRange?: { startLine: number; endLine: number };
   addedLines?: number;
   removedLines?: number;
+  /** Post-change file length — `FileMetric.fileLines`, in every plan. */
+  fileLines?: number;
 }
 
 /**
@@ -281,6 +284,63 @@ function chunkFrom(
 }
 
 /**
+ * The cumulative findings list a reverse auditor is ordered to read in
+ * full, in pages: measured at 65-82 KB on real runs. An estimate on
+ * purpose — the list grows round over round and the brief is built before
+ * the round runs; the ceiling is soft, so the error costs a disclosure.
+ */
+const FINDINGS_LIST_READS = 3;
+
+/**
+ * Lines a single `read_file` page holds, for estimating an invariant
+ * agent's paging through its post-change file: the read cap's worth of
+ * characters at a measured ~50 characters per source line.
+ */
+const LINES_PER_FILE_READ = 500;
+
+/**
+ * A chunk's territory in the same source-weighted units the plan-level
+ * budget is derived from. `reviewBudget` reads `effective = max(src,
+ * total/8)` because prose and generated lines carry less a reviewer can
+ * get wrong — a scoped allowance scaling off RAW chunk lines inverted
+ * that: a 600-line lockfile chunk out-earned a 200-line source chunk. The
+ * chunk's own file spans are weighted by `report.files[].kind` (a path the
+ * plan does not classify counts as source — erring toward more headroom),
+ * and the weight scales `chunk.lines` so the unit stays the chunk's own.
+ */
+function weightedTerritoryLines(
+  report: PlanReport,
+  chunk: { lines?: number; files?: unknown },
+): number {
+  const lines =
+    typeof chunk.lines === 'number' && Number.isFinite(chunk.lines)
+      ? Math.max(0, Math.floor(chunk.lines))
+      : 0;
+  if (lines === 0) return 0;
+  const kinds = new Map(
+    (Array.isArray(report.files) ? (report.files as HeavyFile[]) : [])
+      .filter((f) => !!f && typeof f.path === 'string')
+      .map((f) => [f.path, f.kind]),
+  );
+  let src = 0;
+  let other = 0;
+  for (const f of Array.isArray(chunk.files) ? chunk.files : []) {
+    const e = f as { path?: string; newStart?: number; newEnd?: number };
+    const span =
+      typeof e?.newStart === 'number' && typeof e?.newEnd === 'number'
+        ? e.newEnd - e.newStart + 1
+        : 0;
+    if (!(span > 0)) continue;
+    const kind = typeof e.path === 'string' ? kinds.get(e.path) : undefined;
+    if (kind === undefined || kind === 'source') src += span;
+    else other += span;
+  }
+  const total = src + other;
+  if (total === 0) return lines;
+  return Math.max(1, Math.round((lines * (src + other / 8)) / total));
+}
+
+/**
  * The soft tool-call ceiling for finder/auditor briefs (see lib/budget.ts,
  * `agentToolBudget` and `launchToolBudget`). Empty when the plan predates
  * the budget field — an old plan fails toward more coverage, exactly like
@@ -310,21 +370,6 @@ function chunkFrom(
  * transcript and reports them — a gap the orchestrator must then rule on,
  * exactly as it rules on whiffs.
  */
-/**
- * The cumulative findings list a reverse auditor is ordered to read in
- * full, in pages: measured at 65-82 KB on real runs. An estimate on
- * purpose — the list grows round over round and the brief is built before
- * the round runs; the ceiling is soft, so the error costs a disclosure.
- */
-const FINDINGS_LIST_READS = 3;
-
-/**
- * Lines a single `read_file` page holds, for estimating an invariant
- * agent's paging through its post-change file: the read cap's worth of
- * characters at a measured ~50 characters per source line.
- */
-const LINES_PER_FILE_READ = 500;
-
 function toolBudgetBlock(
   report: PlanReport,
   launch: { territoryLines?: number | null; mandatoryReads: number },
@@ -482,7 +527,7 @@ export function buildChunkAgentPrompt(
   if (!unreachable) {
     parts.push(
       ...toolBudgetBlock(report, {
-        territoryLines: typeof chunk.lines === 'number' ? chunk.lines : 0,
+        territoryLines: weightedTerritoryLines(report, chunk),
         // The launch's whole reading list: the brief file, plus the diff pages
         // this chunk takes.
         mandatoryReads:
@@ -972,7 +1017,7 @@ export function buildRoleBrief(
       const c = chunks.find((x) => x?.id === opts.chunk);
       parts.push(
         ...toolBudgetBlock(report, {
-          territoryLines: typeof c?.lines === 'number' ? c.lines : 0,
+          territoryLines: weightedTerritoryLines(report, c ?? {}),
           // Its reading list: the brief file, the chunk's diff pages, and
           // the cumulative findings list its brief orders read in full —
           // measured at 65-82 KB on real runs, several pages of it.
@@ -999,30 +1044,43 @@ export function buildRoleBrief(
       ) as HeavyFile[];
       const f = files.find((x) => x?.path === opts.file);
       const added = typeof f?.addedLines === 'number' ? f.addedLines : 0;
+      const fileLines =
+        typeof f?.fileLines === 'number' && Number.isFinite(f.fileLines)
+          ? f.fileLines
+          : 0;
       const changed =
         added + (typeof f?.removedLines === 'number' ? f.removedLines : 0);
       parts.push(
         ...toolBudgetBlock(report, {
           territoryLines: changed,
           // Its reading list: the brief, its own diff slice, and the whole
-          // post-change file paged to the end. The plan records no
-          // post-change length, so the pages are estimated from the added
-          // lines — a heavy file is largely rewritten, which makes them the
-          // best lower bound on hand — at the read cap's worth of lines per
-          // page. A flat count here once told a 400 KB file's agent its
-          // paging was already overspending; the estimate floors at the old
-          // flat 4 so no launch gets less than before.
+          // post-change file paged to the end. The pages come from
+          // `fileLines` — the post-change length the plan records for
+          // every file — with `addedLines` as the fallback lower bound
+          // for an older plan without it: a file can go heavy by VOLUME
+          // in a large file it barely rewrote, and estimating its paging
+          // from added lines alone told exactly that agent its mandatory
+          // reading was already overspending. Floors at the old flat 4 so
+          // no launch gets less than before.
           mandatoryReads: Math.max(
             4,
-            2 + Math.ceil(added / LINES_PER_FILE_READ),
+            2 + Math.ceil(Math.max(added, fileLines) / LINES_PER_FILE_READ),
           ),
         }),
       );
     } else {
-      // A whole-diff role is assigned one read per chunk, plus its brief;
-      // those ride on top of the plan-level allowance rather than inside it.
+      // A whole-diff role is assigned one read per chunk, plus its brief —
+      // plus, for a findings-bearing role (the chunkless Step 3A reverse
+      // auditor), the cumulative findings list its brief orders read in
+      // full, exactly as the chunk-scoped branch counts it. Keyed on the
+      // brief's own `acceptsFindings` declaration, not the role name.
       parts.push(
-        ...toolBudgetBlock(report, { mandatoryReads: 1 + chunks.length }),
+        ...toolBudgetBlock(report, {
+          mandatoryReads:
+            1 +
+            chunks.length +
+            (brief.acceptsFindings ? FINDINGS_LIST_READS : 0),
+        }),
       );
     }
   }

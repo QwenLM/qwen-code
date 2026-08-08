@@ -196,24 +196,36 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(schedule(2).due).toEqual([13, 14, 15]);
   });
 
-  it('a dry receipt carrying a Budget gap disclosure never retires its chunk', () => {
-    // The tool-budget brief has a stopped auditor disclose each unfinished
-    // check as a `Budget gap:` line. That admission must not double as the
-    // receipt that retires the chunk still owing the work — two such rounds
-    // would print the clean-convergence certificate over an audit the agent
-    // itself said did not finish.
-    const GAPPY =
-      DRY + '\nBudget gap: the two remaining changed-export call-site traces';
-    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), GAPPY);
-    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), GAPPY);
-    record(1, 14, 'chunk 14 round 1 territory walk');
-    record(2, 14, 'chunk 14 round 2 territory walk');
+  it('a disclosure cannot BE the receipt — but cannot BLOCK a real one either', () => {
+    // Two directions, one rule: the receipt is judged with its
+    // `Budget gap:` lines stripped. A return whose only substance is its
+    // disclosures must not retire the chunk still owing the work (the
+    // admission doubling as the receipt). And a receipt substantive
+    // without them — a proven territory walk that found nothing new —
+    // must still retire, or a reverse auditor whose ceiling is routinely
+    // met (its brief orders the whole findings list read) makes
+    // convergence impossible and runs every budgeted loop to the round
+    // cap. The gap is coverage's to report and Step 3D's to rule on.
+    const ONLY_GAPS =
+      'No new issues found —\n' +
+      'Budget gap: the reconnect state machine walk\n' +
+      'Budget gap: the two remaining changed-export call-site traces';
+    const DRY_WITH_GAP =
+      DRY + '\nBudget gap: second-order callers outside this chunk';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY_WITH_GAP);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY_WITH_GAP);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), ONLY_GAPS);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk'), ONLY_GAPS);
     record(1, 15, 'chunk 15 round 1 territory walk');
     record(2, 15, 'chunk 15 round 2 territory walk');
 
     const r3 = schedule(3);
-    expect(r3.due).toEqual([13, 14, 15]);
-    expect(r3.skipped).toEqual([]);
+    // 13 retires on its substantive-without-gaps receipts; 14's
+    // gaps-as-receipt returns keep it due.
+    expect(r3.due).toEqual([14, 15]);
+    expect(r3.skipped).toEqual([
+      { chunkId: 13, dryRounds: [1, 2], nextColdCheck: 4 },
+    ]);
     expect(r3.converged).toBe(false);
   });
 

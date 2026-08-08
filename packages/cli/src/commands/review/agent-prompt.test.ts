@@ -3722,11 +3722,17 @@ describe('the tool budget in the briefs', () => {
 
   it('gives a whole-diff role the plan allowance plus its reading list', () => {
     // 42 from the plan + its brief + one read per chunk (3).
-    for (const role of ['1a', '2', '6b', 'reverse-audit'] as const) {
+    for (const role of ['1a', '2', '6b'] as const) {
       expect(buildRoleBrief(budgetPlan, role)).toContain(
         'About **46 tool calls**',
       );
     }
+    // The chunkless (Step 3A) reverse auditor also owes the cumulative
+    // findings list its brief orders read in full — same three pages the
+    // chunk-scoped branch counts, keyed on `acceptsFindings`.
+    expect(buildRoleBrief(budgetPlan, 'reverse-audit')).toContain(
+      'About **49 tool calls**',
+    );
   });
 
   it('a chunk-scoped reverse auditor gets its chunk, not the diff', () => {
@@ -3746,6 +3752,116 @@ describe('the tool budget in the briefs', () => {
     expect(
       buildRoleBrief(budgetPlan, 'invariant-a', { file: 'big.ts' }),
     ).toContain('About **46 tool calls**');
+  });
+
+  it('invariant reads scale with the file, past the floor', () => {
+    // The fixture sits ABOVE both thresholds it pins — a +300-line file's
+    // reads land on the flat-4 floor, so a mutant deleting the scaling
+    // term entirely stayed green. 3,200 post-change lines: reads = 2 + 7 =
+    // 9, territory 3000 → min(plan 60, cap 60) = 60 → 69 (a flat 4 gives
+    // 64).
+    const big = {
+      ...budgetPlanObj,
+      files: [
+        {
+          path: 'huge.ts',
+          kind: 'source',
+          heavy: true,
+          addedLines: 3000,
+          removedLines: 0,
+          fileLines: 3200,
+          addedRanges: [{ start: 10, end: 3010 }],
+          diffRange: { startLine: 1, endLine: 3600 },
+        },
+      ],
+      budget: { agentToolBudget: 60 },
+    } as never;
+    expect(buildRoleBrief(big, 'invariant-a', { file: 'huge.ts' })).toContain(
+      'About **69 tool calls**',
+    );
+  });
+
+  it('removed lines are territory too — a gutting rewrite is not 200 lines', () => {
+    // added 200 / removed 800: territory 1000 → allowance 60. An
+    // added-only derivation would hand this launch 40.
+    const gutted = {
+      ...budgetPlanObj,
+      files: [
+        {
+          path: 'gut.ts',
+          kind: 'source',
+          heavy: true,
+          addedLines: 200,
+          removedLines: 800,
+          fileLines: 400,
+          addedRanges: [{ start: 1, end: 200 }],
+          diffRange: { startLine: 1, endLine: 1100 },
+        },
+      ],
+      budget: { agentToolBudget: 60 },
+    } as never;
+    expect(buildRoleBrief(gutted, 'invariant-a', { file: 'gut.ts' })).toContain(
+      'About **64 tool calls**',
+    );
+  });
+
+  it('a volume-heavy file budgets its paging from fileLines, not added lines', () => {
+    // A file can go heavy by VOLUME: ~450 added lines in a 9,000-line
+    // file. The brief mandates paging the WHOLE post-change file — 18
+    // pages, not the 1 the added lines suggest. reads = max(4, 2 + 18) =
+    // 20; territory 450 → min(60, 52) = 52 → 72. The added-only estimate
+    // told exactly this agent its mandatory reading was overspending (56).
+    const voluminous = {
+      ...budgetPlanObj,
+      files: [
+        {
+          path: 'vol.ts',
+          kind: 'source',
+          heavy: true,
+          addedLines: 450,
+          removedLines: 0,
+          fileLines: 9000,
+          addedRanges: [{ start: 100, end: 550 }],
+          diffRange: { startLine: 1, endLine: 700 },
+        },
+      ],
+      budget: { agentToolBudget: 60 },
+    } as never;
+    expect(
+      buildRoleBrief(voluminous, 'invariant-a', { file: 'vol.ts' }),
+    ).toContain('About **72 tool calls**');
+  });
+
+  it('chunk territory is source-weighted, like the plan allowance it mirrors', () => {
+    // A 640-line chunk that is 80 source lines + 560 lockfile lines is
+    // not 640 lines of risk: weighted = 640·(80 + 560/8)/640 = 150 →
+    // allowance min(42, 30 + 7) = 37, reads 2 → 39. Raw-lines scaling
+    // handed this chunk min(42, 60) = 42 — and the inversion the finding
+    // measured: the generated chunk out-earning the source one.
+    const mixed = {
+      ...budgetPlanObj,
+      files: [
+        { path: 'src/real.ts', kind: 'source' },
+        { path: 'package-lock.json', kind: 'generated' },
+      ],
+      chunks: [
+        {
+          id: 21,
+          startLine: 1,
+          endLine: 640,
+          lines: 640,
+          chars: 20_000,
+          maxLineChars: 120,
+          files: [
+            { path: 'src/real.ts', newStart: 1, newEnd: 80 },
+            { path: 'package-lock.json', newStart: 1, newEnd: 560 },
+          ],
+        },
+      ],
+    } as never;
+    expect(buildChunkAgentPrompt(mixed, 21)).toContain(
+      'About **39 tool calls**',
+    );
   });
 
   it('an Agent 8 specialist is budgeted like any other whole-diff finder', () => {
