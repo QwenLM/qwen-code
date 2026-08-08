@@ -194,104 +194,47 @@ describe('goalCommand', () => {
     },
   );
 
-  it.each(['edit revised', 'pause', 'resume'] as const)(
-    'rejects /goal %s in ACP mode',
-    async (args) => {
-      const { runtime } = makeRuntime(goalSnapshot());
+  it.each([
+    [
+      'set Ship it',
+      { action: 'replace', objective: 'Ship it' },
+      { kind: 'set', objective: 'Ship it' },
+    ],
+    [
+      'edit revised',
+      { action: 'edit', objective: 'revised' },
+      { kind: 'edit', objective: 'revised' },
+    ],
+    ['pause', { action: 'pause' }, { kind: 'pause' }],
+    ['resume', { action: 'resume' }, { kind: 'resume' }],
+    ['clear', { action: 'clear' }, { kind: 'clear' }],
+  ] as const)(
+    'uses the canonical runtime for ACP /goal %s',
+    async (args, request, operation) => {
+      const snapshot = goalSnapshot();
+      const { dispatch, runtime } = makeRuntime(snapshot);
       const { context, getGoalRuntimeReady } = makeContext(runtime, {
         executionMode: 'acp',
       });
 
       const result = await goalCommand.action!(context, args);
 
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: expect.stringMatching(/not available in ACP mode/i),
+      expect(dispatch).toHaveBeenCalledWith({
+        ...request,
+        expectedGoalId: 'goal-1',
+        expectedRevision: 4,
       });
-      expect(getGoalRuntimeReady).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'goal_control',
+        operation,
+        response: { snapshot },
+        cause: request.action,
+      });
+      expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
       expect(mockRegisterGoalHook).not.toHaveBeenCalled();
       expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
     },
   );
-
-  it('strips the set keyword before forwarding to the legacy ACP path', async () => {
-    mockRegisterGoalHook.mockReturnValue({
-      condition: 'Ship it',
-      setAt: Date.now(),
-    });
-    const config = {
-      getSessionId: () => 'test-session',
-      isTrustedFolder: () => true,
-      getDisableAllHooks: () => false,
-      getHookSystem: () => ({}),
-    } as unknown as Config;
-    const context = createMockCommandContext({
-      executionMode: 'acp',
-      services: { config },
-    });
-
-    await goalCommand.action!(context, 'set Ship it');
-
-    expect(mockRegisterGoalHook).toHaveBeenCalledWith(
-      expect.objectContaining({ condition: 'Ship it' }),
-    );
-  });
-
-  it.each(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])(
-    'sets a literal %j objective instead of clearing in legacy ACP mode',
-    async (keyword) => {
-      mockRegisterGoalHook.mockReturnValue({
-        condition: keyword,
-        setAt: Date.now(),
-      });
-      const config = {
-        getSessionId: () => 'test-session',
-        isTrustedFolder: () => true,
-        getDisableAllHooks: () => false,
-        getHookSystem: () => ({}),
-      } as unknown as Config;
-      const context = createMockCommandContext({
-        executionMode: 'acp',
-        services: { config },
-      });
-
-      const result = await goalCommand.action!(context, `set ${keyword}`);
-
-      expect(mockRegisterGoalHook).toHaveBeenCalledWith(
-        expect.objectContaining({ condition: keyword }),
-      );
-      expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
-      expect(result).toMatchObject({ type: 'submit_prompt' });
-    },
-  );
-
-  it('still clears on a bare clear keyword in legacy ACP mode', async () => {
-    mockUnregisterGoalHook.mockReturnValue({
-      condition: 'Old goal',
-      iterations: 2,
-      setAt: Date.now() - 1000,
-    });
-    const config = {
-      getSessionId: () => 'test-session',
-      isTrustedFolder: () => true,
-      getDisableAllHooks: () => false,
-      getHookSystem: () => ({}),
-    } as unknown as Config;
-    const context = createMockCommandContext({
-      executionMode: 'acp',
-      services: { config },
-    });
-
-    const result = await goalCommand.action!(context, 'clear');
-
-    expect(mockUnregisterGoalHook).toHaveBeenCalled();
-    expect(mockRegisterGoalHook).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      type: 'message',
-      content: expect.stringMatching(/goal cleared/i),
-    });
-  });
 
   it('rejects invalid set and edit commands before runtime admission', async () => {
     const { runtime } = makeRuntime(noGoalSnapshot());

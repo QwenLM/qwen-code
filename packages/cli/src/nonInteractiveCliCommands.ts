@@ -13,6 +13,7 @@ import {
   Logger,
   uiTelemetryService,
   type Config,
+  type GoalStateCause,
   type GoalStateResponse,
   createDebugLogger,
   recordSkillInvocation,
@@ -92,6 +93,7 @@ export type NonInteractiveSlashCommandResult =
       type: 'goal_control';
       operation: GoalCommandOperation;
       response: GoalStateResponse;
+      cause?: GoalStateCause;
     }
   | {
       type: 'unsupported';
@@ -153,6 +155,7 @@ function handleCommandResult(
         type: 'goal_control',
         operation: result.operation,
         response: result.response,
+        ...(result.cause ? { cause: result.cause } : {}),
       };
 
     /**

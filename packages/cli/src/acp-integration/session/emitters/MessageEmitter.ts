@@ -13,7 +13,10 @@ import {
 import {
   apiActivityTracker,
   getActiveGoal,
-  type GoalTerminalEvent,
+  projectGoalStateToLegacy,
+  type GoalRecord,
+  type GoalSnapshotV2,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './base-emitter.js';
 import type { HistoryItemGoalStatus } from '../../../ui/types.js';
@@ -63,16 +66,6 @@ export class MessageEmitter extends BaseEmitter {
     });
   }
 
-  async emitGoalTerminal(event: GoalTerminalEvent): Promise<void> {
-    await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: '' },
-      _meta: {
-        goalTerminal: event,
-      },
-    });
-  }
-
   async emitGoalStatus(
     status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
   ): Promise<void> {
@@ -81,6 +74,33 @@ export class MessageEmitter extends BaseEmitter {
       content: { type: 'text', text: '' },
       _meta: {
         goalStatus: status,
+      },
+    });
+  }
+
+  async emitGoalState(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+    previousGoal: GoalRecord | null = null,
+  ): Promise<void> {
+    const projection = cause
+      ? projectGoalStateToLegacy({ v: 2, cause, snapshot }, previousGoal)
+      : undefined;
+    const goalStatus = projection
+      ? (() => {
+          const { type: _type, ...status } = projection.goalStatus;
+          return status;
+        })()
+      : undefined;
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalState: snapshot,
+        ...(goalStatus ? { goalStatus } : {}),
+        ...(projection?.goalTerminal
+          ? { goalTerminal: projection.goalTerminal }
+          : {}),
       },
     });
   }
