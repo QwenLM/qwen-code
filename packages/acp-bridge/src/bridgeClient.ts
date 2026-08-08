@@ -25,6 +25,7 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import {
+  INJECTED_MID_TURN_ID_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from './bridgeTypes.js';
@@ -546,6 +547,13 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /**
+   * Bounded ring of drained mid-turn message ids. Owned by the full
+   * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so the
+   * drain in `extMethod` can record what it handed to the child. See
+   * `SessionEntry.injectedMidTurnMessageIds`.
+   */
+  injectedMidTurnMessageIds: string[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
@@ -1151,6 +1159,24 @@ export class BridgeClient implements Client {
     const entry = this.resolveEntry(sessionId);
     if (!entry) return { messages: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
+    if (drained.length > 0) {
+      // Record the handoff so clients that lost their bookkeeping (page
+      // refresh) or missed the echo frame below can reconcile via
+      // `getMidTurnMessages` instead of resending an already-injected
+      // message as the next turn. Ring is bounded; oldest ids evicted.
+      for (const item of drained) {
+        entry.injectedMidTurnMessageIds.push(item.messageId);
+      }
+      if (
+        entry.injectedMidTurnMessageIds.length > INJECTED_MID_TURN_ID_RING_SIZE
+      ) {
+        entry.injectedMidTurnMessageIds.splice(
+          0,
+          entry.injectedMidTurnMessageIds.length -
+            INJECTED_MID_TURN_ID_RING_SIZE,
+        );
+      }
+    }
     const messages = drained.map((item) => item.text);
     const hasQueuedPrompt = entry.pendingPromptList.some(
       (prompt) =>

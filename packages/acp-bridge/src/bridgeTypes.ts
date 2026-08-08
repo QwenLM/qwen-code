@@ -640,6 +640,18 @@ export interface BridgeHeartbeatState {
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 
 /**
+ * Cap on the per-session ring of mid-turn message ids already handed to the
+ * ACP child by the drain (`SessionEntry.injectedMidTurnMessageIds`). The ring
+ * exists purely for client reconciliation (a client that refreshed the page or
+ * missed the drain's SSE echo needs to distinguish "already injected — do not
+ * resend" from "dropped at the idle boundary — resend as next turn"). Ids are
+ * unique per message and drains only happen while a turn runs, so a bounded
+ * ring covering the recent drains of the current and previous turn is enough;
+ * oldest ids are evicted past the cap.
+ */
+export const INJECTED_MID_TURN_ID_RING_SIZE = 200;
+
+/**
  * Child-to-parent request that atomically assigns the next Todo Stop Guard
  * model send to the current daemon FIFO owner. `promptId`, when present, is
  * the trusted bridge invocation id rather than the provider-facing prompt id.
@@ -709,6 +721,21 @@ export interface MidTurnQueueEntry {
   messageId: string;
   text: string;
   originatorClientId?: string;
+}
+
+/**
+ * Reconciliation snapshot returned by `getMidTurnMessages`. `messages` is the
+ * current queue content; `injectedMessageIds` is the bounded ring of ids
+ * already drained into the running turn. A client that lost its local
+ * bookkeeping (page refresh) or missed the `mid_turn_message_injected` echo
+ * reconciles row by row: an id still in `messages` is waiting (restore/keep
+ * the queued row), an id in `injectedMessageIds` was delivered (drop the row
+ * WITHOUT resending), and an id in neither was dropped at the idle boundary
+ * and must be resent as a next-turn prompt.
+ */
+export interface BridgeMidTurnMessagesSnapshot {
+  messages: MidTurnQueueEntry[];
+  injectedMessageIds: string[];
 }
 
 /**
@@ -1541,6 +1568,21 @@ export interface AcpSessionBridge {
     sessionId: string,
     notification: BridgeBackgroundNotification,
   ): Promise<{ sessionId: string; accepted: boolean }>;
+
+  /**
+   * Return the mid-turn reconciliation snapshot for a session: messages still
+   * waiting in the queue plus the bounded ring of ids already drained into
+   * the running turn. Lets clients recover their bookkeeping after a page
+   * refresh (the browser-side pending queue is component state and does not
+   * survive reloads) or a missed `mid_turn_message_injected` echo frame.
+   * `context.clientId` is authorized against the session like the sibling
+   * mid-turn routes; throws `InvalidClientIdError` when the id is not bound
+   * to the session, and `SessionNotFoundError` for unknown ids.
+   */
+  getMidTurnMessages(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): BridgeMidTurnMessagesSnapshot;
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

@@ -384,6 +384,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_side_task',
   'session_prompt',
   'session_mid_turn_message_mutation',
+  'session_mid_turn_message_query',
   'session_cancel',
   'session_events',
   'session_artifacts',
@@ -631,6 +632,15 @@ interface FakeBridgeOpts {
     messageId: string,
     context?: BridgeClientRequestContext,
   ) => { removed: boolean };
+  /** Drives `GET /session/:id/mid-turn-messages`. Default: empty snapshot. */
+  getMidTurnMessagesImpl?: (sessionId: string) => {
+    messages: Array<{
+      messageId: string;
+      text: string;
+      originatorClientId?: string;
+    }>;
+    injectedMessageIds: string[];
+  };
   getPendingPromptsImpl?: (sessionId: string) => ReadonlyArray<{
     promptId: string;
     text: string;
@@ -933,6 +943,10 @@ interface FakeBridge extends AcpSessionBridge {
     messageId: string;
     context?: BridgeClientRequestContext;
   }>;
+  getMidTurnMessagesCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
@@ -1124,6 +1138,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const removeMidTurnCalls: FakeBridge['removeMidTurnCalls'] = [];
   const removeMidTurnImpl =
     opts.removeMidTurnImpl ?? (() => ({ removed: true }));
+  const getMidTurnMessagesCalls: FakeBridge['getMidTurnMessagesCalls'] = [];
+  const getMidTurnMessagesImpl =
+    opts.getMidTurnMessagesImpl ??
+    (() => ({ messages: [], injectedMessageIds: [] }));
   const getPendingPromptsCalls: string[] = [];
   const getPendingPromptsImpl = opts.getPendingPromptsImpl ?? (() => []);
   const removePendingPromptCalls: Array<{
@@ -1719,6 +1737,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setSessionWorktreeCalls,
     enqueueMidTurnCalls,
     removeMidTurnCalls,
+    getMidTurnMessagesCalls,
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
@@ -2104,6 +2123,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return removeMidTurnImpl(sessionId, messageId, context);
+    },
+    getMidTurnMessages(sessionId, context) {
+      getMidTurnMessagesCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return getMidTurnMessagesImpl(sessionId);
     },
     getPendingPrompts(sessionId) {
       getPendingPromptsCalls.push(sessionId);
@@ -8639,6 +8665,74 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ removed: false });
+    });
+  });
+
+  describe('GET /session/:id/mid-turn-messages', () => {
+    const queryApp = (bridge: FakeBridge) =>
+      createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+    it('200 with the reconciliation snapshot and forwards client identity', async () => {
+      const bridge = fakeBridge({
+        getMidTurnMessagesImpl: () => ({
+          messages: [
+            {
+              messageId: 'mid-1',
+              text: 'waiting',
+              originatorClientId: 'client-9',
+            },
+          ],
+          injectedMessageIds: ['mid-0'],
+        }),
+      });
+      const res = await request(queryApp(bridge))
+        .get('/session/s-1/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-9');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        messages: [
+          {
+            messageId: 'mid-1',
+            text: 'waiting',
+            originatorClientId: 'client-9',
+          },
+        ],
+        injectedMessageIds: ['mid-0'],
+      });
+      expect(bridge.getMidTurnMessagesCalls).toEqual([
+        { sessionId: 's-1', context: { clientId: 'client-9' } },
+      ]);
+    });
+
+    it('maps a bridge SessionNotFoundError to 404', async () => {
+      const bridge = fakeBridge({
+        getMidTurnMessagesImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const res = await request(queryApp(bridge))
+        .get('/session/missing/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('400 on a malformed X-Qwen-Client-Id (never reaches the bridge)', async () => {
+      const bridge = fakeBridge();
+      const res = await request(queryApp(bridge))
+        .get('/session/s-1/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'bad client id with spaces');
+      expect(res.status).toBe(400);
+      expect(bridge.getMidTurnMessagesCalls).toEqual([]);
     });
   });
 

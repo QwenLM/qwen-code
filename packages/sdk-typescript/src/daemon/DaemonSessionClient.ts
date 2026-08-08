@@ -25,6 +25,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -625,6 +626,22 @@ export class DaemonSessionClient {
     messageId: string,
   ): Promise<DaemonRemoveMidTurnMessageResult> {
     return await this.client.removeMidTurnMessage(this.sessionId, messageId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Fetch the mid-turn reconciliation snapshot (queue + injected-id ring) for
+   * this session. Forwards the bound client id. See
+   * `DaemonClient.getMidTurnMessages` — requires the daemon to advertise
+   * `session_mid_turn_message_query`; older daemons reject with 404 and
+   * callers keep the legacy local-bookkeeping behavior.
+   */
+  async getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult> {
+    return await this.client.getMidTurnMessages(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

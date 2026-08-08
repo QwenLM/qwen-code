@@ -543,6 +543,15 @@ interface SessionEntry {
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
   /**
+   * Bounded ring of mid-turn message ids handed to the ACP child by the
+   * `craft/drainMidTurnQueue` drain (see `INJECTED_MID_TURN_ID_RING_SIZE`).
+   * Purely a reconciliation aid: a client that lost its local bookkeeping
+   * (page refresh) or missed the drain's SSE echo asks `getMidTurnMessages`
+   * and treats an id found here as "already injected — drop the row, do NOT
+   * resend it as the next turn".
+   */
+  injectedMidTurnMessageIds: string[];
+  /**
    * Per-session model-change FIFO. Prevents two concurrent
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
    * model requests) from racing into `unstable_setSessionModel` and
@@ -3971,6 +3980,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingPromptCount: 0,
       pendingPromptList: [],
       midTurnMessageQueue: [],
+      injectedMidTurnMessageIds: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -7952,6 +7962,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         getTransportClosedReject(entry),
       ]);
       return { sessionId, accepted: response['accepted'] === true };
+    },
+
+    getMidTurnMessages(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against THIS session — mirrors the sibling
+      // mid-turn routes and `getPendingPrompts`. The snapshot returns every
+      // queued entry WITH its originator (same projection convention as
+      // `getPendingPrompts`); callers filter their own rows client-side.
+      resolveTrustedClientId(entry, context?.clientId);
+      return {
+        messages: entry.midTurnMessageQueue.map((message) => ({
+          messageId: message.messageId,
+          text: message.text,
+          ...(message.originatorClientId !== undefined
+            ? { originatorClientId: message.originatorClientId }
+            : {}),
+        })),
+        injectedMessageIds: [...entry.injectedMidTurnMessageIds],
+      };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {

@@ -16,6 +16,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -425,6 +426,17 @@ export interface DaemonSessionActions {
     messageId: string,
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
+  /**
+   * Best-effort reconciliation snapshot (queue + injected-id ring) from the
+   * daemon. Resolves `undefined` (never throws/raises a notice) when there
+   * is no session or the query fails — callers then keep the legacy
+   * local-bookkeeping behavior. Pre-flight the
+   * `session_mid_turn_message_query` capability before relying on it: older
+   * daemons lack the route.
+   */
+  getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult | undefined>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonPendingPromptsResult>;

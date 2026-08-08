@@ -62,7 +62,10 @@ import type {
   MidTurnQueueEntry,
   PendingPromptEntry,
 } from './bridgeTypes.js';
-import { TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD } from './bridgeTypes.js';
+import {
+  INJECTED_MID_TURN_ID_RING_SIZE,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+} from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -1775,6 +1778,7 @@ describe('BridgeClient — artifact ingress', () => {
         pendingPermissionIds: new Set<string>(),
         pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        injectedMidTurnMessageIds: [] as string[],
         promptActive: true,
       };
       const client = new BridgeClient(
@@ -1859,6 +1863,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -1931,6 +1936,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -1994,6 +2000,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -2043,6 +2050,7 @@ describe('BridgeClient — artifact ingress', () => {
         pendingPermissionIds: new Set<string>(),
         pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        injectedMidTurnMessageIds: [] as string[],
         promptActive: true,
       };
       const client = new BridgeClient(
@@ -2106,6 +2114,7 @@ describe('BridgeClient — artifact ingress', () => {
         pendingPermissionIds: new Set<string>(),
         pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        injectedMidTurnMessageIds: [] as string[],
         promptActive: true,
       };
       const client = new BridgeClient(
@@ -2176,6 +2185,7 @@ describe('BridgeClient — artifact ingress', () => {
             pendingPermissionIds: new Set<string>(),
             pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
+            injectedMidTurnMessageIds: [] as string[],
           }
         : undefined,
     );
@@ -2229,6 +2239,7 @@ describe('BridgeClient — artifact ingress', () => {
             pendingPermissionIds: new Set<string>(),
             pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
+            injectedMidTurnMessageIds: [] as string[],
           }
         : undefined,
     );
@@ -2331,6 +2342,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
     };
     const client = new BridgeClient(
       ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
@@ -2387,6 +2399,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -2430,6 +2443,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -2489,6 +2503,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       promptActive: false,
     };
     const client = new BridgeClient(
@@ -2568,6 +2583,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       promptActive: true,
     }));
     const client = new BridgeClient(
@@ -2919,6 +2935,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       | {
           sessionId: string;
           midTurnMessageQueue: MidTurnQueueEntry[];
+          injectedMidTurnMessageIds?: string[];
           pendingPromptList?: PendingPromptEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
@@ -2928,7 +2945,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     ownsSession?: (sessionId: string) => boolean,
   ): BridgeClient {
     const resolvedEntry = entry
-      ? { ...entry, pendingPromptList: entry.pendingPromptList ?? [] }
+      ? {
+          ...entry,
+          pendingPromptList: entry.pendingPromptList ?? [],
+          injectedMidTurnMessageIds: entry.injectedMidTurnMessageIds ?? [],
+        }
       : undefined;
     return new BridgeClient(
       ((sid: string) =>
@@ -2954,6 +2975,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         { messageId: 'mid-1', text: 'first' },
         { messageId: 'mid-2', text: 'second' },
       ],
+      injectedMidTurnMessageIds: [],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:drain', entry);
@@ -2968,6 +2990,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
     // Queue emptied so the same messages can't be re-injected on the next batch.
     expect(entry.midTurnMessageQueue).toEqual([]);
+    // Drained ids land in the reconciliation ring so a client that missed the
+    // echo frame (or refreshed) can tell "already injected" from "dropped".
+    expect(entry.injectedMidTurnMessageIds).toEqual(['mid-1', 'mid-2']);
     // Exactly one SSE frame carrying the drained text for the browser to dedupe.
     expect(publish).toHaveBeenCalledTimes(1);
     expect(publish.mock.calls[0][0]).toMatchObject({
@@ -2997,6 +3022,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         { messageId: 'mid-b', text: 'b', originatorClientId: 'client-2' },
         { messageId: 'mid-c', text: 'c', originatorClientId: 'client-1' },
       ],
+      injectedMidTurnMessageIds: [],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:multi', entry);
@@ -3010,6 +3036,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       hasQueuedPrompt: false,
     });
     expect(entry.midTurnMessageQueue).toEqual([]);
+    expect(entry.injectedMidTurnMessageIds).toEqual([
+      'mid-a',
+      'mid-b',
+      'mid-c',
+    ]);
 
     // One frame per originator: client-1 gets ['a','c'], client-2 gets ['b'].
     expect(publish).toHaveBeenCalledTimes(2);
@@ -3053,6 +3084,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         midTurnMessageQueue: [
           { messageId: 'mid-delivered', text: 'still-delivered' },
         ],
+        injectedMidTurnMessageIds: [],
         events: { publish },
       };
       const client = makeClientWithEntry('sess:closed', entry);
@@ -3067,6 +3099,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         hasQueuedPrompt: false,
       });
       expect(entry.midTurnMessageQueue).toEqual([]);
+      // The ring records the handoff even when the echo is dropped — this is
+      // exactly the lost-echo case the reconciliation query exists for.
+      expect(entry.injectedMidTurnMessageIds).toEqual(['mid-delivered']);
       // (b) the dropped-echo degradation is logged.
       const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
       expect(logged).toContain('echo frame dropped (bus closed)');
@@ -3080,6 +3115,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const entry = {
       sessionId: 'sess:empty',
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:empty', entry);
@@ -3090,6 +3126,43 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
 
     expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
     expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('bounds the injected-id ring, evicting oldest ids past the cap', async () => {
+    // The ring exists for reconciliation after a missed echo / page refresh;
+    // it must not grow unboundedly across a long session's many drains.
+    const publish = vi.fn().mockReturnValue(true);
+    const prefilled = Array.from(
+      { length: INJECTED_MID_TURN_ID_RING_SIZE - 1 },
+      (_, index) => `old-${index}`,
+    );
+    const entry = {
+      sessionId: 'sess:ring',
+      midTurnMessageQueue: [
+        { messageId: 'new-1', text: 'x' },
+        { messageId: 'new-2', text: 'y' },
+        { messageId: 'new-3', text: 'z' },
+      ],
+      injectedMidTurnMessageIds: [...prefilled],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:ring', entry);
+
+    await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:ring',
+    });
+
+    expect(entry.injectedMidTurnMessageIds).toHaveLength(
+      INJECTED_MID_TURN_ID_RING_SIZE,
+    );
+    // Oldest prefilled ids evicted; the freshly drained ids are retained.
+    expect(entry.injectedMidTurnMessageIds.slice(-3)).toEqual([
+      'new-1',
+      'new-2',
+      'new-3',
+    ]);
+    expect(entry.injectedMidTurnMessageIds).not.toContain('old-0');
+    expect(entry.injectedMidTurnMessageIds).not.toContain('old-1');
   });
 
   it('returns an empty drain for an unknown session without throwing', async () => {
@@ -3139,6 +3212,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const entry = {
       sessionId: 'sess:queued',
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      injectedMidTurnMessageIds: [] as string[],
       pendingPromptList: [running, queued],
       events: { publish },
     };
@@ -3178,6 +3252,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       activePromptId: 'running',
       promptActive: true,
       midTurnMessageQueue: [],
+      injectedMidTurnMessageIds: [],
       pendingPromptList: [running, queued],
       events: { publish: vi.fn() },
       todoStopGuardAwaitingQueuedPromptOwnerPromptId: undefined as
@@ -3247,6 +3322,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       activePromptId: 'running',
       promptActive: true,
       midTurnMessageQueue: [],
+      injectedMidTurnMessageIds: [],
       pendingPromptList: [running],
       events: { publish: vi.fn() },
     });
@@ -3254,6 +3330,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:idle',
       promptActive: false,
       midTurnMessageQueue: [],
+      injectedMidTurnMessageIds: [],
       pendingPromptList: [],
       events: { publish: vi.fn() },
     });
@@ -3280,6 +3357,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:not-owned',
       promptActive: false,
       midTurnMessageQueue: [],
+      injectedMidTurnMessageIds: [],
       pendingPromptList: [],
       events: { publish: vi.fn() },
     };

@@ -14,6 +14,7 @@ import type {
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
@@ -1121,6 +1122,29 @@ export function createDaemonSessionActions({
         );
       }
       return await session.removeMidTurnMessage(messageId);
+    },
+
+    async getMidTurnMessages(opts?: {
+      signal?: AbortSignal;
+    }): Promise<DaemonMidTurnMessagesResult | undefined> {
+      // Best-effort and silent, like `enqueueMidTurnMessage`: reconciliation
+      // is a bookkeeping recovery aid (page refresh / missed echo), not a
+      // user-initiated action. `undefined` keeps callers on the legacy
+      // local-bookkeeping behavior — same degradation contract as an older
+      // daemon that lacks the route entirely.
+      const session = sessionRef.current;
+      if (!session) return undefined;
+      try {
+        return await session.getMidTurnMessages(opts);
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.debug(
+            '[getMidTurnMessages] reconciliation query failed; keeping legacy behavior',
+            err,
+          );
+        }
+        return undefined;
+      }
     },
 
     async getPendingPrompts(opts) {

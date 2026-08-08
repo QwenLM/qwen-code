@@ -19891,6 +19891,125 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await prompt;
     await bridge.shutdown();
   });
+
+  it('getMidTurnMessages returns the queued messages with originators', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'still waiting',
+      { clientId: session.clientId },
+    );
+    expect(admission.accepted).toBe(true);
+
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({
+      messages: [
+        {
+          messageId: admission.messageId,
+          text: 'still waiting',
+          originatorClientId: session.clientId,
+        },
+      ],
+      injectedMessageIds: [],
+    });
+
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('getMidTurnMessages moves drained ids from the queue into the injected ring', async () => {
+    // The reconciliation contract: after a drain, a client that missed the
+    // SSE echo (or refreshed the page) sees its messageId under
+    // `injectedMessageIds` and must NOT resend the message.
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const admission = bridge.enqueueMidTurnMessage(session.sessionId, 'note', {
+      clientId: session.clientId,
+    });
+    expect(admission.accepted).toBe(true);
+
+    await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+      sessionId: session.sessionId,
+    });
+
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({
+      messages: [],
+      injectedMessageIds: [admission.messageId],
+    });
+
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('getMidTurnMessages throws for unknown sessions and unbound client ids', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(() => bridge.getMidTurnMessages('nope')).toThrow(
+      SessionNotFoundError,
+    );
+    expect(() =>
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: 'not-bound-to-this-session',
+      }),
+    ).toThrow(InvalidClientIdError);
+    await bridge.shutdown();
+  });
 });
 
 describe('createAcpSessionBridge — child-resource refresh', () => {

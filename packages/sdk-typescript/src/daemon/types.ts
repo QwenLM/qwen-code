@@ -2999,6 +2999,34 @@ export interface DaemonRemoveMidTurnMessageResult {
 }
 
 /**
+ * One entry still waiting in the daemon's mid-turn queue (projection of the
+ * bridge's `MidTurnQueueEntry`). `originatorClientId` is the client that
+ * pushed the message; callers filter their own rows client-side.
+ */
+export interface DaemonMidTurnMessageSummary {
+  messageId: string;
+  text: string;
+  originatorClientId?: string;
+}
+
+/**
+ * Response body of `GET /session/:id/mid-turn-messages`. Reconciliation
+ * snapshot for clients that lost their mid-turn bookkeeping (page refresh —
+ * the browser pending queue is component state) or missed the
+ * `mid_turn_message_injected` echo frame: a row whose `messageId` appears in
+ * `messages` is still waiting (restore/keep it), a row whose id appears in
+ * `injectedMessageIds` was already drained into the running turn (drop it
+ * WITHOUT resending), and an id in neither was dropped at the idle boundary
+ * and should be resent as a normal next-turn prompt. Older daemons lack the
+ * route — pre-flight the `session_mid_turn_message_query` capability feature
+ * before calling.
+ */
+export interface DaemonMidTurnMessagesResult {
+  messages: DaemonMidTurnMessageSummary[];
+  injectedMessageIds: string[];
+}
+
+/**
  * One entry in the daemon's pending prompt queue. The `state` is
  * `'running'` for the currently dispatching prompt and `'queued'`
  * for prompts waiting in the FIFO.

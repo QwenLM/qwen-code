@@ -49,6 +49,15 @@ interface UseQueuedPromptsArgs {
    * ids without the route isn't sent a DELETE it answers with a 404.
    */
   canMutateMidTurn: boolean;
+  /**
+   * Whether the daemon advertises `session_mid_turn_message_query`. Gates the
+   * reconciliation query (`getMidTurnMessages`) that restores queued rows
+   * lost to a page refresh and prunes rows the daemon already drained when
+   * the `mid_turn_message_injected` echo frame never arrived. Without it the
+   * hook keeps the legacy local-bookkeeping behavior (refresh loses queued
+   * rows; missed echoes resend at the idle boundary).
+   */
+  canQueryMidTurn: boolean;
   streamingState: DaemonStreamingState;
   sessionActions: DaemonSessionActions;
   store: DaemonTranscriptStore;
@@ -136,6 +145,7 @@ export function useQueuedPrompts({
   sessionId,
   clientId,
   canMutateMidTurn,
+  canQueryMidTurn,
   streamingState,
   sessionActions,
   store,
@@ -156,6 +166,8 @@ export function useQueuedPrompts({
   const completedPromptIdOrderRef = useRef<string[]>([]);
   const latestStreamingStateRef = useRef(streamingState);
   const refreshRequestSeqRef = useRef(0);
+  /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
+  const midTurnReconcileSeqRef = useRef(0);
 
   latestSessionIdRef.current = sessionId;
   latestStreamingStateRef.current = streamingState;
@@ -678,6 +690,101 @@ export function useQueuedPrompts({
     );
   }, [midTurnInjectedBatches, sessionId, clientId, consumeMidTurnInjected]);
 
+  // Reconcile the mid-turn queue against the daemon whenever (re)connecting
+  // to a session. Two recovery cases, both gated by the
+  // `session_mid_turn_message_query` capability (older daemons keep the
+  // legacy local-bookkeeping behavior):
+  // - Page refresh / remount lost the local rows: restore the still-queued
+  //   daemon messages this client pushed, so the drain's SSE echo or the
+  //   idle fallback settles them exactly like locally-queued rows — without
+  //   this they are silently dropped at the idle boundary with nobody left
+  //   to resend them.
+  // - A missed `mid_turn_message_injected` echo left a stale "queued" row:
+  //   prune it when its id shows up in the injected ring (the model already
+  //   received it; the idle fallback would otherwise resend = double
+  //   delivery).
+  useEffect(() => {
+    if (!canQueryMidTurn || !connected || !sessionId) return;
+    const targetSessionId = sessionId;
+    const seq = ++midTurnReconcileSeqRef.current;
+    const ctrl = new AbortController();
+    void (async () => {
+      const snapshot = await sessionActions.getMidTurnMessages({
+        signal: ctrl.signal,
+      });
+      if (
+        !snapshot ||
+        seq !== midTurnReconcileSeqRef.current ||
+        latestSessionIdRef.current !== targetSessionId
+      ) {
+        return;
+      }
+      const injectedIds = new Set(snapshot.injectedMessageIds);
+      const current = queuedPromptsRef.current;
+      let next = current.filter(
+        (prompt) =>
+          !(
+            prompt.midTurnState !== undefined &&
+            prompt.midTurnMessageId !== undefined &&
+            injectedIds.has(prompt.midTurnMessageId)
+          ),
+      );
+      const localIds = new Set(
+        next
+          .map((prompt) => prompt.midTurnMessageId)
+          .filter((id): id is string => id !== undefined),
+      );
+      const restoredRows: QueuedPrompt[] = [];
+      for (const message of snapshot.messages) {
+        if (localIds.has(message.messageId)) continue;
+        // The daemon returns every originator's entries; only adopt this
+        // client's (plus anonymous ones, which any client may resend).
+        if (
+          message.originatorClientId !== undefined &&
+          message.originatorClientId !== clientId
+        ) {
+          continue;
+        }
+        restoredRows.push({
+          id: nextQueuedPromptIdRef.current++,
+          sessionId: targetSessionId,
+          text: message.text,
+          midTurnState: 'queued',
+          midTurnMessageId: message.messageId,
+        });
+      }
+      if (restoredRows.length > 0) {
+        next = [...next, ...restoredRows];
+      }
+      if (next !== current) {
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+      }
+      // Settled while we were away: the daemon already dropped undrained
+      // messages at the idle boundary, so honor the legacy resend contract
+      // for the rows just restored instead of parking them forever.
+      if (
+        restoredRows.length > 0 &&
+        latestStreamingStateRef.current === 'idle' &&
+        latestSessionIdRef.current === targetSessionId
+      ) {
+        for (const row of restoredRows) {
+          fallbackToPendingPrompt(row.id);
+        }
+      }
+    })();
+    return () => {
+      ctrl.abort();
+    };
+  }, [
+    canQueryMidTurn,
+    connected,
+    sessionId,
+    clientId,
+    sessionActions,
+    fallbackToPendingPrompt,
+  ]);
+
   useEffect(() => {
     if (streamingState !== 'idle') return;
     const ctrl = midTurnEnqueueAbortRef.current;
@@ -685,6 +792,8 @@ export function useQueuedPrompts({
       ctrl.abort();
       midTurnEnqueueAbortRef.current = null;
     }
+    // Failed-action rows settle without reconciliation — handle them first
+    // so a slow query can't delay the editor restore.
     for (const prompt of queuedPromptsRef.current) {
       if (prompt.midTurnFailedAction) {
         const next = queuedPromptsRef.current.filter(
@@ -695,15 +804,55 @@ export function useQueuedPrompts({
         if (prompt.midTurnFailedAction === 'edit') {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
         }
-      } else if (
-        prompt.midTurnState &&
-        !prompt.isEditing &&
-        !prompt.isRemoving
-      ) {
-        fallbackToPendingPrompt(prompt.id);
       }
     }
-  }, [streamingState, fallbackToPendingPrompt, restoreTextToEditor]);
+    const fallbackMidTurnRows = () => {
+      for (const prompt of queuedPromptsRef.current) {
+        if (prompt.midTurnState && !prompt.isEditing && !prompt.isRemoving) {
+          fallbackToPendingPrompt(prompt.id);
+        }
+      }
+    };
+    if (
+      !canQueryMidTurn ||
+      !queuedPromptsRef.current.some((prompt) => prompt.midTurnState)
+    ) {
+      fallbackMidTurnRows();
+      return;
+    }
+    // Reconcile BEFORE resending: a row the daemon already drained (its echo
+    // frame was missed) must be dropped silently — resending it would give
+    // the model the same message twice. Best-effort: on any failure the
+    // action resolves undefined and we keep the legacy resend-all behavior.
+    void (async () => {
+      const targetSessionId = latestSessionIdRef.current;
+      const snapshot = await sessionActions.getMidTurnMessages();
+      if (latestSessionIdRef.current !== targetSessionId) return;
+      if (snapshot) {
+        const injectedIds = new Set(snapshot.injectedMessageIds);
+        const current = queuedPromptsRef.current;
+        const next = current.filter(
+          (prompt) =>
+            !(
+              prompt.midTurnState !== undefined &&
+              prompt.midTurnMessageId !== undefined &&
+              injectedIds.has(prompt.midTurnMessageId)
+            ),
+        );
+        if (next.length !== current.length) {
+          queuedPromptsRef.current = next;
+          setQueuedPrompts(next);
+        }
+      }
+      fallbackMidTurnRows();
+    })();
+  }, [
+    streamingState,
+    canQueryMidTurn,
+    sessionActions,
+    fallbackToPendingPrompt,
+    restoreTextToEditor,
+  ]);
 
   const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
     const current = queuedPromptsRef.current;

@@ -4665,6 +4665,35 @@ export function registerSessionRoutes(
     ),
   );
 
+  // Mid-turn reconciliation snapshot: messages still waiting in the queue
+  // plus the bounded ring of ids already drained into the running turn.
+  // Lets clients recover their bookkeeping after a page refresh (the
+  // browser-side pending queue is component state and does not survive
+  // reloads) or a missed `mid_turn_message_injected` echo frame — without
+  // it a refreshed browser can neither restore its queued rows nor tell an
+  // injected message from one dropped at the idle boundary (⇒ resend ⇒
+  // double delivery). Gated client-side by the
+  // `session_mid_turn_message_query` capability; older daemons simply lack
+  // the route and clients keep the legacy local-bookkeeping behavior.
+  app.get('/session/:id/mid-turn-messages', (req, res) => {
+    const route = 'GET /session/:id/mid-turn-messages';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+    if (!runtime) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const snapshot = runtime.bridge.getMidTurnMessages(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(snapshot);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
+
   // Pending prompt queue: list and remove.
   app.get('/session/:id/pending-prompts', (req, res) => {
     const sessionId = requireSessionId(req, res);
