@@ -180,6 +180,9 @@ describe('serve command args', () => {
     expect(() => buildParser().parseSync('--local-control --port 0')).toThrow(
       /Local Control requires a fixed port/,
     );
+    expect(() =>
+      buildParser().parseSync('--local-control --hostname 192.168.1.2'),
+    ).toThrow(/Local Control manages its hostname/);
   });
 
   it('parses repeatable --channel values', () => {
@@ -253,6 +256,16 @@ describe('serve command args', () => {
 describe('localControlUrls', () => {
   it('builds fragment-authenticated URLs for each non-loopback IPv4 address', () => {
     const urls = localControlUrls('http://0.0.0.0:4170/', 'a/b token', {
+      en1: [
+        {
+          address: '10.0.0.20',
+          netmask: '255.255.255.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:01',
+          internal: false,
+          cidr: '10.0.0.20/24',
+        },
+      ],
       en0: [
         {
           address: '192.168.1.20',
@@ -261,6 +274,15 @@ describe('localControlUrls', () => {
           mac: '00:00:00:00:00:00',
           internal: false,
           cidr: '192.168.1.20/24',
+        },
+        {
+          address: 'fe80::1',
+          netmask: 'ffff:ffff:ffff:ffff::',
+          family: 'IPv6',
+          mac: '00:00:00:00:00:00',
+          internal: false,
+          cidr: 'fe80::1/64',
+          scopeid: 1,
         },
       ],
       lo0: [
@@ -273,12 +295,17 @@ describe('localControlUrls', () => {
           cidr: '127.0.0.1/8',
         },
       ],
+      unavailable: undefined,
     });
 
     expect(urls).toEqual([
       {
         interfaceName: 'en0',
         url: 'http://192.168.1.20:4170/#token=a%2Fb%20token',
+      },
+      {
+        interfaceName: 'en1',
+        url: 'http://10.0.0.20:4170/#token=a%2Fb%20token',
       },
     ]);
   });
@@ -392,7 +419,9 @@ describe('serve rate limit env parsing', () => {
       runtimeReady: Promise.resolve(),
     }));
 
-    await startServeHandlerWithArgs('--local-control --hostname 192.168.1.2');
+    await startServeHandlerWithArgs(
+      '--local-control --tls-cert cert.pem --tls-key key.pem',
+    );
     await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
 
     const options = mockRunQwenServe.mock.calls[0]?.[0];
@@ -410,16 +439,23 @@ describe('serve rate limit env parsing', () => {
     expect(String(mockQr.generate.mock.calls[0]?.[0])).toContain(
       `#token=${options.token}`,
     );
+    expect(String(mockQr.generate.mock.calls[0]?.[0])).toMatch(/^https:/);
     expect(options.allowOrigins).toContain(
       new URL(String(mockQr.generate.mock.calls[0]?.[0])).origin,
     );
     expect(options.allowOrigins).not.toContain('*');
     expect(stdoutWrites.join('')).toContain('Local Control is on');
+    expect(stdoutWrites.join('')).toContain('Sleep inhibition is best effort');
   });
 
   it('does not inhibit sleep when pairing output fails', async () => {
-    const close = vi.fn();
+    const close = vi.fn().mockRejectedValue(new Error('close failed'));
+    const stderrWrites: string[] = [];
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
     mockQr.generate.mockImplementationOnce(() => {
       throw new Error('QR failed');
     });
@@ -441,7 +477,31 @@ describe('serve rate limit env parsing', () => {
       handler(argv as Parameters<typeof handler>[0]),
     ).rejects.toThrow('process.exit(1) called');
     expect(close).toHaveBeenCalledOnce();
+    expect(stderrWrites.join('')).toContain('QR failed');
+    expect(stderrWrites.join('')).not.toContain('close failed');
     expect(mockSleepInhibitor.acquire).not.toHaveBeenCalled();
+  });
+
+  it('closes Local Control when the authenticated Web Shell is unavailable', async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://0.0.0.0:4170/',
+      webShellMounted: false,
+      runtimeReady: Promise.resolve(),
+      close,
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(close).toHaveBeenCalledOnce();
+    expect(mockQr.generate).not.toHaveBeenCalled();
   });
 
   it('passes normalized named channels to runQwenServe', async () => {

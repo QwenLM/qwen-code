@@ -16,7 +16,7 @@ The command binds to the IPv4 LAN, generates a fresh 256-bit bearer token, print
 
 The terminal remains the visible enabled indicator. `Ctrl+C` turns Local Control off, closes the daemon, invalidates the generated token, and releases the existing cross-platform sleep inhibitor.
 
-The mode overrides `--hostname` with its LAN bind and rejects `--token`, `--allow-origin`, `--no-web`, and ephemeral port `0` instead of creating ambiguous or incomplete configurations. It also fails if the requested port is busy because retrying would make the printed pairing URLs and allowed origins incorrect. Existing explicit `qwen serve` deployments are unchanged.
+The mode rejects a non-default `--hostname`, `--token`, `--allow-origin`, `--no-web`, and ephemeral port `0` instead of silently overriding settings or creating incomplete configurations. It also fails if the requested port is busy because retrying would make the printed pairing URLs and allowed origins incorrect. Existing explicit `qwen serve` deployments are unchanged.
 
 ## Security
 

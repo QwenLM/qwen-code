@@ -94,7 +94,7 @@ async function showLocalControlPairing(
     });
   }
   writeStdoutLine(
-    '\nKeep this terminal open. Press Ctrl+C to turn Local Control off.',
+    '\nKeep this terminal open. Sleep inhibition is best effort. Press Ctrl+C to turn Local Control off.',
   );
 }
 
@@ -338,7 +338,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Share the Web Shell on the local IPv4 network with a fresh token, terminal QR code, and sleep inhibition. Press Ctrl+C to turn it off.',
+          'Share the Web Shell on the local IPv4 network with a fresh token, terminal QR code, and best-effort sleep inhibition. Press Ctrl+C to turn it off.',
       })
       .check((argv) => {
         if (argv['local-control'] === true && argv.token !== undefined) {
@@ -355,6 +355,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         }
         if (argv['local-control'] === true && argv['port'] === 0) {
           throw new Error('Local Control requires a fixed port.');
+        }
+        if (argv['local-control'] === true && argv.hostname !== '127.0.0.1') {
+          throw new Error('Local Control manages its hostname.');
         }
         return true;
       })
@@ -855,7 +858,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           await showLocalControlPairing(handle, localControlPairing);
           sleepInhibitor.acquire('Qwen Code Local Control is active');
         } catch (err) {
-          await handle.close();
+          await handle.close().catch(() => undefined);
           throw err;
         }
       }
