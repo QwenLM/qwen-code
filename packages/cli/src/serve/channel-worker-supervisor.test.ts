@@ -234,6 +234,7 @@ describe('createChannelWorkerSupervisor', () => {
           QWEN_DAEMON_TOKEN: 'secret-token',
           QWEN_DAEMON_WORKSPACE: '/workspace',
           QWEN_CODE_NO_RELAUNCH: 'true',
+          QWEN_CODE_SERVE: '1',
           QWEN_CHANNEL_DAEMON_WORKER: expect.any(String),
         }),
         cwd: '/workspace',
