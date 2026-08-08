@@ -159,30 +159,56 @@ describe('ChatRecordingService', () => {
       expect(record.provenance).toBe('real_user');
     });
 
-    it('stores hook display provenance in systemPayload only when provided', async () => {
-      const taggedParts: Part[] = [
-        { text: 'my prompt' },
+    it('preserves model-bound parts and records clean display text', async () => {
+      const modelParts: Part[] = [
+        { text: 'expanded model prompt' },
         {
-          text: '<qwen:user-prompt-submit-context>\nextra\n</qwen:user-prompt-submit-context>',
+          text: [
+            '<qwen:user-prompt-submit-context>',
+            'hook-only context',
+            '</qwen:user-prompt-submit-context>',
+          ].join('\n'),
         },
       ];
-      chatRecordingService.recordUserMessage(taggedParts, undefined, {
-        displayText: 'my prompt',
+
+      chatRecordingService.recordUserMessage(modelParts, undefined, {
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
       });
-      chatRecordingService.recordUserMessage([{ text: 'plain prompt' }]);
       await chatRecordingService.flush();
 
-      const calls = vi.mocked(jsonl.writeLine).mock.calls;
-      const augmented = calls[0][1] as ChatRecord;
-      const plain = calls[1][1] as ChatRecord;
-
-      // The model-bound parts are stored verbatim; the user-authored
-      // projection travels separately in the payload.
-      expect(augmented.message).toEqual({ role: 'user', parts: taggedParts });
-      expect(augmented.systemPayload).toEqual({
-        displayText: 'my prompt',
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.message).toEqual({ role: 'user', parts: modelParts });
+      expect(record.systemPayload).toEqual({
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
       });
-      expect(plain.systemPayload).toBeUndefined();
+    });
+
+    it('records empty display text without dropping prompt provenance', async () => {
+      chatRecordingService.recordUserMessage(
+        [
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'hook-only context',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
+          },
+        ],
+        undefined,
+        {
+          displayText: '',
+          hookContext: 'hook-only context',
+        },
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: 'hook-only context',
+      });
     });
 
     it('blocks later turns after a generic durable write failure', async () => {
