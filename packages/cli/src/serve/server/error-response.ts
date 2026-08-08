@@ -19,6 +19,7 @@ import type { Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
+  BridgeChannelQuarantinedError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
@@ -32,6 +33,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
@@ -90,6 +92,29 @@ function bridgeErrorExtraContext(
     extra[key] = value;
   }
   return extra;
+}
+
+function recordExpectedBridgeError(
+  err: Error,
+  ctx: BridgeErrorContext | undefined,
+  daemonLog: DaemonLogger | undefined,
+): void {
+  recordDaemonBridgeError(err);
+  recordDaemonError(undefined, err, {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+  });
+  emitDaemonLog('Daemon bridge request failed.', {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    'error.type': err.name,
+    'error.message': err.message.slice(0, 1024),
+  });
+  daemonLog?.warn(err.message, {
+    ...(ctx?.route ? { route: ctx.route } : {}),
+    ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    errorType: err.name,
+  });
 }
 
 export function sendPermissionVoteError(
@@ -170,6 +195,32 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof SessionRestoreTimeoutError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(504).json({
+      error: err.message,
+      code: 'session_restore_timeout',
+      errorKind: 'restore_timeout',
+      retryable: true,
+      sessionId: err.sessionId,
+      action: err.action,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
+  if (err instanceof BridgeChannelQuarantinedError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'acp_channel_unavailable',
+      errorKind: 'acp_channel_unavailable',
+      retryable: true,
+      reason: err.reason,
+    });
+    return;
+  }
   if (err instanceof DaemonDrainingError) {
     res.status(503).json({
       error: err.message,
@@ -538,14 +589,17 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof RestoreInProgressError) {
-    // Match `SessionLimitExceededError`'s 5s hint (above) — the
-    // underlying restore can take up to `initTimeoutMs` (default
-    // 10s) on the agent side, so a 1s retry hint pushed clients
-    // into tight loops that kept hitting the same 409.
-    res.set('Retry-After', '5');
+    // An ordinary in-flight restore matches `SessionLimitExceededError`'s 5s
+    // hint (above). A fence left behind by a timed-out restore carries a much
+    // longer hint from the bridge, because the late ACP request has to settle
+    // before the id frees up — a 5s cadence there is a tight loop against a
+    // 409 the client cannot clear. `reason` lets clients tell the two apart.
+    res.set('Retry-After', String(err.retryAfterSeconds));
     res.status(409).json({
       error: err.message,
       code: 'restore_in_progress',
+      reason: err.reason,
+      retryable: true,
       sessionId: err.sessionId,
       activeAction: err.activeAction,
       requestedAction: err.requestedAction,

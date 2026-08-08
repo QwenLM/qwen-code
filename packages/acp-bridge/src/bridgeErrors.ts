@@ -117,23 +117,51 @@ export class SessionArchivingError extends Error {
   }
 }
 
+/**
+ * Why a restore of this id is fenced.
+ *
+ * `restore_in_progress` is the ordinary case: a restore is running and the
+ * caller can retry shortly. `awaiting_abandoned_cleanup` means the public
+ * caller already received a timeout, but the non-cancellable ACP request (and
+ * its cleanup) has not settled yet — retrying at the ordinary cadence just
+ * re-hits the fence, so clients must back off much further.
+ */
+export type RestoreInProgressReason =
+  | 'restore_in_progress'
+  | 'awaiting_abandoned_cleanup';
+
+/** Fallback retry hint, in seconds, for an ordinary in-flight restore. */
+export const RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS = 5;
+
 export class RestoreInProgressError extends Error {
   readonly sessionId: string;
   readonly activeAction: 'load' | 'resume';
   readonly requestedAction: 'load' | 'resume';
+  readonly reason: RestoreInProgressReason;
+  readonly retryAfterSeconds: number;
 
   constructor(
     sessionId: string,
     activeAction: 'load' | 'resume',
     requestedAction: 'load' | 'resume',
+    opts?: {
+      reason?: RestoreInProgressReason;
+      retryAfterSeconds?: number;
+    },
   ) {
+    const reason = opts?.reason ?? 'restore_in_progress';
     super(
-      `Session "${sessionId}" is already being restored via session/${activeAction}; retry session/${requestedAction} after it completes`,
+      reason === 'awaiting_abandoned_cleanup'
+        ? `Session "${sessionId}" timed out during session/${activeAction} and its abandoned restore has not settled yet; retry session/${requestedAction} once cleanup completes`
+        : `Session "${sessionId}" is already being restored via session/${activeAction}; retry session/${requestedAction} after it completes`,
     );
     this.name = 'RestoreInProgressError';
     this.sessionId = sessionId;
     this.activeAction = activeAction;
     this.requestedAction = requestedAction;
+    this.reason = reason;
+    this.retryAfterSeconds =
+      opts?.retryAfterSeconds ?? RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS;
   }
 }
 
@@ -567,6 +595,34 @@ export class WorkspaceDrainingError extends Error {
     super(`Workspace ${JSON.stringify(workspaceCwd)} is being removed`);
     this.name = 'WorkspaceDrainingError';
     this.workspaceCwd = workspaceCwd;
+  }
+}
+
+/**
+ * Why a channel is closed to new session work. `restore_cleanup_failed`: the
+ * cleanup of a timed-out restore failed, so the child's state is unknown.
+ * `restore_settlement_overdue`: an abandoned restore blew past its settlement
+ * grace period, so the child still holds work the bridge can neither cancel
+ * nor account for. Both keep existing sessions usable and clear once the
+ * channel drains and is recycled.
+ */
+export type BridgeChannelUnavailableReason =
+  | 'restore_cleanup_failed'
+  | 'restore_settlement_overdue';
+
+export class BridgeChannelQuarantinedError extends Error {
+  readonly reason: BridgeChannelUnavailableReason;
+
+  constructor(
+    reason: BridgeChannelUnavailableReason = 'restore_cleanup_failed',
+  ) {
+    super(
+      reason === 'restore_settlement_overdue'
+        ? 'The ACP channel is unavailable for new sessions while an abandoned session restore has not settled'
+        : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
+    );
+    this.name = 'BridgeChannelQuarantinedError';
+    this.reason = reason;
   }
 }
 

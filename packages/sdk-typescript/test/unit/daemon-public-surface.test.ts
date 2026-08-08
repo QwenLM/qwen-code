@@ -341,6 +341,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // mismatch.
     expect(Public.DAEMON_ERROR_KINDS).toContain('prompt_deadline_exceeded');
     expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('restore_timeout');
   });
 });
 

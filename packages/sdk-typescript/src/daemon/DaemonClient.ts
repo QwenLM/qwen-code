@@ -339,6 +339,8 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
+const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS = 35_000;
@@ -537,6 +539,11 @@ export interface RestoreSessionRequest {
   approvalMode?: string;
   /** Latest persisted records to include in the initial load replay. */
   historyPageSize?: number;
+  /**
+   * Client-side deadline for this restore request. `0` disables the client
+   * timer and relies on the daemon's own restore deadline.
+   */
+  timeoutMs?: number;
 }
 
 export interface PromptRequest {
@@ -629,6 +636,8 @@ export class DaemonClient {
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
+  private readonly hasExplicitFetchTimeout: boolean;
+  private cachedSessionRestoreTimeoutMs: number | undefined;
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
@@ -673,6 +682,7 @@ export class DaemonClient {
     // before it could complete. The `0` sentinel is the documented
     // disable value, so we collapse all "doesn't make sense" inputs onto
     // it instead of defending the math at every call site.
+    this.hasExplicitFetchTimeout = opts.fetchTimeoutMs !== undefined;
     const raw = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
     this.fetchTimeoutMs = Number.isFinite(raw) && raw > 0 ? raw : 0;
     this.promptLimit = normalizePendingPromptLimit(
@@ -1009,7 +1019,7 @@ export class DaemonClient {
   }
 
   async capabilities(): Promise<DaemonCapabilities> {
-    return await this.fetchWithTimeout(
+    const capabilities = await this.fetchWithTimeout(
       `${this.baseUrl}/capabilities`,
       { headers: this.headers() },
       async (res) => {
@@ -1017,6 +1027,15 @@ export class DaemonClient {
         return (await res.json()) as DaemonCapabilities;
       },
     );
+    const restoreTimeoutMs = capabilities.limits?.sessionRestoreTimeoutMs;
+    this.cachedSessionRestoreTimeoutMs =
+      typeof restoreTimeoutMs === 'number' &&
+      Number.isInteger(restoreTimeoutMs) &&
+      restoreTimeoutMs > 0 &&
+      restoreTimeoutMs <= MAX_TIMER_DELAY_MS
+        ? restoreTimeoutMs
+        : undefined;
+    return capabilities;
   }
 
   /**
@@ -2759,6 +2778,7 @@ export class DaemonClient {
     req: RestoreSessionRequest,
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
+    const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/${action}`,
       {
@@ -2780,7 +2800,32 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonRestoredSession;
       },
+      timeoutMs,
     );
+  }
+
+  private resolveRestoreTimeoutMs(
+    perRequestTimeoutMs: number | undefined,
+  ): number {
+    if (perRequestTimeoutMs !== undefined) {
+      if (
+        !Number.isFinite(perRequestTimeoutMs) ||
+        !Number.isInteger(perRequestTimeoutMs) ||
+        perRequestTimeoutMs < 0
+      ) {
+        throw new TypeError(
+          'RestoreSessionRequest.timeoutMs must be a non-negative integer',
+        );
+      }
+      return perRequestTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : perRequestTimeoutMs;
+    }
+    if (this.hasExplicitFetchTimeout) {
+      return this.fetchTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : this.fetchTimeoutMs;
+    }
+    const derived = this.cachedSessionRestoreTimeoutMs
+      ? this.cachedSessionRestoreTimeoutMs + SESSION_RESTORE_TIMEOUT_HEADROOM_MS
+      : DEFAULT_SESSION_RESTORE_TIMEOUT_MS;
+    return derived > MAX_TIMER_DELAY_MS ? 0 : derived;
   }
 
   /**

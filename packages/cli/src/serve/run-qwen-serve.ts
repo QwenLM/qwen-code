@@ -29,6 +29,7 @@ import {
   normalizeMaxJournalEvents,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
@@ -1276,6 +1277,7 @@ function createBootstrapCapabilities(input: {
       maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
         input.opts.maxPendingPromptsPerSession,
       ),
+      sessionRestoreTimeoutMs: resolveSessionRestoreTimeoutMs(input.opts),
     },
   };
 }
@@ -2727,6 +2729,8 @@ async function runQwenServeImpl(
     }
     assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
+  const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  opts.sessionRestoreTimeoutMs = sessionRestoreTimeoutMs;
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
   // bridge treats a non-finite / negative value as the "disabled"
@@ -3910,6 +3914,7 @@ async function runQwenServeImpl(
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -4309,6 +4314,7 @@ async function runQwenServeImpl(
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -4858,6 +4864,7 @@ async function runQwenServeImpl(
           ...(opts.initializeTimeoutMs !== undefined
             ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
+          sessionRestoreTimeoutMs,
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
             : {}),
