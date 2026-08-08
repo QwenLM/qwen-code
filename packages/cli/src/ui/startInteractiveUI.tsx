@@ -10,7 +10,9 @@ import React from 'react';
 import {
   createDebugLogger,
   isDebugLogFileEnabled,
+  registerSession,
   type Config,
+  unregisterSession,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
@@ -96,6 +98,25 @@ export async function startInteractiveUI(
     config.markRuntimeStatusEnabled();
   } catch {
     // ignored: best-effort, never block UI startup.
+  }
+
+  // Announce this session in the machine-wide registry so sibling
+  // sessions can discover it (`qwen sessions ps`). Unlike the runtime.json
+  // sidecar above, this record is unlinked on exit — the registry's whole
+  // value is that presence means "running right now".
+  //
+  // registerSession swallows its own I/O errors, so a failure here is
+  // silent by design: discovery is a convenience, not a precondition for
+  // running Qwen Code.
+  if (
+    await registerSession({
+      sessionId: config.getSessionId(),
+      cwd: config.getTargetDir(),
+      kind: 'interactive',
+      qwenVersion: version,
+    })
+  ) {
+    registerCleanup(() => unregisterSession());
   }
 
   const restoreTerminalRedrawOptimizer =

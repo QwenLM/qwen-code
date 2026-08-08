@@ -211,6 +211,10 @@ import {
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
+  deriveSessionName,
+  patchSessionRecord,
+} from '../services/session-registry.js';
+import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
@@ -3868,6 +3872,16 @@ export class Config {
           sessionId: newSessionId,
           workDir,
           qwenVersion: cliVersion,
+        });
+        // Keep the machine-wide session registry in step for the same
+        // reason and under the same ownership rule: this PID's record
+        // would otherwise point discovery at the previous transcript.
+        // The record is keyed by PID, so a swap is a patch, not a
+        // delete-and-rewrite.
+        await patchSessionRecord({
+          sessionId: newSessionId,
+          cwd: workDir,
+          name: deriveSessionName(workDir, newSessionId),
         });
       });
     }
