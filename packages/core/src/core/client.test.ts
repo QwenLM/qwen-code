@@ -4965,9 +4965,11 @@ hello
       );
     });
 
-    it('should bound the main request wait when auto-memory recall is slow', async () => {
-      // Recall never settles, so the UserQuery consume point proceeds after
-      // the fixed initial budget without memory.
+    it('should hold the main request for exactly the initial recall budget when recall never settles', async () => {
+      // Recall never settles. Fake timers pin the budget contract: the
+      // request must still be blocked 1 ms inside the budget and proceed,
+      // without memory, the moment the budget expires.
+      vi.useFakeTimers();
       mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 
       const mockStream = (async function* () {
@@ -4981,16 +4983,23 @@ hello
       };
       client['chat'] = mockChat as GeminiChat;
 
-      const stream = client.sendMessageStream(
-        [{ text: 'Quick question' }],
-        new AbortController().signal,
-        'prompt-id-slow-memory',
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Quick question' }],
+          new AbortController().signal,
+          'prompt-id-slow-memory',
+        ),
       );
-      for await (const _ of stream) {
-        // consume stream
-      }
 
-      // turn.run() must have been called without the slow memory
+      // Drain microtasks up to the consume point, then stop 1 ms short of
+      // the 100 ms budget: the request must still be held.
+      await vi.advanceTimersByTimeAsync(99);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+
+      // Budget expiry: the request proceeds without the slow memory.
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.not.arrayContaining([
