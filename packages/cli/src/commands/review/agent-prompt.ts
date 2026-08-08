@@ -127,6 +127,7 @@ interface PlanReport {
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
   repositoryContext?: unknown;
+  budget?: { agentToolBudget?: unknown };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -294,7 +295,9 @@ function chunkFrom(
  */
 function toolBudgetBlock(report: PlanReport): string[] {
   const budget = report.budget?.agentToolBudget;
-  if (typeof budget !== 'number' || budget <= 0) return [];
+  if (typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0) {
+    return [];
+  }
   return [
     '',
     '## Tool budget',
