@@ -32,6 +32,7 @@ import {
   type ScrollableListRef,
 } from './shared/ScrollableList.js';
 import { TextSelectionController } from '../selection/use-text-selection.js';
+import { measureElementPosition } from '../utils/measure-element-position.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -455,6 +456,11 @@ export const MainContent = () => {
         <TextSelectionController
           isActive={!uiState.dialogsVisible}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getFooterRect={() =>
+            uiState.footerRef.current
+              ? measureElementPosition(uiState.footerRef.current)
+              : null
+          }
           getScrollState={() =>
             scrollRef.current?.getScrollState() ?? {
               scrollTop: 0,
