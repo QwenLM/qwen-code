@@ -4965,9 +4965,11 @@ hello
       );
     });
 
-    it('should not block the main request when auto-memory recall is slow', async () => {
-      // Recall never settles — settledAt stays null so the UserQuery consume
-      // point skips it and turn.run() is called immediately without memory.
+    it('should hold the main request for exactly the initial recall budget when recall never settles', async () => {
+      // Recall never settles. Fake timers pin the budget contract: the
+      // request must still be blocked 1 ms inside the budget and proceed,
+      // without memory, the moment the budget expires.
+      vi.useFakeTimers();
       mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 
       const mockStream = (async function* () {
@@ -4981,20 +4983,82 @@ hello
       };
       client['chat'] = mockChat as GeminiChat;
 
-      const stream = client.sendMessageStream(
-        [{ text: 'Quick question' }],
-        new AbortController().signal,
-        'prompt-id-slow-memory',
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Quick question' }],
+          new AbortController().signal,
+          'prompt-id-slow-memory',
+        ),
       );
-      for await (const _ of stream) {
-        // consume stream
-      }
 
-      // turn.run() must have been called without the slow memory
+      // Drain microtasks up to the consume point, then stop 1 ms short of
+      // the 100 ms budget: the request must still be held.
+      await vi.advanceTimersByTimeAsync(99);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+
+      // Budget expiry: the request proceeds without the slow memory.
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.not.arrayContaining([
           expect.stringContaining('Slow memory result'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should end the initial wait early when recall settles inside the budget', async () => {
+      // Fake timers pin the early-exit contract: once recall settles the
+      // request proceeds immediately with the memory — it must not run out
+      // the remaining budget. Dropping the settle listener in
+      // tryConsumeMemoryPrefetch would leave the request blocked until the
+      // full budget, which this assertion catches.
+      vi.useFakeTimers();
+      mockMemoryManager.recall.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  prompt: '## Relevant memory\n\nBounded memory result.',
+                  selectedDocs: [],
+                  strategy: 'model',
+                }),
+              10,
+            );
+          }),
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Quick question' }],
+          new AbortController().signal,
+          'prompt-id-bounded-memory',
+        ),
+      );
+
+      // Recall settles 10 ms in; the request must already be proceeding,
+      // 90 ms short of the budget.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mockTurnRunFn).toHaveBeenCalled();
+      await done;
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nBounded memory result.',
         ]),
         expect.any(AbortSignal),
       );
@@ -5154,11 +5218,13 @@ hello
             strategy: 'model';
           }) => void)
         | undefined;
-      mockMemoryManager.recall.mockReturnValue(
-        new Promise((resolve) => {
+      let recallSignal: AbortSignal | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        recallSignal = options.abortSignal;
+        return new Promise((resolve) => {
           resolveRecall = resolve;
-        }),
-      );
+        });
+      });
 
       // The model requests a tool call so pendingToolCalls is non-empty and
       // the prefetch is preserved for the subsequent ToolResult turn.
@@ -5201,6 +5267,7 @@ hello
         ]),
         expect.any(AbortSignal),
       );
+      expect(recallSignal?.aborted).toBe(false);
 
       // Recall settles between turns
       resolveRecall!({
@@ -5347,6 +5414,180 @@ hello
       expect(abortHandlerInvoked).toBe(false);
       callerController.abort();
       expect(abortHandlerInvoked).toBe(true);
+    });
+
+    it('should end the bounded initial wait when the prefetch is cancelled', async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      const handle = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        firedAt: Date.now(),
+        controller,
+      };
+      client['pendingMemoryPrefetch'] = handle;
+      const privateClient = client as unknown as {
+        tryConsumeMemoryPrefetch: (
+          deliveryPoint: 'initial',
+          waitMs: number,
+        ) => Promise<unknown>;
+        cancelPendingMemoryPrefetch: (reason: 'abort') => void;
+      };
+
+      const consume = privateClient.tryConsumeMemoryPrefetch('initial', 100);
+      setTimeout(() => privateClient.cancelPendingMemoryPrefetch('abort'), 10);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(consume).resolves.toBeNull();
+      expect(controller.signal.aborted).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should not consume a prefetch replaced during the bounded wait', async () => {
+      vi.useFakeTimers();
+      type RecallResult = {
+        prompt: string;
+        selectedDocs: Array<{
+          type: 'user';
+          filePath: string;
+          relativePath: string;
+          filename: string;
+          title: string;
+          description: string;
+          body: string;
+          mtimeMs: number;
+        }>;
+        strategy: 'model';
+      };
+      let settleRecall: ((value: RecallResult) => void) | undefined;
+      const handle = {
+        promise: new Promise<RecallResult>((resolve) => {
+          settleRecall = resolve;
+        }),
+        settledAt: null as number | null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      client['pendingMemoryPrefetch'] = handle;
+      const privateClient = client as unknown as {
+        tryConsumeMemoryPrefetch: (
+          deliveryPoint: 'initial',
+          waitMs: number,
+        ) => Promise<unknown>;
+      };
+
+      const consume = privateClient.tryConsumeMemoryPrefetch('initial', 100);
+
+      // The handle is replaced mid-wait and only settles afterwards; the
+      // post-wait guard must refuse the stale handle instead of consuming
+      // it.
+      const replacement = { ...handle, controller: new AbortController() };
+      setTimeout(() => {
+        client['pendingMemoryPrefetch'] = replacement;
+      }, 10);
+      setTimeout(() => {
+        handle.settledAt = Date.now();
+        settleRecall!({
+          prompt: '## Relevant memory\n\nReplaced result.',
+          selectedDocs: [],
+          strategy: 'model',
+        });
+      }, 20);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(consume).resolves.toBeNull();
+      expect(handle.consumed).toBe(false);
+      expect(client['pendingMemoryPrefetch']).toBe(replacement);
+    });
+
+    it('should not apply the initial wait budget on Cron turns', async () => {
+      // Cron recall fires too, but its consume point is zero-wait: with a
+      // never-settling recall the Cron request must proceed at elapsed 0
+      // instead of being held for the user-query budget.
+      vi.useFakeTimers();
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Cron response' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Scheduled sweep' }],
+          new AbortController().signal,
+          'prompt-id-cron-memory',
+          { type: SendMessageType.Cron },
+        ),
+      );
+
+      // Zero elapsed: the Cron turn must not be held by the recall budget.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Relevant memory'),
+        ]),
+        expect.any(AbortSignal),
+      );
+      await done;
+    });
+
+    it('should keep the ToolResult consume point zero-wait', async () => {
+      // The ToolResult delivery point must never block on the recall
+      // budget: with a still-pending prefetch the ToolResult turn proceeds
+      // at elapsed 0 and without memory.
+      vi.useFakeTimers();
+      client['pendingMemoryPrefetch'] = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-tool-result-zero-wait',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Relevant memory'),
+        ]),
+        expect.any(AbortSignal),
+      );
+      await done;
     });
 
     it('should abort the previous prefetch when a new UserQuery arrives mid-flight', async () => {

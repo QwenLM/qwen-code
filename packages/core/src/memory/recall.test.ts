@@ -99,6 +99,146 @@ const activeToolDocs: ScannedAutoMemoryDocument[] = [
   },
 ];
 
+function memoryDoc(
+  filename: string,
+  type: ScannedAutoMemoryDocument['type'],
+  title: string,
+  description: string,
+  body: string,
+): ScannedAutoMemoryDocument {
+  return {
+    type,
+    filePath: `/tmp/${filename}`,
+    relativePath: filename,
+    filename,
+    title,
+    description,
+    body,
+    mtimeMs: 1,
+  };
+}
+
+const multilingualDocs: ScannedAutoMemoryDocument[] = [
+  memoryDoc(
+    'zh-deploy.md',
+    'project',
+    '生产部署流程',
+    '发布检查清单',
+    '上线前确认监控和回滚开关。',
+  ),
+  memoryDoc(
+    'zh-api.md',
+    'reference',
+    '接口延迟排查',
+    'API 性能看板',
+    '记录服务响应时间和告警入口。',
+  ),
+  memoryDoc(
+    'ja-auth.md',
+    'project',
+    '認証設定ガイド',
+    'ユーザーログイン構成',
+    'セッション設定の確認手順。',
+  ),
+  memoryDoc(
+    'ja-deploy.md',
+    'reference',
+    'デプロイ手順',
+    'リリース運用',
+    '本番反映前の確認事項。',
+  ),
+  memoryDoc(
+    'ko-deploy.md',
+    'project',
+    '배포 절차',
+    '릴리스 체크리스트',
+    '운영 반영 전에 모니터링을 확인한다.',
+  ),
+  memoryDoc(
+    'ko-auth.md',
+    'reference',
+    '인증 설정',
+    '로그인 문제 해결',
+    '세션 만료와 권한 구성을 확인한다.',
+  ),
+  memoryDoc(
+    'en-release.md',
+    'project',
+    'Release process',
+    'Production deployment checklist',
+    'Verify monitoring before shipping.',
+  ),
+  memoryDoc(
+    'en-style.md',
+    'user',
+    'Response preferences',
+    'Concise answer style',
+    'Keep explanations direct.',
+  ),
+  memoryDoc(
+    'mixed-api.md',
+    'reference',
+    'Qwen API 限流',
+    'Rate limit dashboard',
+    '检查 quota 和请求速率。',
+  ),
+  memoryDoc(
+    'body-only.md',
+    'feedback',
+    'Operational notes',
+    'Miscellaneous guidance',
+    'Emergency rollback procedures require owner approval.',
+  ),
+  memoryDoc(
+    'ja-hiragana.md',
+    'user',
+    'よくあるしつもん',
+    'ひらがなだけでかいたあんない',
+    'ひらがなのとうこにそなえたきろく。',
+  ),
+];
+
+const multilingualRecallCases: Array<
+  [name: string, query: string, expectedFilename: string | null]
+> = [
+  ['Chinese title', '生产部署', 'zh-deploy.md'],
+  ['Chinese description', '发布检查', 'zh-deploy.md'],
+  ['Chinese API title', '接口延迟', 'zh-api.md'],
+  ['Chinese troubleshooting', '延迟排查', 'zh-api.md'],
+  ['Chinese mixed ASCII', 'API 延迟', 'zh-api.md'],
+  ['Japanese Han title', '認証設定', 'ja-auth.md'],
+  ['Japanese Katakana description', 'ログイン構成', 'ja-auth.md'],
+  ['Japanese prolonged sound mark', 'ユーザー', 'ja-auth.md'],
+  ['Japanese Katakana title', 'デプロイ手順', 'ja-deploy.md'],
+  ['Japanese release description', 'リリース運用', 'ja-deploy.md'],
+  ['Japanese Hiragana-only query', 'よくあるしつもん', 'ja-hiragana.md'],
+  ['Korean title', '배포 절차', 'ko-deploy.md'],
+  ['Korean description', '릴리스 체크', 'ko-deploy.md'],
+  ['Korean auth title', '인증 설정', 'ko-auth.md'],
+  ['Korean login description', '로그인 문제', 'ko-auth.md'],
+  ['English title', 'release process', 'en-release.md'],
+  ['English description', 'production deployment', 'en-release.md'],
+  ['English style description', 'concise answer', 'en-style.md'],
+  ['English preference title', 'response preferences', 'en-style.md'],
+  ['Mixed-language title', 'qwen api 限流', 'mixed-api.md'],
+  ['Mixed-language description', 'rate limit', 'mixed-api.md'],
+  ['Mixed ASCII and Han', 'API 限流', 'mixed-api.md'],
+  ['Body-only English', 'rollback procedures', 'body-only.md'],
+  ['Body-only phrase', 'emergency rollback', 'body-only.md'],
+  ['NFKC full-width API', 'ＱＷＥＮ ＡＰＩ', 'mixed-api.md'],
+  [
+    'NFKC full-width English',
+    'ＰＲＯＤＵＣＴＩＯＮ deployment',
+    'en-release.md',
+  ],
+  ['No lexical match', 'vector database', null],
+  ['Single Han character', '部', null],
+  ['Single Japanese character', '認', null],
+  ['Single Hangul character', '배', null],
+  ['Short ASCII token', 'go', null],
+  ['Unrelated English terms', 'empty mismatch', null],
+];
+
 describe('auto-memory relevant recall', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -116,6 +256,137 @@ describe('auto-memory relevant recall', () => {
 
   it('returns an empty list for an empty query', () => {
     expect(selectRelevantAutoMemoryDocuments('   ', docs)).toEqual([]);
+  });
+
+  it.each(multilingualRecallCases)('%s', (_name, query, expectedFilename) => {
+    const selected = selectRelevantAutoMemoryDocuments(query, multilingualDocs);
+
+    if (expectedFilename === null) {
+      expect(selected).toEqual([]);
+    } else {
+      expect(selected[0]?.filename).toBe(expectedFilename);
+    }
+  });
+
+  it('weights title and description matches above body-only matches', () => {
+    const bodyMatch = memoryDoc(
+      'body.md',
+      'reference',
+      'General notes',
+      'Miscellaneous',
+      'Latency dashboard troubleshooting.',
+    );
+    const titleMatch = memoryDoc(
+      'title.md',
+      'reference',
+      'Latency dashboard',
+      'Troubleshooting reference',
+      'General notes.',
+    );
+
+    expect(
+      selectRelevantAutoMemoryDocuments('latency dashboard', [
+        bodyMatch,
+        titleMatch,
+      ])[0]?.filename,
+    ).toBe('title.md');
+  });
+
+  it('applies type boosts only after a lexical match', () => {
+    const userDoc = memoryDoc(
+      'user-cadence.md',
+      'user',
+      'Cadence summary',
+      '',
+      '',
+    );
+    const projectDoc = memoryDoc(
+      'project-cadence.md',
+      'project',
+      'Cadence summary',
+      '',
+      '',
+    );
+
+    // Both docs tie on lexical score for 'cadence'; the 'preference' token
+    // boosts only the user-typed doc, so it must win. Without the boost the
+    // alphabetical type tie-break would surface the project doc instead.
+    const selected = selectRelevantAutoMemoryDocuments('cadence preference', [
+      projectDoc,
+      userDoc,
+    ]);
+
+    expect(selected[0]?.filename).toBe('user-cadence.md');
+    // Type keywords alone never surface a doc without a lexical match.
+    expect(selectRelevantAutoMemoryDocuments('preference', [userDoc])).toEqual(
+      [],
+    );
+  });
+
+  it('bounds long mixed queries while retaining their actual text edges', () => {
+    const codePoints = Array.from({ length: 100 }, (_, index) =>
+      String.fromCodePoint(0x4e00 + index),
+    );
+    const asciiTokens = Array.from(
+      { length: 100 },
+      (_, index) => `token${String(index).padStart(3, '0')}`,
+    );
+    const selected = selectRelevantAutoMemoryDocuments(
+      `${codePoints.join('')} ${asciiTokens.join(' ')}`,
+      [
+        memoryDoc(
+          'query-start.md',
+          'reference',
+          codePoints.slice(0, 2).join(''),
+          '',
+          '',
+        ),
+        memoryDoc(
+          'query-middle.md',
+          'reference',
+          codePoints.slice(49, 51).join(''),
+          '',
+          '',
+        ),
+        memoryDoc('query-end.md', 'reference', asciiTokens.at(-1)!, '', ''),
+      ],
+    );
+
+    expect(selected.map((doc) => doc.filename)).toEqual([
+      'query-start.md',
+      'query-end.md',
+    ]);
+  });
+
+  it('refreshes repeated tokens near the query tail', () => {
+    const tokens = Array.from(
+      { length: 65 },
+      (_, index) => `token${String(index).padStart(3, '0')}`,
+    );
+    const selected = selectRelevantAutoMemoryDocuments(
+      [...tokens.slice(0, 64), tokens[32], tokens[64]].join(' '),
+      [
+        memoryDoc('repeated.md', 'reference', tokens[32], '', ''),
+        memoryDoc('stale.md', 'reference', tokens[33], '', ''),
+        memoryDoc('last.md', 'reference', tokens[64], '', ''),
+      ],
+    ).map((doc) => doc.filename);
+
+    expect(selected).toContain('repeated.md');
+    expect(selected).toContain('last.md');
+    expect(selected).not.toContain('stale.md');
+  });
+
+  it('does not score body text outside the surfaced prompt window', () => {
+    const doc = memoryDoc(
+      'late-body.md',
+      'reference',
+      'General notes',
+      '',
+      `${'x'.repeat(1_200)}late marker`,
+    );
+
+    expect(selectRelevantAutoMemoryDocuments('late marker', [doc])).toEqual([]);
   });
 
   it('formats selected documents as a prompt block', () => {

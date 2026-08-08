@@ -18,6 +18,7 @@ import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 
 const MAX_RELEVANT_DOCS = 5;
 const MAX_DOC_BODY_CHARS = 1_200;
+const MAX_HEURISTIC_QUERY_TOKENS = 64;
 const debugLogger = createDebugLogger('AUTO_MEMORY_RECALL');
 
 const ACTIVE_TOOL_USAGE_MEMORY_MARKERS = [
@@ -62,16 +63,49 @@ const TYPE_KEYWORDS: Record<string, string[]> = {
   reference: ['reference', 'dashboard', 'ticket', 'docs', 'doc', 'link'],
 };
 
+const RECALL_TOKEN_RUN =
+  /[a-z0-9]{3,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Hangul}]+/gu;
+
+function normalizeRecallText(text: string): string {
+  return text.normalize('NFKC').toLowerCase();
+}
+
 function tokenize(text: string): string[] {
-  return Array.from(
-    new Set(
-      text
-        .toLowerCase()
-        .split(/[^a-z0-9]+/)
-        .map((token) => token.trim())
-        .filter((token) => token.length >= 3),
-    ),
-  );
+  const normalized = normalizeRecallText(text);
+  const edgeSize = MAX_HEURISTIC_QUERY_TOKENS / 2;
+  const headTokens = new Set<string>();
+  const tailTokens = new Set<string>();
+  const addToken = (token: string) => {
+    if (headTokens.has(token)) return;
+    if (tailTokens.delete(token)) {
+      tailTokens.add(token);
+      return;
+    }
+    if (headTokens.size < edgeSize) {
+      headTokens.add(token);
+      return;
+    }
+    tailTokens.add(token);
+    if (tailTokens.size > edgeSize) {
+      const oldest = tailTokens.values().next();
+      if (!oldest.done) tailTokens.delete(oldest.value);
+    }
+  };
+
+  for (const match of normalized.matchAll(RECALL_TOKEN_RUN)) {
+    const run = match[0];
+    if (run.charCodeAt(0) <= 0x7f) {
+      addToken(run);
+    } else {
+      let previous = '';
+      for (const codePoint of run) {
+        if (previous) addToken(previous + codePoint);
+        previous = codePoint;
+      }
+    }
+  }
+
+  return [...headTokens, ...tailTokens];
 }
 
 function normalizeBody(body: string): string {
@@ -138,26 +172,33 @@ function scoreDocument(
   queryTokens: string[],
   doc: ScannedAutoMemoryDocument,
 ): number {
-  const normalizedBody = normalizeBody(doc.body);
-  const haystack = [doc.type, doc.title, doc.description, normalizedBody]
-    .join(' ')
-    .toLowerCase();
+  const title = normalizeRecallText(doc.title);
+  const description = normalizeRecallText(doc.description);
+  const body = normalizeRecallText(
+    normalizeBody(doc.body).slice(0, MAX_DOC_BODY_CHARS),
+  );
 
-  let score = 0;
+  let lexicalScore = 0;
   for (const token of queryTokens) {
-    if (haystack.includes(token)) {
-      score += 2;
+    if (title.includes(token)) {
+      lexicalScore += 4;
     }
-    if (TYPE_KEYWORDS[doc.type]?.includes(token)) {
-      score += 1;
+    if (description.includes(token)) {
+      lexicalScore += 3;
+    }
+    if (body.includes(token)) {
+      lexicalScore += 1;
     }
   }
 
-  if (normalizedBody.length > 0) {
-    score += 1;
+  if (lexicalScore === 0) {
+    return 0;
   }
 
-  return score;
+  const typeBoost = queryTokens.filter((token) =>
+    TYPE_KEYWORDS[doc.type]?.includes(token),
+  ).length;
+  return lexicalScore + typeBoost;
 }
 
 export function selectRelevantAutoMemoryDocuments(
