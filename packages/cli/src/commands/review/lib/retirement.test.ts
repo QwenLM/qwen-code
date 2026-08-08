@@ -196,6 +196,61 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(schedule(2).due).toEqual([13, 14, 15]);
   });
 
+  it('a disclosure cannot BE the receipt — but cannot BLOCK a real one either', () => {
+    // Two directions, one rule: the receipt is judged with its
+    // `Budget gap:` lines stripped. A return whose only substance is its
+    // disclosures must not retire the chunk still owing the work (the
+    // admission doubling as the receipt). And a receipt substantive
+    // without them — a proven territory walk that found nothing new —
+    // must still retire, or a reverse auditor whose ceiling is routinely
+    // met (its brief orders the whole findings list read) makes
+    // convergence impossible and runs every budgeted loop to the round
+    // cap. The gap is coverage's to report and Step 3D's to rule on.
+    const ONLY_GAPS =
+      'No new issues found —\n' +
+      'Budget gap: the reconnect state machine walk\n' +
+      'Budget gap: the two remaining changed-export call-site traces';
+    const DRY_WITH_GAP =
+      DRY + '\nBudget gap: second-order callers outside this chunk';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY_WITH_GAP);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY_WITH_GAP);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), ONLY_GAPS);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk'), ONLY_GAPS);
+    record(1, 15, 'chunk 15 round 1 territory walk');
+    record(2, 15, 'chunk 15 round 2 territory walk');
+
+    const r3 = schedule(3);
+    // 13 retires on its substantive-without-gaps receipts; 14's
+    // gaps-as-receipt returns keep it due.
+    expect(r3.due).toEqual([14, 15]);
+    expect(r3.skipped).toEqual([
+      { chunkId: 13, dryRounds: [1, 2], nextColdCheck: 4 },
+    ]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('an inline disclosure cannot lend the receipt its substance', () => {
+    // A one-line return puts the disclosure AFTER the receipt separator,
+    // where the line-based strip cannot see it — and the clause capture
+    // would absorb the gap text and pass the substance check on it. The
+    // clause is cut at the inline marker first: with nothing before the
+    // disclosure, the receipt is bare and the chunk stays due. A zh
+    // disclosure counts the same — the receipt regex accepts zh receipts,
+    // so the guard must too.
+    const INLINE = 'No new issues found — Budget gap: the remaining traces';
+    const INLINE_ZH = '未发现新问题——预算缺口：其余调用点追踪';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), INLINE);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), INLINE);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), INLINE_ZH);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk'), INLINE_ZH);
+    record(1, 15, 'chunk 15 round 1 territory walk');
+    record(2, 15, 'chunk 15 round 2 territory walk');
+
+    const r3 = schedule(3);
+    expect(r3.due).toEqual([13, 14, 15]);
+    expect(r3.skipped).toEqual([]);
+  });
+
   it('a chunk twice dry retires on the odd round and cold-checks on the even one', () => {
     transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
     transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
