@@ -507,10 +507,22 @@ describe('capture-tui without tmux (probe seam)', () => {
             timeoutMs: 1000,
           } as never),
         );
-        expect(process.exitCode, name).toBe(3);
-        expect(existsSync(join(dir, 'cap.ans')), name).toBe(false);
-        expect(existsSync(join(dir, 'cap.png')), name).toBe(false);
-        expect(existsSync(join(dir, 'cap.json')), name).toBe(false);
+        // The probe name rides IN the compared value: `expect(v, message)`
+        // is banned by vitest/valid-expect, and a bare false would not say
+        // which of the three refusals regressed.
+        expect({
+          probe: name,
+          exitCode: process.exitCode,
+          ans: existsSync(join(dir, 'cap.ans')),
+          png: existsSync(join(dir, 'cap.png')),
+          manifest: existsSync(join(dir, 'cap.json')),
+        }).toEqual({
+          probe: name,
+          exitCode: 3,
+          ans: false,
+          png: false,
+          manifest: false,
+        });
       } finally {
         rmSync(dir, { recursive: true, force: true });
         process.exitCode = undefined;
