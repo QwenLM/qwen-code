@@ -79,13 +79,16 @@ function activeTarget(sessions: VirtualSubagentSessions): {
 }
 
 describe('VirtualSubagentSessions', () => {
-  it('rejects invalid parent session ids and empty agent ids', () => {
+  it('rejects invalid, oversized, or non-round-trippable id parts', () => {
     expect(() =>
       createVirtualSubagentSessionId('parent session', 'agent-1'),
     ).toThrow('valid id parts');
     expect(() => createVirtualSubagentSessionId('parent-session', '')).toThrow(
       'valid id parts',
     );
+    expect(() =>
+      createVirtualSubagentSessionId('parent-session', 'a'.repeat(501)),
+    ).toThrow('valid id parts');
     expect(() =>
       createVirtualSubagentSessionId('parent-session', '界'.repeat(500)),
     ).toThrow('valid id parts');
