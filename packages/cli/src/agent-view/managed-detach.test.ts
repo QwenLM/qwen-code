@@ -32,8 +32,8 @@ describe('detachCurrentSessionToAgentView', () => {
     expect(result).toEqual({ sessionId });
     expect(adopt).toHaveBeenCalledWith({
       sessionId,
-      projectCwd: path.join(globalDir, 'project'),
-      activeCwd: path.join(globalDir, 'project', 'src'),
+      projectCwd: path.resolve(globalDir, 'project'),
+      activeCwd: path.resolve(globalDir, 'project', 'src'),
       approvalMode: 'default',
       sandbox: undefined,
       terminal: { columns: 100, rows: 40 },
