@@ -73,6 +73,21 @@ export function tmuxSupportsCaptureN(versionLine: string): boolean | undefined {
   return minor >= 1;
 }
 
+/** Whether a `tmux -V` line names a tmux whose `capture-pane -N` PADS each
+ * line out to the grid line's allocated cells. Measured: 3.2a pads (`BBB`
+ * came back as `BBB` + 17 spaces) and has no `-T` to undo it; 3.3a does not
+ * pad; 3.4+ pads but takes `-T`. So the padding-without-a-remedy window is
+ * exactly 3.1–3.2.x — which Ubuntu 22.04 ships. Undefined when the version
+ * does not parse. */
+export function tmuxPadsWithCaptureN(versionLine: string): boolean | undefined {
+  const m = /(\d+)\.(\d+)([a-z]*)/i.exec(versionLine);
+  if (!m) return undefined;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  if (major !== 3) return false;
+  return minor < 3;
+}
+
 /** Whether a `tmux -V` line names a tmux whose `capture-pane` takes `-T`
  * ("ignore trailing positions that do not contain a character"), which
  * landed in 3.4. Undefined when the version does not parse — the caller
@@ -142,6 +157,10 @@ export function tmuxPlan(opts: {
   rows: number;
   command: string;
   cwd: string;
+  /** Whether to ask for real trailing spaces at all (`-N`). False only on
+   * the tmux versions whose `-N` FABRICATES them and that have no `-T` to
+   * undo it — see tmuxPadsWithCaptureN. */
+  captureTrailing?: boolean;
   /** Whether this tmux takes `capture-pane -T` (3.4+) — see the capture
    * argv below. False on older versions, which need no trimming and reject
    * the flag. */
@@ -294,7 +313,12 @@ export function tmuxPlan(opts: {
       'capture-pane',
       '-p',
       '-e',
-      '-N',
+      // -N asks tmux to keep the REAL trailing spaces — dropped only where
+      // it would invent them instead (tmux 3.1-3.2.x, which pad to the grid
+      // allocation and have no -T): there, a trimmed line understates a
+      // clipped right edge, while a padded one FABRICATES evidence, and the
+      // manifest records the caveat as a degradation.
+      ...(opts.captureTrailing === false ? [] : ['-N']),
       // -N alone pads each line out to the grid line's ALLOCATED cell count,
       // not what it rendered: measured on tmux 3.4, a row that had held 24
       // characters and was then erased and rewritten with `BBB` came back as

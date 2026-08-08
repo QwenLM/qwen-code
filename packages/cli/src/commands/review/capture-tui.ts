@@ -49,6 +49,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createContext, runInContext, type Context } from 'node:vm';
 import {
   writeStdoutLine,
+  writeStdoutLineSafe,
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
@@ -60,6 +61,7 @@ import {
   tmuxPlan,
   tmuxSupportsCaptureN,
   tmuxSupportsCaptureT,
+  tmuxPadsWithCaptureN,
   validGeometry,
   type CaptureManifest,
 } from './lib/tui-capture.js';
@@ -219,17 +221,33 @@ let brokenPipeGuarded = false;
  * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
  * trace where the machine-read contract promised exit 3 (or 0). Swallow
  * EPIPE only; anything else stays loud. */
+/** Set once this run's artifacts are on disk AND described by a manifest.
+ * From that moment a stdio failure cannot change what happened: the
+ * evidence exists, so an exit 1 with a stack trace would report a
+ * successful capture as a failed command. */
+let artifactsComplete = false;
+
 function guardBrokenPipes(): void {
   if (brokenPipeGuarded) return;
   brokenPipeGuarded = true;
   const swallow = (err: NodeJS.ErrnoException): void => {
-    if (err.code !== 'EPIPE') throw err;
+    // EPIPE always: a reader that left (`qwen … | head`) is not this
+    // command's failure. Anything else only once the evidence is complete —
+    // measured with an ENOSPC shim and stdout redirected to a file, the
+    // async 'error' event arrived AFTER a fully successful capture and
+    // rethrowing it exited 1 with the .ans and manifest both on disk. Before
+    // that point a stdio fault still propagates: it can mean the refusal
+    // itself never reached anyone.
+    if (err.code !== 'EPIPE' && !artifactsComplete) throw err;
   };
   process.stdout.on('error', swallow);
   process.stderr.on('error', swallow);
 }
 
 export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
+  // Per RUN, not per process: the guard is installed once, but a second
+  // capture in the same process must not inherit the first one's completion.
+  artifactsComplete = false;
   guardBrokenPipes();
   const refuse = (reason: string): void => {
     // Exit code FIRST: it is the disposition a harness reads, and the
@@ -342,14 +360,24 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       }
     };
     let shaped = false;
+    let manifestHadPng = false;
     try {
       const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         evidence?: unknown;
+        pngPath?: unknown;
       };
       shaped =
         m !== null &&
         typeof m === 'object' &&
         (m.evidence === 'png' || m.evidence === 'ans-only');
+      // The png clear needs the manifest to have CLAIMED a png: either the
+      // png rung itself or a recorded pngPath. An ans-only manifest says
+      // this tool never wrote one, so whatever sits at <out>.png belongs to
+      // someone else — and clearing it on the next run against the same
+      // --out (the documented reuse shape) destroyed a foreign file the
+      // previous run had deliberately spared.
+      manifestHadPng =
+        shaped && (m.evidence === 'png' || typeof m.pngPath === 'string');
     } catch {
       // ANY read failure means the capture signature could not be verified —
       // including fd exhaustion (EMFILE/ENFILE), which is transient under
@@ -362,7 +390,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
     if (shaped) {
       clearArtifact(ansPath);
-      clearArtifact(pngPath);
+      if (manifestHadPng) clearArtifact(pngPath);
       clearArtifact(manifestPath);
     }
     // AFTER the clears, never before: this unlink is the one that may throw
@@ -624,6 +652,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const server = captureServerName(process.pid, randomBytes(4).toString('hex'));
   const session = 'cap';
   const resolvedCwd = args.cwd ? resolve(args.cwd) : process.cwd();
+  // Measured on 3.2a (what Ubuntu 22.04 ships): `capture-pane -p -N` padded
+  // a three-character line out to the grid's allocated width with 17
+  // phantom spaces, and its tmux has no -T. Trailing spaces are dropped
+  // there rather than fabricated, and the manifest says so.
+  const capturePads = tmuxPadsWithCaptureN(tmuxVersion) === true;
   const plan = tmuxPlan({
     server,
     session,
@@ -633,6 +666,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     cwd: resolvedCwd,
     // Only 3.4+ has the flag; older versions have nothing to trim.
     captureTrim: tmuxSupportsCaptureT(tmuxVersion) === true,
+    // ...and 3.1-3.2.x invent trailing spaces with -N and cannot undo it.
+    captureTrailing: !capturePads,
     readyFile: holderReadyPath,
   });
 
@@ -946,6 +981,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         `${args.timeoutMs}ms budget — late frame captured`,
     );
   }
+  if (capturePads) {
+    degradations.push(
+      `tmux ${tmuxVersion} pads capture-pane -N to the grid allocation and ` +
+        `has no -T — trailing spaces were TRIMMED rather than fabricated; ` +
+        `a trailing-space or right-edge claim needs tmux 3.3+`,
+    );
+  }
   if (matchOverruns > 0) {
     // A budget cutoff is not the same as an absent marker: the match may
     // have been interrupted mid-backtrack, and the field's contract is that
@@ -1105,11 +1147,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   }
   await drainSignalsThenRelease();
 
-  writeStderrLine(
+  // The evidence is on disk and described. Whatever happens to stdio now,
+  // this run SUCCEEDED.
+  artifactsComplete = true;
+  writeStderrLineSafe(
     `capture-tui: ${manifest.evidence} at ${args.cols}x${args.rows} ` +
       `(settled by ${settledBy})${degradedBecause ? ` — ${degradedBecause}` : ''}`,
   );
-  writeStdoutLine(
+  writeStdoutLineSafe(
     JSON.stringify({
       captured: true,
       evidence: manifest.evidence,

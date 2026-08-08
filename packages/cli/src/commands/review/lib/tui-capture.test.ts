@@ -11,6 +11,7 @@ import {
   tmuxPlan,
   tmuxSupportsCaptureN,
   tmuxSupportsCaptureT,
+  tmuxPadsWithCaptureN,
   validGeometry,
 } from './tui-capture.js';
 
@@ -214,6 +215,37 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(plainHash.start[plainHash.start.indexOf('-c') + 1]).toBe(
       '/tmp/d/a##b',
     );
+  });
+
+  it('drops -N on the tmux versions that FABRICATE trailing spaces', () => {
+    // 3.1-3.2.x pad each line out to the grid's allocated cells and have no
+    // -T to undo it: measured on 3.2a (what Ubuntu 22.04 ships), a
+    // three-character line came back with 17 phantom spaces. Trimming
+    // understates a clipped right edge; padding INVENTS one, and the
+    // command records the caveat as a degradation.
+    const opts = {
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: 'node cli.js',
+      cwd: '/work',
+      readyFile: '/ready',
+    };
+    expect(tmuxPlan({ ...opts, captureTrailing: false }).capture).not.toContain(
+      '-N',
+    );
+    expect(tmuxPlan({ ...opts, captureTrailing: true }).capture).toContain(
+      '-N',
+    );
+    // Default stays -N: only the padding versions opt out.
+    expect(tmuxPlan(opts).capture).toContain('-N');
+    expect(tmuxPadsWithCaptureN('tmux 3.2a')).toBe(true);
+    expect(tmuxPadsWithCaptureN('tmux 3.1')).toBe(true);
+    expect(tmuxPadsWithCaptureN('tmux 3.3a')).toBe(false);
+    expect(tmuxPadsWithCaptureN('tmux 3.4')).toBe(false);
+    expect(tmuxPadsWithCaptureN('tmux 4.0')).toBe(false);
+    expect(tmuxPadsWithCaptureN('tmux next')).toBeUndefined();
   });
 
   it('adds capture-pane -T only when the tmux has it (3.4+)', () => {
