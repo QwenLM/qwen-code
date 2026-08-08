@@ -23,6 +23,7 @@ describe('ShellTool git config probe end-to-end (#8575)', () => {
   let cleanRepo: string;
   let dirtyRepo: string;
   let huskyRepo: string;
+  let submoduledRepo: string;
 
   function makeShellTool(targetDir: string): ShellTool {
     const config = {
@@ -63,6 +64,24 @@ describe('ShellTool git config probe end-to-end (#8575)', () => {
     fs.writeFileSync(path.join(huskyHooks, 'pre-commit'), '#!/bin/sh\n', {
       mode: 0o755,
     });
+
+    // Superproject whose own config is clean but a submodule's STORED
+    // config executes programs — `git status` / `git diff` run child git
+    // processes inside submodules that read it.
+    submoduledRepo = path.join(root, 'super');
+    fs.mkdirSync(path.join(submoduledRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(submoduledRepo, '.git', 'config'),
+      '[core]\n\tbare = false\n',
+    );
+    const moduleDir = path.join(submoduledRepo, '.git', 'modules', 'sub');
+    fs.mkdirSync(path.join(moduleDir, 'objects'), { recursive: true });
+    fs.mkdirSync(path.join(moduleDir, 'refs'), { recursive: true });
+    fs.writeFileSync(path.join(moduleDir, 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(
+      path.join(moduleDir, 'config'),
+      '[core]\n\tfsmonitor = /tmp/evil\n',
+    );
   });
 
   afterAll(() => {
@@ -99,6 +118,17 @@ describe('ShellTool git config probe end-to-end (#8575)', () => {
         is_background: false,
       });
       expect(await invocation.getDefaultPermission()).toBe('allow');
+    },
+  );
+
+  it.each(['git status', 'git diff'])(
+    'asks for %s when a submodule config executes programs',
+    async (command) => {
+      const invocation = makeShellTool(submoduledRepo).build({
+        command,
+        is_background: false,
+      });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
     },
   );
 
