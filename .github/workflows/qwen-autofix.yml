@@ -83,6 +83,10 @@ on:
         required: false
         type: 'boolean'
         default: false
+      source:
+        description: 'Dispatch-origin marker (fork-bridge = the fork-review bridge); routing metadata only — never changes what may be touched, and its one behavioral effect (staying quiet at the round cap) is honored only after the scan verifies a matching fork-bridge run'
+        required: false
+        type: 'string'
 
 defaults:
   run:
@@ -160,14 +164,27 @@ env:
   INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
-  MAX_TARGETS_PER_SCAN: '10'
+  # TUNABLE WITHOUT A CODE CHANGE: set the repository variable to re-size the
+  # loop as the takeover pool grows — Settings → Variables, no PR, no deploy.
+  # The literal here is only the fallback when the variable is unset.
+  # Why 30: 37 PRs carried autofix/takeover on 2026-08-08, so the previous
+  # budget of 10 emitted at most 27% of the eligible set per tick and pushed
+  # the rest a scan further out every time. It must also stay strictly above
+  # the address matrix's max-parallel or the matrix can never fill, and the
+  # same-repo candidate pool was 51, so 30 still bounds a pathological
+  # backlog. RAISE BOTH TOGETHER: this must stay above QWEN_AUTOFIX_MAX_PARALLEL.
+  MAX_TARGETS_PER_SCAN: '${{ vars.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN || 30 }}'
   # Upper bound on candidates INSPECTED per scan: idle candidates consume
   # serial API calls even when they emit nothing, and takeover widens the
   # candidate pool. Candidates are inspected NEWEST-first; past the budget
   # the oldest tail defers — old quiet PRs are the least likely to hold new
   # feedback, and a deferred PR with a live conflict is still picked up by
   # the shepherd's conflict lever.
-  MAX_CANDIDATE_INSPECTIONS: '60'
+  # TUNABLE WITHOUT A CODE CHANGE, for the same reason as the two above: this
+  # one gates whether a PR is even LOOKED AT, so it has to grow ahead of the
+  # candidate pool or the oldest PRs starve. The pool was 51 same-repo open
+  # PRs on 2026-08-08, still under the 60 fallback.
+  MAX_CANDIDATE_INSPECTIONS: '${{ vars.QWEN_AUTOFIX_MAX_CANDIDATE_INSPECTIONS || 60 }}'
   # Maintainer-facing engagement labels (applying labels requires GitHub
   # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
   # including a human-authored one — into the loop; SKIP opts any PR out
@@ -237,7 +254,12 @@ jobs:
       #     apart route once — the old shared group's one useful side effect,
       #     kept, without letting events on OTHER PRs cancel this one)
       #   • issue events coalesce PER issue
-      #   • dispatches are unique per run and are never cancelled
+      #   • dispatches are unique per run and are never cancelled —
+      #     fork-bridge dispatches included: `source` is a public
+      #     workflow_dispatch input, so no dispatch may claim a trusted
+      #     per-PR coalescing group by asserting an origin; fork-review
+      #     bursts coalesce upstream instead (the signal per PR, the bridge
+      #     per conclusion+head)
       # The old single shared cancel-in-progress group let ANY newer event kill
       # pending full scans while route jobs sat queued behind runner backlog —
       # observed as hours of scan starvation during review-event storms.
@@ -261,7 +283,10 @@ jobs:
       # a burst of trusted command comments coalesces to at most two runs
       # with latest-intent semantics, never touching review routes;
       # issues → per-issue; anything else (dispatch) → unique per run_id,
-      # never cancelled.
+      # never cancelled. A fork-bridge dispatch is still a dispatch here:
+      # `source` is a public input any manual dispatch can set, so keying a
+      # cancellable per-PR group on it would let a manual dispatch cancel a
+      # queued one (and vice versa).
       group: >-
         ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-label-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
@@ -368,30 +393,28 @@ jobs:
                     echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
                   fi
                 else
-                  # Fork PR. The scheduled scan already admits these for
-                  # takeover, so real-time pickup applies the SAME admission
-                  # (allow-edits on, and either the bot's own fork or an
-                  # explicit TAKEOVER_LABEL) rather than making the takeover
-                  # PRs — the ones a maintainer is actively waiting on — sit
-                  # through a throttled schedule. This event runs in BASE-repo
-                  # context, and review-address independently re-verifies
-                  # allow-edits, a live write+ author and a matching live head
-                  # repo before it touches the branch, so this only decides
-                  # WHEN that same gated work happens, never whether it may.
-                  fork_meta=''
-                  if fork_meta="$(gh pr view "${PR_NUMBER_EVENT}" --repo "${REPO}" --json labels,maintainerCanModify 2> /dev/null)"; then
-                    fork_allows_edits="$(jq -r '.maintainerCanModify == true' <<< "${fork_meta}")"
-                    fork_has_takeover="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${fork_meta}")"
-                    if [[ "${fork_allows_edits}" != 'true' ]]; then
-                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits"
-                    elif [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" || "${fork_has_takeover}" == 'true' ]]; then
-                      pr_is_managed=true
-                    else
-                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} is neither ${AUTOFIX_BOT}'s own fork nor ${TAKEOVER_LABEL}-labeled"
-                    fi
-                  else
-                    echo "🧭 review event ignored: could not read fork PR #${PR_NUMBER_EVENT} metadata"
-                  fi
+                  # Fork PR — decline, and say so. This event carries NO
+                  # repository secrets: GitHub withholds them from every run
+                  # tied to a pull request whose head lives in a fork, and the
+                  # run header states it outright (`Secret source: None`). So
+                  # CI_DEV_BOT_PAT arrives EMPTY and neither review-scan nor
+                  # review-address could authenticate from here — the earlier
+                  # claim that "this event runs in BASE-repo context" held for
+                  # the workflow FILE, which is read from base, but not for the
+                  # credentials.
+                  # Admitting the PR anyway spent two API reads to decide it,
+                  # then three more failing inside the scan, which exited 1 on
+                  # `metadata_fetch_failed` — a reason whose blocked comment
+                  # promises "a later scheduled scan will retry", true for a
+                  # 5xx and false for a credential this run was never handed.
+                  # Every review of a fork PR reddened the workflow while
+                  # changing nothing, and that noise buried the failures that
+                  # do need a human.
+                  # The label and the feedback both keep working: the scheduled
+                  # scan runs in repo context and admits fork takeover PRs on
+                  # its own. This mirrors the pull_request label branch below,
+                  # which already declines forks for exactly this reason.
+                  echo "🧭 fork review noted for #${PR_NUMBER_EVENT} — this event carries no repository secrets, so nothing here could authenticate; the next scheduled scan engages (author write+ and allow-edits required)"
                 fi
                 if [[ "${pr_is_managed}" == 'true' ]]; then
                   # Verify the reviewer/commenter is trusted (prompt-injection gate).
@@ -658,7 +681,19 @@ jobs:
         needs.route.outputs.do_issue == 'true' &&
         (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true'))
       }}
-    runs-on: 'ubuntu-latest'
+    # Secret-bearing and executes agent-driven code, but the agent runs inside
+    # the docker sandbox image and only ever writes a new branch as the
+    # dev-bot — it never executes a foreign author's code. Forks of this repo
+    # (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to hosted. On
+    # pull_request / pull_request_review events the ECS route additionally
+    # needs a same-repo head or a write+ author (ci.yml's pick_runner form);
+    # the other triggers skip that clause and rely on their own gates
+    # instead: issues / schedule require autofix/approved plus
+    # status/ready-for-agent on the issue, and workflow_dispatch rides the
+    # actor's own write access. Docker availability on this pool is proven
+    # in-repo by qwen-triage's container jobs, which run on the same
+    # runner labels.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 180
     # route.issue_number is only set for forced dispatches; label events carry
     # the issue in the payload, and scan-and-pick runs (cron, unforced
@@ -690,12 +725,97 @@ jobs:
       contents: 'read'
     env:
       REPO: '${{ github.repository }}'
-      WORKDIR: '/tmp/autofix'
+      # Per-run private dir: this pool carries many registrations sharing one
+      # OS /tmp, and issue-phase runs never serialize against each other, so
+      # a fixed path let concurrent runs clobber each other's decision files.
+      WORKDIR: '/tmp/autofix-${{ github.run_id }}'
       EVENT_NAME: '${{ github.event_name }}'
       READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
       AUTOFIX_APPROVED_LABEL: 'autofix/approved'
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
     steps:
+      # Self-hosted runners reuse the workspace; a prior containerised job
+      # can leave root-owned, read-only files anywhere in it. Restore
+      # ownership and write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Self-hosted runners keep the workspace between runs, and other pool
+      # jobs execute human-authored code as the runner user, so a prior job
+      # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
+      # diff.external, includeIf, hooks) in the local config that would fire
+      # inside THIS job's PAT-bearing git steps. It keeps
+      # a known-safe allowlist and unsets everything else, hardened against
+      # the worktree-config and global-hooksPath bypasses verified in
+      # qwen-triage on this pool. No-op on a fresh hosted runner.
+      - name: 'Sanitize workspace git config'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in
+          # a worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to sanitize"
+            exit 0
+          fi
+          # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+          # on the allowlist below (it carries no command itself), but it
+          # activates `.git/config.worktree` — a second config file that
+          # `git config --local` neither lists nor unsets, and that CAN carry
+          # core.hooksPath. Verified in qwen-triage: a prior run can set
+          # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+          # make the hooks deletion below walk /. Delete the file outright,
+          # then drop the extension.
+          rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          # Rather than denylist each exec-vector family (which kept missing
+          # new ones), KEEP a known-safe allowlist and --unset-all everything
+          # else: this closes the whole class, including knobs not yet
+          # enumerated. The kept set is only plumbing that carries no command
+          # — repo format, remote, branch, fetch/gc/pack/index, safe.directory,
+          # extensions, and submodule url/active/branch (NOT
+          # submodule.*.update, which can be `!cmd`). actions/checkout
+          # re-establishes remote/auth afterward. `|| true` on the grep: no
+          # non-allowlisted keys (the steady state on an already-sanitized
+          # runner) means grep exits 1, which would kill the step exactly
+          # when there is nothing to clean.
+          git config --local --name-only --list 2>/dev/null \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # Belt and braces after the config scrub: only delete inside the
+          # repository's own git dir. A hooks path resolving anywhere else is
+          # unlinked, never swept — a recursive delete of a planted path is
+          # far worse than a stale hook on a runner the pool re-cleans.
+          # Resolve hooks with global/system config OUT of the way. Verified
+          # in qwen-triage: with a global core.hooksPath set, `git rev-parse
+          # --git-path hooks` returns that path, the guard below sees
+          # "outside the git dir", and a planted `.git/hooks` symlink
+          # survives untouched. Keep this resolution AFTER the sweep above.
+          GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+          HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+          if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+            # Match -type f OR -type l: a symlinked hook survives a bare
+            # `-type f` sweep and still fires on the next checkout.
+            find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          else
+            # Resolves outside the git dir (or not at all). Warning and
+            # walking away would leave a live hook directory that the next
+            # git command executes, so unlink the ENTRY without descending
+            # into it and put an empty hooks directory back.
+            RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
+            mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
+          fi
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -705,7 +825,34 @@ jobs:
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
-          mkdir -p "${WORKDIR}"
+          # 0700: the dir holds agent transcripts and decision files; the
+          # sandbox container runs as this same user, so the tighter mode
+          # costs the job nothing. umask at creation, not mkdir-then-chmod —
+          # the chmod form leaves a world-readable window on this shared /tmp.
+          (umask 077; mkdir -p "${WORKDIR}")
+          # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
+          # runner kill skips the always() teardown and run_id never repeats,
+          # so nothing else ever reclaims them.
+          find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          # The reused workspace's .git accumulates unreferenced objects
+          # across fetch runs on this persistent pool; prune them.
+          git -c gc.autoDetach=false gc --auto --prune=now --quiet 2>/dev/null || true
+
+      # Self-hosted runners keep the workspace's .git across runs, so a
+      # failed earlier attempt's local branch survives here: the agent's
+      # branch create then dies "branch already exists", or an adaptation
+      # checks out the stale line and pushes the failed attempt's commits
+      # into the new PR. Drop them deterministically (refs survive
+      # actions/checkout's untracked-file clean).
+      - name: 'Drop stale autofix branches'
+        run: |-
+          # Detach first: `git branch -D` refuses the currently checked-out
+          # branch, so a stale autofix branch holding HEAD would otherwise
+          # silently survive the sweep (actions/checkout normally leaves
+          # HEAD on the default branch; this makes the sweep unconditional).
+          git checkout --detach 2>/dev/null || true
+          git for-each-ref --format='%(refname:short)' "refs/heads/${BRANCH_PREFIX}*" \
+            | xargs -r -n 1 git branch -D 2>/dev/null || true
 
       # Same staging as the review-address job: the verify gate always runs the
       # trusted checkout's copy of the schema gate, never a working-tree copy.
@@ -740,22 +887,60 @@ jobs:
       - name: 'Check runner environment'
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted) ;;
+            github-hosted|self-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
               ;;
           esac
+          # The label routing pins ecs-qwen, but a mis-labelled registration
+          # must not silently claim a PAT-bearing 300-minute job — assert the
+          # pool by name on the self-hosted branch too.
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an ecs-qwen pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+          fi
+          # Capability preflight for the persistent pool: this job's agent
+          # runs inside the docker sandbox, and a missing daemon otherwise
+          # surfaces only at 'Resolve sandbox image' — after npm ci/build
+          # has already burned tens of minutes. Fail in seconds instead.
+          # Hosted runners ship docker; the ECS pool's docker is proven by
+          # qwen-triage's container jobs on the same labels.
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
+            exit 1
+          fi
+          # 'Set up Node.js' assumes this pool keeps ~/.npm across jobs;
+          # log its size so a move to per-job containers is visible.
+          du -sh "${HOME}/.npm" 2>/dev/null || echo '~/.npm is absent on this runner.'
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
+          # No remote npm cache on the persistent pool: one measured
+          # review-address leg spent 339s in `Set up Node.js` restoring
+          # 2,654,052,865 bytes (~10 MB/s) to protect an `npm ci` that took
+          # 29s in the very next step, and those runners keep ~/.npm across
+          # jobs anyway, so every leg paid the download again — up to ten
+          # review-address legs per scan. The hosted fallback is ephemeral
+          # and keeps the cache; the choice keys on the runner fact directly.
+          # Keep the truthy literal in the MIDDLE of the ternary — GHA's
+          # &&/|| return operand values and '' is falsy, so
+          # `== 'self-hosted' && '' || 'npm'` yields 'npm' on BOTH pools
+          # (the contract tests evaluate the expression for both runner
+          # facts). package-manager-cache stops a future `packageManager`
+          # field in package.json from silently re-enabling the cache here.
+          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          package-manager-cache: false
           cache-dependency-path: 'package-lock.json'
 
       - name: 'Install tmux'
@@ -763,8 +948,13 @@ jobs:
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq tmux
+            # sudo -n: a host without passwordless sudo must fail fast with a
+            # clear message, not die on a password prompt (the pr-review pool
+            # steps make the same assumption with `sudo -n ... || ::warning`).
+            sudo -n apt-get update -qq && sudo -n apt-get install -y -qq tmux || {
+              echo '::error::tmux is required on the autofix runner and passwordless install failed.'
+              exit 1
+            }
           else
             echo '::error::tmux is required on the autofix runner.'
             exit 1
@@ -1285,7 +1475,7 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'autofix-issue-artifacts'
-          path: '/tmp/autofix/'
+          path: '${{ env.WORKDIR }}/'
           if-no-files-found: 'ignore'
 
       - name: 'Publish PR'
@@ -1322,9 +1512,14 @@ jobs:
           fi
           BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           git config core.hooksPath /dev/null
-          git push --no-verify origin "${BRANCH}"
+          # Authenticate the push with a one-shot, host-scoped credential
+          # helper via `git -c`: nothing is written to the reused
+          # workspace's .git/config (no error path can strand it there),
+          # argv holds only the literal ${GITHUB_TOKEN} reference, and the
+          # host scope means it cannot answer a non-GitHub URL.
+          git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+            push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -1396,6 +1591,16 @@ jobs:
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
           fi
+
+      # Nothing else removes the per-run WORKDIR; on the persistent pool
+      # every run would leave its transcripts and decision files behind
+      # forever. Last step, after every reader including the artifact
+      # upload. always() covers cancellation too; only a hard runner kill
+      # abandons the dir, and run_id never repeats — the age sweep in
+      # Reset autofix workspace reclaims it.
+      - name: 'Clean up autofix workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
 
   # ===========================================================================
   # TAKEOVER COMMAND — the accepted comment command's side effects are the
@@ -1716,6 +1921,16 @@ jobs:
       ${{ needs.route.outputs.do_review == 'true' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
+    # A forced scan can write the same status comment as review-address.
+    # Share its per-PR lock so neither writer can erase the other's state.
+    # Keep the predicate as narrow as the job's own `if:` — concurrency is
+    # evaluated BEFORE it, so without the do_review conjunct a dispatch with
+    # `phase: issue` + `pr_number: N` (route emits pr_number unconditionally)
+    # would park this skipped job in that PR's shared slot behind a 300-minute
+    # address round, stalling the issue phase that `needs` it.
+    concurrency:
+      group: "qwen-pr-head-write-${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"
+      cancel-in-progress: false
     outputs:
       targets: '${{ steps.scan.outputs.targets }}'
       has_targets: '${{ steps.scan.outputs.has_targets }}'
@@ -1729,7 +1944,24 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
+          DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
+          # Every lane that reaches this scan is supposed to hold the PAT:
+          # route now declines the one event GitHub is known to run without
+          # secrets (a fork PR's own review) before it can set do_review. An
+          # empty PAT here is therefore a deleted or renamed secret, or a lane
+          # nobody has modelled yet — neither repaired by a later tick, and
+          # neither visible to a job `if:`, which cannot read the `secrets`
+          # context at all.
+          # It must not be quiet. With no credential every `gh` call below
+          # answers as if the repository held no PRs, so the scan would walk an
+          # empty candidate list and report a healthy fleet of zero — green,
+          # forever, while the whole loop is dead.
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT is empty in this ${EVENT_NAME} scan — every API call would be unauthenticated and the scan would report an empty fleet; check the repository secret"
+            exit 1
+          fi
+
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
           # Reconstructing this by hand (list bot PRs, regex each one's eval
@@ -1742,6 +1974,186 @@ jobs:
           }
           WORKDIR="$(mktemp -d)"
 
+          read_forced_pr_meta() {
+            local attempt meta
+            for attempt in 1 2 3; do
+              if meta="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
+                --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null)" \
+                && jq -e 'type == "object"
+                  and (.number | type == "number")
+                  and (.state | type == "string")
+                  and (.author.login | type == "string")
+                  and (.headRefName | type == "string")
+                  and (.baseRefName | type == "string")
+                  and (.isCrossRepository | type == "boolean")
+                  and (.labels | type == "array")
+                  and (.maintainerCanModify | type == "boolean")' > /dev/null <<< "${meta}"; then
+                printf '%s' "${meta}"
+                return 0
+              fi
+              echo "::warning::Forced PR #${FORCED_PR} metadata lookup failed (attempt ${attempt}/3)" >&2
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
+            return 1
+          }
+
+          # 'none' and HTTP 404 are DEFINITIVE answers, not lookup failures.
+          # GitHub returns 200 with permission 'none' for logins that exist but
+          # hold nothing here (bot-type logins such as dependabot[bot], and org
+          # logins), and 404 for logins that do not exist or are empty. Both
+          # mean "no write access" — the routine rejection this gate is for.
+          # Retrying them would burn 3 API calls plus back-off per candidate per
+          # scheduled tick, forever, and strand the caller on
+          # 'permission_lookup_failed': a red forced run (exit 1) whose blocked
+          # comment promises "a later scheduled scan will retry" — a retry that
+          # can never succeed — while the actionable "grant the fork author
+          # write access" guidance behind author_permission_* stays unreachable.
+          # Only genuinely transient answers (5xx, network, auth) retry.
+          read_live_permission() {
+            local login="$1" attempt permission err result=''
+            # An empty login can only 404; skip the call and answer terminally.
+            if [[ -z "${login}" ]]; then
+              printf 'none'
+              return 0
+            fi
+            err="$(mktemp)"
+            for attempt in 1 2 3; do
+              if permission="$(gh api "repos/${REPO}/collaborators/${login}/permission" --jq '.permission // ""' 2> "${err}")" \
+                && [[ "${permission}" =~ ^(admin|maintain|write|triage|read|none)$ ]]; then
+                result="${permission}"
+                break
+              fi
+              if grep -q 'HTTP 404' "${err}"; then
+                result='none'
+                break
+              fi
+              # Surface gh's own diagnosis instead of discarding it: a rate
+              # limit, an expired PAT and a 5xx all look identical otherwise.
+              echo "::warning::Permission lookup failed for ${login} (attempt ${attempt}/3): $(tr '\n' ' ' < "${err}")" >&2
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
+            rm -f "${err}"
+            [[ -n "${result}" ]] || return 1
+            printf '%s' "${result}"
+          }
+
+          forced_admission_reason() {
+            jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" '
+              if (.state // "") != "OPEN" then "not_open"
+              elif (.baseRefName // "") != "main" then "wrong_base"
+              elif ([.labels[]?.name] | index($skip) != null) then "skip_label"
+              elif ((((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null)) | not) then "unmanaged_author"
+              elif (.isCrossRepository == true) and (.maintainerCanModify != true) then "maintainer_edits_disabled"
+              elif (((.isCrossRepository == true) or (.isCrossRepository == false)) | not) then "cross_repo_state_missing"
+              else "eligible"
+              end'
+          }
+
+          report_forced_takeover_blocked() {
+            local reason="$1" actor status_ids status_id body attempt status_lookup_ok next_en next_zh err
+            [[ "${DRY_RUN}" == 'true' ]] && return 0
+            [[ "$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" '
+              ((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null)
+            ' <<< "${META}")" == 'true' ]] || return 0
+            case "${reason}" in
+              permission_lookup_failed|author_permission_*|maintainer_edits_disabled|cross_repo_state_missing) ;;
+              *) return 0 ;;
+            esac
+            actor=''
+            for attempt in 1 2 3; do
+              if actor="$(gh api user --jq '.login' 2> /dev/null)" && [[ -n "${actor}" ]]; then
+                break
+              fi
+              echo "::warning::PAT identity lookup failed (attempt ${attempt}/3)" >&2
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
+            if [[ "${actor}" != "${AUTOFIX_BOT}" ]]; then
+              echo "::warning::Blocked takeover status skipped: PAT authenticates as '${actor:-unknown}'" >&2
+              return 1
+            fi
+            if [[ "${reason}" == 'maintainer_edits_disabled' ]]; then
+              next_en='Re-enable maintainer edits on the fork PR to resume takeover.'
+              next_zh='请在 fork PR 上重新允许 maintainer edits，以恢复 takeover。'
+            elif [[ "${reason}" == author_permission_* ]]; then
+              next_en='Grant the fork author write access, or remove the autofix/takeover label, to resume takeover.'
+              next_zh='请授予 fork 作者 write 权限，或移除 autofix/takeover 标签，以恢复 takeover。'
+            else
+              next_en='A later scheduled scan will retry without advancing the feedback watermark.'
+              next_zh='后续定时扫描会重试，本次不会推进反馈水位。'
+            fi
+            # Every other status writer resolves its run link from
+            # github.server_url / GITHUB_SERVER_URL. Hardcoding github.com here
+            # would make the one link this message exists to surface the only
+            # broken one on a GHES or proxied host.
+            body="$(printf '<!-- autofix-status -->\n\n⛔ **AutoFix blocked** — takeover admission stopped at `%s`, so no work was started. [View run](%s/%s/actions/runs/%s). %s\n\n<details>\n<summary>中文说明</summary>\n\n⛔ **AutoFix 已阻塞** —— takeover 准入停在 `%s`，因此本轮未开始处理。[查看运行](%s/%s/actions/runs/%s)。%s\n\n</details>' \
+              "${reason}" "${GITHUB_SERVER_URL}" "${REPO}" "${GITHUB_RUN_ID}" "${next_en}" \
+              "${reason}" "${GITHUB_SERVER_URL}" "${REPO}" "${GITHUB_RUN_ID}" "${next_zh}")"
+            status_ids=''
+            status_lookup_ok=false
+            err="$(mktemp)"
+            # Same filter as the sibling upsert in 'Post autofix status comment',
+            # including its two guards: `// ""` so a single comment with a null
+            # body cannot abort the whole program (jq exits 5, all three
+            # attempts fail, and the run reds out WITHOUT posting the very
+            # status it exists to post), and --arg so a repo-configured
+            # AUTOFIX_BOT_LOGIN containing " or \ is a mismatch instead of a jq
+            # parse error. Stays an inline id stream into `tail -1` — it never
+            # lands in a WORKDIR json file, so the WORKDIR page normalizer
+            # (add-with-empty-default) must NOT be applied here: it would wrap
+            # the id stream in an array and break the tail-1 consumer.
+            # pipefail is set LOCALLY here rather than relied on: this `if`
+            # must test gh's status, not jq's. A gh failure carrying an HTTP
+            # status prints the error body to stdout, so jq errors out and the
+            # retry fires — but a CONNECTION-level failure (TCP reset, TLS
+            # abort, DNS blip) leaves stdout EMPTY, and `jq -rs` then prints
+            # nothing and exits 0. Without pipefail that reads as success on
+            # nothing read: status_lookup_ok=true, the empty id takes the
+            # writer down the "no status comment yet" branch, and it posts a
+            # DUPLICATE ⛔ blocked comment beside the stale ✅ one — the exact
+            # two-status state this function exists to prevent — on a green
+            # run. `defaults.run.shell: bash` already gives every step in this
+            # file `-eo pipefail`, so this is redundant today; it is also the
+            # only guard that survives that default changing or this helper
+            # being lifted into a step that sets its own options.
+            for attempt in 1 2 3; do
+              if status_ids="$(set -o pipefail; gh api "repos/${REPO}/issues/${FORCED_PR}/comments" --paginate 2> "${err}" |
+                jq -rs --arg ab "${AUTOFIX_BOT}" --arg m '<!-- autofix-status -->' \
+                  '.[][] | select((.user.login // "") == $ab) | select((.body // "") | contains($m)) | .id')"; then
+                status_lookup_ok=true
+                break
+              fi
+              # Surface gh's own diagnosis instead of discarding it, exactly as
+              # read_live_permission does: a rate limit, an expired PAT and a
+              # 5xx are indistinguishable from 'attempt 3/3' alone.
+              echo "::warning::Takeover status lookup failed for #${FORCED_PR} (attempt ${attempt}/3): $(tr '\n' ' ' < "${err}")" >&2
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
+            rm -f "${err}"
+            if [[ "${status_lookup_ok}" != 'true' ]]; then
+              echo "::warning::Failed to read takeover status comments for #${FORCED_PR}" >&2
+              return 1
+            fi
+            status_id="$(tail -1 <<< "${status_ids}")"
+            if [[ -n "${status_id}" ]]; then
+              for attempt in 1 2 3; do
+                if gh api --method PATCH "repos/${REPO}/issues/comments/${status_id}" -f body="${body}" > /dev/null; then
+                  return 0
+                fi
+                echo "::warning::Failed to update blocked takeover status for #${FORCED_PR} (attempt ${attempt}/3)" >&2
+                [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+              done
+            else
+              for attempt in 1 2 3; do
+                if gh pr comment "${FORCED_PR}" --repo "${REPO}" --body "${body}" > /dev/null; then
+                  return 0
+                fi
+                echo "::warning::Failed to post blocked takeover status for #${FORCED_PR} (attempt ${attempt}/3)" >&2
+                [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+              done
+            fi
+            return 1
+          }
+
           # Candidate PRs: open, same-repo, targeting main, and either
           # authored by the dev-bot or opted in via TAKEOVER_LABEL. A PR
           # carrying SKIP_LABEL is excluded everywhere — skip wins over
@@ -1751,8 +2163,12 @@ jobs:
           # jq's // treats false as empty, so that form is false for EVERY
           # input and silently green-no-op'd all forced dispatches.
           if [[ -n "${FORCED_PR}" ]]; then
-            META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null || echo '{}')"
+            if ! META="$(read_forced_pr_meta)"; then
+              echo "::error::Forced PR #${FORCED_PR} admission blocked: metadata_fetch_failed"
+              echo "targets=[]" >> "${GITHUB_OUTPUT}"
+              echo "has_targets=false" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
             # Same admission as the scheduled scan below. In-repo PRs fail
             # CLOSED on a missing isCrossRepository field (`.isCrossRepository
             # == false`, never a `// true | not` default — jq's // treats false
@@ -1762,34 +2178,40 @@ jobs:
             # gate runs in the shell case just below, mirroring the scan's
             # per-candidate permission call) so the real-time route's fork
             # pickup is not silently discarded here.
-            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" \
-              '(((.state // "") == "OPEN")
-                 and (((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null))
-                 and ([.labels[]?.name] | index($skip) | not)
-                 and ((.baseRefName // "") == "main")
-                 and (if (.isCrossRepository == true)
-                        then (.maintainerCanModify == true)
-                        else (.isCrossRepository == false)
-                      end))' <<< "${META}")"
+            ADMISSION_REASON="$(forced_admission_reason <<< "${META}")"
             # Fork only: the author must hold write+ RIGHT NOW (the same
             # live-privilege rule the scan applies per candidate and
             # review-address re-checks before pushing). In-repo PRs are gated
             # by author/label alone.
-            if [[ "${OK}" == 'true' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
+            if [[ "${ADMISSION_REASON}" == 'eligible' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
               FORK_AUTHOR="$(jq -r '.author.login // ""' <<< "${META}")"
-              FPERM="$(gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              if ! FPERM="$(read_live_permission "${FORK_AUTHOR}")"; then
+                ADMISSION_REASON='permission_lookup_failed'
+                report_forced_takeover_blocked "${ADMISSION_REASON}" \
+                  || echo "::error::Forced PR #${FORCED_PR} blocked status update failed"
+                echo "::error::Forced PR #${FORCED_PR} admission blocked: ${ADMISSION_REASON}"
+                echo "targets=[]" >> "${GITHUB_OUTPUT}"
+                echo "has_targets=false" >> "${GITHUB_OUTPUT}"
+                exit 1
+              fi
               case "${FPERM}" in
                 admin|maintain|write)
                   echo "🌿 forced fork PR #${FORCED_PR} admitted (author ${FORK_AUTHOR}=${FPERM})"
                   ;;
                 *)
-                  echo "🧭 forced fork PR #${FORCED_PR} rejected: author ${FORK_AUTHOR} permission='${FPERM:-none}' below write"
-                  OK='false'
+                  ADMISSION_REASON="author_permission_${FPERM:-none}"
+                  echo "🧭 forced fork PR #${FORCED_PR} rejected: ${ADMISSION_REASON}"
                   ;;
               esac
             fi
-            if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); a fork PR additionally needs maintainer edits allowed and a live write+ author"
+            if [[ "${ADMISSION_REASON}" != 'eligible' ]]; then
+              if ! report_forced_takeover_blocked "${ADMISSION_REASON}"; then
+                echo "::error::Forced PR #${FORCED_PR} blocked status update failed"
+                echo "targets=[]" >> "${GITHUB_OUTPUT}"
+                echo "has_targets=false" >> "${GITHUB_OUTPUT}"
+                exit 1
+              fi
+              echo "❌ Forced PR #${FORCED_PR} rejected: ${ADMISSION_REASON}"
               echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
@@ -1835,7 +2257,11 @@ jobs:
             # candidates alone exhaust the inspection budget.
             while IFS=$'\t' read -r FPR FAUTHOR; do
               [[ -z "${FPR}" ]] && continue
-              FPERM="$(gh api "repos/${REPO}/collaborators/${FAUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              if ! FPERM="$(read_live_permission "${FAUTHOR}")"; then
+                echo "::warning::Fork takeover candidate #${FPR} blocked: permission_lookup_failed"
+                fleet_row "${FPR}" 'blocked' 'permission_lookup_failed'
+                continue
+              fi
               case "${FPERM}" in
                 admin|maintain|write)
                   echo "🌿 fork takeover candidate #${FPR} admitted (author ${FAUTHOR}=${FPERM})"
@@ -1843,6 +2269,7 @@ jobs:
                   ;;
                 *)
                   echo "🧭 fork takeover candidate #${FPR} skipped: author ${FAUTHOR} permission='${FPERM:-none}' below write"
+                  fleet_row "${FPR}" 'blocked' "author_permission_${FPERM:-none}"
                   ;;
               esac
             done < <(jq -rs --arg skip "${SKIP_LABEL}" '
@@ -2323,8 +2750,36 @@ jobs:
               # #7836, so review submissions stay covered by the
               # once-per-window pause notice below. No dedup on the dispatch
               # itself: the shepherd sends at most one per head, and a human
-              # asking twice deserves two answers.
-              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
+              # asking twice deserves two answers. fork-bridge dispatches are
+              # the one dispatch-shaped exception: they are fork-PR reviews
+              # laundered into dispatch form (a fork's review event carries no
+              # secrets), not an explicit human/shepherd dispatch — answering
+              # each one loudly would post one refusal per review on a capped
+              # fork PR, the exact #7836 spam this gate exists to prevent.
+              # But `source` is a public workflow_dispatch input any manual
+              # dispatch can set, so the silence is honored ONLY on positive
+              # proof of origin: a recent SUCCESSFUL fork-bridge run whose
+              # title names this exact PR (the bridge propagates the signal's
+              # run-name into its own title — both base-branch files, not
+              # fork-forgeable). The window is generous because route backlog
+              # can queue a dispatch for hours; the PR match, not the window,
+              # is what proves origin. Unverified → answered like any
+              # explicit dispatch.
+              FORK_BRIDGE_VERIFIED=false
+              if [[ "${DISPATCH_SOURCE}" == 'fork-bridge' ]]; then
+                BRIDGE_CUTOFF="$(date -u -d '360 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+                if BRIDGE_RUNS="$(gh run list --repo "${REPO}" --workflow qwen-autofix-fork-bridge.yml --limit 20 --json conclusion,createdAt,displayTitle 2> /dev/null)" \
+                  && jq -e --arg pr "${PR}" --arg cutoff "${BRIDGE_CUTOFF}" '
+                    [ .[]
+                      | select(.conclusion == "success" and ((.createdAt // "") >= $cutoff))
+                      | select((.displayTitle // "") | startswith("fork-bridge: fork-signal: PR \($pr) reviewed by ")) ]
+                    | length > 0' <<< "${BRIDGE_RUNS}" > /dev/null; then
+                  FORK_BRIDGE_VERIFIED=true
+                else
+                  echo "::warning::fork-bridge provenance unverified for #${PR} — answering this dispatch like an explicit one"
+                fi
+              fi
+              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' && "${FORK_BRIDGE_VERIFIED}" != 'true' ]]; then
                 if [[ "${DRY_RUN}" == "true" ]]; then
                   echo "🧪 DRY-RUN: would post cap-refused notice on #${PR}"
                 else
@@ -2550,6 +3005,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.body // "") | test($bf) | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test($cf) | not) ] | length' \
               "${WORKDIR}/ic.json")"
 
@@ -2629,13 +3085,91 @@ jobs:
     needs: ['route', 'review-scan']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     permissions:
       contents: 'read'
     outputs:
       base_sha: '${{ steps.meta.outputs.base_sha }}'
     steps:
+      # Self-hosted runners reuse the workspace; a prior containerised job
+      # can leave root-owned, read-only files anywhere in it. Restore
+      # ownership and write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Same sweep as the agent jobs: this checkout runs in a workspace
+      # other pool jobs have written, and a surviving filter.*.smudge or
+      # hook fires during it — in the job that builds the CLI bundle every
+      # review-address leg then executes with a PAT in env.
+      - name: 'Sanitize workspace git config'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in
+          # a worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to sanitize"
+            exit 0
+          fi
+          # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+          # on the allowlist below (it carries no command itself), but it
+          # activates `.git/config.worktree` — a second config file that
+          # `git config --local` neither lists nor unsets, and that CAN carry
+          # core.hooksPath. Verified in qwen-triage: a prior run can set
+          # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+          # make the hooks deletion below walk /. Delete the file outright,
+          # then drop the extension.
+          rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          # Rather than denylist each exec-vector family (which kept missing
+          # new ones), KEEP a known-safe allowlist and --unset-all everything
+          # else: this closes the whole class, including knobs not yet
+          # enumerated. The kept set is only plumbing that carries no command
+          # — repo format, remote, branch, fetch/gc/pack/index, safe.directory,
+          # extensions, and submodule url/active/branch (NOT
+          # submodule.*.update, which can be `!cmd`). actions/checkout
+          # re-establishes remote/auth afterward. `|| true` on the grep: no
+          # non-allowlisted keys (the steady state on an already-sanitized
+          # runner) means grep exits 1, which would kill the step exactly
+          # when there is nothing to clean.
+          git config --local --name-only --list 2>/dev/null \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # Belt and braces after the config scrub: only delete inside the
+          # repository's own git dir. A hooks path resolving anywhere else is
+          # unlinked, never swept — a recursive delete of a planted path is
+          # far worse than a stale hook on a runner the pool re-cleans.
+          # Resolve hooks with global/system config OUT of the way. Verified
+          # in qwen-triage: with a global core.hooksPath set, `git rev-parse
+          # --git-path hooks` returns that path, the guard below sees
+          # "outside the git dir", and a planted `.git/hooks` symlink
+          # survives untouched. Keep this resolution AFTER the sweep above.
+          GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+          HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+          if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+            # Match -type f OR -type l: a symlinked hook survives a bare
+            # `-type f` sweep and still fires on the next checkout.
+            find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          else
+            # Resolves outside the git dir (or not at all). Warning and
+            # walking away would leave a live hook directory that the next
+            # git command executes, so unlink the ENTRY without descending
+            # into it and put an empty hooks directory back.
+            RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
+            mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
+          fi
+
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -2643,13 +3177,15 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
+          # No remote npm cache on the persistent pool — the rationale and
+          # the ternary's operand-order trap live in issue-autofix's 'Set up
+          # Node.js' step; the contract tests pin all three copies.
+          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          package-manager-cache: false
           cache-dependency-path: 'package-lock.json'
 
       # The npm-ci retry recipe and the 'Prepare Qwen Code CLI' shim below
@@ -2727,7 +3263,22 @@ jobs:
     needs: ['route', 'review-scan', 'build-cli']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
-    runs-on: 'ubuntu-latest'
+    # Secret-bearing and executes PR code, but every target is live-gated to
+    # write+ (internal) authors at scan AND address time. That is an
+    # author-permission gate by design, not a head-repository gate: takeover
+    # engages maintainer fork PRs, and the pattern matches qwen-code-pr-review,
+    # whose ECS-routed review job also rides its upstream write+ check. The
+    # job therefore runs host-side (no `container:`): the branch code it
+    # executes is collaborator-authored — the same trust class ci.yml's
+    # pick_runner routes onto this pool — and persistent-workspace residue is
+    # scrubbed by the hygiene steps below. On pull_request /
+    # pull_request_review events the ECS route additionally needs a same-repo
+    # head or a write+ author (ci.yml's pick_runner form); issue_comment and
+    # the other triggers skip that clause and rely on the live write+ gates.
+    # Forks of this repo (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to
+    # hosted. Docker availability on this pool is proven in-repo by
+    # qwen-triage's container jobs, which run on the same runner labels.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 300
     permissions:
       contents: 'read'
@@ -2739,14 +3290,29 @@ jobs:
       # Measured at 3, on the scan that selected 7 PRs: the legs started
       # 3-at-a-time and each new one began 3-4s after a slot freed, so the
       # 7th PR waited 81 minutes for a slot it could have had immediately.
-      # 5 halves that tail while staying a real bound — the point of the cap
-      # is that a backlog cannot open an unbounded number of agent runs at
-      # once, not the specific number. The 300-minute job cap raises the
-      # worst-case hold to 5 runner-hours per slot (25 across the fleet) and
-      # holds the per-PR head-write concurrency group for the same window.
-      # The cap itself does not lengthen the queueing tail above; the raised
-      # 120-minute budget does, for the PRs that exhaust it.
-      max-parallel: 5
+      # 5 halved that tail — the point of the cap is that a backlog cannot
+      # open an unbounded number of agent runs at once, not the specific
+      # number.
+      # TUNABLE WITHOUT A CODE CHANGE: set QWEN_AUTOFIX_MAX_PARALLEL in
+      # Settings → Variables to re-size the fleet as the takeover pool grows;
+      # the literal below is only the fallback when the variable is unset.
+      # Verified on a live runner that `max-parallel` accepts this expression
+      # and schedules by it — a 6-leg matrix at 3 started 3, then began the
+      # 4th only once a slot freed.
+      # Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
+      # ~14% of them at a time and the tail measured at 3 simply reappeared
+      # at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
+      # legs occupy under a quarter of it, and the executed legs sampled that
+      # day finished in 3-28 minutes.
+      # The 300-minute job cap puts the worst case at 5 runner-hours per slot
+      # (100 across the fleet at 20) and holds the per-PR head-write
+      # concurrency group for the same window. Different PRs never share that
+      # group, so raising this does not add push contention.
+      # RAISE BOTH TOGETHER: this must stay strictly below
+      # MAX_TARGETS_PER_SCAN, or the scan cannot emit enough legs to fill the
+      # matrix and the extra slots sit idle. A test pins that for the
+      # fallbacks; for the variables it is an operator invariant.
+      max-parallel: '${{ fromJSON(vars.QWEN_AUTOFIX_MAX_PARALLEL || 20) }}'
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
     # Serialises every writer of THIS PR's head branch, across workflows.
@@ -2813,6 +3379,88 @@ jobs:
             exit 1
           fi
 
+      # Self-hosted runners reuse the workspace; a prior containerised job
+      # can leave root-owned, read-only files anywhere in it. Restore
+      # ownership and write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Self-hosted runners keep the workspace between runs, and other pool
+      # jobs execute human-authored code as the runner user, so a prior job
+      # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
+      # diff.external, includeIf, hooks) in the local config that would fire
+      # inside THIS job's PAT-bearing git steps. It keeps
+      # a known-safe allowlist and unsets everything else, hardened against
+      # the worktree-config and global-hooksPath bypasses verified in
+      # qwen-triage on this pool. No-op on a fresh hosted runner.
+      - name: 'Sanitize workspace git config'
+        run: |-
+          set -uo pipefail
+          # `.git` is a directory in a normal checkout but a gitlink file in
+          # a worktree; -e covers both, and a missing .git (first run) too.
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to sanitize"
+            exit 0
+          fi
+          # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+          # on the allowlist below (it carries no command itself), but it
+          # activates `.git/config.worktree` — a second config file that
+          # `git config --local` neither lists nor unsets, and that CAN carry
+          # core.hooksPath. Verified in qwen-triage: a prior run can set
+          # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+          # make the hooks deletion below walk /. Delete the file outright,
+          # then drop the extension.
+          rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          # Rather than denylist each exec-vector family (which kept missing
+          # new ones), KEEP a known-safe allowlist and --unset-all everything
+          # else: this closes the whole class, including knobs not yet
+          # enumerated. The kept set is only plumbing that carries no command
+          # — repo format, remote, branch, fetch/gc/pack/index, safe.directory,
+          # extensions, and submodule url/active/branch (NOT
+          # submodule.*.update, which can be `!cmd`). actions/checkout
+          # re-establishes remote/auth afterward. `|| true` on the grep: no
+          # non-allowlisted keys (the steady state on an already-sanitized
+          # runner) means grep exits 1, which would kill the step exactly
+          # when there is nothing to clean.
+          git config --local --name-only --list 2>/dev/null \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # Belt and braces after the config scrub: only delete inside the
+          # repository's own git dir. A hooks path resolving anywhere else is
+          # unlinked, never swept — a recursive delete of a planted path is
+          # far worse than a stale hook on a runner the pool re-cleans.
+          # Resolve hooks with global/system config OUT of the way. Verified
+          # in qwen-triage: with a global core.hooksPath set, `git rev-parse
+          # --git-path hooks` returns that path, the guard below sees
+          # "outside the git dir", and a planted `.git/hooks` symlink
+          # survives untouched. Keep this resolution AFTER the sweep above.
+          GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+          HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+          if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+            # Match -type f OR -type l: a symlinked hook survives a bare
+            # `-type f` sweep and still fires on the next checkout.
+            find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          else
+            # Resolves outside the git dir (or not at all). Warning and
+            # walking away would leave a live hook directory that the next
+            # git command executes, so unlink the ENTRY without descending
+            # into it and put an empty hooks directory back.
+            RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
+            mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
+          fi
+
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -2823,7 +3471,18 @@ jobs:
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
-          mkdir -p "${WORKDIR}"
+          # 0700: the dir holds agent transcripts and decision files; the
+          # sandbox container runs as this same user, so the tighter mode
+          # costs the job nothing. umask at creation, not mkdir-then-chmod —
+          # the chmod form leaves a world-readable window on this shared /tmp.
+          (umask 077; mkdir -p "${WORKDIR}")
+          # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
+          # runner kill skips the always() teardown and run_id never repeats,
+          # so nothing else ever reclaims them.
+          find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          # The reused workspace's .git accumulates unreferenced objects
+          # across fetch runs on this persistent pool; prune them.
+          git -c gc.autoDetach=false gc --auto --prune=now --quiet 2>/dev/null || true
 
       # Stage the schema gate script from the TRUSTED BASE checkout before
       # "Prepare branch and feedback" switches the working tree to the PR
@@ -2855,22 +3514,50 @@ jobs:
       - name: 'Check runner environment'
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted) ;;
+            github-hosted|self-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
               ;;
           esac
+          # The label routing pins ecs-qwen, but a mis-labelled registration
+          # must not silently claim a PAT-bearing 300-minute job — assert the
+          # pool by name on the self-hosted branch too.
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an ecs-qwen pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+          fi
+          # Capability preflight for the persistent pool: this job's agent
+          # runs inside the docker sandbox, and a missing daemon otherwise
+          # surfaces only at 'Resolve sandbox image' — after npm ci/build
+          # has already burned tens of minutes. Fail in seconds instead.
+          # Hosted runners ship docker; the ECS pool's docker is proven by
+          # qwen-triage's container jobs on the same labels.
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
+            exit 1
+          fi
+          # 'Set up Node.js' assumes this pool keeps ~/.npm across jobs;
+          # log its size so a move to per-job containers is visible.
+          du -sh "${HOME}/.npm" 2>/dev/null || echo '~/.npm is absent on this runner.'
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
+          # No remote npm cache on the persistent pool — the rationale and
+          # the ternary's operand-order trap live in issue-autofix's 'Set up
+          # Node.js' step; the contract tests pin all three copies.
+          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          package-manager-cache: false
           cache-dependency-path: 'package-lock.json'
 
       - name: 'Install tmux'
@@ -2878,8 +3565,13 @@ jobs:
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq tmux
+            # sudo -n: a host without passwordless sudo must fail fast with a
+            # clear message, not die on a password prompt (the pr-review pool
+            # steps make the same assumption with `sudo -n ... || ::warning`).
+            sudo -n apt-get update -qq && sudo -n apt-get install -y -qq tmux || {
+              echo '::error::tmux is required on the autofix runner and passwordless install failed.'
+              exit 1
+            }
           else
             echo '::error::tmux is required on the autofix runner.'
             exit 1
@@ -3048,7 +3740,8 @@ jobs:
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
             # of 403ing at the report step after the work is done.
-            if ! git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
+            if ! git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+              push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
               echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
               {
                 echo "stale=true"
@@ -3111,6 +3804,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3196,6 +3890,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3283,6 +3978,7 @@ jobs:
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
                  + [ ($ic | add)[]
                    | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                   | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                    | select((.body // "") | test("^\\s*@qwen-code /") | not)
                    | select(((.body // "") | contains("**[Critical]**")) | not)
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
@@ -3348,6 +4044,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
                 | select(((.body // "") | contains("**[Critical]**")) | not)
                 | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
@@ -3427,6 +4124,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
@@ -3942,19 +4640,22 @@ jobs:
           if [[ "${OUTCOME}" == "fixed" ]]; then
             NEXT_ROUND="$(( ROUND + 1 ))"
             git config --local --unset-all http.https://github.com/.extraheader || true
-            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
             # This step carries the PAT; the branch carries PR-controlled
             # .husky hooks (hooksPath was pointed there so the AGENT's
             # commits get checked). A pre-push hook would execute that code
             # with the PAT in env — sever hooks entirely before pushing.
             git config core.hooksPath /dev/null
+            # Authenticate push/fetch with a one-shot, host-scoped credential
+            # helper via a git_auth wrapper (see Publish PR) — nothing lands
+            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference.
+            git_auth() { git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
             if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's
               # PR branch when the author ticked the box).
-              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"
+              PUSH_URL="https://github.com/${HEAD_REPO}.git"
             else
-              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+              PUSH_URL="https://github.com/${REPO}.git"
             fi
             # Salvage a race-lost push instead of discarding the run. The
             # per-PR head-write concurrency group serialises THIS repo's
@@ -3973,7 +4674,7 @@ jobs:
             # through to the existing failure path — same as today.
             PUSH_RACE_MERGED='false'
             for push_attempt in 1 2 3; do
-              if git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+              if git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
                 break
               fi
               if [[ "${push_attempt}" == 3 ]]; then
@@ -3981,7 +4682,7 @@ jobs:
                 exit 1
               fi
               echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
-              if ! git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
+              if ! git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
                 echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
                 exit 1
               fi
@@ -4830,3 +5531,14 @@ jobs:
           gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
             -f body="${BODY}" > /dev/null ||
             echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
+
+      # Nothing else removes the per-target WORKDIR; PR numbers only
+      # increase, so on the persistent pool every addressed PR would leave
+      # its transcripts and decision files behind forever. Last step, after
+      # every reader including the artifact upload. always() covers
+      # cancellation too; a dir abandoned by a hard runner kill is reclaimed
+      # by the next same-PR run's reset, or by the age sweep in Reset
+      # autofix workspace if that PR is never addressed again.
+      - name: 'Clean up autofix workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'

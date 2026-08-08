@@ -3,6 +3,10 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import {
+  QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_SERVE_ENV,
+} from './acp-channel-fallback.js';
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
@@ -21,6 +25,10 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // Runtime attribution markers are stamped by trusted launchers. A project
+  // `.env` must not spoof client channel telemetry.
+  QWEN_CODE_SERVE_ENV,
+  QWEN_CODE_DESKTOP_ENV,
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
   // This is an operator rollout policy. A project must not be able to promote

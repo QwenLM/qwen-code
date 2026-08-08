@@ -93,6 +93,13 @@ import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
+export class TurnInterruptedError extends Error {
+  constructor() {
+    super('Operation cancelled.');
+    this.name = 'TurnInterruptedError';
+  }
+}
+
 const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
 
 /**
@@ -429,6 +436,13 @@ export interface RunNonInteractiveOptions {
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
   /**
+   * Emit a terminal result and return from this turn when its controller is
+   * aborted with {@link TurnInterruptedError}, instead of exiting the process.
+   * Reusable stream-json sessions use this so a protocol interrupt does not
+   * tear down the session; one-shot callers retain the process-level default.
+   */
+  recoverableCancellation?: boolean;
+  /**
    * Continue the most recent unfinished turn from chat history instead of
    * submitting `input` (which is ignored). No new user message enters the
    * transcript: an orphaned trailing user entry is re-submitted with Retry
@@ -734,6 +748,12 @@ export async function runNonInteractive(
         // so the outer catch's `errorMessage` field stays actionable
         // (vs. a useless literal "unreachable").
         throw new Error(exceeded.message);
+      }
+      if (
+        options.recoverableCancellation === true &&
+        abortController.signal.reason instanceof TurnInterruptedError
+      ) {
+        throw abortController.signal.reason;
       }
       await handleCancellationError(config);
       throw new Error('Operation cancelled.');
@@ -2873,13 +2893,19 @@ export async function runNonInteractive(
       // exit with the budget handler's exit code 55 instead of the
       // generic `handleError` exit code 1 from a raw "AbortError".
       const budgetExceeded = budgetEnforcer.getExceeded();
+      const recoverableCancellation =
+        !budgetExceeded &&
+        options.recoverableCancellation === true &&
+        abortController.signal.reason instanceof TurnInterruptedError;
 
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = budgetExceeded
         ? budgetExceeded.message
-        : error instanceof Error
-          ? error.message
-          : String(error);
+        : recoverableCancellation
+          ? abortController.signal.reason.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
       const metrics = uiTelemetryService.getMetrics();
       const usage = computeUsageFromMetrics(metrics);
       // Get stats for JSON format output
@@ -2932,6 +2958,9 @@ export async function runNonInteractive(
         // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
         // see a terminal result envelope before the process dies.
         await handleBudgetExceededError(config, budgetExceeded);
+      }
+      if (recoverableCancellation) {
+        return 130;
       }
       await handleError(error, config);
     } finally {

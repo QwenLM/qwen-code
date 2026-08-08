@@ -12,7 +12,7 @@ import {
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import type { Components } from 'react-markdown';
+import type { Components, Options } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -748,6 +748,74 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
 }
 
+/**
+ * Throttles a rapidly changing value (like a streaming string) to prevent
+ * O(n²) re-parsing of the entire Markdown AST on every token.
+ */
+function useThrottledValue(
+  value: string,
+  isStreaming: boolean | undefined,
+  intervalMs: number = 80,
+): string {
+  const [throttled, setThrottled] = useState(value);
+  const throttledRef = useRef(throttled);
+  throttledRef.current = throttled;
+  const lastRunRef = useRef(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      // Flush immediately when streaming stops
+      if (throttledRef.current !== value) {
+        setThrottled(value);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - lastRunRef.current;
+
+    if (elapsed >= intervalMs) {
+      lastRunRef.current = now;
+      setThrottled(valueRef.current);
+    } else if (!timeoutRef.current) {
+      timeoutRef.current = setTimeout(() => {
+        lastRunRef.current = Date.now();
+        timeoutRef.current = null;
+        setThrottled(valueRef.current);
+      }, intervalMs - elapsed);
+    }
+  }, [value, isStreaming, intervalMs]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  if (!isStreaming) return value;
+
+  // Bypass throttle for non-monotonic changes
+  if (
+    typeof value === 'string' &&
+    typeof throttled === 'string' &&
+    !value.startsWith(throttled)
+  ) {
+    return value;
+  }
+
+  return throttled;
+}
+
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
 // call (it closes over tableMode/tableResetKey). Recreating the components
 // object for a table reset therefore never changes the `code` element type, so
@@ -783,6 +851,35 @@ function createComponents(
 
 const COMPONENTS_DEFAULT = createComponents();
 
+/**
+ * Isolated memoized renderer. This ensures react-markdown ONLY re-parses
+ * when the throttled content or plugin references actually change.
+ */
+const MemoizedMarkdownRenderer = memo(function MemoizedMarkdownRenderer({
+  content,
+  components,
+  remarkPlugins,
+  rehypePlugins,
+  urlTransform,
+}: {
+  content: string;
+  components: Options['components'];
+  remarkPlugins: Options['remarkPlugins'];
+  rehypePlugins: Options['rehypePlugins'];
+  urlTransform: Options['urlTransform'];
+}) {
+  return (
+    <ReactMarkdown
+      components={components}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={urlTransform}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
 export const Markdown = memo(function Markdown({
   content,
   source,
@@ -792,19 +889,28 @@ export const Markdown = memo(function Markdown({
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
   const sourceMarkdown = source ? markdown : undefined;
-  const renderedContent =
-    content && source && sourceMarkdown?.transformMarkdown
-      ? sourceMarkdown.transformMarkdown(content, { source })
-      : content;
+
+  const throttledContent = useThrottledValue(content ?? '', isStreaming);
+  const renderedContent = useMemo(
+    () =>
+      throttledContent && source && sourceMarkdown?.transformMarkdown
+        ? sourceMarkdown.transformMarkdown(throttledContent, { source })
+        : throttledContent,
+    [throttledContent, source, sourceMarkdown],
+  );
+
   const effectiveTableMode = isStreaming
     ? 'basic'
     : (tableMode ?? markdownTableMode ?? 'basic');
+
+  // Memoize components so references stay stable during throttle window
   const components = useMemo(() => {
     if (effectiveTableMode === 'advanced') {
       return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
   }, [effectiveTableMode, renderedContent]);
+
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
@@ -842,23 +948,29 @@ export const Markdown = memo(function Markdown({
     [chartPre, renderedComponents],
   );
 
+  // Memoize plugins so their array references remain stable.
+  const remarkPlugins = useMemo(() => {
+    return sourceMarkdown?.remarkPlugins
+      ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
+      : [remarkGfm, remarkMath];
+  }, [sourceMarkdown?.remarkPlugins]);
+
+  const rehypePlugins = useMemo(() => {
+    return sourceMarkdown?.rehypePlugins
+      ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
+      : [rehypeKatex];
+  }, [sourceMarkdown?.rehypePlugins]);
+
   if (!content) return null;
-  const remarkPlugins = sourceMarkdown?.remarkPlugins
-    ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
-    : [remarkGfm, remarkMath];
-  const rehypePlugins = sourceMarkdown?.rehypePlugins
-    ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-    : [rehypeKatex];
 
   const renderedMarkdown = (
-    <ReactMarkdown
+    <MemoizedMarkdownRenderer
+      content={renderedContent}
+      components={componentsWithCharts}
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
-      components={componentsWithCharts}
       urlTransform={markdownUrlTransform}
-    >
-      {renderedContent}
-    </ReactMarkdown>
+    />
   );
   const chartAwareMarkdown = chart ? (
     <WebShellMarkdownChartProvider

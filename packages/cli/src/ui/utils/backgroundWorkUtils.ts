@@ -32,5 +32,13 @@ export function resetBackgroundStateForSessionSwitch(config: Config): void {
   // R7 (wenshao): symmetric with hasBlockingBackgroundWork — without
   // this call, terminal workflow rows from the previous session
   // leaked into the next session's pill / dialog / /workflows list.
+  // R12 (doudouOUC): abort BEFORE reset — paused runs no longer block
+  // the switch (hasRunningEntries() excludes them), and reset() alone
+  // would drop their entries without aborting the controllers, leaving
+  // the gated script and its vm context alive indefinitely. The gate
+  // still blocks running / pausing runs, so only paused entries are
+  // cancelled here; the runner's finally still writes their snapshot
+  // and telemetry as they settle.
+  config.getWorkflowRunRegistry().abortAll();
   config.getWorkflowRunRegistry().reset();
 }
