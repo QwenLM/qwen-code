@@ -270,10 +270,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
   const holderReadyPath = `${outBase}.holder-ready`;
-  // Files this run found ALREADY at the artifact paths after the clear
-  // phase — see the snapshot below. Defaults to "pre-existing" so a refusal
-  // taken before the snapshot can never authorize a delete.
-  let preExisting = { ans: true, png: true, manifest: true };
+  let pngPreExisted = true;
+  // Whether a png this run did NOT write was already sitting at <out>.png
+  // after the clear phase — see the snapshot below. Defaults to true so a
+  // refusal taken before the snapshot can never authorize a delete.
   try {
     // Clears FIRST — before even mkdir and before the directory-shaped
     // --out refusal below: under fd exhaustion (EMFILE, measured on macOS)
@@ -342,18 +342,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // a user's — recursive removal would destroy it on every run (measured:
     // a seeded content-bearing directory deleted even by successful runs).
     rmSync(holderReadyPath, { force: true });
-    // What still sits at an artifact path now is something this run did not
-    // write and did not clear (an unverifiable manifest, an unrelated file,
-    // a directory). The failure-cleanup sites below consult this snapshot:
-    // they may remove only what this run itself put there. Without it a
-    // successful run deleted a user's untouched .png whose render never
-    // started, and a refusing run deleted a .ans it never wrote (both
-    // measured).
-    preExisting = {
-      ans: existsSync(ansPath),
-      png: existsSync(pngPath),
-      manifest: existsSync(manifestPath),
-    };
+    // A png still sitting here is one this run did not write and did not
+    // clear (the signature check found no capture manifest, so it may be
+    // the user's). The torn-png cleanup consults this: freeze can fail
+    // without its spawn ever opening the output, and a SUCCEEDING run then
+    // deleted a file it never touched (measured). The .ans and .json need
+    // no such snapshot — the probe below refuses up front when either is
+    // unwritable, so a failure at THEIR writes is this run's own partial
+    // output.
+    pngPreExisted = existsSync(pngPath);
     mkdirSync(dirname(outBase), { recursive: true });
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
@@ -848,11 +845,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // persist undescribed.
     try {
       // Plain, never recursive: this run wrote a FILE (or nothing); a
-      // directory at the path is not ours to delete. And only when nothing
-      // was there after the clear: a write that failed (EISDIR, EACCES,
-      // EROFS) may not have touched the file at all, so a .ans the
-      // signature check deliberately protected must survive the refusal.
-      if (!preExisting.ans) rmSync(ansPath, { force: true });
+      // directory at the path is not ours to delete. Unconditional, though:
+      // the artifact-path probe already refused every shape that fails
+      // WITHOUT touching the file (a directory, a read-only or foreign file)
+      // before the capture window opened, so a failure here is a partial
+      // write of this run's own — and a truncated .ans left undescribed is
+      // the harm this catch exists for.
+      rmSync(ansPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
@@ -963,7 +962,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // run then silently deleted a user's untouched png and reported
       // ans-only (measured).
       try {
-        if (!preExisting.png) rmSync(pngPath, { force: true });
+        if (!pngPreExisted) rmSync(pngPath, { force: true });
       } catch {
         // The degradation entry above is the primary signal.
       }
@@ -1011,16 +1010,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     try {
       // Plain, never recursive — same rationale as the .ans catch above —
       // and each path only if this run put it there. Reaching here, the
-      // .ans write SUCCEEDED, so a protected .ans has already been
-      // overwritten by this run and is ours to remove; the png is ours only
-      // when this run's render produced one, and the manifest only when the
-      // clear left the path empty (a failed write can leave the previous
-      // file untouched).
+      // .ans write SUCCEEDED, so the .ans is this run's own output. The
+      // png is ours only when this run's render produced one — a png the
+      // clear phase protected and freeze never opened must survive.
       rmSync(ansPath, { force: true });
       if (png !== null) rmSync(pngPath, { force: true });
       // The failed write itself can leave a PARTIAL manifest at the path —
       // worse than none: it parses or half-parses as evidence description.
-      if (!preExisting.manifest) rmSync(manifestPath, { force: true });
+      // Unconditional for the same reason as the .ans: the probe refused
+      // an unwritable .json before the capture ran.
+      rmSync(manifestPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
