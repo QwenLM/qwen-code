@@ -14,6 +14,8 @@ import type {
   ToolResultDisplay,
   AgentStatus,
   ArenaDiffSummary,
+  GoalSnapshotV2,
+  GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { ReactNode } from 'react';
@@ -52,6 +54,11 @@ export enum ToolCallStatus {
   Error = 'Error',
 }
 
+export interface InlineImageData {
+  data: string;
+  mimeType: string;
+}
+
 export interface ToolCallEvent {
   type: 'tool_call';
   status: ToolCallStatus;
@@ -77,6 +84,10 @@ export interface IndividualToolCallDisplay {
    * is only a count. Undefined → fall back to the summary.
    */
   detailedDisplay?: string;
+  /** Inline images carried by this tool's persisted response parts. */
+  images?: InlineImageData[];
+  /** Images hidden after the per-row rendering limit. */
+  omittedImageCount?: number;
   status: ToolCallStatus;
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
@@ -136,12 +147,16 @@ export type HistoryItemUser = HistoryItemBase & {
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
   type: 'gemini_content';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
 };
 
 export type HistoryItemGeminiThought = HistoryItemBase & {
@@ -460,7 +475,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   mcpTools: ContextToolDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
-  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */
   isEstimated?: boolean;
   /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
   showDetails?: boolean;
@@ -584,6 +599,7 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'paused'
   | 'checking';
 
 export const GOAL_STATUS_KINDS = [
@@ -592,6 +608,7 @@ export const GOAL_STATUS_KINDS = [
   'cleared',
   'failed',
   'aborted',
+  'paused',
   'checking',
 ] as const satisfies readonly GoalStatusKind[];
 
@@ -626,6 +643,12 @@ export type HistoryItemGoalStatus = HistoryItemBase & {
   setAt?: number;
   durationMs?: number;
   lastReason?: string;
+};
+
+export type HistoryItemGoalState = HistoryItemBase & {
+  type: 'goal_state';
+  snapshot: GoalSnapshotV2;
+  cause?: GoalStateCause;
 };
 
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
@@ -674,7 +697,8 @@ export type HistoryItemWithoutId =
   | HistoryItemStopHookSystemMessage
   | HistoryItemDoctor
   | HistoryItemDiffStats
-  | HistoryItemGoalStatus;
+  | HistoryItemGoalStatus
+  | HistoryItemGoalState;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -719,6 +743,7 @@ export enum MessageType {
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
+  GOAL_STATE = 'goal_state',
   VISION_NOTICE = 'vision_notice',
 }
 
@@ -826,6 +851,8 @@ export interface SubmitPromptResult {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
   /**
    * Optional per-turn model id. Applies to this submitted prompt (and its
    * tool-call continuations) only — no session change, no persistence.

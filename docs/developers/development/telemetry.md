@@ -576,8 +576,8 @@ The following events are logged:
 
 #### Tool Events
 
-- `qwen-code.tool_call`: Each function/tool call.
-  - **Attributes**: `function_name` (string), `function_args` (object), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, optional), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
+- `qwen-code.tool_call`: Each function/tool call. Terminal events are normalized so `status` is authoritative: success and cancelled events omit error fields, while error events always have a non-empty `error_type` (`unknown` when the producer did not classify the error). Blank tool names are emitted as `unknown_tool`. A missing `execution_status` is normalized to `unknown` and is never inferred from the terminal `status`.
+  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
 
 - `qwen-code.file_operation`: Each file operation.
   - **Attributes**: `tool_name` (string), `operation` (string: "create", "read", "update"), `lines` (int, optional), `mimetype` (string, optional), `extension` (string, optional), `programming_language` (string, optional)
@@ -721,7 +721,10 @@ Metrics are numerical measurements of behavior over time. Metric names use the `
 - `qwen-code.session.count` (Counter, Int): Incremented once per CLI startup.
 
 - `qwen-code.tool.call.count` (Counter, Int): Counts tool calls.
-  - **Attributes**: `function_name`, `success` (boolean), `decision` ("accept"/"reject"/"auto_accept"/"modify", optional), `tool_type` ("mcp"/"native", optional)
+  - **Attributes**: `function_name`, `status` ("success"/"error"/"cancelled"), `success` (boolean, retained for compatibility), `decision` ("accept"/"reject"/"auto_accept"/"modify", optional), `tool_type` ("mcp"/"native", optional)
+
+- `qwen-code.tool.execution.count` (Counter, Int): Counts tool execution outcomes. Deliberately carries no `function_name` dimension to stay low-cardinality, so an execution-failure rate cannot be attributed to a specific tool without dropping to the `qwen-code.tool_call` logs; exclude `unknown`, `not_started`, and `cancelled` when computing execution-failure ratios (denominator is `success` + `error`).
+  - **Attributes**: `execution_status` ("not_started"/"success"/"error"/"cancelled"/"unknown"), `tool_type` ("mcp"/"native"), plus globally configured common metric attributes such as the opt-in `session.id`
 
 - `qwen-code.tool.call.latency` (Histogram, ms): Measures tool call latency.
   - **Attributes**: `function_name` (string)
@@ -859,16 +862,17 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
   - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `qwen-code.prompt_id`, `qwen-code.message_type`, `qwen-code.model`, `qwen-code.approval_mode`, `interaction.sequence`, `interaction.duration_ms`, `qwen-code.turn_status` ("ok"/"error"/"cancelled")
 
 - `qwen-code.llm_request`: Wraps a single LLM API call.
-  - **GenAI attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.request.model`, `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, optional `gen_ai.output.type`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
+  - **GenAI attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.request.model`, `gen_ai.request.stream`, `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, optional `gen_ai.output.type`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.response.time_to_first_chunk`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
   - **Compatibility attributes**: `session.id`, `qwen-code.prompt_id`, `llm_request.context` ("subagent"/"interaction"/"standalone"), `duration_ms`, `ttft_ms`, `request_setup_ms`, `attempt`, `retry_total_delay_ms`, `sampling_ms`, `output_tokens_per_second`, `success`, `error`, `finish_reason`, `thoughts_token_count`, `subagent_name`, `error_type`, `error_status_code`
   - Standard response fields come from the provider response. Standard token fields are emitted only for provider-reported non-negative safe integers. If the provider reports only a total token count, input/output usage is omitted rather than estimated.
   - Standard request-parameter fields come from the first provider-final SDK request object after adapter defaults, overrides, unsupported-field removal, and output-window clamps. Qwen Code does not infer SDK or server defaults.
+  - Streaming requests emit `gen_ai.request.stream=true`. `gen_ai.response.time_to_first_chunk` measures seconds from the provider call to the first normalized response yielded by the provider adapter, which may differ from the first raw network frame. Non-streaming requests omit both standard streaming attributes because an absent `gen_ai.request.stream` means non-streaming in the semantic convention.
 
 - `qwen-code.tool`: Wraps the full tool lifecycle (approval wait + execution).
-  - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.type` (`function`), `gen_ai.tool.call.id`, `tool.call_id`, `duration_ms`, `success`, `error`
+  - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.type` (`function`), `gen_ai.tool.call.id`, `tool.call_id`, `duration_ms`, `success`, `error`, `tool.failure_kind` (string, optional — the specific failure reason, e.g. "cancelled", "tool_error", "tool_exception", "timeout", "permission_denied", "pre_hook_blocked")
 
-- `qwen-code.tool.execution`: Wraps the tool execution phase (after approval).
-  - **Attributes**: `session.id`, `duration_ms`, `success`, `error`
+- `qwen-code.tool.execution`: Wraps the tool execution phase (after approval). Emitted only for attempted executions.
+  - **Attributes**: `session.id`, `gen_ai.tool.name` (optional), `tool.call_id` (optional), `duration_ms`, `success`, `error`, `execution_status` ("success"/"error"/"cancelled"), `error_type`, `error.type`
 
 - `qwen-code.tool.blocked_on_user`: Time a tool spends waiting on user approval.
   - **Attributes**: `session.id`, `tool.name`, `tool.call_id`, `duration_ms`, `decision` ("proceed_once"/"proceed_always"/"cancel"/"aborted"/"auto_approved"/"error"), `source` ("cli"/"ide"/"hook"/"auto"/"system")
@@ -881,7 +885,7 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
 
 #### GenAI field migration and ARMS recognition
 
-LLM spans now use standard `gen_ai.request.*`, `gen_ai.response.*`, and `gen_ai.usage.*` fields without exact-equivalent private aliases. Request sampling attributes are written only under their standard names; no bare `temperature`, `top_p`, `max_tokens`, penalty, choice-count, or stop-sequence aliases are emitted. Tool spans similarly use `gen_ai.tool.name` without `tool.name`; blocked-on-user and hook spans keep `tool.name` because they are not GenAI Tool spans. The invalid aliases `gen_ai.usage.cached_tokens`, `gen_ai.server.time_to_first_token`, and `gen_ai.usage.reasoning_tokens` are no longer emitted. Use `gen_ai.usage.cache_read.input_tokens` for provider-reported cache reads; continue using the private `ttft_ms` and `thoughts_token_count` fields where no GenAI/ARMS-common replacement exists. The full version-pinned contract and deferred fields are documented in [GenAI and ARMS field alignment](../../design/gen-ai-arms-field-alignment.md).
+LLM spans now use standard `gen_ai.request.*`, `gen_ai.response.*`, and `gen_ai.usage.*` fields without exact-equivalent private aliases. Request sampling attributes are written only under their standard names; no bare `temperature`, `top_p`, `max_tokens`, penalty, choice-count, or stop-sequence aliases are emitted. Tool spans similarly use `gen_ai.tool.name` without `tool.name`; blocked-on-user and hook spans keep `tool.name` because they are not GenAI Tool spans. The invalid aliases `gen_ai.usage.cached_tokens`, `gen_ai.server.time_to_first_token`, and `gen_ai.usage.reasoning_tokens` are no longer emitted. Use `gen_ai.usage.cache_read.input_tokens` for provider-reported cache reads and `gen_ai.response.time_to_first_chunk` for standard streaming latency. The private `ttft_ms` Span attribute remains available for first-user-visible-output latency and continues driving `/stats`, `sampling_ms`, and output-token throughput; `gen_ai.response.time_to_first_chunk` is an independent standard attribute measuring first normalized chunk latency. The full version-pinned contract and deferred fields are documented in [GenAI and ARMS field alignment](../../design/gen-ai-arms-field-alignment.md).
 
 To make ARMS recognize exported spans as a GenAI application, configure its resource feature explicitly:
 

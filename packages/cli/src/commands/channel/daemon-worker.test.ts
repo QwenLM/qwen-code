@@ -33,10 +33,18 @@ const mockDaemonObservedContactsPath = vi.hoisted(() =>
     () => '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
   ),
 );
+const mockDaemonChannelStateDir = vi.hoisted(() =>
+  vi.fn(
+    (workspace: string, channelName: string) =>
+      `/tmp/qwen/channels/daemon/${workspace === '/workspace' ? 'workspace-hash' : 'other-hash'}/instances/${channelName}-hash`,
+  ),
+);
 const mockObserveContact = vi.hoisted(() => vi.fn());
+const mockListContacts = vi.hoisted(() => vi.fn());
 const mockObservedContactStore = vi.hoisted(() =>
   vi.fn(() => ({
     observe: mockObserveContact,
+    list: mockListContacts,
   })),
 );
 const mockLoadSettings = vi.hoisted(() =>
@@ -225,6 +233,7 @@ vi.mock('./proxy.js', () => ({
 vi.mock('./runtime.js', () => ({
   createChannel: mockCreateChannel,
   daemonChannelLoopPath: mockDaemonChannelLoopPath,
+  daemonChannelStateDir: mockDaemonChannelStateDir,
   daemonObservedContactsPath: mockDaemonObservedContactsPath,
   daemonSessionRoutesPath: mockDaemonSessionRoutesPath,
   loadChannelsConfig: mockLoadChannelsConfig,
@@ -239,6 +248,7 @@ vi.mock('./runtime.js', () => ({
 }));
 
 vi.mock('./observed-contact-store.js', () => ({
+  OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS: 365 * 24 * 60 * 60,
   ObservedChannelContactStore: mockObservedContactStore,
 }));
 
@@ -791,8 +801,15 @@ describe('runChannelDaemonWorker', () => {
         channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
         observedContacts: {
           observe: expect.any(Function),
+          list: expect.any(Function),
         },
+        stateDir:
+          '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
       }),
+    );
+    expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(
+      '/workspace',
+      'telegram',
     );
     expect(mockDaemonObservedContactsPath).toHaveBeenCalledWith('/workspace');
     expect(mockObservedContactStore).toHaveBeenCalledWith(
@@ -801,6 +818,7 @@ describe('runChannelDaemonWorker', () => {
     const channelOptions = mockCreateChannel.mock.calls[0]![3] as {
       observedContacts: {
         observe(channelName: string, observation: unknown): unknown;
+        list(): unknown;
       };
     };
     const observation = {
@@ -809,6 +827,10 @@ describe('runChannelDaemonWorker', () => {
     };
     channelOptions.observedContacts.observe('telegram', observation);
     expect(mockObserveContact).toHaveBeenCalledWith('telegram', observation);
+    channelOptions.observedContacts.list();
+    expect(mockListContacts).toHaveBeenCalledWith({
+      freshWithinSeconds: 365 * 24 * 60 * 60,
+    });
     expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
       bridgeFacade,
       mockSessionRouter.mock.results[0]!.value,
@@ -1960,6 +1982,7 @@ describe('daemonWorkerCommand', () => {
     vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
     vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 
@@ -1973,6 +1996,7 @@ describe('daemonWorkerCommand', () => {
 
     expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_URL']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
     expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();

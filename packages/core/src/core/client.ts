@@ -77,12 +77,12 @@ import {
 // Services
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
-import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -143,6 +143,7 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 
 // Hook types and utilities
 import {
@@ -447,6 +448,7 @@ export class GeminiClient {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
           resumeTokenCounts.outputTokenCount,
+          resumeTokenCounts.isEstimated,
         );
       } else {
         chat.setLastPromptTokenCount(
@@ -1824,7 +1826,6 @@ export class GeminiClient {
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
           threshold: AUTO_SKILL_THRESHOLD,
-          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
@@ -2025,12 +2026,21 @@ export class GeminiClient {
           m.pendingToolResultChars && m.pendingToolResultChars > 0
             ? ` (+${m.pendingToolResultChars} pending)`
             : '';
+        const virtualAfter =
+          (m.toolResultCharsAfter ?? 0) + (m.pendingToolResultChars ?? 0);
+        const targetNote =
+          m.toolResultsLowWatermark !== undefined
+            ? `, target ${m.toolResultsLowWatermark}` +
+              (virtualAfter > m.toolResultsLowWatermark
+                ? ' (soft-exceeded)'
+                : '')
+            : '';
         debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
             `tool result(s) (~${m.tokensSaved} tokens), history now ` +
-            `${m.toolResultCharsAfter}${pendingNote}, kept ${m.toolsKept} ` +
-            `tool result(s)`,
+            `${m.toolResultCharsAfter}${pendingNote}${targetNote}, kept ` +
+            `${m.toolsKept} tool result(s)`,
         );
       } else {
         debugLogger.info(
@@ -2271,6 +2281,11 @@ export class GeminiClient {
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
+    const preHookUserPromptText =
+      messageType === SendMessageType.UserQuery
+        ? partToString(request)
+        : undefined;
+    let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
     try {
@@ -2291,7 +2306,7 @@ export class GeminiClient {
         messageBus &&
         this.config.hasHooksForEvent('UserPromptSubmit')
       ) {
-        const promptText = partToString(request);
+        const promptText = preHookUserPromptText ?? partToString(request);
         const submittedPrompt =
           messageType === SendMessageType.UserQuery &&
           typeof options?.submittedPrompt === 'string' &&
@@ -2351,11 +2366,26 @@ export class GeminiClient {
           return new Turn(this.getChat(), prompt_id);
         }
 
-        // Add additional context from hooks to the request
+        // Add additional context from hooks to the request. The context is
+        // appended as its own part, wrapped in a reserved tag so it stays
+        // distinguishable from user-authored text in model history, resume,
+        // and offline transcript analysis. `getAdditionalContext()` escapes
+        // `<`/`>`, so hook output cannot forge the closing tag.
+        // `promptText` is declared above this block so assignment here cannot
+        // hit a TDZ if the surrounding Goal try/catch is later reshuffled.
         const additionalContext = hookOutput?.getAdditionalContext();
         if (additionalContext) {
           const requestArray = Array.isArray(request) ? request : [request];
-          request = [...requestArray, { text: additionalContext }];
+          request = [
+            ...requestArray,
+            { text: wrapUserPromptSubmitContext(additionalContext) },
+          ];
+          if (messageType === SendMessageType.UserQuery) {
+            userPromptRecordPayload = {
+              displayText: submittedPrompt ?? promptText,
+              hookContext: additionalContext,
+            };
+          }
         }
       }
     } catch (error) {
@@ -2502,7 +2532,7 @@ export class GeminiClient {
         addUserPromptAttributes(
           this.config,
           interactionSpan,
-          partToString(request),
+          preHookUserPromptText ?? partToString(request),
         );
       }
     }
@@ -2557,12 +2587,16 @@ export class GeminiClient {
           }
           const promise = this.config
             .getMemoryManager()
-            .recall(this.config.getProjectRoot(), partToString(request), {
-              config: this.config,
-              excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-              recentTools: [...this.recentCompletedToolNames],
-              abortSignal: controller.signal,
-            })
+            .recall(
+              this.config.getProjectRoot(),
+              preHookUserPromptText ?? partToString(request),
+              {
+                config: this.config,
+                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+                recentTools: [...this.recentCompletedToolNames],
+                abortSignal: controller.signal,
+              },
+            )
             .catch((error: unknown) => {
               // Abort sources are now numerous (caller signal, new UserQuery,
               // cleanup paths, safety-net timeout). Keep a debug trace so
@@ -2627,9 +2661,16 @@ export class GeminiClient {
               goalPermit,
             );
         } else {
-          this.config
-            .getChatRecordingService()
-            ?.recordUserMessage(request, goalPermit);
+          const recorder = this.config.getChatRecordingService();
+          if (userPromptRecordPayload) {
+            recorder?.recordUserMessage(
+              request,
+              goalPermit,
+              userPromptRecordPayload,
+            );
+          } else {
+            recorder?.recordUserMessage(request, goalPermit);
+          }
         }
       }
 
@@ -3917,19 +3958,18 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
-    const model = this.config.getModel();
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
-    const info = await this.getChat().tryCompress(
+    const previousChat = this.getChat();
+    const info = await previousChat.tryCompress(
       prompt_id,
-      model,
       force,
       signal,
       customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      const chat = this.getChat();
-      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
+      const compressedHistory =
+        previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       if (
         !this.lastSessionStartContext &&
@@ -3949,7 +3989,10 @@ export class GeminiClient {
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
-      this.getChat().setLastPromptTokenCount(info.newTokenCount);
+      this.getChat().setLastPromptTokenCount(
+        info.newTokenCount,
+        info.newTokenCountIsEstimated ?? true,
+      );
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.

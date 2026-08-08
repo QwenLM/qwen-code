@@ -313,6 +313,9 @@ export async function checkForExtensionUpdate(
   signal?.throwIfAborted();
   const installMetadata = extension.installMetadata;
   if (installMetadata?.type === 'local') {
+    if (installMetadata.source.startsWith('upload:')) {
+      return ExtensionUpdateState.NOT_UPDATABLE;
+    }
     let latestConfig: ExtensionConfig | undefined;
     let tempDir: string | undefined;
     let convertedDir: string | undefined;

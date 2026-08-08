@@ -313,6 +313,7 @@ export interface DaemonArtifactChangedData {
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
+  messageIds?: string[];
   /**
    * Trusted client id that queued these messages, so a consumer dedupes only its
    * OWN pending queue — a peer attached to the same session must not drop a
@@ -424,9 +425,11 @@ export interface DaemonStateResyncRequiredData {
 
 export interface DaemonHistoryTruncatedData {
   reason: 'replay_window_exceeded';
+  scope?: 'live_journal' | (string & {});
   truncatedEvents: number;
   retainedEvents: number;
   maxBytes: number;
+  maxEvents?: number;
   truncatedTurns?: number;
   /**
    * Pagination anchor: the last `qwen.session.recordId` observed by the
@@ -1667,10 +1670,12 @@ export function asKnownDaemonEvent(
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
         : undefined;
-    case MID_TURN_MESSAGE_INJECTED_EVENT:
-      return isMidTurnMessageInjectedData(event.data)
-        ? (event as DaemonMidTurnMessageInjectedEvent)
+    case MID_TURN_MESSAGE_INJECTED_EVENT: {
+      const data = asMidTurnMessageInjectedData(event.data);
+      return data
+        ? ({ ...event, data } as DaemonMidTurnMessageInjectedEvent)
         : undefined;
+    }
     case PENDING_PROMPT_ADDED_EVENT:
       return isPendingPromptAddedData(event.data)
         ? (event as DaemonPendingPromptAddedEvent)
@@ -2667,15 +2672,37 @@ function isArtifactChangedData(
   );
 }
 
-function isMidTurnMessageInjectedData(
+function asMidTurnMessageInjectedData(
   value: unknown,
-): value is DaemonMidTurnMessageInjectedData {
-  return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    Array.isArray(value['messages']) &&
-    value['messages'].every((message) => typeof message === 'string')
-  );
+): DaemonMidTurnMessageInjectedData | undefined {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !Array.isArray(value['messages']) ||
+    !value['messages'].every((message) => typeof message === 'string')
+  ) {
+    return undefined;
+  }
+  const messageIds = value['messageIds'];
+  // `messageIds` is an optional enrichment: a misaligned or malformed batch is
+  // dropped (mirroring `parseSidechannelMidTurnInjected`) rather than rejecting
+  // the whole event, so a buggy daemon can't silently lose the injection signal.
+  const alignedMessageIds =
+    Array.isArray(messageIds) &&
+    messageIds.length === value['messages'].length &&
+    messageIds.every(isNonEmptyString)
+      ? (messageIds as string[])
+      : undefined;
+  // Strip the raw `messageIds` before spreading so a malformed batch OMITS the
+  // key (matching `parseSidechannelMidTurnInjected`) instead of leaving a
+  // present `undefined` that breaks `'messageIds' in data` checks.
+  const { messageIds: _rawMessageIds, ...rest } =
+    value as DaemonMidTurnMessageInjectedData;
+  return {
+    ...rest,
+    messages: value['messages'] as string[],
+    ...(alignedMessageIds ? { messageIds: alignedMessageIds } : {}),
+  };
 }
 
 function isPendingPromptAddedData(
@@ -2750,10 +2777,14 @@ function isHistoryTruncatedData(
     return false;
   }
   const truncatedTurns = value['truncatedTurns'];
+  const scope = value['scope'];
+  const maxEvents = value['maxEvents'];
   return (
     isNonNegativeInteger(value['truncatedEvents']) &&
     isNonNegativeInteger(value['retainedEvents']) &&
     isNonNegativeInteger(value['maxBytes']) &&
+    (scope === undefined || isNonEmptyString(scope)) &&
+    (maxEvents === undefined || isNonNegativeInteger(maxEvents)) &&
     (truncatedTurns === undefined || isNonNegativeInteger(truncatedTurns))
   );
 }

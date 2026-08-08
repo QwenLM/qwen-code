@@ -166,17 +166,18 @@ export class ToolCallEmitter extends BaseEmitter {
     if (this.isTodoWriteTool(params.toolName)) {
       if (params.subagentMeta) return;
       if (!params.success) return;
-      const todos = this.planEmitter.extractTodos(
+      const plan = this.planEmitter.extractPlan(
         params.resultDisplay,
         params.args,
       );
       // Match original behavior: send plan even if empty when args['todos'] exists
       // This ensures the UI is updated even when all todos are removed
-      if (todos && todos.length > 0) {
-        await this.planEmitter.emitPlan(todos);
-      } else if (params.args && Array.isArray(params.args['todos'])) {
-        // Send empty plan when args had todos but result has none
-        await this.planEmitter.emitPlan([]);
+      if (
+        plan &&
+        (plan.todos.length > 0 ||
+          (params.args && Array.isArray(params.args['todos'])))
+      ) {
+        await this.planEmitter.emitPlan(plan, params.callId);
       }
       return; // Skip tool_call_update for TodoWriteTool
     }

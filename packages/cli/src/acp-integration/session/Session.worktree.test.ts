@@ -135,6 +135,10 @@ describe('Session.pendingWorktreeNotice', () => {
         shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
       }),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       // The prompt turn's finally sweeps review-worktree leases against the
@@ -155,6 +159,9 @@ describe('Session.pendingWorktreeNotice', () => {
       // these registries; provide no-op stubs so construction succeeds.
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        listUnfinalizedBackgroundAgentIds: vi.fn().mockReturnValue([]),
       }),
       getMonitorRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),

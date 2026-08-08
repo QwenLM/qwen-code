@@ -43,6 +43,134 @@ afterEach(() => {
 });
 
 describe('startSpeculation', () => {
+  it('stops at a boundary when the host guard denies a speculative invocation', async () => {
+    const execute = vi.fn();
+    const guard = vi.fn().mockResolvedValue({
+      allowed: false,
+      reason: 'host policy denied',
+    });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({
+          params: { path: '/normalized/a.ts' },
+          execute,
+        }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      getToolInvocationGuard: vi.fn().mockReturnValue(guard),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-speculation-guard',
+                        name: 'read_file',
+                        args: { path: 'a.ts' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+
+    expect(guard).toHaveBeenCalledWith({
+      callId: 'call-speculation-guard',
+      toolName: 'read_file',
+      args: { path: '/normalized/a.ts' },
+      signal: expect.any(AbortSignal),
+    });
+    expect(execute).not.toHaveBeenCalled();
+
+    await abortSpeculation(state);
+  });
+
+  it('proceeds to execution when the host guard allows a speculative invocation', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const guard = vi.fn().mockResolvedValue({ allowed: true });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({
+          params: { path: '/normalized/a.ts' },
+          execute,
+        }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      getToolInvocationGuard: vi.fn().mockReturnValue(guard),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-speculation-guard-allow',
+                        name: 'read_file',
+                        args: { path: 'a.ts' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    expect(guard).toHaveBeenCalledWith({
+      callId: 'call-speculation-guard-allow',
+      toolName: 'read_file',
+      args: { path: '/normalized/a.ts' },
+      signal: expect.any(AbortSignal),
+    });
+    expect(execute).toHaveBeenCalledOnce();
+
+    await abortSpeculation(state);
+  });
+
   it('preserves generated tool call ids in paired responses', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'file contents',

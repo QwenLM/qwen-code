@@ -52,6 +52,8 @@ vi.mock('../utils/nextSpeakerChecker.js', () => ({
 import { GeminiClient, SendMessageType } from './client.js';
 import { GeminiEventType, type ServerGeminiStreamEvent } from './turn.js';
 
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
+
 const permit: GoalTurnPermit = {
   goalId: 'goal-1',
   revision: 1,
@@ -982,7 +984,7 @@ describe('GeminiClient Goal admission', () => {
     expect(runtime.finishTurn).not.toHaveBeenCalled();
   });
 
-  it('runs 150 runtime-scheduled Goal turns without recursive or session budgets', async () => {
+  it('runs runtime-scheduled Goal turns beyond the former fixed limit without session budgets', async () => {
     const { client, config } = setupGoalClient();
     const goalJournal: GoalJournal = {
       getTranscriptCursor: () => ({ recordId: null }),
@@ -1016,7 +1018,8 @@ describe('GeminiClient Goal admission', () => {
     vi.mocked(config.getGoalRuntime).mockReturnValue(runtime);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    for (let turn = 0; turn < 150; turn += 1) {
+    const turns = FORMER_GOAL_CONTINUATION_LIMIT + 25;
+    for (let turn = 0; turn < turns; turn += 1) {
       const current = started[turn]!;
       await drain(
         client.sendMessageStream(
@@ -1033,8 +1036,8 @@ describe('GeminiClient Goal admission', () => {
       );
     }
 
-    expect(started).toHaveLength(151);
-    expect(turnMocks.run).toHaveBeenCalledTimes(150);
+    expect(started).toHaveLength(turns + 1);
+    expect(turnMocks.run).toHaveBeenCalledTimes(turns);
     expect(client['sessionTurnCount']).toBe(0);
   });
 });

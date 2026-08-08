@@ -159,6 +159,58 @@ describe('ChatRecordingService', () => {
       expect(record.provenance).toBe('real_user');
     });
 
+    it('preserves model-bound parts and records clean display text', async () => {
+      const modelParts: Part[] = [
+        { text: 'expanded model prompt' },
+        {
+          text: [
+            '<qwen:user-prompt-submit-context>',
+            'hook-only context',
+            '</qwen:user-prompt-submit-context>',
+          ].join('\n'),
+        },
+      ];
+
+      chatRecordingService.recordUserMessage(modelParts, undefined, {
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.message).toEqual({ role: 'user', parts: modelParts });
+      expect(record.systemPayload).toEqual({
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
+      });
+    });
+
+    it('records empty display text without dropping prompt provenance', async () => {
+      chatRecordingService.recordUserMessage(
+        [
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'hook-only context',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
+          },
+        ],
+        undefined,
+        {
+          displayText: '',
+          hookContext: 'hook-only context',
+        },
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: 'hook-only context',
+      });
+    });
+
     it('blocks later turns after a generic durable write failure', async () => {
       const failure = new Error('disk full');
       vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
@@ -545,6 +597,52 @@ describe('ChatRecordingService', () => {
         chatRecordingService.readActiveTranscriptChain(),
       ).resolves.toEqual(activeChain);
       expect(order).toEqual(['flush', 'load']);
+    });
+  });
+
+  describe('recordNotificationStrict', () => {
+    it('resolves only after the notification is durably appended', async () => {
+      const pending = chatRecordingService.recordNotificationStrict(
+        [{ text: '<task-notification />' }],
+        'Worker completed.',
+        {
+          taskId: 'worker-1',
+          status: 'completed',
+          kind: 'agent',
+        },
+      );
+
+      await expect(pending).resolves.toBeUndefined();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'user',
+        subtype: 'notification',
+        systemPayload: {
+          displayText: 'Worker completed.',
+          backgroundTask: {
+            taskId: 'worker-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        },
+      });
+    });
+
+    it('rejects instead of acknowledging an inactive recorder', async () => {
+      const inactive = new ChatRecordingService(mockConfig);
+
+      await expect(
+        inactive.recordNotificationStrict(
+          [{ text: '<task-notification />' }],
+          'Worker completed.',
+          {
+            taskId: 'worker-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        ),
+      ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
   });
 
@@ -1037,6 +1135,37 @@ describe('ChatRecordingService', () => {
 
       expect(record.message).toBeUndefined();
       expect(record.usageMetadata?.totalTokenCount).toBe(30);
+    });
+  });
+
+  describe('recordRealtimeConversation', () => {
+    it('durably records direct Realtime dialogue as non-model history', async () => {
+      await chatRecordingService.recordRealtimeConversation(
+        [
+          { role: 'user', text: '你好' },
+          { role: 'assistant', text: '你好！' },
+        ],
+        'qwen3.5-omni-plus-realtime',
+      );
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({
+        type: 'user',
+        subtype: 'realtime_message',
+        provenance: 'real_user',
+        message: { role: 'user', parts: [{ text: '你好' }] },
+      });
+      expect(records[1]).toMatchObject({
+        type: 'assistant',
+        subtype: 'realtime_message',
+        provenance: 'assistant_output',
+        model: 'qwen3.5-omni-plus-realtime',
+        message: { role: 'model', parts: [{ text: '你好！' }] },
+      });
+      expect(records[1]?.parentUuid).toBe(records[0]?.uuid);
     });
   });
 

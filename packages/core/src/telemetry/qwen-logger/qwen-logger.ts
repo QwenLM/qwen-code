@@ -538,9 +538,13 @@ export class QwenLogger {
       `tool_call#${event.function_name}`,
       {
         properties: {
+          call_id: event.call_id,
           prompt_id: event.prompt_id,
           response_id: event.response_id,
           tool_name: event.function_name,
+          status: event.status,
+          execution_status: event.execution_status,
+          tool_type: event.tool_type,
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,

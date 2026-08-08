@@ -131,6 +131,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   sessionBranch: 'qwen/control/session/branch',
+  sessionSideTask: 'qwen/control/session/side_task',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
   sessionGenerationStart: 'qwen/control/session/generation/start',
@@ -143,6 +144,9 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionTitle: 'qwen/control/session/title',
   sessionParent: 'qwen/control/session/parent',
   sessionSource: 'qwen/control/session/source',
+  sessionLiveConversation: 'qwen/control/session/live-conversation',
+  sessionLiveTranscript: 'qwen/control/session/live-transcript',
+  sessionBackgroundNotification: 'qwen/control/session/background_notification',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
@@ -184,6 +188,13 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * result: `{ payload }`.
    */
   clientMcpMessage: 'qwen/control/client_mcp/message',
+  /**
+   * Called by a private ACP CHILD immediately before a tool executor. The
+   * parent validates the runtime-owned session/prompt identity, invokes its
+   * configured external provider once, and returns allow/deny. Unavailable
+   * unless the daemon explicitly enabled required external guarding.
+   */
+  externalToolGuardPrepare: 'qwen/control/external_tool_guard/prepare',
   sessionCd: 'qwen/control/session/cd',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
@@ -194,6 +205,9 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
+  liveTaskTool: 'qwen/control/live/task-tool',
+  liveSpeakToUser: 'qwen/control/live/speak-to-user',
   channelDelivery: 'qwen/control/channel-delivery',
 } as const;
 
@@ -449,7 +463,12 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
 export interface ServeWorkspaceSkillsRefreshResult {
   sessionsRefreshed: number;
   sessionsFailed: number;
+  configsRefreshed?: number;
+  configsFailed?: number;
+  reason?: ServeWorkspaceSkillsRefreshReason;
 }
+
+export type ServeWorkspaceSkillsRefreshReason = 'settings' | 'content' | 'all';
 
 export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
@@ -1010,6 +1029,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   SessionEnd: {
     description: 'When a session is ending',
     matcherKind: 'sessionTrigger',
+  },
+  SessionDelete: {
+    description: 'After an explicitly selected session is deleted',
   },
   PermissionRequest: {
     description: 'When a permission dialog is displayed',

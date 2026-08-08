@@ -323,6 +323,7 @@ describe('DaemonClient', () => {
             cwd: '/work/secondary',
             primary: false,
             trusted: true,
+            kind: 'live',
           },
         ],
       };
@@ -453,6 +454,36 @@ describe('DaemonClient', () => {
         'http://daemon/file?path=src%2Fa.ts&line=2&limit=3',
       );
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('forwards a workspace text cursor', async () => {
+      const payload = {
+        kind: 'file',
+        path: 'src/a.ts',
+        content: 'next\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 20,
+        returnedBytes: 5,
+        truncated: true,
+        matchedIgnore: null,
+        originalLineCount: null,
+        nextCursor: null,
+        hasMore: false,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: 'http://daemon/', fetch });
+
+      await expect(
+        client.readWorkspaceFile('src/a.ts', {
+          limit: 3,
+          cursor: 'cursor 1',
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/file?path=src%2Fa.ts&limit=3&cursor=cursor+1',
+      );
     });
 
     it('reads raw bytes as base64 payloads', async () => {
@@ -2669,6 +2700,38 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('createSideTaskSession', () => {
+    it('uses the dedicated side-task endpoint', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, {
+          sessionId: 'side-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          state: {},
+          displayName: 'Side task',
+          parentSessionId: 'main-1',
+          sourceType: 'side_task',
+          sourceId: 'main-1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.createSideTaskSession(
+        'main-1',
+        {
+          name: 'Side task',
+        },
+        'side-task-client',
+      );
+
+      expect(calls[0]?.url).toBe('http://daemon/session/main-1/side-task');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('side-task-client');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'Side task',
+      });
+    });
+  });
+
   describe('cancel', () => {
     it('POSTs /cancel and tolerates 204', async () => {
       const { fetch, calls } = recordingFetch(
@@ -3752,14 +3815,14 @@ describe('DaemonClient', () => {
   describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
     it('POSTs the message and returns accepted:true', async () => {
       const { fetch, calls } = recordingFetch(() =>
-        jsonResponse(200, { accepted: true }),
+        jsonResponse(200, { accepted: true, messageId: 'mid-1' }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const result = await client.enqueueMidTurnMessage(
         's-1',
         'also check tests',
       );
-      expect(result).toEqual({ accepted: true });
+      expect(result).toEqual({ accepted: true, messageId: 'mid-1' });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
@@ -3833,6 +3896,26 @@ describe('DaemonClient', () => {
       await expect(
         client.enqueueMidTurnMessage('s-1', 'hi'),
       ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe('removeMidTurnMessage', () => {
+    it('DELETEs the encoded message id with client identity', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { removed: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeMidTurnMessage('s/1', 'mid/1', {
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual({ removed: true });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-messages/mid%2F1',
+      );
+      expect(calls[0]?.method).toBe('DELETE');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
   });
 
@@ -4800,6 +4883,76 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it('POSTs an extension archive as a binary body', async () => {
+      let capturedUrl = '';
+      let capturedInit: RequestInit | undefined;
+      const fetch = vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          capturedUrl = String(input);
+          capturedInit = init;
+          return jsonResponse(202, {
+            accepted: true,
+            operationId: 'op-upload',
+          });
+        },
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const archive = new Blob(['archive-content']);
+
+      await expect(
+        client.installExtensionArchive(
+          { archive, filename: 'demo archive.tar.gz', consent: true },
+          'client-1',
+        ),
+      ).resolves.toEqual({ accepted: true, operationId: 'op-upload' });
+
+      expect(capturedUrl).toBe(
+        'http://daemon/workspace/extensions/install-archive?filename=demo+archive.tar.gz&consent=true',
+      );
+      expect(capturedInit?.method).toBe('POST');
+      expect(new Headers(capturedInit?.headers).get('content-type')).toBe(
+        'application/octet-stream',
+      );
+      expect(new Headers(capturedInit?.headers).get('x-qwen-client-id')).toBe(
+        'client-1',
+      );
+      expect(capturedInit?.body).toBe(archive);
+    });
+
+    it('allows extension archive uploads to outlive the generic fetch timeout', async () => {
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(init.signal?.reason);
+            });
+            setTimeout(
+              () =>
+                resolve(
+                  jsonResponse(202, {
+                    accepted: true,
+                    operationId: 'op-upload',
+                  }),
+                ),
+              20,
+            );
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      await expect(
+        client.installExtensionArchive({
+          archive: new Blob(['archive']),
+          filename: 'demo.zip',
+          consent: true,
+        }),
+      ).resolves.toEqual({ accepted: true, operationId: 'op-upload' });
+    });
+
     it('GETs active extension operations', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { v: 1, operations: [] }),
@@ -7344,6 +7497,19 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[6]!.body!)).toEqual({
         senderId: 'sender-1',
       });
+    });
+
+    it('sends a group ID when revoking a group pairing approval', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { revoked: 'group-1', senderIds: [], groupIds: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.revokeWorkspaceChannelPairingApproval('bot', {
+        groupId: 'group-1',
+      });
+
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
     });
   });
 });

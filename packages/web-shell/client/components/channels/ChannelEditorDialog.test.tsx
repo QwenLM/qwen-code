@@ -33,6 +33,12 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       kind: 'secret',
       required: true,
     },
+    {
+      key: 'interactiveCards',
+      label: 'Interactive Cards',
+      kind: 'object',
+      properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
+    },
   ],
 };
 
@@ -41,6 +47,59 @@ const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   fields: DINGTALK.fields.map((field) =>
     field.key === 'clientSecret' ? { ...field, required: false } : field,
   ),
+};
+
+const GROUP_POLICY_DESCRIPTOR: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: false,
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+  ],
+};
+
+const GITHUB_LOCAL_GH: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+    },
+    {
+      key: 'useLocalGh',
+      label: 'Use Local GitHub CLI Authentication',
+      kind: 'boolean',
+    },
+  ],
+};
+
+const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
+  type: 'example',
+  displayName: 'Example',
+  manageable: true,
+  fields: [
+    {
+      key: 'timeoutMs',
+      label: 'Timeout (ms)',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+  ],
 };
 
 const INSTANCE: DaemonChannelInstanceSnapshot = {
@@ -55,6 +114,15 @@ const INSTANCE: DaemonChannelInstanceSnapshot = {
   },
   startsWithServe: false,
   runtime: { state: 'stopped' },
+};
+
+const PAIRING_INSTANCE: DaemonChannelInstanceSnapshot = {
+  ...INSTANCE,
+  config: {
+    ...INSTANCE.config,
+    senderPolicy: 'pairing',
+    allowedUsers: ['configured-user'],
+  },
 };
 
 const { ChannelEditorDialog } = await import('./ChannelEditorDialog');
@@ -79,6 +147,8 @@ async function renderDialog(
           onReload={vi.fn().mockResolvedValue(undefined)}
           listPairingRequests={vi.fn().mockResolvedValue({ requests: [] })}
           approvePairingRequest={vi.fn()}
+          listPairingApprovals={vi.fn().mockResolvedValue({ senderIds: [] })}
+          revokePairingApproval={vi.fn()}
           {...props}
         />
       </I18nProvider>,
@@ -114,6 +184,12 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('does not render object metadata as a text field', async () => {
+    await renderDialog();
+
+    expect(inputByLabel('Interactive Cards')).toBeNull();
+  });
+
   it('preserves a stored secret until Replace is explicitly selected', async () => {
     await renderDialog({ instance: INSTANCE });
 
@@ -236,5 +312,163 @@ describe('ChannelEditorDialog', () => {
       'Reload is temporarily unavailable.',
     );
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  it('shows the configured allowlist for a pairing Channel and hides it without one', async () => {
+    await renderDialog({ instance: PAIRING_INSTANCE });
+
+    expect(document.body.textContent).toContain('Configured allowlist');
+    expect(document.body.textContent).toContain('configured-user');
+  });
+
+  it('saves the local GitHub CLI opt-in when the switch is toggled', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_LOCAL_GH, onSave });
+
+    const name = inputByLabel('Instance name');
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    expect(name).not.toBeNull();
+    expect(toggle).not.toBeNull();
+
+    await act(async () => {
+      setInputValue(name!, 'github-bot');
+      toggle!.click();
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('github-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        senderPolicy: 'pairing',
+      },
+      secrets: { token: { operation: 'clear' } },
+    });
+  });
+
+  it('does not show the allowlist alert when no users are configured', async () => {
+    const pairingNoAllowlist: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: { ...INSTANCE.config, senderPolicy: 'pairing' },
+    };
+    await renderDialog({ instance: pairingNoAllowlist });
+
+    expect(document.body.textContent).toContain('Pairing approvals');
+    expect(document.body.textContent).not.toContain('Configured allowlist');
+  });
+
+  it('re-sends the stored object config when editing an existing instance', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        interactiveCards: { enabled: true, statusCard: { enabled: true } },
+      },
+    };
+    await renderDialog({ instance, onSave });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('release-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'dingtalk',
+        clientId: 'stored-id',
+        senderPolicy: 'open',
+        interactiveCards: { enabled: true, statusCard: { enabled: true } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+  });
+
+  it('shows the out-of-range message for a number at the exclusive minimum', async () => {
+    await renderDialog({ descriptor: EXCLUSIVE_MINIMUM });
+
+    const name = inputByLabel('Instance name');
+    const timeoutMs = inputByLabel('Timeout (ms)');
+    expect(name).not.toBeNull();
+    expect(timeoutMs).not.toBeNull();
+    await act(async () => {
+      setInputValue(name!, 'example-bot');
+      setInputValue(timeoutMs!, '0');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 0.',
+    );
+  });
+
+  it('shows pairing affordance from a descriptor-driven groupPolicy draft', async () => {
+    const groupPolicyInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        senderPolicy: 'open',
+        groupPolicy: 'open',
+      },
+    };
+    await renderDialog({
+      descriptor: GROUP_POLICY_DESCRIPTOR,
+      instance: groupPolicyInstance,
+    });
+
+    expect(document.body.textContent).not.toContain('Save pairing mode first');
+
+    const trigger = inputByLabel('Group Policy');
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Pairing');
+    expect(option).toBeDefined();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(document.body.textContent).toContain('Save pairing mode first');
+  });
+
+  it('shows pairing management when only group pairing is enabled', async () => {
+    const groupPairingInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        senderPolicy: 'open',
+        groupPolicy: 'pairing',
+      },
+    };
+    const listPairingRequests = vi.fn().mockResolvedValue({ requests: [] });
+
+    await renderDialog({
+      instance: groupPairingInstance,
+      listPairingRequests,
+    });
+
+    expect(document.body.textContent).toContain('Pairing approvals');
+    expect(listPairingRequests).toHaveBeenCalledWith('release-bot');
   });
 });

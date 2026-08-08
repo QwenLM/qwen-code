@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
-import type {
+import {
   AgentEventEmitter,
   type Config,
   type ToolRegistry,
@@ -15,6 +15,7 @@ import type {
   type AgentToolResultEvent,
   type AgentApprovalRequestEvent,
   type AgentStreamTextEvent,
+  type AgentUsageEvent,
   type ToolEditConfirmationDetails,
   type ToolInfoConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
@@ -390,6 +391,39 @@ describe('SubAgentTracker', () => {
         );
       });
     });
+
+    it('treats rejected nested tool updates as best-effort', async () => {
+      sendUpdateSpy.mockRejectedValue(new Error('client unavailable'));
+      tracker.setup(eventEmitter, abortController.signal);
+
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-best-effort',
+          args: { path: '/test.ts' },
+        }),
+      );
+      eventEmitter.emit(
+        AgentEventType.TOOL_RESULT,
+        createToolResultEvent({
+          name: 'read_file',
+          callId: 'call-best-effort',
+          success: true,
+          resultDisplay: 'contents',
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalledTimes(3);
+      });
+      await Promise.resolve();
+    });
+
+    // Subagent todo state is isolated from the parent session plan: a
+    // subagent's TodoWrite result must not promote into a session-level
+    // plan update. The guard lives in ToolCallEmitter.emitResult, keyed on
+    // the subagentMeta this tracker stamps onto every emit.
 
     it('does not promote a subagent TodoWrite as the session plan', async () => {
       tracker.setup(eventEmitter, abortController.signal);
@@ -770,6 +804,40 @@ describe('SubAgentTracker', () => {
       );
     });
 
+    it('does not report parent abort as an explicit nested permission cancellation', async () => {
+      requestPermissionSpy.mockReturnValue(new Promise<never>(() => {}));
+      const onPermissionCancel = vi.fn();
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        onPermissionCancel,
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      eventEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        createApprovalEvent({
+          name: 'shell',
+          callId: 'call-shell',
+          confirmationDetails: createInfoConfirmation(),
+          respond: respondSpy,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalledOnce();
+      });
+      abortController.abort();
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      });
+
+      expect(onPermissionCancel).not.toHaveBeenCalled();
+    });
+
     it('notifies when nested permission failure cannot respond', async () => {
       requestPermissionSpy.mockRejectedValue(new Error('Network error'));
       const onPermissionCancel = vi.fn();
@@ -957,6 +1025,39 @@ describe('SubAgentTracker', () => {
   });
 
   describe('stream text handling', () => {
+    it.each([
+      [
+        'stream text',
+        AgentEventType.STREAM_TEXT,
+        () =>
+          createStreamTextEvent({
+            text: 'best-effort stream text',
+          }),
+      ],
+      [
+        'usage metadata',
+        AgentEventType.USAGE_METADATA,
+        () =>
+          ({
+            subagentId: 'test-subagent',
+            round: 1,
+            timestamp: Date.now(),
+            usage: { promptTokenCount: 1 },
+            durationMs: 5,
+          }) satisfies AgentUsageEvent,
+      ],
+    ])('treats rejected %s updates as best-effort', async (_, type, event) => {
+      sendUpdateSpy.mockRejectedValue(new Error('client unavailable'));
+      tracker.setup(eventEmitter, abortController.signal);
+
+      eventEmitter.emit(type, event());
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalledOnce();
+      });
+      await Promise.resolve();
+    });
+
     it('should emit agent_message_chunk on STREAM_TEXT event', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 

@@ -5,11 +5,13 @@
  */
 
 import type { Part } from '@google/genai';
-import type {
-  GoalRecord,
-  GoalTerminalProposal,
-  GoalTurnPermit,
+import {
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  type GoalRecord,
+  type GoalTerminalProposal,
+  type GoalTurnPermit,
 } from './goal-protocol.js';
+import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 
 const CATALOG_PREVIEW_LIMIT = 240;
 const CATALOG_ENTRY_LIMIT = 100;
@@ -36,6 +38,7 @@ export interface GoalEvidenceRecord {
   provenance?: GoalRecordProvenance;
   goalContext?: unknown;
   message?: { parts?: Part[] };
+  systemPayload?: unknown;
 }
 
 export type GoalEvidenceProofKind =
@@ -179,7 +182,7 @@ export function validateGoalEvidenceReferences(
   if (input.proposal.status === 'complete' && analysis.catalogTruncated) {
     throw new InvalidGoalEvidenceReferenceError(
       'catalog_truncated',
-      'A complete Goal proposal requires an exhaustive bounded evidence catalog.',
+      GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
     );
   }
   const evidenceBytes = citedRecords.reduce(
@@ -538,8 +541,16 @@ function evidenceContent(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
 ): string {
+  const projection =
+    provenance === 'real_user'
+      ? projectUserTranscriptForDisplay(record)
+      : undefined;
+  if (projection?.displayText !== undefined) {
+    return projection.displayText.trim();
+  }
   const content: string[] = [];
-  for (const part of record.message?.parts ?? []) {
+  const parts = projection?.parts ?? record.message?.parts ?? [];
+  for (const part of parts) {
     if (part.thought !== true && typeof part.text === 'string') {
       content.push(part.text);
     }
@@ -555,6 +566,13 @@ function evidencePreview(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
 ): string {
+  const projection =
+    provenance === 'real_user'
+      ? projectUserTranscriptForDisplay(record)
+      : undefined;
+  if (projection?.displayText !== undefined) {
+    return projection.displayText.slice(0, CATALOG_PREVIEW_LIMIT).trim();
+  }
   let preview = '';
   const append = (value: string) => {
     if (!value || preview.length >= CATALOG_PREVIEW_LIMIT) return;
@@ -563,7 +581,8 @@ function evidencePreview(
     preview += `${separator}${value}`.slice(0, remaining);
   };
 
-  for (const part of record.message?.parts ?? []) {
+  const parts = projection?.parts ?? record.message?.parts ?? [];
+  for (const part of parts) {
     if (part.thought !== true && typeof part.text === 'string') {
       append(part.text);
     }

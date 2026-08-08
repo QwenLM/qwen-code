@@ -14,6 +14,7 @@ import type {
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
@@ -24,6 +25,7 @@ import type {
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
+import { extractHttpStatus } from './httpErrors.js';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -31,7 +33,10 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
-import { persistStableClientId } from './clientLifecycle.js';
+import {
+  getPersistedClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -79,6 +84,7 @@ export interface CreateDaemonSessionActionsArgs {
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
+  clearLiveJournalRepair?: () => void;
 }
 
 export function getConnectionAfterSessionClear(
@@ -143,8 +149,13 @@ export function createDaemonSessionActions({
   setRestoreSessionNonce,
   setAttachSessionNonce,
   setNewSessionNonce,
+  clearLiveJournalRepair = () => undefined,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
+  const silentHardFailureNoticeKeys = new Set<string>();
+
   function clearActiveSessionState() {
+    clearLiveJournalRepair();
+    silentHardFailureNoticeKeys.clear();
     for (const [, active] of activePromptsRef.current) {
       active.controller.abort();
     }
@@ -174,6 +185,7 @@ export function createDaemonSessionActions({
     sessionId: string,
     mode: PendingSessionLoad['mode'],
     signal?: AbortSignal,
+    replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
@@ -208,6 +220,7 @@ export function createDaemonSessionActions({
         resolve,
         reject,
         ...(signal ? { signal } : {}),
+        ...(replaySource ? { replaySource } : {}),
       };
     });
     return loadPromise;
@@ -218,14 +231,23 @@ export function createDaemonSessionActions({
     mode: 'load' | 'resume',
     workspaceCwd?: string,
     signal?: AbortSignal,
+    replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
+    if (replaySource !== 'memory') {
+      clearLiveJournalRepair();
+    }
     if (signal?.aborted) {
       return Promise.reject(
         new DOMException('Session load cancelled', 'AbortError'),
       );
     }
     manualSessionClearRef.current = false;
-    const loadPromise = startPendingSessionLoad(sessionId, mode, signal);
+    const loadPromise = startPendingSessionLoad(
+      sessionId,
+      mode,
+      signal,
+      replaySource,
+    );
     const currentSession = sessionRef.current;
     const currentSessionId = currentSession?.sessionId;
     const activePrompt = currentSessionId
@@ -633,7 +655,7 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async reloadSession(signal) {
+    async reloadSession(signal, options) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -645,6 +667,7 @@ export function createDaemonSessionActions({
         'load',
         session.workspaceCwd,
         signal,
+        options?.replaySource,
       );
     },
 
@@ -1071,6 +1094,35 @@ export function createDaemonSessionActions({
       }
     },
 
+    async removeMidTurnMessage(
+      messageId: string,
+      opts,
+    ): Promise<DaemonRemoveMidTurnMessageResult> {
+      const session = sessionRef.current;
+      if (!session) return { removed: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        // The bridge removes a mid-turn message only on an exact originator
+        // match. The originator is the client id that was attached to the
+        // TARGET session when the message was queued — with per-session client
+        // ids that differs from the currently selected session's id, so
+        // forwarding our own id would resolve to a foreign originator and the
+        // bridge would reject a valid removal after a session switch. Prefer
+        // the target session's persisted id; fall back to our own when nothing
+        // is persisted (a shared caller-provided client id covers every
+        // session).
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ?? session.clientId;
+        return await session.client.removeMidTurnMessage(
+          opts.sessionId,
+          messageId,
+          {
+            ...(targetClientId ? { clientId: targetClientId } : {}),
+          },
+        );
+      }
+      return await session.removeMidTurnMessage(messageId);
+    },
+
     async getPendingPrompts(opts) {
       const session = sessionRef.current;
       if (!session)
@@ -1126,21 +1178,32 @@ export function createDaemonSessionActions({
       }
     },
 
-    async getTasks() {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Get tasks failed',
-        'load_tasks',
-      );
+    async getTasks(opts) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(session.tasks(), 'Get tasks timed out');
       } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'Daemon session is not connected'
+        ) {
+          throw error;
+        }
+        if (opts?.silent && isTransientActionError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Get tasks failed',
           error,
           'load_tasks',
+          opts?.silent
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey('load_tasks', error),
+              }
+            : undefined,
         );
       }
     },
@@ -1424,6 +1487,10 @@ function dispatchActionError(
   action: string,
   error: unknown,
   operation: DaemonNoticeOperation,
+  opts?: {
+    dispatchedNoticeKeys?: Set<string>;
+    noticeOnceKey?: string;
+  },
 ): Error {
   if (isAbortError(error)) {
     if (error instanceof Error) return error;
@@ -1433,17 +1500,50 @@ function dispatchActionError(
     return abortError;
   }
   const message = error instanceof Error ? error.message : String(error);
-  addNotice({
-    severity: 'error',
-    category: 'user_action',
-    operation,
-    code: `daemon.${operation}.failed`,
-    message: `${action}: ${message}`,
-    debugMessage: message,
-    recoverable: true,
-  });
+  const noticeKey = opts?.noticeOnceKey;
+  const dispatchedNoticeKeys = opts?.dispatchedNoticeKeys;
+  if (!noticeKey || !dispatchedNoticeKeys?.has(noticeKey)) {
+    addNotice({
+      severity: 'error',
+      category: 'user_action',
+      operation,
+      code: `daemon.${operation}.failed`,
+      message: `${action}: ${message}`,
+      debugMessage: message,
+      recoverable: true,
+    });
+    if (noticeKey) {
+      dispatchedNoticeKeys?.add(noticeKey);
+    }
+  }
   return markNoticeDispatched(
     error instanceof Error ? error : new Error(message),
+  );
+}
+
+function getActionErrorNoticeKey(
+  operation: DaemonNoticeOperation,
+  error: unknown,
+): string {
+  return `${operation}:${getActionErrorMessage(error)}`;
+}
+
+function getActionErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTransientActionError(error: unknown): boolean {
+  if (isAbortError(error)) return true;
+  const status = extractHttpStatus(error);
+  if (status !== undefined) {
+    return status >= 500 || status === 408 || status === 429;
+  }
+  const message = getActionErrorMessage(error).toLowerCase();
+  return (
+    message.includes('timed out') ||
+    message.includes('failed to fetch') ||
+    message.includes('network error') ||
+    message.includes('networkerror')
   );
 }
 

@@ -1,6 +1,10 @@
-export { getGlobalQwenDir, resolvePath } from './paths.js';
+export {
+  getGlobalQwenDir,
+  getWorkspaceScopeDirName,
+  resolvePath,
+} from './paths.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
-export { AcpBridge } from './AcpBridge.js';
+export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
   BridgeSessionInfo,
@@ -68,7 +72,11 @@ export type {
   ChannelLoopStoreOptions,
 } from './ChannelLoopStore.js';
 export { PairingStore } from './PairingStore.js';
-export type { PairingRequest } from './PairingStore.js';
+export type {
+  CreatePairingRequestResult,
+  PairingRequest,
+  PairingSubject,
+} from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
 export { DmGate } from './DmGate.js';
@@ -80,6 +88,7 @@ export {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  truncateCodePoints,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {
@@ -87,8 +96,14 @@ export type {
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigNestedFieldDescriptor,
+  ChannelConfigNumberFieldDescriptor,
+  ChannelConfigObjectFieldDescriptor,
+  ChannelConfigPlainValueFieldDescriptor,
+  ChannelConfigValueFieldDescriptor,
   ChannelIdentityConfig,
   ChannelManagementDescriptor,
   ChannelMemoryIntentClassifier,

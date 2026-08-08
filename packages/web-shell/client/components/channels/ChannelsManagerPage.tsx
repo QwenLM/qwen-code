@@ -57,6 +57,7 @@ import styles from './ChannelsManagerPage.module.css';
 import {
   isChannelPlatformAvailable,
   isSupportedChannelType,
+  PLATFORM_MARKS,
 } from './channel-platform';
 
 interface ChannelsManagerPageProps {
@@ -72,12 +73,6 @@ const STATUS_KEYS: Record<DaemonChannelRuntimeState['state'], string> = {
   connected: 'channels.status.connected',
   partial: 'channels.status.partial',
   error: 'channels.status.error',
-};
-
-const PLATFORM_MARKS: Record<string, string> = {
-  dingtalk: 'D',
-  wecom: 'W',
-  feishu: 'F',
 };
 
 function badgeVariant(
@@ -528,7 +523,9 @@ export function ChannelsManagerPage({
                 }
               >
                 <span className={styles.platformMark} aria-hidden="true">
-                  {PLATFORM_MARKS[platform.type]}
+                  {PLATFORM_MARKS[platform.type] ??
+                    platform.displayName[0]?.toUpperCase() ??
+                    '?'}
                 </span>
                 <div className={styles.platformCopy}>
                   <p className={styles.platformName}>{platform.displayName}</p>
@@ -558,6 +555,8 @@ export function ChannelsManagerPage({
           onReload={reload}
           listPairingRequests={pairing.list}
           approvePairingRequest={pairing.approve}
+          listPairingApprovals={pairing.approvals}
+          revokePairingApproval={pairing.revoke}
         />
       ) : null}
 

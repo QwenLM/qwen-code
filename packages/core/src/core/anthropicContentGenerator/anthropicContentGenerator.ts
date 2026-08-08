@@ -261,9 +261,20 @@ type StreamingBlockState = {
 // and the adaptive shape for 4.6+. Centralized so the message-params type,
 // the streaming-request override, and `buildThinkingConfig`'s return type
 // stay in lockstep when a third shape (e.g. `extended`) eventually lands.
+//
+// `display` controls whether adaptive thinking is rendered as readable text
+// ('summarized') or withheld ('omitted', the server default per Anthropic's
+// own migration docs — Opus 4.7+/Fable 5/etc. all default to 'omitted', so
+// a caller that surfaces reasoning to users must set 'summarized' or every
+// thinking block comes back empty).
+type AnthropicThinkingDisplay = 'summarized' | 'omitted';
 type AnthropicThinkingParam =
-  | { type: 'enabled'; budget_tokens: number }
-  | { type: 'adaptive' };
+  | {
+      type: 'enabled';
+      budget_tokens: number;
+      display?: AnthropicThinkingDisplay;
+    }
+  | { type: 'adaptive'; display?: AnthropicThinkingDisplay };
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
@@ -547,6 +558,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
       betas.push('prompt-caching-scope-2026-01-05');
     }
 
+    // Sent defensively whenever the body carries `ttl: '1h'`. Live
+    // verification against the Anthropic Messages API (via Vertex AI)
+    // found this header has no observable effect there -- identical
+    // `ephemeral_1h_input_tokens` with and without it across every
+    // currently-active model -- but omitting it risks a hard 400 on any
+    // Anthropic-compatible backend that still enforces the beta gate.
+    if (this.hasExtendedCacheTtlOnWire(anthropicRequest)) {
+      betas.push('extended-cache-ttl-2025-04-11');
+    }
+
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
@@ -616,6 +637,51 @@ export class AnthropicContentGenerator implements ContentGenerator {
   }
 
   /**
+   * Whether the assembled request body carries any
+   * `cache_control: { ..., ttl: '1h' }` entry. Scans the system block,
+   * tools array, and message content blocks — every place the converter
+   * attaches `cache_control` (system text, last tool, trailing user
+   * message). Used to gate the `extended-cache-ttl-2025-04-11` beta
+   * header defensively: live verification found the header has no
+   * observable effect on this proxy/Vertex backend (identical
+   * `ephemeral_1h_input_tokens` with and without it), but a hard
+   * requirement can't be ruled out for every Anthropic-compatible
+   * backend, so it is sent whenever the body actually requests the 1h
+   * tier -- same single-source-of-truth pattern as
+   * {@link hasGlobalCacheScopeOnWire}.
+   */
+  private hasExtendedCacheTtlOnWire(
+    req: MessageCreateParamsWithThinking,
+  ): boolean {
+    const hasTtl1h = (block: unknown): boolean => {
+      if (!block || typeof block !== 'object') return false;
+      const cc = (block as { cache_control?: unknown }).cache_control;
+      if (!cc || typeof cc !== 'object') return false;
+      return (cc as { ttl?: string }).ttl === '1h';
+    };
+
+    if (Array.isArray(req.system)) {
+      for (const block of req.system) {
+        if (hasTtl1h(block)) return true;
+      }
+    }
+    if (Array.isArray(req.tools)) {
+      for (const tool of req.tools) {
+        if (hasTtl1h(tool)) return true;
+      }
+    }
+    if (Array.isArray(req.messages)) {
+      for (const message of req.messages) {
+        if (!Array.isArray(message.content)) continue;
+        for (const block of message.content) {
+          if (hasTtl1h(block)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
    * Read every customHeaders entry whose key (case-insensitively) is
    * `anthropic-beta` and yield the comma-separated flags from each. Multiple
    * matching entries are concatenated; later ones may produce duplicates
@@ -672,6 +738,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
       !!thinking &&
       this.modelSupportsAdaptiveThinking() &&
       !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+    // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
+    // message has role 'assistant' ("assistant message prefill") with a
+    // hard 400 — per Anthropic's own migration guidance this is a
+    // model-generation behavior change, identical on the native API,
+    // Vertex AI, and Bedrock, so (unlike the signature workaround above)
+    // this is NOT gated on baseURL.
+    const stripTrailingAssistantPrefill = this.modelSupportsAdaptiveThinking();
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -692,6 +765,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const enableCacheControl =
       this.contentGeneratorConfig.enableCacheControl !== false;
     const useGlobalCacheScope = this.useGlobalCacheScope();
+    const cacheRetention = this.contentGeneratorConfig.cacheRetention;
+    const cacheRetentionByBlock =
+      this.contentGeneratorConfig.cacheRetentionByBlock;
 
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
@@ -703,8 +779,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
         stripAssistantThinking,
+        stripTrailingAssistantPrefill,
         enableCacheControl,
         useGlobalCacheScope,
+        cacheRetention,
+        cacheRetentionByBlock,
         // Read per request (not latched at construction): the client
         // re-records the prefix whenever it rebuilds the system prompt
         // (memory refresh, model change), and the converter fails open to
@@ -717,7 +796,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const tools = request.config?.tools
       ? await this.converter.convertGeminiToolsToAnthropic(
           request.config.tools,
-          { enableCacheControl, useGlobalCacheScope },
+          {
+            enableCacheControl,
+            useGlobalCacheScope,
+            cacheRetention,
+            cacheRetentionByBlock,
+          },
         )
       : undefined;
 
@@ -958,16 +1042,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
 
     const reasoning = this.contentGeneratorConfig.reasoning;
+    const requestBudgetCap = request.config?.thinkingConfig?.thinkingBudget;
+    const applyRequestBudgetCap = (budgetTokens: number): number =>
+      typeof requestBudgetCap === 'number' && requestBudgetCap > 0
+        ? Math.min(budgetTokens, requestBudgetCap)
+        : budgetTokens;
 
     if (reasoning === false) {
       return undefined;
     }
 
     // Explicit budget_tokens is an escape hatch from the effort ladder: honor
-    // exactly what the user asked for, without re-clamping to track the
-    // (possibly clamped) effort label — the budget field is just an integer the
-    // server accepts within its context window, so an explicit override stays
-    // explicit. This only applies to models that still accept the manual
+    // what the user asked for without re-clamping to the effort label. A caller
+    // may still provide a smaller per-request thinkingBudget when it also sets
+    // a lower maxOutputTokens; Anthropic requires budget_tokens < max_tokens,
+    // so that request-local ceiling keeps bounded side queries valid. This only
+    // applies to models that still accept the manual
     // `{ type: 'enabled', budget_tokens }` shape (Opus 4.5/4.6, Sonnet 4.6,
     // older 4.x, and unknown/unversioned ids). Opus 4.7+ and every 5.x family
     // reject manual thinking with a 400 and require adaptive thinking, so on
@@ -984,7 +1074,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     ) {
       return {
         type: 'enabled',
-        budget_tokens: reasoning.budget_tokens,
+        budget_tokens: applyRequestBudgetCap(reasoning.budget_tokens),
       };
     }
 
@@ -1008,8 +1098,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Models that support adaptive thinking use { type: 'adaptive' } without
     // a budget_tokens field. The server controls the thinking budget via
     // output_config.effort instead.
+    //
+    // `display: 'summarized'` is set explicitly rather than relying on the
+    // server default: Sonnet 4.6 defaults adaptive thinking's `display` to
+    // `'summarized'`, but Opus 4.7+ and every 5.x family (Sonnet 5, Fable 5,
+    // Mythos 5, …) silently changed the default to `'omitted'` — with no
+    // error, thinking blocks stream back with empty `thinking` text, which
+    // looks like a long pause before output to anyone rendering reasoning.
+    // Setting it explicitly is a no-op on 4.6 (matches its existing default)
+    // and required on 4.7+ to keep behavior consistent across the whole
+    // adaptive-thinking model population.
     if (this.modelSupportsAdaptiveThinking()) {
-      return { type: 'adaptive' };
+      return { type: 'adaptive', display: 'summarized' };
     }
 
     // Budget path for non-adaptive (pre-4.6) models. resolveEffectiveEffort has
@@ -1030,7 +1130,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     return {
       type: 'enabled',
-      budget_tokens: budgetTokens,
+      budget_tokens: applyRequestBudgetCap(budgetTokens),
     };
   }
 
