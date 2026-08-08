@@ -44,6 +44,13 @@ describe('isShellCommandReadOnlyAST', () => {
     expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
   });
 
+  it('downgrades the #8582 bypasses through the shared substitution gate', async () => {
+    for (const command of ['echo "$\\\n(touch PWNED)"', 'echo "${value@P}"']) {
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    }
+  });
+
   // Regression coverage for PR #4386 round 4: the AST walker previously
   // only checked substitution inside the `command` node type, missing it
   // inside `variable_assignment` (e.g. `FOO=$(curl evil)`) and inside

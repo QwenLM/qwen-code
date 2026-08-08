@@ -1532,6 +1532,15 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
  * @returns true if command substitution would be executed by bash
  */
 export function detectCommandSubstitution(command: string): boolean {
+  const startsPromptExpansion = (text: string, index: number): boolean => {
+    const close = text.indexOf('}', index + 2);
+    if (close < 0) return false;
+    const body = text.slice(index + 2, close).replaceAll('\\\n', '');
+    return /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[-?@$*])(?:\[[^\]\n]*\])?@P$/.test(
+      body,
+    );
+  };
+
   type PendingHeredoc = {
     delimiter: string;
     isQuotedDelimiter: boolean;
@@ -1676,6 +1685,10 @@ export function detectCommandSubstitution(command: string): boolean {
       }
 
       if (char === '$' && nextChar === '(') {
+        return true;
+      }
+
+      if (char === '$' && nextChar === '{' && startsPromptExpansion(line, i)) {
         return true;
       }
 
@@ -1824,6 +1837,19 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
+      if (nextChar === '\n' && command[i - 1] === '$') {
+        let precedingBackslashes = 0;
+        for (let j = i - 2; j >= 0 && command[j] === '\\'; j--) {
+          precedingBackslashes++;
+        }
+        let nextIndex = i + 2;
+        while (command[nextIndex] === '\\' && command[nextIndex + 1] === '\n') {
+          nextIndex += 2;
+        }
+        if (precedingBackslashes % 2 === 0 && command[nextIndex] === '(') {
+          return true;
+        }
+      }
       i += 2; // Skip the escaped character
       continue;
     }
@@ -1862,6 +1888,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        startsPromptExpansion(command, i)
+      ) {
+        return true;
+      }
+
       // <(...) process substitution - works unquoted only (not in double quotes)
       if (char === '<' && nextChar === '(' && !inDoubleQuotes && !inBackticks) {
         return true;
@@ -1894,7 +1928,7 @@ export function detectCommandSubstitution(command: string): boolean {
  * the wording can't drift between sites — see #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
-  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+  'Contains command substitution ($(...), backticks, <(...), >(...), or ${parameter@P}).';
 
 /**
  * Single dual-check predicate: does the command contain shell command
@@ -1985,7 +2019,7 @@ export async function checkCommandPermissions(
       allAllowed: false,
       disallowedCommands: [command],
       blockReason:
-        'Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons',
+        'Command substitution using $(), `` ` ``, <(), >(), or ${parameter@P} is not allowed for security reasons',
       isHardDenial: true,
     };
   }
