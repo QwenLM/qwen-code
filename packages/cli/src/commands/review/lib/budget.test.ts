@@ -9,6 +9,7 @@ import {
   MAX_INLINE_ANGLES,
   MIN_INLINE_ANGLES,
   VERIFY_SHARD,
+  budgetGapDisclosures,
   launchToolBudget,
   reviewBudget,
 } from './budget.js';
@@ -163,24 +164,97 @@ describe('reviewBudget — the agent tool budget', () => {
 });
 
 describe('launchToolBudget — the per-launch ceiling', () => {
-  it('derives the allowance from the launch territory, same rate and clamps', () => {
-    expect(launchToolBudget(0, 0)).toBe(30);
-    expect(launchToolBudget(217, 0)).toBe(40);
-    expect(launchToolBudget(5000, 0)).toBe(60);
+  it('derives a scoped allowance from the territory, same rate and clamps', () => {
+    expect(launchToolBudget(60, 0, 0)).toBe(30);
+    expect(launchToolBudget(60, 217, 0)).toBe(40);
+    expect(launchToolBudget(60, 5000, 0)).toBe(60);
+  });
+
+  it('never lets a territory raise a launch above the plan allowance', () => {
+    // The plan's recorded number is the authority every launch answers to;
+    // the scoped derivation may only lower it.
+    expect(launchToolBudget(35, 5000, 0)).toBe(35);
+    expect(launchToolBudget(42, 217, 0)).toBe(40);
+  });
+
+  it('a whole-diff launch (null territory) uses the plan allowance as-is', () => {
+    expect(launchToolBudget(42, null, 0)).toBe(42);
+  });
+
+  it('clamps the plan value in both directions', () => {
+    // A version-skewed or hand-edited plan carrying 0.5 or 100000 must not
+    // become a three-call or a hundred-thousand-call brief.
+    expect(launchToolBudget(0.5, null, 0)).toBe(30);
+    expect(launchToolBudget(100_000, null, 0)).toBe(60);
+    expect(launchToolBudget(100_000, 5000, 0)).toBe(60);
   });
 
   it('mandatory reads ride on top of the allowance, never inside it', () => {
     // The finding this pins: a whole-diff role on a 25,000-line diff is
     // ASSIGNED 63 chunk reads — a flat cap would be exhausted by the reading
     // list before any analysis began.
-    expect(launchToolBudget(25_000, 63)).toBe(60 + 63);
-    expect(launchToolBudget(100, 2)).toBe(35 + 2);
+    expect(launchToolBudget(60, 25_000, 63)).toBe(60 + 63);
+    expect(launchToolBudget(60, 100, 2)).toBe(35 + 2);
   });
 
   it('garbled inputs fail toward the floor, never throw', () => {
-    expect(launchToolBudget(Number.NaN, Number.NaN)).toBe(30);
-    expect(launchToolBudget(-40, -3)).toBe(30);
-    expect(launchToolBudget(100, Number.POSITIVE_INFINITY)).toBe(35);
+    expect(launchToolBudget(Number.NaN, Number.NaN, Number.NaN)).toBe(30);
+    expect(launchToolBudget(-5, -40, -3)).toBe(30);
+    expect(launchToolBudget(42, 100, Number.POSITIVE_INFINITY)).toBe(35);
+  });
+});
+
+describe('budgetGapDisclosures — the one parser of the disclosure format', () => {
+  it('parses plain fixed-format lines', () => {
+    expect(
+      budgetGapDisclosures(
+        'No issues found — walked it all.\n' +
+          'Budget gap: callers of parseArgs outside packages/cli\n' +
+          'Budget gap: the removed retry path',
+      ),
+    ).toEqual([
+      'callers of parseArgs outside packages/cli',
+      'the removed retry path',
+    ]);
+  });
+
+  it('tolerates the markdown furniture an LLM writes lists in', () => {
+    // A disclosure lost to a bullet point is unobservable: nothing
+    // downstream can tell "no gaps" from "gaps we failed to parse".
+    for (const line of [
+      '- Budget gap: the check',
+      '* Budget gap: the check',
+      '1. Budget gap: the check',
+      '> Budget gap: the check',
+      '**Budget gap:** the check',
+      '`Budget gap: the check`',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual(['the check']);
+    }
+  });
+
+  it('drops placeholders and non-answers instead of minting phantom gaps', () => {
+    // `Budget gap: none` and the brief's own template must not become gaps
+    // an orchestrator has to rule on.
+    for (const line of [
+      'Budget gap: <the check>',
+      'Budget gap: none',
+      'Budget gap: N/A',
+      'Budget gap:',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+  });
+
+  it('sanitizes and caps what will reach a terminal and the posted body', () => {
+    const escaped = budgetGapDisclosures('Budget gap: x\u001b[2Jy')[0];
+    expect(escaped).not.toContain('\u001b');
+    const long = budgetGapDisclosures(`Budget gap: ${'a'.repeat(500)}`)[0];
+    expect(long.length).toBeLessThanOrEqual(161);
+    const many = budgetGapDisclosures(
+      Array.from({ length: 20 }, (_, i) => `Budget gap: check ${i}`).join('\n'),
+    );
+    expect(many).toHaveLength(8);
   });
 });
 

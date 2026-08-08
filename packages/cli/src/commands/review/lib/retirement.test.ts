@@ -196,6 +196,27 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(schedule(2).due).toEqual([13, 14, 15]);
   });
 
+  it('a dry receipt carrying a Budget gap disclosure never retires its chunk', () => {
+    // The tool-budget brief has a stopped auditor disclose each unfinished
+    // check as a `Budget gap:` line. That admission must not double as the
+    // receipt that retires the chunk still owing the work — two such rounds
+    // would print the clean-convergence certificate over an audit the agent
+    // itself said did not finish.
+    const GAPPY =
+      DRY + '\nBudget gap: the two remaining changed-export call-site traces';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), GAPPY);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), GAPPY);
+    record(1, 14, 'chunk 14 round 1 territory walk');
+    record(2, 14, 'chunk 14 round 2 territory walk');
+    record(1, 15, 'chunk 15 round 1 territory walk');
+    record(2, 15, 'chunk 15 round 2 territory walk');
+
+    const r3 = schedule(3);
+    expect(r3.due).toEqual([13, 14, 15]);
+    expect(r3.skipped).toEqual([]);
+    expect(r3.converged).toBe(false);
+  });
+
   it('a chunk twice dry retires on the odd round and cold-checks on the even one', () => {
     transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
     transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);

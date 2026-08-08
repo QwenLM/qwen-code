@@ -285,20 +285,24 @@ function chunkFrom(
  * `agentToolBudget` and `launchToolBudget`). Empty when the plan predates
  * the budget field — an old plan fails toward more coverage, exactly like
  * the pre-budget fallback the skill documents — and empty for the roles
- * whose load is governed elsewhere: the verifier (verifyShard), Build &
- * Test (deterministic commands), and Agent 0, whose mandatory work is
- * issue-sized, not diff-sized — a small bugfix referencing many issues
- * would exhaust a diff-derived ceiling on required fetches alone.
+ * whose brief declares `budgetExempt` (the reason lives at each role's
+ * entry in agent-briefs).
  *
  * The ceiling is per LAUNCH, not per plan: a scoped agent's allowance is
- * derived from its own territory (its chunk, its heavy file), and every
- * launch's mandatory reads ride on top of the allowance — a whole-diff
- * role on a huge diff is assigned more chunk reads than a flat cap holds.
+ * derived from its own territory (its chunk, its heavy file) but never
+ * exceeds the plan's recorded allowance, and every launch's mandatory
+ * reads ride on top of the allowance — a whole-diff role on a huge diff
+ * is assigned more chunk reads than a flat cap holds. The reads estimate
+ * counts the launch's whole reading list — the brief file itself, the
+ * diff pages, and any files the role's method mandates — and it is an
+ * estimate: the ceiling is soft, so roughness costs a disclosure, never a
+ * truncation.
  *
  * The wording is deliberate on three points. "Stop exploring" is aimed at
  * the measured pathology — the slowest agent of a wave is reliably one
  * that kept walking the tree past any recall gain (two runs of the same
- * 14-agent wave: 11.7 vs 41 minutes). The recall rule is restated inline
+ * 14-agent wave: 11.7 vs 41 minutes). The recall restatement is inline
+ * and self-contained (a chunk brief has no RECALL section to cite)
  * because a budget that reads as a reporting cap would suppress exactly
  * the low-confidence candidates the pipeline's later stages exist to
  * judge. And the disclosure format is FIXED (`Budget gap: <the check>`,
@@ -306,32 +310,57 @@ function chunkFrom(
  * transcript and reports them — a gap the orchestrator must then rule on,
  * exactly as it rules on whiffs.
  */
+/**
+ * The cumulative findings list a reverse auditor is ordered to read in
+ * full, in pages: measured at 65-82 KB on real runs. An estimate on
+ * purpose — the list grows round over round and the brief is built before
+ * the round runs; the ceiling is soft, so the error costs a disclosure.
+ */
+const FINDINGS_LIST_READS = 3;
+
+/**
+ * Lines a single `read_file` page holds, for estimating an invariant
+ * agent's paging through its post-change file: the read cap's worth of
+ * characters at a measured ~50 characters per source line.
+ */
+const LINES_PER_FILE_READ = 500;
+
 function toolBudgetBlock(
   report: PlanReport,
-  launch: { territoryLines?: number; mandatoryReads: number },
+  launch: { territoryLines?: number | null; mandatoryReads: number },
 ): string[] {
   const base = report.budget?.agentToolBudget;
   if (typeof base !== 'number' || !Number.isFinite(base) || base <= 0) {
     return [];
   }
-  const reads = Math.max(0, Math.floor(launch.mandatoryReads));
-  const total =
-    typeof launch.territoryLines === 'number'
-      ? launchToolBudget(launch.territoryLines, reads)
-      : Math.floor(base) + reads;
+  // The plan is parsed off disk with an unchecked cast, so a garbled chunk
+  // entry can hand this NaN — which must degrade to the floor, not render
+  // `About **NaN tool calls**` into a brief.
+  const reads = Number.isFinite(launch.mandatoryReads)
+    ? Math.max(0, Math.floor(launch.mandatoryReads))
+    : 0;
+  const territory =
+    typeof launch.territoryLines === 'number' &&
+    Number.isFinite(launch.territoryLines)
+      ? launch.territoryLines
+      : launch.territoryLines === null || launch.territoryLines === undefined
+        ? null
+        : 0;
+  const total = launchToolBudget(base, territory, reads);
   return [
     '',
     '## Tool budget',
     '',
     `About **${total} tool calls** for this whole review — reads, greps, shell, ` +
-      `everything, and the ~${reads} assigned reads your brief lists are already ` +
+      `everything — and the ~${reads} reads your launch is assigned (your ` +
+      'brief, the diff pages, any files your method mandates) are already ' +
       'counted in. It is a soft ceiling. At the ceiling: stop exploring, write ' +
       'your findings from the evidence already in hand, and disclose each ' +
       'unfinished check on its own line, exactly as `Budget gap: <the check>` — ' +
       'the coverage tool reads those lines, so the format is load-bearing. The ' +
       'budget never suppresses a finding: a candidate you can already name goes ' +
       'in your return regardless (at `Confidence: low` if the budget stopped ' +
-      'you before verifying it), exactly as the recall rule requires.',
+      'you before verifying it).',
   ];
 }
 
@@ -444,12 +473,30 @@ export function buildChunkAgentPrompt(
     parts.push('', ...repositoryContextBlock(repositoryContext));
   }
 
-  parts.push(
-    ...toolBudgetBlock(report, {
-      territoryLines: chunk.lines,
-      mandatoryReads: Math.max(1, Math.ceil(chunk.chars / READ_FILE_CHAR_CAP)),
-    }),
-  );
+  // NOT for an unreachable chunk: its instruction is to return the exact
+  // `Uncoverable:` line and stop, and a budget block telling it to "write your
+  // findings from the evidence in hand" beside that is the same two-masters
+  // contradiction the receipt guard below documents — an agent that follows
+  // the budget's disclosure format instead of the exact receipt line turns a
+  // disclosed uncoverable gap into a hard coverage failure.
+  if (!unreachable) {
+    parts.push(
+      ...toolBudgetBlock(report, {
+        territoryLines: typeof chunk.lines === 'number' ? chunk.lines : 0,
+        // The launch's whole reading list: the brief file, plus the diff pages
+        // this chunk takes.
+        mandatoryReads:
+          1 +
+          Math.max(
+            1,
+            Math.ceil(
+              (Number.isFinite(chunk.chars) ? chunk.chars : 0) /
+                READ_FILE_CHAR_CAP,
+            ),
+          ),
+      }),
+    );
+  }
 
   // Deliberately NOT included: a sentence for the agent to recite when it finds
   // nothing. Every real launch handed the agent its own receipt text — `If you
@@ -576,7 +623,13 @@ export function buildWholeDiffBlock(
   // An Agent 8 specialist is a whole-diff finder like any other: without
   // this block it was the one launch class that could still spend 40-100
   // calls wandering — recreating exactly the slowest-agent tail the budget
-  // exists to cut.
+  // exists to cut. This block is built for Agent 8 ALONE — every rostered
+  // role's launch comes out of `--roster`/`--role` with its reading block
+  // and (unless its brief declares `budgetExempt`) its own budget already
+  // inside, so prepending this to a role brief would double-budget it and
+  // hand the exempt roles the ceiling their exemption exists to withhold.
+  // Its domain brief is appended inline by the orchestrator, not read from
+  // disk, so the reading list is the diff pages alone.
   parts.push(
     ...toolBudgetBlock(report, {
       mandatoryReads: Array.isArray(report.chunks) ? report.chunks.length : 0,
@@ -905,13 +958,11 @@ export function buildRoleBrief(
   }
 
   parts.push('## Your dimension', '', brief.brief);
-  // Not the verifier (verifyShard governs its load, and its per-finding
-  // re-tracing is the one walk that must not stop early), not Build & Test
-  // (deterministic commands, already self-budgeted), and not Agent 0, whose
-  // mandatory work scales with the linked ISSUES, not the diff — a
-  // diff-derived ceiling on a small bugfix would be exhausted by required
-  // fetches alone.
-  if (role !== 'verify' && role !== '7' && role !== '0') {
+  // The exemptions are declared on the briefs (`budgetExempt`), each with
+  // its reason at the role's entry — a hardcoded name list here is how a
+  // later role whose work does not scale with the diff would silently
+  // receive a diff-derived ceiling.
+  if (!brief.budgetExempt) {
     const chunks = (
       Array.isArray(report.chunks) ? report.chunks : []
     ) as Array<{ id?: number; lines?: number; chars?: number }>;
@@ -922,12 +973,20 @@ export function buildRoleBrief(
       parts.push(
         ...toolBudgetBlock(report, {
           territoryLines: typeof c?.lines === 'number' ? c.lines : 0,
-          mandatoryReads: Math.max(
-            1,
-            Math.ceil(
-              (typeof c?.chars === 'number' ? c.chars : 0) / READ_FILE_CHAR_CAP,
-            ),
-          ),
+          // Its reading list: the brief file, the chunk's diff pages, and
+          // the cumulative findings list its brief orders read in full —
+          // measured at 65-82 KB on real runs, several pages of it.
+          mandatoryReads:
+            1 +
+            Math.max(
+              1,
+              Math.ceil(
+                (typeof c?.chars === 'number' && Number.isFinite(c.chars)
+                  ? c.chars
+                  : 0) / READ_FILE_CHAR_CAP,
+              ),
+            ) +
+            FINDINGS_LIST_READS,
         }),
       );
     } else if (role.startsWith('invariant-') && opts.file) {
@@ -939,19 +998,32 @@ export function buildRoleBrief(
         Array.isArray(report.files) ? report.files : []
       ) as HeavyFile[];
       const f = files.find((x) => x?.path === opts.file);
+      const added = typeof f?.addedLines === 'number' ? f.addedLines : 0;
       const changed =
-        (typeof f?.addedLines === 'number' ? f.addedLines : 0) +
-        (typeof f?.removedLines === 'number' ? f.removedLines : 0);
+        added + (typeof f?.removedLines === 'number' ? f.removedLines : 0);
       parts.push(
         ...toolBudgetBlock(report, {
           territoryLines: changed,
-          mandatoryReads: 4,
+          // Its reading list: the brief, its own diff slice, and the whole
+          // post-change file paged to the end. The plan records no
+          // post-change length, so the pages are estimated from the added
+          // lines — a heavy file is largely rewritten, which makes them the
+          // best lower bound on hand — at the read cap's worth of lines per
+          // page. A flat count here once told a 400 KB file's agent its
+          // paging was already overspending; the estimate floors at the old
+          // flat 4 so no launch gets less than before.
+          mandatoryReads: Math.max(
+            4,
+            2 + Math.ceil(added / LINES_PER_FILE_READ),
+          ),
         }),
       );
     } else {
-      // A whole-diff role is assigned one read per chunk; those ride on
-      // top of the plan-level allowance rather than inside it.
-      parts.push(...toolBudgetBlock(report, { mandatoryReads: chunks.length }));
+      // A whole-diff role is assigned one read per chunk, plus its brief;
+      // those ride on top of the plan-level allowance rather than inside it.
+      parts.push(
+        ...toolBudgetBlock(report, { mandatoryReads: 1 + chunks.length }),
+      );
     }
   }
   const repositoryContext = repositoryContextOf(report);

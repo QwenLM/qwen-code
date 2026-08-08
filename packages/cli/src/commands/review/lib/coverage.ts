@@ -73,6 +73,7 @@ import {
 import { BRIEFS } from './agent-briefs.js';
 import { chunkIdsProblem } from './diff-plan.js';
 import { readBudgetStop } from './deadline.js';
+import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -315,7 +316,6 @@ function merge(ranges: Array<[number, number]>): Array<[number, number]> {
 }
 
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
-const BUDGET_GAP_RE = /^\s*Budget gap:\s*(.+)$/gim;
 
 /** The exact rebuild flags for one required agent — operator-facing (stderr). */
 function selectorOf(req: RequiredAgent): string {
@@ -490,6 +490,18 @@ export function coverageFromTranscripts(
   const superseded = (rec: AgentRecord, chunk: number | null): boolean =>
     chunk !== null ? chunkSatisfied(chunk, rec) : keySatisfied(rec);
 
+  // Budget-gap disclosures (`Budget gap: <the check>` lines, the format the
+  // tool-budget brief mandates and `budgetGapDisclosures` parses). Collected
+  // inside the walk below so every guard the `Uncoverable:` claim earns
+  // applies here for the same reason: the brief hands each agent the literal
+  // template, so a zero-tool-call or blind agent that copied it back must
+  // not be credited with a disclosed gap — that is the whiff wearing a
+  // costume. Detection is deterministic here; the RULING (which gaps cap
+  // Approve) stays with the orchestrator, like whiffs. Not part of `ok`: a
+  // disclosed gap is the budget working, and failing the gate on it would
+  // teach agents not to disclose.
+  const budgetGaps: Array<{ agent: string; gaps: string[] }> = [];
+
   for (const rec of records) {
     const chunk = assignedChunk(rec);
     const name = label(rec, chunk);
@@ -591,11 +603,26 @@ export function coverageFromTranscripts(
       continue;
     }
 
-    // What it was told to read, plus what it demonstrably read. The second term is
-    // what lets an agent handed the bare diff path with no territory — a
-    // reverse-audit pass, a verifier — be credited for exactly the lines it opened
-    // and for no others.
-    const ranges = merge([...told, ...rec.diffReads]);
+    // This record has passed every credit guard: it was given the diff, it
+    // worked, and if it was pointed at lines it opened the file they live
+    // in. Only now do its budget-gap lines count as disclosures.
+    const gaps = budgetGapDisclosures(rec.finalText);
+    if (gaps.length > 0 && !superseded(rec, chunk)) {
+      budgetGaps.push({ agent: name, gaps });
+    }
+
+    // What it was told to read, plus what it demonstrably read — UNLESS it
+    // disclosed a budget stop. The `told` term credits the reading list on
+    // the presumption the agent walked it; a `Budget gap:` line is the agent
+    // saying it did not, so its credit narrows to the ranges the harness saw
+    // it open. Without this, one ranged read plus a disclosure would receipt
+    // a 63-chunk reading list — budget-driven early stopping invisible to
+    // the very gate whose purpose is "no agent read this". The disclosure is
+    // not punished: the uncredited chunks land in `missingChunks`, which is
+    // a relaunch, exactly what an unwalked reading list is owed.
+    const ranges = merge(
+      gaps.length > 0 ? [...rec.diffReads] : [...told, ...rec.diffReads],
+    );
     if (ranges.length === 0) continue;
 
     const u = UNCOVERABLE_RE.exec(rec.finalText);
@@ -862,19 +889,6 @@ export function coverageFromTranscripts(
   const missingChunks = planned.filter(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
-
-  // Budget-gap disclosures, parsed from every agent return with the fixed
-  // format the tool-budget brief mandates. Deterministic detection here;
-  // the ruling (which gaps cap Approve) stays with the orchestrator, like
-  // whiffs. Not part of `ok`: a disclosed gap is the budget working, and
-  // failing the gate on it would teach agents not to disclose.
-  const budgetGaps: Array<{ agent: string; gaps: string[] }> = [];
-  for (const rec of records) {
-    const gaps = [...rec.finalText.matchAll(BUDGET_GAP_RE)]
-      .map((m) => m[1].trim())
-      .filter(Boolean);
-    if (gaps.length > 0) budgetGaps.push({ agent: rec.agentId, gaps });
-  }
 
   return {
     ok:

@@ -48,6 +48,7 @@ import {
   promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
+import { budgetGapDisclosures } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
@@ -318,6 +319,20 @@ function classifyReturn(
       if (findingsList.includes(`**File:** ${file}`)) continue;
       return 'yielded';
     }
+  }
+  // A budget-stopped audit is not a dry audit. The tool-budget brief has
+  // the auditor disclose each check its soft ceiling cut short as a
+  // `Budget gap:` line — an admission that part of this chunk's audit did
+  // not happen. Counted as dry, that admission would RETIRE the chunk that
+  // still owes the work (two such rounds print the clean-convergence
+  // certificate), and the disclosure text itself would double as the
+  // receipt's substantive clause — the agent's honesty doing the retiring.
+  // `unknown` instead: the chunk stays under audit, and the next round's
+  // auditor arrives with a fresh budget. Checked after the yield scan —
+  // a filed finding proves the territory hot whatever else the return
+  // discloses — and the loop's own deadline gate bounds the extra rounds.
+  if (budgetGapDisclosures(text).length > 0) {
+    return 'unknown';
   }
   const receipt = DRY_RECEIPT_RE.exec(text);
   if (

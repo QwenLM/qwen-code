@@ -161,6 +161,13 @@ function transcript(
      * clears a path-shaped floor without reading the file.
      */
     mentions?: string[];
+    /**
+     * `[offset, limit]` for the diff reads, making them RANGED — the shape
+     * a compliant agent's reads take, and the only shape `diffReads`
+     * records. The budget-gap tests need it: a disclosing agent's chunk
+     * credit narrows to its ranged reads.
+     */
+    range?: [number, number];
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
@@ -187,7 +194,18 @@ function transcript(
         message: {
           role: 'model',
           parts: [
-            { functionCall: { name: 'read_file', args: { file_path: DIFF } } },
+            {
+              functionCall: {
+                name: 'read_file',
+                args: opts.range
+                  ? {
+                      file_path: DIFF,
+                      offset: opts.range[0],
+                      limit: opts.range[1],
+                    }
+                  : { file_path: DIFF },
+              },
+            },
           ],
         },
       }),
@@ -724,31 +742,81 @@ describe('Step 3A — dimension agents, no territory, no receipts', () => {
   });
 });
 
-describe('budget-gap disclosures — parsed, reported, never punished', () => {
-  it("collects each agent's `Budget gap:` lines from its final return", () => {
+describe('budget-gap disclosures — guarded, parsed, never punished', () => {
+  it("collects a working agent's gaps under its coverage label", () => {
     transcript('a1', good(1), {
       calls: 3,
+      range: [0, 100],
       text:
         'No issues found — reviewed chunk 1 end to end.\n' +
         'Budget gap: callers of parseArgs outside packages/cli\n' +
-        'Budget gap: the removed retry path in fetch-pr',
+        '- Budget gap: the removed retry path in fetch-pr',
     });
-    transcript('a2', good(2), { calls: 2 });
+    transcript('a2', good(2), { calls: 2, range: [100, 100] });
 
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.budgetGaps).toEqual([
       {
-        agent: 'a1',
+        agent: 'chunk 1',
         gaps: [
           'callers of parseArgs outside packages/cli',
           'the removed retry path in fetch-pr',
         ],
       },
     ]);
-    // The load-bearing half: a disclosed gap must not fail the gate. Failing
-    // on disclosure teaches agents not to disclose — the ruling on each gap
-    // belongs to the orchestrator, exactly as with whiffs.
+    // The load-bearing half: this agent READ its territory (the ranged
+    // read), so its disclosure costs nothing — coverage stands and the gate
+    // passes. Failing on disclosure teaches agents not to disclose; the
+    // ruling on each gap belongs to the orchestrator, exactly as with
+    // whiffs.
+    expect(r.coveredChunks).toContain(1);
     expect(r.ok).toBe(true);
+  });
+
+  it("narrows a disclosing agent's credit to the lines it actually read", () => {
+    // A whole-diff agent is CREDITED its launch prompt's reading list on the
+    // presumption it walked it; a `Budget gap:` line is the agent saying it
+    // did not. One ranged read of chunk 1 plus a disclosure must not receipt
+    // chunk 2 — budget-driven early stopping would otherwise be invisible to
+    // the very gate whose purpose is "no agent read this".
+    transcript('sec', wholeDiff(), {
+      calls: 1,
+      range: [0, 100],
+      text: 'Walked what I could.\nBudget gap: chunk 2 (hit the tool ceiling)',
+    });
+
+    const r = coverageFromTranscripts(plan3a(), ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+    expect(r.budgetGaps).toHaveLength(1);
+  });
+
+  it('does not credit an idle agent that copied the template back', () => {
+    // The brief hands every agent the literal `Budget gap: <the check>`
+    // format — the costume is issued with the uniform. A zero-tool-call
+    // agent's disclosure is the whiff wearing it.
+    transcript('idle1', good(1), {
+      calls: 0,
+      text: 'No issues found — thorough review.\nBudget gap: deeper caller tracing',
+    });
+    transcript('a2', good(2), { calls: 2, range: [100, 100] });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.idleAgents).toEqual(['chunk 1']);
+    expect(r.budgetGaps).toEqual([]);
+  });
+
+  it('does not credit a blind agent with a disclosed gap either', () => {
+    transcript('blind1', blind(1), {
+      calls: 2,
+      text: 'Reviewed.\nBudget gap: the other half of the chunk',
+    });
+    transcript('a2', good(2), { calls: 2, range: [100, 100] });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.blindAgents).toEqual(['chunk 1']);
+    expect(r.budgetGaps).toEqual([]);
   });
 
   it('reports none when nobody disclosed one', () => {

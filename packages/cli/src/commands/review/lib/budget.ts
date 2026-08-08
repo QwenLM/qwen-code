@@ -169,29 +169,98 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
 }
 
 /**
- * The per-launch tool ceiling: the exploration allowance for a territory of
- * `effectiveLines`, PLUS the launch's mandatory reads.
+ * The per-launch tool ceiling: the exploration allowance for this launch,
+ * PLUS the launch's mandatory reads.
  *
- * Two review findings shaped the second term and the split. A whole-diff
- * role on a 25,000-line diff is ASSIGNED 63 chunk reads — a flat 60-call
- * cap is exhausted by the reading list before any analysis begins, so
- * mandatory reads ride on top of the allowance, never inside it. And a
- * scoped agent (one chunk, one heavy file) inheriting the whole-diff
- * ceiling keeps exactly the wandering headroom the budget exists to cut, so
- * the allowance is derived from the launch's own territory. Same constants
- * as `reviewBudget` — one rate, one home.
+ * Review findings shaped every term here. A whole-diff role on a
+ * 25,000-line diff is ASSIGNED 63 chunk reads — a flat 60-call cap is
+ * exhausted by the reading list before any analysis begins, so mandatory
+ * reads ride on top of the allowance, never inside it. A scoped agent (one
+ * chunk, one heavy file) inheriting the whole-diff ceiling keeps exactly
+ * the wandering headroom the budget exists to cut, so a scoped launch's
+ * allowance is derived from its own territory at the same rate. And the
+ * plan's recorded number stays the authority for every launch — the skill
+ * promises "every reader sees one number", so the scoped derivation may
+ * only LOWER the plan's allowance, never raise it, and the plan's value is
+ * clamped into the same [floor, ceiling] band in both directions: a
+ * version-skewed or hand-edited plan carrying `0.5` or `100000` must not
+ * become a three-call or a hundred-thousand-call brief.
+ *
+ * `territoryLines: null` is a whole-diff launch — no territory smaller
+ * than the plan's, so the clamped plan allowance is used as-is.
  */
 export function launchToolBudget(
-  effectiveLines: number,
+  planBudget: number,
+  territoryLines: number | null,
   mandatoryReads: number,
 ): number {
-  const allowance = clamp(
-    MIN_AGENT_TOOL_BUDGET +
-      Math.floor(sane(effectiveLines) / LINES_PER_TOOL_CALL),
+  const base = clamp(
+    sane(planBudget) || MIN_AGENT_TOOL_BUDGET,
     MIN_AGENT_TOOL_BUDGET,
     MAX_AGENT_TOOL_BUDGET,
   );
+  const allowance =
+    territoryLines === null
+      ? base
+      : Math.min(
+          base,
+          clamp(
+            MIN_AGENT_TOOL_BUDGET +
+              Math.floor(sane(territoryLines) / LINES_PER_TOOL_CALL),
+            MIN_AGENT_TOOL_BUDGET,
+            MAX_AGENT_TOOL_BUDGET,
+          ),
+        );
   return allowance + Math.max(0, Math.floor(sane(mandatoryReads)));
+}
+
+/**
+ * The disclosure an agent writes when the ceiling stopped a check, and the
+ * one parser every reader of that disclosure shares. The brief mandates the
+ * line form (`Budget gap: <the check>`); `check-coverage` reports the
+ * parsed gaps; the reverse-audit retirement refuses to count a gap-bearing
+ * return as a dry audit. One regex, one home — a second copy is how the
+ * brief and its readers drift apart.
+ *
+ * The line-start is tolerant of Markdown furniture on purpose: an LLM
+ * writing a list of caveats writes `- Budget gap: …` or `**Budget gap:**
+ * …`, and a disclosure lost to a bullet point is unobservable — nothing
+ * downstream can tell "no gaps" from "gaps we failed to parse".
+ */
+const BUDGET_GAP_RE =
+  /^[\s>*+-]*(?:\d+[.)]\s+)?[*_~`]{0,3}budget gap[*_~`]{0,3}\s*[:：][*_~`]{0,3}\s*(.+)$/gim;
+
+/** Templates and non-answers that must not become gaps someone rules on. */
+const PLACEHOLDER_GAP_RE = /^(?:<[^>]*>|none|n\/a|nothing|-|—)$/i;
+
+/** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
+const MAX_GAP_LENGTH = 160;
+const MAX_GAPS_PER_AGENT = 8;
+
+/**
+ * Every budget-gap disclosure in an agent's final return, sanitized for the
+ * two places it lands: an operator's terminal (stderr NOTE) and the posted
+ * review body. Control characters are stripped — agent-quoted text must not
+ * carry a terminal escape into either — each gap is capped in length, the
+ * list is capped in count, and placeholder text (the brief's own
+ * `<the check>` template, `none`) is dropped rather than handed to the
+ * orchestrator as a gap to rule on.
+ */
+export function budgetGapDisclosures(finalText: string): string[] {
+  const gaps: string[] = [];
+  for (const m of finalText.matchAll(BUDGET_GAP_RE)) {
+    const raw = (m[1] ?? '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/[*_~`]+\s*$/, '')
+      .trim();
+    if (raw.length === 0 || PLACEHOLDER_GAP_RE.test(raw)) continue;
+    gaps.push(
+      raw.length > MAX_GAP_LENGTH ? `${raw.slice(0, MAX_GAP_LENGTH)}…` : raw,
+    );
+    if (gaps.length >= MAX_GAPS_PER_AGENT) break;
+  }
+  return gaps;
 }
 
 function sane(n: unknown): number {

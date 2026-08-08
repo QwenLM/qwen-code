@@ -434,6 +434,16 @@ function composeReviewBody(
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
   // lines of the second register posted to the first reader.
   const remediation: string[] = [];
+  // Budget-gap disclosures from the coverage report — the checks agents said
+  // their soft tool budget cut short. A DISCLOSURE channel, deliberately not
+  // a cap: these render in the body's "Not reviewed" section mechanically
+  // (so a disclosed gap reaches the author whether or not the orchestrator
+  // relays it), while judging which gaps name an incomplete REQUIRED trace —
+  // and so belong in `unreviewedDimensions`, which caps — stays the
+  // orchestrator's ruling, exactly as the skill's Step 3D writes it. Capping
+  // on every gap here would make the soft ceiling hard: any large diff's
+  // routine budget stop would forbid an Approve the review otherwise earned.
+  const budgetGapNotes: Array<{ agent: string; gaps: string[] }> = [];
   // FIX lines are commands. `<plan>` was a placeholder a reader had to notice
   // and fill; pasted literally it parses as a shell redirection. The run KNOWS
   // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
@@ -614,6 +624,7 @@ function composeReviewBody(
             'the read is what proves the review happened',
         );
       }
+      budgetGapNotes.push(...cov.budgetGaps);
       // The prompt was built in code and edited on the way to the agent. This caps
       // for the same reason the others do: what the agent was actually asked is not
       // what this skill's guarantees are written against.
@@ -1065,6 +1076,18 @@ function composeReviewBody(
       zh: `未审查：${d}。`,
     });
   }
+  // One line per disclosing agent, gaps joined — the parser has already
+  // sanitized, length-capped and count-capped them. These are "stopped at
+  // the budget", not "nobody looked": the phrasing must not claim the
+  // stronger gap, and the entries deliberately do not join the capping
+  // lists above.
+  for (const g of budgetGapNotes) {
+    if (g.gaps.length === 0) continue;
+    notReviewedParts.push({
+      en: `Not explored to full depth (tool budget reached): ${g.gaps.join('; ')}.`,
+      zh: `未探索到全部深度（达到工具调用预算）：${g.gaps.join('；')}。`,
+    });
+  }
   // Same cause, one sentence: forty-three chunks launched with rewritten
   // prompts are one failure with forty-three subjects, not forty-three
   // paragraphs — a posted body on #7166 was ninety-nine clauses over four
@@ -1247,16 +1270,24 @@ function composeReviewBody(
   }
 
   if (event === 'APPROVE') {
+    // `notReviewedParts` here is exactly the budget-gap disclosures: every
+    // other source of a not-reviewed entry also caps, and a capped run never
+    // reaches this branch. They render on the Approve because they are a
+    // disclosure, not a defect — hiding "stopped at the tool budget" behind
+    // an unqualified LGTM would break the one promise the disclosure channel
+    // makes, that it reaches the author mechanically.
     return {
       event,
       body: render(
         [
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...notReviewedParts,
           ...deferredBlock,
           ...testPlanBlock,
           ...repositoryContextBlock,
         ],
-        deferredBlock.length ||
+        notReviewedParts.length ||
+          deferredBlock.length ||
           testPlanBlock.length ||
           repositoryContextBlock.length
           ? '\n\n'
