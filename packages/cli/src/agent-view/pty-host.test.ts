@@ -233,6 +233,28 @@ describe('launchAgentViewPtyHost', () => {
     ).toBeUndefined();
   });
 
+  it('strips host-only secrets even when the launch env re-adds them', async () => {
+    const pty = createFakePty();
+
+    await launchAgentViewPtyHost(
+      {
+        ...createLaunch(),
+        env: {
+          QWEN_AGENT_VIEW_WORKER: '1',
+          QWEN_AGENT_VIEW_PTY_HOST_TOKEN: 'injected-token',
+        },
+      },
+      { pty },
+    );
+
+    expect(pty.spawnCalls[0]?.options.env).toEqual(
+      expect.objectContaining({ QWEN_AGENT_VIEW_WORKER: '1' }),
+    );
+    expect(
+      pty.spawnCalls[0]?.options.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'],
+    ).toBeUndefined();
+  });
+
   it('kills the PTY process when disposed', async () => {
     const pty = createFakePty();
     const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
