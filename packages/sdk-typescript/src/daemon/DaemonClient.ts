@@ -161,6 +161,7 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSkillBatchToggleResult,
   DaemonSkillToggleResult,
   DaemonSkillInstallRequest,
   DaemonSkillMutationResult,
@@ -3177,6 +3178,36 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Toggle up to 100 user-invocable skills and return every target outcome.
+   *
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_batch_toggle')` before calling.
+   */
+  async setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ skillNames, enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/skills/enable');
+        }
+        return (await res.json()) as DaemonSkillBatchToggleResult;
+      },
+    );
+  }
+
   installWorkspaceSkill(
     request: DaemonSkillInstallRequest,
   ): Promise<DaemonSkillMutationResult> {
@@ -5867,6 +5898,19 @@ export class WorkspaceDaemonClient {
       `/skills/${urlEncode(skillName)}/enable`,
       'POST /workspaces/:workspace/skills/:name/enable',
       { enabled },
+      opts?.clientId,
+    );
+  }
+
+  setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return this.post(
+      '/skills/enable',
+      'POST /workspaces/:workspace/skills/enable',
+      { skillNames, enabled },
       opts?.clientId,
     );
   }

@@ -153,6 +153,20 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
       sessionsRefreshed: 0,
       sessionsFailed: 0,
     })),
+    setWorkspaceSkillsEnabled: vi.fn(
+      async (_ctx, skillNames: readonly string[], enabled) => ({
+        enabled,
+        activation: 'deferred' as const,
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        results: skillNames.map((skillName) => ({
+          skillName,
+          enabled,
+          changed: true,
+        })),
+        errors: [],
+      }),
+    ),
     initWorkspace: vi.fn(async (ctx) => ({
       path: `${ctx.workspaceCwd}/QWEN.md`,
       action: 'created' as const,
@@ -970,6 +984,43 @@ describe('workspace-qualified core REST', () => {
         sessionsFailed: 0,
       });
 
+      const batch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review', 'deploy'], enabled: false });
+      expect(batch.status).toBe(200);
+      expect(batch.body).toEqual({
+        enabled: false,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        results: [
+          {
+            skillName: 'review',
+            enabled: false,
+            changed: true,
+          },
+          {
+            skillName: 'deploy',
+            enabled: false,
+            changed: true,
+          },
+        ],
+        errors: [],
+      });
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        ['review', 'deploy'],
+        false,
+      );
+
       vi.mocked(
         h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
       ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));
@@ -993,6 +1044,70 @@ describe('workspace-qualified core REST', () => {
         .send({ enabled: false });
       expect(invalidClient.status).toBe(400);
       expect(invalidClient.body.code).toBe('invalid_client_id');
+
+      const invalidBatchClient = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: false });
+      expect(invalidBatchClient.status).toBe(400);
+      expect(invalidBatchClient.body.code).toBe('invalid_client_id');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(1);
+
+      const badBatchBody = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: [], enabled: false });
+      expect(badBatchBody.status).toBe(400);
+      expect(badBatchBody.body.code).toBe('invalid_skill_names');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(1);
+
+      const enableBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: true });
+      expect(enableBatch.status).toBe(200);
+      expect(enableBatch.body).toMatchObject({
+        enabled: true,
+        results: [{ skillName: 'review', enabled: true, changed: true }],
+      });
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        ['review'],
+        true,
+      );
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(2);
+
+      vi.mocked(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).mockRejectedValueOnce(new Error('disk full'));
+      const failedBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: false });
+      expect(failedBatch.status).toBe(500);
+      expect(failedBatch.body.error).toBe('disk full');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(3);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -1011,6 +1126,19 @@ describe('workspace-qualified core REST', () => {
         .send({ enabled: false });
       expect(res.status).toBe(403);
       expect(res.body.code).toBe('untrusted_workspace');
+
+      const batch = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/skills/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: false });
+      expect(batch.status).toBe(403);
+      expect(batch.body.code).toBe('untrusted_workspace');
+      expect(
+        untrusted.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
     }
