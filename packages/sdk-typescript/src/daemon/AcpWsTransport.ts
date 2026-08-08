@@ -244,8 +244,10 @@ export class AcpWsTransport implements DaemonTransport {
     // live shared notification stream, never replays), so there is no
     // stale-cursor problem for the epoch token to solve and no HTTP
     // response headers to learn the epoch from. Intentionally ignored
-    // rather than silently mis-applied — same policy as `maxQueued`, which
-    // is likewise REST-only and unused here.
+    // rather than silently mis-applied — same policy as `maxQueued` and the
+    // REST SSE lifecycle fields (`clientId`, `sseConnectReason`,
+    // `previousSseStreamId`, `onSseStreamAccepted`), which are likewise
+    // REST-only and unused here.
 
     await this.ensureConnected();
 

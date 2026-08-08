@@ -912,3 +912,27 @@ Dogfooding this skill against its own PR emitted `Review complete: pr-6771 — A
 ### The five already-implemented Suggestions
 
 Dogfooded against this skill's own PR, a run reported five "Suggestions" — "Enhanced Binary File Handling", "Security Improvement for Terminal Output" — each summarising a thing the PR already did, each with `Suggested fix: N/A (already implemented)`. That is not silence being better than noise; it is noise wearing silence's clothes, and the reader has to read all five to discover there was nothing to do.
+
+### The 22-minute serial first verification
+
+Two CI reviews of similar-size PRs ran the same skill on the same day (2026-08-06). The #8619 run launched its Step 4 verifier and its round-1 reverse auditor together in one response. The #8628 run launched the verifier alone at 08:12, read its verdicts at 08:34, and only then launched round 1 at 08:37 — 22 minutes of wall clock spent waiting for verdicts the auditor's launch never consumed (the findings file carries `— [unverified]` tags for exactly this state). The pipelining rule said "round _k_'s verifiers ride with round _k+1_'s auditors" and started counting at k=1, so the initial verification's coupling was orchestrator discretion, and discretion split 50/50 across the measured runs.
+
+### The serial convergence pair
+
+Measured on the CI reviews of #8619 and #8607: both audits converged at the minimum — round 1 dry, round 2 dry — and the rounds ran serially at 13–25 minutes each, although a dry round leaves the cumulative findings list unchanged, so round 2's launch input was substantively identical to round 1's — the same entries, at most with verification tags the unconditional merge had cleared in between: an independent rerun, paid for at the price of a dependent one. The #8501 round-5 review made the cost concrete: round 1 came back dry, the deadline gate then refused round 2 (`BUDGET:`, exit 4), and the verdict shipped capped by a budget stop — for want of a second dry audit the run had time to launch in parallel but not in series.
+
+### The rounds a rejected finding bought (PR #8353)
+
+The 15th review round of #8353 (its audit rounds numbered 1–5 within that run; `R15-1` is the incremental-review ledger's naming, not an audit round): audit round 2 dry; round 3's sole finding rejected by its verifier with direct counter-evidence — the claimed compound behavior lived entirely in unchanged code. The rejection removed the entry from the cumulative list, but not the reset it had already applied to the dry counter. Under the forward pairing the rule licenses, round 4's dry return completed the two-dry evidence the moment it landed — the retired round 3 plus dry round 4 — and round 5 (~15–20 minutes) was the waste: it audited nothing the loop had not already answered.
+
+### The artifact root that pointed at qwen-home
+
+Every one of six measured CI reviews (2026-08-05/06) spent 1.5–3 minutes at Step 8 rediscovering the same fact: `save-artifact` resolved its containment root from `QWEN_CODE_PROJECT_DIR`, and that variable does not name the main checkout in any environment — the harness exports it as `Storage.getProjectDir()`, the session-storage directory under the runtime base where the harness's own transcripts live. The helper refused its own inputs ("must be inside the workspace"), and each orchestrator improvised a different workaround: one overrode the env var to the repo, one copied the inputs into the qwen-home mirror and copied the artifact back, others retried path shapes until one landed. The env preference was wrong 100% of the time it was consulted; the command's cwd — the main checkout, where the skill runs every subcommand — was right in every measured run.
+
+### The one-command-per-turn tail
+
+Measured across the same six CI reviews: the post-verdict bookkeeping — Markdown report, cost-ledger, save-artifact, `record_artifact`, the incremental-cache write, cleanup — ran one command per model turn, 4–6 minutes of wall clock after the review's outcome was already decided (and, on posting runs, already on the PR), stretching past 7 minutes when the qwen-home fumbling above joined it. Every command in the tail is cheap; the turns are not — the same arithmetic that batches the Step 1 setup calls, unapplied to the other end of the run.
+
+### The forty-one minute wave
+
+Two measured runs of the same 14-agent Step 3A fan-out, on diffs of comparable size, took 11.7 and 41 minutes — and the wave's wall clock is its slowest agent, so the whole review inherited the difference. The slow wave's tail was not review depth: individual agents spent 40-100 model calls exploring the tree (the pattern a sibling PR had already named as the next optimization target), while healthy agents on the same class of diff settle at 25-45 calls with indistinguishable findings. The budget that answers this is soft on purpose: a hard cap would convert the pathology into silent truncation, so the brief tells the agent to stop exploring at the ceiling, file what it holds, and disclose the checks it did not get to — the disclosure lands in the same receipt machinery that already judges whiffs.

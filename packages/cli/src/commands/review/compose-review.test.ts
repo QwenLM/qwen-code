@@ -24,6 +24,7 @@ import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
   buildLedger,
+  repositoryContextGate,
   scriptLintGate,
   testPlanGate,
   composeReviewCommand,
@@ -98,6 +99,7 @@ function plan(
     effort?: 'low' | 'medium' | 'high';
     /** Override the fixture's 5000 — the low-signal floor reads this. */
     srcDiffLines?: number;
+    repositoryContext?: unknown;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -111,6 +113,9 @@ function plan(
       // The effort the capturing command recorded — the roster and the
       // reverse-audit floor both read it from here.
       ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.repositoryContext === undefined
+        ? {}
+        : { repositoryContext: opts.repositoryContext }),
       srcDiffLines: opts.srcDiffLines ?? 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -184,7 +189,13 @@ function recordStep45(
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { toolCalls?: number; text?: string; opens?: string[] } = {},
+  opts: {
+    toolCalls?: number;
+    text?: string;
+    opens?: string[];
+    /** `[offset, limit]` making the diff reads ranged, as a compliant agent's are. */
+    range?: [number, number];
+  } = {},
 ): void {
   const pointedAtBriefs = [
     ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
@@ -207,7 +218,18 @@ function transcript(
         message: {
           role: 'model',
           parts: [
-            { functionCall: { name: 'read_file', args: { file_path: DIFF } } },
+            {
+              functionCall: {
+                name: 'read_file',
+                args: opts.range
+                  ? {
+                      file_path: DIFF,
+                      offset: opts.range[0],
+                      limit: opts.range[1],
+                    }
+                  : { file_path: DIFF },
+              },
+            },
           ],
         },
       }),
@@ -329,6 +351,7 @@ function coveredPlan(
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
     srcDiffLines?: number;
+    repositoryContext?: unknown;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -455,6 +478,197 @@ describe('composeReview — the low-signal Approve disclosure', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.lowSignal).toBeNull();
     expect(verdictLine(r)).not.toContain('low signal');
+  });
+});
+
+describe('repository context proof boundary', () => {
+  it('derives unreviewed dimensions from the validated plan, not model input', () => {
+    const planPath = join(dir, 'repository-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: ['runtime'],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: ['linux-x64'],
+          requiredAgents: ['test-matrix'],
+          unverifiedDimensions: ['Alternate runtime was not exercised'],
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      '`Alternate runtime was not exercised` — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('renders manifest-controlled proof boundaries as inert Markdown', () => {
+    const planPath = join(dir, 'mention-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'manifest',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: ['@security-team'],
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      '`@security-team` — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('caps the unverified-dimension disclosure at five entries', () => {
+    // The schema admits 128 dimensions x 512 chars; joined into one
+    // disclosure that outruns the review body's own size budget — the same
+    // cap discipline testPlanGate applies to its notes.
+    const planPath = join(dir, 'capped-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: Array.from(
+            { length: 8 },
+            (_, index) => `dimension ${index}`,
+          ),
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      ...Array.from(
+        { length: 5 },
+        (_, index) =>
+          `\`dimension ${index}\` — the repository context marks this proof boundary as unverified`,
+      ),
+      'and 3 more',
+    ]);
+  });
+
+  it('returns no extra disclosure when the plan has no repository context', () => {
+    const planPath = join(dir, 'generic-plan.json');
+    writeFileSync(planPath, JSON.stringify({ files: [] }));
+    expect(repositoryContextGate(planPath)).toEqual([]);
+  });
+
+  it('returns nothing for an unreadable plan but fails closed on a malformed context', () => {
+    // Unreadable plan: the coverage gate owns plan validity; the disclosure
+    // has nothing to say. Present-but-INVALID context: every consumer of the
+    // field fails closed, so the gate throws instead of silently dropping the
+    // disclosure.
+    const missing = join(dir, 'missing-plan.json');
+    expect(repositoryContextGate(missing)).toEqual([]);
+
+    const malformed = join(dir, 'malformed-plan.json');
+    writeFileSync(
+      malformed,
+      JSON.stringify({ repositoryContext: { version: 1 } }),
+    );
+    expect(() => repositoryContextGate(malformed)).toThrow(
+      'unknown or missing fields',
+    );
+  });
+
+  it('keeps the disclosure on a REQUEST_CHANGES body', () => {
+    // The RC render site is a separate code path from APPROVE; deleting the
+    // block there must fail the suite, not ship green.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      bodyCriticals: ['whole-PR blocker X'],
+    });
+    expect(result.event).toBe('REQUEST_CHANGES');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
+  it('keeps the disclosure when a cap downgrades the verdict to COMMENT', () => {
+    // An APPROVE capped at COMMENT renders through the COMMENT clause
+    // composer — the third render site — and the disclosure must survive
+    // exactly the verdicts where the reader most needs the boundary.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      cannotTellCriticals: ['SKILL.md:35 — full text unfetchable'],
+    });
+    expect(result.event).toBe('COMMENT');
+    expect(result.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
+  it('discloses repository proof boundaries without permanently capping approval', () => {
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['runtime'],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: ['linux-x64'],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+
+    const result = composeReview({ planPath, env: ENV, modelId: MODEL });
+
+    expect(result.event).toBe('APPROVE');
+    expect(result.cappedBy).not.toContain('unreviewed-dimension');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
   });
 });
 
@@ -955,6 +1169,114 @@ describe('composeReview — not-reviewed entries that carry their own reason', (
     );
     // The self-explained entry must not be folded into the whiff sentence.
     expect(r.body).not.toContain('issue-fidelity, security');
+  });
+});
+
+describe('composeReview — budget-gap disclosures (a channel, never a cap)', () => {
+  it('renders disclosed gaps in the body and still approves a clean run', () => {
+    // The agent read its whole territory (ranged read) and disclosed one
+    // optional-depth check its tool budget cut short. The disclosure must
+    // reach the author mechanically — whether or not the orchestrator
+    // relays anything — and must NOT cap the verdict: judging which gaps
+    // name a required trace is the orchestrator's ruling (Step 3D), and
+    // capping on every routine budget stop would make the soft ceiling
+    // hard.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: second-order callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    // Not base(): its planPath DEFAULT (coveredPlan()) is evaluated on every
+    // call and rewrites this run's a1/a2 transcripts with clean ones.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    // Attributed to its agent and wrapped as inline code — a gap carrying
+    // an @-mention, a #123 reference or a stray `</details>` must reach
+    // the body inert.
+    expect(r.body).toContain(
+      'Not explored to full depth (tool budget reached): ' +
+        'chunk 1: `second-order callers of the renamed export`.',
+    );
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('drops its mechanical line for a gap the caller promoted — one register, not two', () => {
+    // Step 3D has the orchestrator promote a required-trace gap into
+    // unreviewedDimensions with the gap's own text as the scope. The
+    // promoted entry caps and renders verbatim; the mechanical line must
+    // yield, or the body says one budget stop twice in two contradicting
+    // framings (#7188's double-disclosure regression, reopened).
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: second-order callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        'second-order callers of the renamed export — stopped at the agent tool budget',
+      ],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not reviewed: second-order callers of the renamed export — stopped at the agent tool budget.',
+    );
+    expect(r.body).not.toContain('Not explored to full depth');
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('a disclosed gap denies the "no blockers" certification', () => {
+    // "Reviewed — no blockers." two lines above "Not explored to full
+    // depth" is the opener certifying what the disclosure takes back.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'One suggestion filed.\n' +
+        'Budget gap: the callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('Not explored to full depth');
+    expect(r.body).not.toContain('no blockers');
   });
 });
 

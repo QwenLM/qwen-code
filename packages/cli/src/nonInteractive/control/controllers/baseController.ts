@@ -73,6 +73,19 @@ export abstract class BaseController {
   }
 
   /**
+   * Capture cancellation for a request owned by the current turn. Session
+   * cancellation always applies; when a turn is active, interrupting that
+   * turn also cancels the request. Call this when creating each request so a
+   * later active turn cannot take ownership of work already in flight.
+   */
+  protected getTurnRequestAbortSignal(): AbortSignal {
+    const activeTurnSignal = this.context.getActiveTurnAbortSignal?.();
+    return activeTurnSignal
+      ? AbortSignal.any([this.context.abortSignal, activeTurnSignal])
+      : this.context.abortSignal;
+  }
+
+  /**
    * Handle an incoming control request
    *
    * Manages lifecycle: register -> process -> deregister

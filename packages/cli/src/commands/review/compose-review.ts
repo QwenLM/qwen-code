@@ -44,6 +44,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { repositoryContextOf } from './lib/repository-context.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
@@ -433,6 +434,19 @@ function composeReviewBody(
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
   // lines of the second register posted to the first reader.
   const remediation: string[] = [];
+  // Budget-gap disclosures from the coverage report — the checks agents said
+  // their soft tool budget cut short. A DISCLOSURE channel, deliberately not
+  // a cap: these render in the body's "Not reviewed" section mechanically
+  // (so a disclosed gap reaches the author whether or not the orchestrator
+  // relays it), while judging which gaps name an incomplete REQUIRED trace —
+  // and so belong in `unreviewedDimensions`, which caps — stays the
+  // orchestrator's ruling, exactly as the skill's Step 3D writes it. Capping
+  // on every gap here would make the soft ceiling hard: any large diff's
+  // routine budget stop would forbid an Approve the review otherwise earned.
+  const budgetGapNotes: Array<{ agent: string; gaps: string[] }> = [];
+  // Sibling caps MAX_DIMENSIONS and MAX_NOTES bound their lists for the
+  // same reason; this bounds the one budget-gap sentence.
+  const MAX_BUDGET_GAP_LINES = 5;
   // FIX lines are commands. `<plan>` was a placeholder a reader had to notice
   // and fill; pasted literally it parses as a shell redirection. The run KNOWS
   // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
@@ -482,12 +496,18 @@ function composeReviewBody(
   // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
   // see `testPlanGate` for why this one neither blocks nor caps.
   const testPlanNotes: string[] = [];
+  // Repository proof boundaries are also disclosures, not findings or permanent
+  // approval caps. The first schema has no validated evidence channel that could
+  // resolve one after a specialist inspects it, so capping here would make every
+  // affected review impossible to approve.
+  const repositoryContextNotes: string[] = [];
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
+    repositoryContextNotes.push(...repositoryContextGate(input.planPath));
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -607,6 +627,7 @@ function composeReviewBody(
             'the read is what proves the review happened',
         );
       }
+      budgetGapNotes.push(...cov.budgetGaps);
       // The prompt was built in code and edited on the way to the agent. This caps
       // for the same reason the others do: what the agent was actually asked is not
       // what this skill's guarantees are written against.
@@ -906,17 +927,21 @@ function composeReviewBody(
   // keeps its bare Approve — there, finding nothing is the expected outcome.
   let lowSignal: ComposeReviewResult['lowSignal'] = null;
   if (event === 'APPROVE' && input.planPath) {
+    let plan: RosterPlan | undefined;
     try {
-      const plan = JSON.parse(
-        readFileSync(input.planPath, 'utf8'),
-      ) as RosterPlan;
+      plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as RosterPlan;
+    } catch {
+      // Unreadable plan, no disclosure — the coverage gate owns plan validity.
+    }
+    // A malformed repositoryContext inside an otherwise-readable plan is NOT
+    // swallowed here: requiredAgents throws, fail-closed like every other
+    // consumer of the field. On a real APPROVE the coverage gate already
+    // validated it.
+    if (plan) {
       const src = Number(plan.srcDiffLines ?? 0);
       if (src > LOW_SIGNAL_SRC_DIFF_LINES) {
         lowSignal = { agents: requiredAgents(plan).length, srcDiffLines: src };
       }
-    } catch {
-      // Unreachable on a real APPROVE — the coverage gate already read this
-      // plan — and a disclosure must never take the review down.
     }
   }
 
@@ -1052,6 +1077,41 @@ function composeReviewBody(
     notReviewedParts.push({
       en: `Not reviewed: ${d}.`,
       zh: `未审查：${d}。`,
+    });
+  }
+  // Budget-gap disclosures, one BOUNDED sentence for all of them. Four
+  // review findings shaped this: each gap rides through `mdField` (inline
+  // code neutralizes @-mentions, #123 cross-references, links and any
+  // stray `</details>` an agent quoted — the first path by which raw
+  // sub-agent prose could reach a public PR body); the line is capped like
+  // its siblings (unbounded entries joined into one disclosure drown the
+  // verdict they ride on — and ~50 uncapped agents would break GitHub's
+  // 64 KB body limit and lose the whole POST); each gap carries its
+  // agent's label so N agents stopping on the same trace stay tellable
+  // apart; and a gap the caller already promoted into
+  // `unreviewedDimensions` is dropped here — the capping relay owns it,
+  // and the body must not say it twice in two registers. These are
+  // "stopped at the budget", not "nobody looked": the phrasing must not
+  // claim the stronger gap, and the entries do not join the capping lists.
+  const budgetGapItems: Array<{ agent: string; gap: string }> = [];
+  for (const g of budgetGapNotes) {
+    for (const gap of g.gaps) budgetGapItems.push({ agent: g.agent, gap });
+  }
+  const keptBudgetGaps = budgetGapItems.filter(
+    (it) => !unreviewed.some((d) => d.includes(it.gap)),
+  );
+  if (keptBudgetGaps.length > 0) {
+    const shown = keptBudgetGaps.slice(0, MAX_BUDGET_GAP_LINES);
+    const more = keptBudgetGaps.length - shown.length;
+    const enList =
+      shown.map((it) => `${it.agent}: ${mdField(it.gap)}`).join('; ') +
+      (more > 0 ? `, and ${more} more` : '');
+    const zhList =
+      shown.map((it) => `${it.agent}：${mdField(it.gap)}`).join('；') +
+      (more > 0 ? `，另有 ${more} 条` : '');
+    notReviewedParts.push({
+      en: `Not explored to full depth (tool budget reached): ${enList}.`,
+      zh: `未探索到全部深度（达到工具调用预算）：${zhList}。`,
     });
   }
   // Same cause, one sentence: forty-three chunks launched with rewritten
@@ -1199,6 +1259,15 @@ function composeReviewBody(
           },
         ];
 
+  const repositoryContextBlock: Bi[] = repositoryContextNotes.length
+    ? [
+        {
+          en: `Repository proof boundary (not a blocker): ${repositoryContextNotes.join('; ')}.`,
+          zh: `仓库验证边界（非阻断）：${repositoryContextNotes.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -1211,6 +1280,7 @@ function composeReviewBody(
       ...unverifiedTagsBlock,
       ...deferredBlock,
       ...testPlanBlock,
+      ...repositoryContextBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -1226,15 +1296,28 @@ function composeReviewBody(
   }
 
   if (event === 'APPROVE') {
+    // `notReviewedParts` here is exactly the budget-gap disclosures: every
+    // other source of a not-reviewed entry also caps, and a capped run never
+    // reaches this branch. They render on the Approve because they are a
+    // disclosure, not a defect — hiding "stopped at the tool budget" behind
+    // an unqualified LGTM would break the one promise the disclosure channel
+    // makes, that it reaches the author mechanically.
     return {
       event,
       body: render(
         [
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...notReviewedParts,
           ...deferredBlock,
           ...testPlanBlock,
+          ...repositoryContextBlock,
         ],
-        deferredBlock.length || testPlanBlock.length ? '\n\n' : ' ',
+        notReviewedParts.length ||
+          deferredBlock.length ||
+          testPlanBlock.length ||
+          repositoryContextBlock.length
+          ? '\n\n'
+          : ' ',
       ),
       baseEvent,
       cappedBy,
@@ -1283,6 +1366,12 @@ function composeReviewBody(
       // them." Nothing nobody read can be certified blocker-free — and neither
       // can a loop that ended with findings no verifier ever ruled on.
       missingReceipts.length === 0 &&
+      // A disclosed budget gap is not a blocker, but "Reviewed — no
+      // blockers." two lines above "Not explored to full depth" is the
+      // opener certifying what the disclosure takes back — the exact
+      // shape the comment below forbids. (A gap the caller promoted into
+      // `unreviewedDimensions` already denies certification above.)
+      keptBudgetGaps.length === 0 &&
       !findingsUnverifiedAtCompose;
     // The opener may not say "Reviewed." over a disclosure set that denies it.
     // #7268's posted body opened exactly that way — "Reviewed. Suggestions are
@@ -1356,6 +1445,10 @@ function composeReviewBody(
   // 6c. Test Plan rulings (non-capping) — a claim in the PR description that
   //     the reviewed tree does not bear out.
   clauses.push(...testPlanBlock);
+
+  // 6d. Repository proof boundaries (non-capping) — dimensions the context
+  //     planner recommends disclosing without claiming the code is defective.
+  clauses.push(...repositoryContextBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
@@ -1468,6 +1561,37 @@ const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
   );
   return (JSON.parse(json) as { body?: string }).body ?? '';
 };
+
+export function repositoryContextGate(planPath: string): string[] {
+  let plan: RosterPlan;
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8')) as RosterPlan;
+  } catch {
+    // An unreadable plan has nothing to disclose; the coverage gate owns plan
+    // validity and already fails closed on it.
+    return [];
+  }
+  // A PRESENT-but-invalid context is a corrupted plan, and every consumer of
+  // this field fails closed on one — coverage throws, the roster throws; the
+  // disclosure cannot be the one place that silently shrugs.
+  const context = repositoryContextOf(plan);
+  const dimensions = context?.unverifiedDimensions ?? [];
+  // The same cap discipline testPlanGate applies: unbounded entries joined
+  // into one disclosure drown the verdict they ride on — and at the schema
+  // bounds (128 x 512 chars) the paragraph outruns the review body's own
+  // budget before any other content gets a word in.
+  const MAX_DIMENSIONS = 5;
+  const disclosed = dimensions
+    .slice(0, MAX_DIMENSIONS)
+    .map(
+      (dimension) =>
+        `${mdField(dimension)} — the repository context marks this proof boundary as unverified`,
+    );
+  if (dimensions.length > MAX_DIMENSIONS) {
+    disclosed.push(`and ${dimensions.length - MAX_DIMENSIONS} more`);
+  }
+  return disclosed;
+}
 
 /**
  * Read the script-lint report the orchestrator wrote and turn it into verdict
