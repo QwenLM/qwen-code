@@ -42,6 +42,10 @@ const openaiLoggerMockState = vi.hoisted(() => ({
   }>,
 }));
 
+const dashscopeMockState = vi.hoisted(() => ({
+  createCount: 0,
+}));
+
 vi.mock('./openaiContentGenerator/index.js', () => ({
   createOpenAIContentGenerator: () => {
     if (openaiMockState.generatorError) {
@@ -106,6 +110,26 @@ vi.mock('../utils/openaiLogger.js', () => ({
   },
 }));
 
+vi.mock('./dashscopeContentGenerator/index.js', () => ({
+  createDashScopeContentGenerator: () => {
+    dashscopeMockState.createCount += 1;
+    return {
+      generateContent: async () => ({}),
+      generateContentStream: async () =>
+        (async function* () {
+          yield {};
+        })(),
+      countTokens: async () => ({ totalTokens: 1 }),
+      embedContent: async () => {
+        throw new Error(
+          'DashScope native provider does not support embeddings.',
+        );
+      },
+      useSummarizedThinking: () => false,
+    };
+  },
+}));
+
 describe('createContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -118,6 +142,7 @@ describe('createContentGenerator', () => {
     qwenMockState.constructorCount = 0;
     qwenMockState.constructorModels = [];
     openaiLoggerMockState.constructorCalls = [];
+    dashscopeMockState.createCount = 0;
   });
 
   it('should defer Gemini content generator creation until first use', async () => {
@@ -601,6 +626,58 @@ describe('createContentGenerator', () => {
         mockConfig,
       ),
     ).rejects.toThrow('Unsupported authType');
+  });
+
+  it('dispatches USE_DASHSCOPE to the native DashScope factory without loading the OpenAI provider', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => true,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    const generator = await createContentGenerator(
+      {
+        model: 'qwen3.8-max',
+        apiKey: 'test-key',
+        authType: AuthType.USE_DASHSCOPE,
+      },
+      mockConfig,
+    );
+
+    expect(dashscopeMockState.createCount).toBe(0);
+    await generator.countTokens({ model: 'qwen3.8-max', contents: 'hello' });
+    expect(dashscopeMockState.createCount).toBe(1);
+    expect(openaiMockState.createCount).toBe(0);
+  });
+
+  it('AuthType.USE_DASHSCOPE has the wire value "dashscope"', () => {
+    expect(AuthType.USE_DASHSCOPE).toBe('dashscope');
+  });
+
+  it('still routes a DashScope-hosted compatible-mode baseUrl through USE_OPENAI', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => true,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+
+    const generator = await createContentGenerator(
+      {
+        model: 'qwen3-coder-plus',
+        apiKey: 'test-key',
+        baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    await generator.countTokens({ model: 'qwen3-coder-plus', contents: 'hi' });
+    expect(openaiMockState.createCount).toBe(1);
+    expect(dashscopeMockState.createCount).toBe(0);
   });
 });
 

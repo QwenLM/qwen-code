@@ -14,6 +14,8 @@ export function getDefaultApiKeyEnvVar(authType: string | undefined): string {
       return 'GEMINI_API_KEY';
     case 'vertex-ai':
       return 'GOOGLE_API_KEY';
+    case 'dashscope':
+      return 'DASHSCOPE_API_KEY';
     default:
       return 'API_KEY';
   }
@@ -29,6 +31,8 @@ export function getDefaultModelEnvVar(authType: string | undefined): string {
       return 'GEMINI_MODEL';
     case 'vertex-ai':
       return 'GOOGLE_MODEL';
+    case 'dashscope':
+      return 'DASHSCOPE_MODEL';
     default:
       return 'MODEL';
   }

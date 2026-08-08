@@ -37,7 +37,12 @@ import {
   useVimModeState,
   useVimModeActions,
 } from '../contexts/VimModeContext.js';
-import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  getSupportedReasoningEffortTiers,
+  type Config,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import {
   isDeletionKey,
@@ -77,6 +82,33 @@ const maxItemsToShow = 8;
 type ConfigTab = 'settings' | 'status' | 'stats';
 
 const CONFIG_TAB_ORDER: ConfigTab[] = ['settings', 'status', 'stats'];
+
+function getDialogSettingDefinition(
+  key: string,
+  config?: Config,
+): ReturnType<typeof getSettingDefinition> {
+  const definition = getSettingDefinition(key);
+  if (
+    key !== 'model.reasoningEffort' ||
+    !config ||
+    definition?.type !== 'enum'
+  ) {
+    return definition;
+  }
+
+  const supportedTiers = getSupportedReasoningEffortTiers(
+    config.getAuthType(),
+    config.getModel(),
+  );
+  return {
+    ...definition,
+    options: definition.options?.filter(
+      (option) =>
+        typeof option.value === 'string' &&
+        supportedTiers.includes(option.value as ReasoningEffort),
+    ),
+  };
+}
 
 // Literal t() calls keep the labels extractable for translation.
 function configTabLabel(tab: ConfigTab): string {
@@ -199,7 +231,7 @@ export function SettingsDialog({
     // Overlay globally pending (unsaved) changes so user sees their modifications in any scope
     const newModified = new Set<string>();
     for (const [key, value] of globalPendingChanges.entries()) {
-      const def = getSettingDefinition(key);
+      const def = getDialogSettingDefinition(key, config);
       if (def?.type === 'boolean' && typeof value === 'boolean') {
         updated = setPendingSettingValue(key, value, updated);
       } else if (
@@ -214,13 +246,13 @@ export function SettingsDialog({
     }
     setPendingSettings(updated);
     setModifiedSettings(newModified);
-  }, [selectedScope, settings, globalPendingChanges]);
+  }, [selectedScope, settings, globalPendingChanges, config]);
 
   const generateSettingsItems = () => {
     const settingKeys = getDialogSettingKeys();
 
     return settingKeys.map((key: string) => {
-      const definition = getSettingDefinition(key);
+      const definition = getDialogSettingDefinition(key, config);
 
       return {
         label: definition?.label
@@ -464,7 +496,7 @@ export function SettingsDialog({
   };
 
   const commitEdit = (key: string) => {
-    const definition = getSettingDefinition(key);
+    const definition = getDialogSettingDefinition(key, config);
     const type = definition?.type;
 
     if (editBuffer.trim() === '' && type === 'number') {
@@ -789,7 +821,7 @@ export function SettingsDialog({
       if (mode === 'settings') {
         // If editing, capture input and control keys
         if (editingKey) {
-          const definition = getSettingDefinition(editingKey);
+          const definition = getDialogSettingDefinition(editingKey, config);
           const type = definition?.type;
 
           if (key.paste && key.sequence) {

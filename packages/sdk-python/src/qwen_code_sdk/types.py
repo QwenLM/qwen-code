@@ -22,6 +22,7 @@ AuthType: TypeAlias = Literal[
     "qwen-oauth",
     "gemini",
     "vertex-ai",
+    "dashscope",
 ]
 Effort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
 

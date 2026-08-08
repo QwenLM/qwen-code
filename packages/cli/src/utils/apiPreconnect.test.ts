@@ -224,6 +224,17 @@ describe('apiPreconnect', () => {
       );
     });
 
+    it('should use the Singapore default baseUrl for dashscope', async () => {
+      preconnectApi('dashscope', {
+        proxy: 'http://proxy.example.com:8080',
+      });
+      await waitForPreconnect();
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://dashscope-intl.aliyuncs.com',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
     it('should pass shared dispatcher on Node.js runtime', async () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',

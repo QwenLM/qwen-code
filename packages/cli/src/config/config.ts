@@ -965,6 +965,7 @@ export async function parseArguments(): Promise<CliArgs> {
             AuthType.QWEN_OAUTH,
             AuthType.USE_GEMINI,
             AuthType.USE_VERTEX_AI,
+            AuthType.USE_DASHSCOPE,
           ],
           description: 'Authentication type',
         })

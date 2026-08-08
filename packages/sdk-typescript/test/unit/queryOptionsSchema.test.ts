@@ -11,6 +11,11 @@ describe('QueryOptionsSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  it('accepts DashScope authentication', () => {
+    const result = QueryOptionsSchema.safeParse({ authType: 'dashscope' });
+    expect(result.success).toBe(true);
+  });
+
   it('accepts fallbackModel with up to 3 models', () => {
     const result = QueryOptionsSchema.safeParse({
       fallbackModel: ['a', 'b', 'c'],

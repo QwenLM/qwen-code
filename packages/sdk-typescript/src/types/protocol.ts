@@ -241,7 +241,8 @@ export type AuthType =
   | 'anthropic'
   | 'qwen-oauth'
   | 'gemini'
-  | 'vertex-ai';
+  | 'vertex-ai'
+  | 'dashscope';
 
 /**
  * TODO: Align with `ToolCallConfirmationDetails`

@@ -17,6 +17,7 @@ describe('ACP auth methods', () => {
 
     expect(authMethods.map((method) => method.id)).toEqual([
       AuthType.USE_OPENAI,
+      AuthType.USE_DASHSCOPE,
     ]);
   });
 
@@ -25,6 +26,7 @@ describe('ACP auth methods', () => {
 
     expect(authMethods.map((method) => method.id)).toEqual([
       AuthType.USE_OPENAI,
+      AuthType.USE_DASHSCOPE,
     ]);
   });
 });
