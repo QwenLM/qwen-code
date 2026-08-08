@@ -267,7 +267,7 @@ describe('evaluateWebSearchGate', () => {
       `ENABLE_WEB_SEARCH=true WEB_SEARCH_MODEL=${settings.model}`,
     );
     expect(gate.notice).toContain(`(recommended: ${settings.model})`);
-    expect(gate.notice).toContain('WEB_SEARCH_BASE_URL');
+    expect(gate.notice).toContain(`WEB_SEARCH_BASE_URL=${DASHSCOPE_BASE_URL}`);
     expect(gate.notice).toContain('WEB_SEARCH_API_KEY');
   });
 
