@@ -210,7 +210,11 @@ function isValidVirtualParentSessionId(value: string): boolean {
 }
 
 function isValidVirtualAgentId(value: string): boolean {
-  return value.length > 0 && value.length <= 500;
+  return (
+    value.length > 0 &&
+    value.length <= 500 &&
+    decodePart(encodePart(value)) === value
+  );
 }
 
 export function createVirtualSubagentSessionId(
