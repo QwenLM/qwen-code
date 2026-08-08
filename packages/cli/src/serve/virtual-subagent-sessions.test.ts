@@ -79,14 +79,29 @@ function activeTarget(sessions: VirtualSubagentSessions): {
 }
 
 describe('VirtualSubagentSessions', () => {
-  it('rejects id parts that the parser cannot accept', () => {
+  it('rejects invalid parent session ids and empty agent ids', () => {
     expect(() =>
       createVirtualSubagentSessionId('parent session', 'agent-1'),
     ).toThrow('valid id parts');
-    expect(() =>
-      createVirtualSubagentSessionId('parent-session', 'agent/1'),
-    ).toThrow('valid id parts');
+    expect(() => createVirtualSubagentSessionId('parent-session', '')).toThrow(
+      'valid id parts',
+    );
   });
+
+  it.each(['general-purpose-agent:8', 'general-purpose-agent/8'])(
+    'round-trips an existing agent id containing reserved characters: %s',
+    (agentId) => {
+      const sessionId = createVirtualSubagentSessionId(
+        'parent-session',
+        agentId,
+      );
+
+      expect(parseVirtualSubagentSessionId(sessionId)).toEqual({
+        parentSessionId: 'parent-session',
+        agentId,
+      });
+    },
+  );
 
   it('resolves an out-of-band fork by agent task id', async () => {
     const runtime = {
