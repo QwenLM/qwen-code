@@ -19,6 +19,12 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
+import {
+  emptyMobileComposerLayout,
+  expectEmptyMobileComposerAnchored,
+  expectEmptyMobileWelcomeChromeVisible,
+  gotoEmptyMobileWelcomeHarness,
+} from './utils/emptyMobileComposer';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 
@@ -35,6 +41,28 @@ test('renders the textarea backend instead of CodeMirror on touch devices', asyn
   await expect(
     page.locator('[data-web-shell-composer-typewriter]'),
   ).toHaveCount(0);
+});
+
+test('anchors the empty mobile composer with the textarea backend', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await expect(textarea).toBeVisible();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  const layout = await emptyMobileComposerLayout(page);
+  expectEmptyMobileComposerAnchored(layout);
+
+  await textarea.tap();
+  await textarea.fill('Composer remains interactive on touch devices');
+  await expect(textarea).toHaveValue(
+    'Composer remains interactive on touch devices',
+  );
 });
 
 test('keeps the composer usable after WebGL context loss', async ({

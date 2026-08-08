@@ -374,6 +374,8 @@ export type CompactionTriggerReason =
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
+  /** Whether newTokenCount ultimately came from a local estimate. */
+  newTokenCountIsEstimated?: boolean;
   compressionStatus: CompressionStatus;
   triggerReason?: CompactionTriggerReason;
   /** Set when the compaction model was swapped for the main model at runtime. */
