@@ -193,16 +193,14 @@ describe('Telemetry SDK', () => {
 
       expect(NodeSDK).toHaveBeenCalledTimes(1);
       expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
-      expect(emitSessionStart).not.toHaveBeenCalled();
+      // One shared init means one settle-time catch-up, even with concurrent
+      // callers.
+      expect(emitSessionStart).toHaveBeenCalledTimes(1);
+      expect(emitSessionStart).toHaveBeenCalledWith('test-session');
     });
 
-    it('emits the initial session start after deferred telemetry initialization', async () => {
-      const deferredConfig = {
-        ...mockConfig,
-        isTelemetryInitializationDeferred: () => true,
-      } as unknown as Config;
-
-      await initializeTelemetry(deferredConfig);
+    it('emits the initial session start after the SDK settles', async () => {
+      await initializeTelemetry(mockConfig);
 
       expect(emitSessionStart).toHaveBeenCalledWith('test-session');
       expect(

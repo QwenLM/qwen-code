@@ -391,6 +391,32 @@ describe('loggers', () => {
         },
       });
     });
+
+    it('does not emit or consume the session.start idempotency token while the SDK is uninitialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const mockConfig = makeFakeConfig({
+        sessionId: 'suppressed-session',
+      });
+
+      logStartSession(mockConfig, new StartSessionEvent(mockConfig));
+      logSessionEnd(mockConfig);
+
+      expect(mockLogger.emit).not.toHaveBeenCalled();
+
+      // The suppressed start must not consume the one-shot token: once the
+      // SDK settles, the settle-time catch-up still emits the record.
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(true);
+      logStartSession(mockConfig, new StartSessionEvent(mockConfig));
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session started.',
+        attributes: {
+          'event.name': EVENT_SESSION_START,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'suppressed-session',
+        },
+      });
+    });
   });
 
   describe('logUserPrompt', () => {

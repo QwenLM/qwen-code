@@ -89,9 +89,11 @@ export function initializeTelemetry(
       activeMetricReader = started.metricReader;
       const sessionId = config.getSessionId();
       setSessionContext(createSessionRootContext(sessionId), sessionId);
-      if (config.isTelemetryInitializationDeferred?.()) {
-        emitSessionStart(sessionId);
-      }
+      // Unconditional catch-up: in every init mode `logStartSession` can run
+      // before the SDK settles and get dropped by its initialization gate,
+      // while shutdown still emits `session.end`. The session-events guard
+      // dedupes the race-won case.
+      emitSessionStart(sessionId);
       setShellTracePropagation(
         config.getOutboundCorrelationPropagateTraceContext(),
       );

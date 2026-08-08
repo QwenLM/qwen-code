@@ -3800,7 +3800,8 @@ export class Config {
     // Resuming the session the user is already in keeps the same id. That is
     // not a lifecycle transition: ending it here would record session.end for
     // a live session and pair it with a duplicate session.start.
-    if (nextSessionId !== previousSessionId) {
+    const isSessionTransition = nextSessionId !== previousSessionId;
+    if (isSessionTransition) {
       logSessionEnd(this);
     }
     this.sessionId = nextSessionId;
@@ -3852,9 +3853,7 @@ export class Config {
       logStartSession(
         this,
         new StartSessionEvent(this),
-        sessionData && previousSessionId !== this.sessionId
-          ? previousSessionId
-          : undefined,
+        sessionData && isSessionTransition ? previousSessionId : undefined,
       );
     }
 
@@ -3871,7 +3870,7 @@ export class Config {
     // sidecar that happens to share the outgoing session id
     // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
-    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
+    if (this.runtimeStatusEnabled && isSessionTransition) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
       const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
       const cliVersion = this.cliVersion ?? null;

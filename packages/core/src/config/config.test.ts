@@ -2330,6 +2330,9 @@ describe('Server Config (config.ts)', () => {
         }
       ).chatRecordingService = recorder;
 
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
       expect(() => config.startNewSession('replacement-session')).toThrow(
         expect.objectContaining({
           name: 'SessionWriterUnavailableError',
@@ -2340,6 +2343,9 @@ describe('Server Config (config.ts)', () => {
       expect(config.getChatRecordingService()).toBe(recorder);
       expect(finalize).not.toHaveBeenCalled();
       expect(flush).not.toHaveBeenCalled();
+      // A rejected switch must leave the live session's lifecycle untouched.
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).not.toHaveBeenCalled();
     });
 
     const resumedGoalSession = (

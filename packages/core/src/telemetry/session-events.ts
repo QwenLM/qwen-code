@@ -12,9 +12,9 @@ import {
   SERVICE_NAME,
 } from './constants.js';
 
-// Deferred telemetry initialization and Config.initialize() can both observe
-// the same session in the interactive TUI. Keep session.start idempotent so
-// those two legitimate paths cannot duplicate the lifecycle record.
+// The SDK settle-time catch-up in initializeTelemetry and logStartSession can
+// both observe the same session in every init mode. Keep session.start
+// idempotent so those two legitimate paths cannot duplicate the record.
 let startedSessionId: string | undefined;
 
 export function emitSessionStart(
