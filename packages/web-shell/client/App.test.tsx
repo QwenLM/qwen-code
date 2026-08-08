@@ -2920,6 +2920,15 @@ describe('App plan todos', () => {
       container.querySelector('[data-testid="workflow-page"]')?.textContent,
     ).toContain('1,200 tokens');
 
+    const completedMessages = testState.messages;
+    testState.messages = [];
+    rerender();
+    await flush();
+    expect(container.querySelector('[data-testid="workflow-page"]')).toBeNull();
+    testState.messages = completedMessages;
+    rerender();
+    await flush();
+
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="open-cockpit"]')
@@ -2941,6 +2950,15 @@ describe('App plan todos', () => {
     ).not.toBeNull();
     expect(container.querySelector('[data-testid="open-chat"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="open-workflow"]')).toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-chat"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
   });
 
   it('keeps the tasks dialog plain when Session Workflow is off', async () => {

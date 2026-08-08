@@ -17,7 +17,7 @@ import styles from './ToolApproval.module.css';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
-  onConfirm: (id: string, selectedOption: string) => void;
+  onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
@@ -283,7 +283,12 @@ export function ToolApproval({
     (optionId: string) => {
       if (submittedRef.current) return;
       submittedRef.current = true;
-      onConfirm(requestRef.current.id, optionId);
+      const submission = onConfirm(requestRef.current.id, optionId);
+      if (submission) {
+        void submission.catch(() => {
+          submittedRef.current = false;
+        });
+      }
     },
     [onConfirm],
   );

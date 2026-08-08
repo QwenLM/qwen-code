@@ -553,6 +553,21 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
   });
 
+  it('re-enables confirmation when submission rejects', async () => {
+    onConfirm
+      .mockRejectedValueOnce(new Error('submit failed'))
+      .mockResolvedValueOnce(undefined);
+    render(undefined);
+
+    act(() => optionButtons()[1]!.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[1]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
   it('does not re-arm the submit guard when the same request changes options', () => {
     render(undefined, {
       id: 'same-id',

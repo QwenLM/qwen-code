@@ -29,12 +29,7 @@
 .cockpit button:focus-visible,
 .reviewShell button:focus-visible,
 .emptyCockpit button:focus-visible {
-  outline: 3px solid
-    color-mix(
-      in srgb,
-      var(--agent-blue-500) var(--cockpit-tint-strong),
-      transparent
-    );
+  outline: 3px solid var(--agent-blue-500);
   outline-offset: 2px;
 }
 

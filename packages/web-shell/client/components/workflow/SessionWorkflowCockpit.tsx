@@ -25,12 +25,12 @@ import styles from './SessionWorkflowCockpit.module.css';
 interface CockpitApproval {
   request: PermissionRequest;
   todos: readonly TodoItem[];
-  onConfirm: (id: string, selectedOption: string) => void;
+  onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
 }
 
 interface CockpitDecision {
   request: PermissionRequest;
-  onConfirm: (id: string, selectedOption: string) => void;
+  onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
 }
 
 interface SessionWorkflowCockpitProps {
@@ -212,14 +212,19 @@ function PlanReview({
     (total, todo) => total + (todo.blockedBy?.length ?? 0),
     0,
   );
-  const handleConfirm = (id: string, selectedOption: string) => {
-    approval.onConfirm(id, selectedOption);
+  const handleConfirm = (
+    id: string,
+    selectedOption: string,
+  ): void | Promise<void> => {
+    const submission = approval.onConfirm(id, selectedOption);
     const option = approval.request.options.find(
       (candidate) => candidate.id === selectedOption,
     );
     if (option?.kind === 'reject_once' || option?.kind === 'reject_always') {
+      if (submission) return submission.then(() => onBackToChat());
       onBackToChat();
     }
+    return submission;
   };
 
   return (

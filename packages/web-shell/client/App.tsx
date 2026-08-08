@@ -2424,6 +2424,15 @@ export function App({
   }, [connection.sessionId]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
+  const artifactPanelTriggerRef = useRef<HTMLElement | null>(null);
+  const rememberArtifactPanelTrigger = useCallback(() => {
+    if (
+      !artifactPanelOpenRef.current &&
+      document.activeElement instanceof HTMLElement
+    ) {
+      artifactPanelTriggerRef.current = document.activeElement;
+    }
+  }, []);
   const [activeArtifactPanelTabId, setActiveArtifactPanelTabId] = useState<
     string | null
   >(null);
@@ -2784,6 +2793,7 @@ export function App({
   const openArtifactPanel = useCallback(
     (artifactId: string, previewContent?: string) => {
       if (!artifactId) return;
+      rememberArtifactPanelTrigger();
       const artifact = artifactPanelArtifacts.find(
         (item) => item.id === artifactId,
       );
@@ -2818,6 +2828,7 @@ export function App({
       artifactWorkspaceTarget?.workspaceId,
       connection.workspaceCwd,
       getDefaultReviewPanelWidth,
+      rememberArtifactPanelTrigger,
     ],
   );
   const openReviewPanel = useCallback(
@@ -2976,6 +2987,7 @@ export function App({
   );
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
+      rememberArtifactPanelTrigger();
       const rawOutput =
         tool.rawOutput && typeof tool.rawOutput === 'object'
           ? (tool.rawOutput as Record<string, unknown>)
@@ -3007,7 +3019,7 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
   );
   const openSubagentPanel = useCallback(
     (tool: ACPToolCall) => {
@@ -3698,6 +3710,10 @@ export function App({
   const [mainView, setMainView] = useState<MainView>('chat');
   const mainViewRef = useRef(mainView);
   const workflowTabRef = useRef<HTMLButtonElement>(null);
+  const showChat = useCallback(() => {
+    if (cockpitViewRequested()) updateCockpitLocation(false);
+    setMainView('chat');
+  }, []);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split' || mainView === 'cockpit';
   // Sessions to seed the split view with (e.g. the selection from the overview).
@@ -3754,10 +3770,10 @@ export function App({
         | 'agents'
         | 'channels',
     ) => {
-      setMainView('chat');
+      showChat();
       setActivePanel(panel);
     },
-    [],
+    [showChat],
   );
   const loadMcpManagerMessage = useCallback(async () => {
     const status = await workspaceActions.loadMcpStatus();
@@ -3781,10 +3797,10 @@ export function App({
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
     setActivePanel(null);
-    setMainView('chat');
+    showChat();
     setForceMobileDrawer(true);
     setMobileDrawerOpen(true);
-  }, [sidebarOptions.enabled]);
+  }, [showChat, sidebarOptions.enabled]);
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
   // onPanesChange — so it must be preserved across entries, not blindly reset.
@@ -6149,7 +6165,7 @@ export function App({
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
-      if (!opts?.keepView) setMainView('chat');
+      if (!opts?.keepView) showChat();
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
@@ -6182,6 +6198,7 @@ export function App({
       reloadLoadedSkills,
       scheduleComposerFocus,
       sessionActions,
+      showChat,
     ],
   );
   /**
@@ -6622,14 +6639,14 @@ export function App({
   // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
     (sessionId: string, workspaceCwd?: string) => {
-      setMainView('chat');
+      showChat();
       void loadSidebarSession(sessionId, workspaceCwd).catch(
         (error: unknown) => {
           reportError(error, 'Failed to open session');
         },
       );
     },
-    [loadSidebarSession, reportError],
+    [loadSidebarSession, reportError, showChat],
   );
 
   // Listen for `qwen:open-session` events dispatched by the markdown renderer
@@ -6765,7 +6782,7 @@ export function App({
   }, [enqueueManualRun]);
   const runTaskManually = useCallback(
     (prompt: string, sessionId: string | null): Promise<void> => {
-      setMainView('chat');
+      showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
         return enqueueManualRun(prompt);
@@ -6805,6 +6822,7 @@ export function App({
       enqueueManualRun,
       loadSidebarSession,
       clearPendingBoundRun,
+      showChat,
       tryFireBoundRun,
     ],
   );
@@ -6845,16 +6863,27 @@ export function App({
     setTasksDialogMessage(null);
     setMainView('cockpit');
   }, [requireActiveSessionForLocalCommand, sessionWorkflowEnabled]);
-  const closeCockpit = useCallback(() => {
-    if (cockpitViewRequested()) updateCockpitLocation(false);
-    setMainView('chat');
-  }, []);
+  const closeCockpit = showChat;
   const workflowApprovalRequest =
     sessionWorkflowEnabled &&
     isExitPlanApprovalRequest(pendingToolApproval) &&
     approvalPlanTodos.length > 0
       ? pendingToolApproval
       : null;
+  useEffect(() => {
+    if (
+      mainView === 'workflow' &&
+      !workflowApprovalRequest &&
+      sessionWorkflowTodos.length === 0
+    ) {
+      showChat();
+    }
+  }, [
+    mainView,
+    sessionWorkflowTodos.length,
+    showChat,
+    workflowApprovalRequest,
+  ]);
   const autoOpenedCockpitApprovalRef = useRef<string | null>(null);
   useEffect(() => {
     if (!workflowApprovalRequest) {
@@ -8142,10 +8171,12 @@ export function App({
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
-      sessionActions
+      return sessionActions
         .submitPermission(id, selectedOption, answers)
+        .then(() => undefined)
         .catch((error: unknown) => {
           reportError(error, 'Failed to submit permission choice');
+          throw error;
         });
     },
     [sessionActions, reportError],
@@ -9396,7 +9427,7 @@ export function App({
                   }}
                   onNewSession={(workspaceCwd) => createNewSession(workspaceCwd)}
                   onLoadSession={(sessionId, workspaceCwd) => {
-                    setMainView('chat');
+                    showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onOpenSessionWorkflow={
@@ -9414,7 +9445,7 @@ export function App({
                   }
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
-                    setMainView('chat');
+                    showChat();
                     closePanel();
                   }}
                   onError={reportError}
@@ -9840,7 +9871,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
+                      onClick={showChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -9900,7 +9931,7 @@ export function App({
                       onOpenSession={(sessionId) => {
                         // The task's bound session IS its run history — switch
                         // to the chat view and load that session's transcript.
-                        setMainView('chat');
+                        showChat();
                         loadSidebarSession(sessionId).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
@@ -9918,7 +9949,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
+                      onClick={showChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -9999,11 +10030,11 @@ export function App({
                           throw error;
                         }
                         strandedGoalSessionRef.current = undefined;
-                        setMainView('chat');
+                        showChat();
                       }}
                       onOpenSession={(sessionId) => {
                         // The goal's session transcript IS its history.
-                        setMainView('chat');
+                        showChat();
                         loadSidebarSession(sessionId).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
@@ -10093,7 +10124,7 @@ export function App({
                       data-testid="split-approval-notice"
                     >
                       <span>{t('splitView.outerApprovalPending')}</span>
-                      <button type="button" onClick={() => setMainView('chat')}>
+                      <button type="button" onClick={showChat}>
                         {t('splitView.goToApproval')}
                       </button>
                     </div>
@@ -10782,13 +10813,23 @@ export function App({
             {artifactPanelOpen && useFloatingArtifactPanel ? (
               <Drawer
                 open
+                autoFocus
                 direction="right"
                 shouldScaleBackground={false}
                 onOpenChange={(open) => {
                   if (!open) closeArtifactPanel();
                 }}
               >
-                <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]">
+                <DrawerContent
+                  className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]"
+                  onCloseAutoFocus={(event) => {
+                    const trigger = artifactPanelTriggerRef.current;
+                    artifactPanelTriggerRef.current = null;
+                    if (!trigger?.isConnected) return;
+                    event.preventDefault();
+                    trigger.focus();
+                  }}
+                >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <ArtifactPanel
                     artifacts={artifactPanelArtifacts}
