@@ -341,6 +341,46 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
+  it('clears stale artifacts BEFORE the sentinel unlink can refuse', async () => {
+    // The sentinel unlink is the one clear that may THROW (a directory
+    // there gives EISDIR, which `force` does not suppress) and its throw
+    // refuses. Ordered first, it stranded the previous run's artifacts —
+    // manifest claiming "evidence":"png" — beside the refusal JSON, the
+    // wrong-evidence outcome the clear-first contract exists to prevent.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-sentinelorder-'));
+    try {
+      writeFileSync(join(dir, 'cap.ans'), 'old run');
+      writeFileSync(join(dir, 'cap.png'), 'old run');
+      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      mkdirSync(join(dir, 'cap.holder-ready'));
+      writeFileSync(join(dir, 'cap.holder-ready', 'user-file'), 'not ours');
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('not writable');
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      // Fail-closed preserved: the user's directory is still theirs.
+      expect(statSync(join(dir, 'cap.holder-ready')).isDirectory()).toBe(true);
+      expect(existsSync(join(dir, 'cap.holder-ready', 'user-file'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('clears stale artifacts even when a SHAPE guard refuses', async () => {
     // The measured R4-1 regression: an array-shaped --command refused at
     // the shape guard BEFORE the clear, leaving a stale evidence:"png"
@@ -436,14 +476,18 @@ describe('capture-tui without tmux (probe seam)', () => {
     },
   );
 
-  it('clears a DIRECTORY squatting at an artifact path — the EISDIR fallback', async () => {
-    // Plain unlink throws EISDIR on a directory; without the recursive
-    // fallback the clear aborted mid-way and the refusal misdiagnosed as
-    // '--out is not writable: … EISDIR' with the stale manifest surviving.
+  it('SKIPS a directory squatting at an artifact path and clears the rest', async () => {
+    // A capture writes files, so a DIRECTORY at an artifact path is someone
+    // else's — the recursive EISDIR fallback deleted it and its contents on
+    // every re-run against the same --out (a stale shaped manifest is the
+    // normal state from the second run on). The directory survives; the
+    // unlink's throw must not abort the clear of the OTHER paths either.
     probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-eisdir-'));
     try {
       mkdirSync(join(dir, 'cap.ans'));
+      writeFileSync(join(dir, 'cap.ans', 'user-file'), 'not ours');
+      writeFileSync(join(dir, 'cap.png'), 'stale png');
       writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
       const { stderr } = await withStdio(() =>
         runCaptureTui({
@@ -460,7 +504,10 @@ describe('capture-tui without tmux (probe seam)', () => {
       );
       expect(process.exitCode).toBe(3);
       expect(stderr).toContain('not a valid regex');
-      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(statSync(join(dir, 'cap.ans')).isDirectory()).toBe(true);
+      expect(existsSync(join(dir, 'cap.ans', 'user-file'))).toBe(true);
+      // The throw on the directory does not strand the other stale evidence.
+      expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -564,16 +611,16 @@ describe('capture-tui without tmux (probe seam)', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'clears stale artifacts even when the WRITE PROBE itself fails',
+    'keeps unverifiable artifacts when the WRITE PROBE itself fails',
     async () => {
-      // The clear must precede the probe too, not just the later gates: a
-      // probe refusal (EMFILE at openSync — measured) that ran first would
-      // leave the previous run's manifest claiming "evidence":"png" next to
-      // this run's refusal JSON — the exact wrong-evidence outcome the
-      // production comment names. Real fd exhaustion drives the EMFILE:
-      // vi.spyOn on node:fs does not reach this module's named imports.
-      // (win32 skipped: its handle limit is high enough to exhaust the
-      // loop's budget before the process's.)
+      // Fd exhaustion means the manifest CANNOT be read, so the capture
+      // signature cannot be verified — and unverified is not permission to
+      // delete: the artifact names are not reserved, so what sits there may
+      // be the user's. This run refuses; the files stay. (The sentinel is
+      // this tool's alone and clears unconditionally.) Real fd exhaustion
+      // drives the EMFILE: vi.spyOn on node:fs does not reach this module's
+      // named imports. (win32 skipped: its handle limit is high enough to
+      // exhaust the loop's budget before the process's.)
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-staleprobe-'));
       const fds: number[] = [];
       try {
@@ -605,9 +652,11 @@ describe('capture-tui without tmux (probe seam)', () => {
         );
         expect(process.exitCode).toBe(3);
         expect(stderr).toContain('not writable');
-        expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
-        expect(existsSync(join(dir, 'cap.png'))).toBe(false);
-        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+        expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+        expect(existsSync(join(dir, 'cap.png'))).toBe(true);
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        // The sentinel is plumbing this tool alone writes — cleared even
+        // here, by design, outside the signature guard.
         expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
       } finally {
         for (const fd of fds) {
@@ -1095,6 +1144,58 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+  });
+
+  it('keeps the exit contract when the reap WARNING cannot be written', async () => {
+    // reap() runs from the finally and from onSignal; a throwing stderr
+    // write there turned an exit-3 refusal into an exit-1 stack trace (and
+    // an uncaughtException out of the signal handler, killing the re-raise).
+    // The write is incidental — its reader going away must not decide the
+    // command's disposition.
+    const binDir = join(dir, 'fakebin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, 'tmux'),
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    // NOT withStdio: it installs its own stderr spy, which would replace a
+    // throwing one — the sinks are wired by hand so the WARNING write is
+    // the one that fails.
+    const sinks = { stdout: '', stderr: '' };
+    const realPath = process.env['PATH'];
+    process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+    const outSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        sinks.stdout += String(chunk);
+        return true;
+      }) as never);
+    const errSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        const text = String(chunk);
+        if (text.includes('WARNING')) {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        }
+        sinks.stderr += text;
+        return true;
+      }) as never);
+    try {
+      await run({ until: undefined, settleMs: 0 });
+    } finally {
+      outSpy.mockRestore();
+      errSpy.mockRestore();
+      if (realPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = realPath;
+    }
+    const stdout = sinks.stdout;
+    // The capture still completed: no stack trace, no exit-1 disposition.
+    expect(process.exitCode).toBeUndefined();
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+    expect(JSON.parse(stdout.trim().split('\n').at(-1) ?? '')).toMatchObject({
+      captured: true,
+    });
   });
 
   it('WARNS when kill-server fails twice — never an unqualified success', async () => {
@@ -1721,6 +1822,19 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.degradedBecause).toContain('signal');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+  });
+
+  it('never deletes a png the clear phase PROTECTED when the render fails', async () => {
+    // shaped=false (no capture manifest) deliberately leaves whatever sits
+    // at <out>.png alone as possibly the user's. The torn-png cleanup then
+    // deleted it on a SUCCEEDING run whose freeze never opened its output
+    // (EMFILE, a belt kill) — silent data loss recorded as plain ans-only.
+    writeFileSync(join(dir, 'cap.png'), 'the user file');
+    await withFakeFreeze('#!/bin/sh\nexit 9\n', () => run());
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('the user file');
   });
 
   it('never manifests a png rung on exit code alone — the file must exist', async () => {

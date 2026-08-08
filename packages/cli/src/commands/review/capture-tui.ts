@@ -47,7 +47,11 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createContext, runInContext, type Context } from 'node:vm';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   DEFAULT_COLS,
   DEFAULT_ROWS,
@@ -264,6 +268,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
   const holderReadyPath = `${outBase}.holder-ready`;
+  // Files this run found ALREADY at the artifact paths after the clear
+  // phase — see the snapshot below. Defaults to "pre-existing" so a refusal
+  // taken before the snapshot can never authorize a delete.
+  let preExisting = { ans: true, png: true, manifest: true };
   try {
     // Clears FIRST — before even mkdir and before the directory-shaped
     // --out refusal below: under fd exhaustion (EMFILE, measured on macOS)
@@ -280,19 +288,24 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // SIGKILL'd run would pass the ready gate before the new holder
     // installs its trap.
     const clearArtifact = (path: string): void => {
-      // Plain unlink first (no descriptor needed — survives EMFILE), the
-      // recursive form only as the EISDIR fallback for an externally-
-      // created DIRECTORY at an artifact path (measured: plain rmSync
-      // threw EISDIR mid-clear, aborting with the stale evidence still
-      // there; recursive rm opens the dir, which needs a descriptor and
-      // would itself die under fd exhaustion).
+      // Plain unlink only — no descriptor needed, so it survives EMFILE —
+      // and a throw is SWALLOWED rather than escalated to a recursive rm.
+      // A capture writes files; a DIRECTORY at an artifact path was made by
+      // someone else, and the recursive fallback destroyed it and its
+      // contents on every re-run against the documented same-`--out` usage
+      // (a stale shaped manifest is the normal state from the second run
+      // on — no fd exhaustion needed). Skipping it keeps the clear going
+      // for the other paths; a directory still standing where this run must
+      // write turns into the write-failure refusal downstream, which is the
+      // fail-closed outcome.
       try {
         rmSync(path, { force: true });
       } catch {
-        rmSync(path, { recursive: true, force: true });
+        // Not ours to delete (EISDIR), or unlinkable for a reason the
+        // write probe below will name.
       }
     };
-    let shaped: boolean | undefined;
+    let shaped = false;
     try {
       const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         evidence?: unknown;
@@ -301,25 +314,44 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         m !== null &&
         typeof m === 'object' &&
         (m.evidence === 'png' || m.evidence === 'ans-only');
-    } catch (e) {
-      // No descriptor to decide with (EMFILE/ENFILE): fall back to the
-      // unconditional clear rather than strand stale evidence — the unlink
-      // above needs no descriptor, and a process that cannot read is
-      // refusing anyway.
-      const code = (e as NodeJS.ErrnoException).code;
-      shaped = code === 'EMFILE' || code === 'ENFILE' ? undefined : false;
+    } catch {
+      // ANY read failure means the capture signature could not be verified —
+      // including fd exhaustion (EMFILE/ENFILE), which is transient under
+      // the concurrent captures the briefs encourage. Unverified is NOT
+      // permission to delete: clearing here deleted unrelated user files at
+      // the artifact names on a run that then refused (measured), against
+      // this block's own invariant. Stale evidence left beside a refusal is
+      // the lesser harm — the refusal names itself, a deleted file does not.
+      shaped = false;
     }
-    // The sentinel clears as a PLAIN file — never recursively: this tool
-    // only ever writes it as a file, so a DIRECTORY at that path is a
-    // user's, and recursive removal would destroy it on every run
-    // (measured: a seeded content-bearing directory at <out>.holder-ready
-    // was deleted even by fully successful runs).
-    rmSync(holderReadyPath, { force: true });
-    if (shaped !== false) {
+    if (shaped) {
       clearArtifact(ansPath);
       clearArtifact(pngPath);
       clearArtifact(manifestPath);
     }
+    // AFTER the clears, never before: this unlink is the one that may throw
+    // (a DIRECTORY at the sentinel path gives EISDIR, which `force` does not
+    // suppress) and its throw refuses. Run first, it stranded the previous
+    // run's artifacts beside the refusal (measured) — the exact wrong-
+    // evidence outcome the clear-first contract exists to prevent. The
+    // sentinel itself clears UNCONDITIONALLY and as a PLAIN file: this tool
+    // alone writes it, a stale one from a SIGKILL'd run would pass the ready
+    // gate before the new holder installs its trap, and a directory there is
+    // a user's — recursive removal would destroy it on every run (measured:
+    // a seeded content-bearing directory deleted even by successful runs).
+    rmSync(holderReadyPath, { force: true });
+    // What still sits at an artifact path now is something this run did not
+    // write and did not clear (an unverifiable manifest, an unrelated file,
+    // a directory). The failure-cleanup sites below consult this snapshot:
+    // they may remove only what this run itself put there. Without it a
+    // successful run deleted a user's untouched .png whose render never
+    // started, and a refusing run deleted a .ans it never wrote (both
+    // measured).
+    preExisting = {
+      ans: existsSync(ansPath),
+      png: existsSync(pngPath),
+      manifest: existsSync(manifestPath),
+    };
     mkdirSync(dirname(outBase), { recursive: true });
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
@@ -571,7 +603,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // A presumed-alive private server is never a silent outcome: the
       // holder keeps it up for up to three hours, and the briefs encourage many
       // captures per review — orphans would accumulate invisibly.
-      writeStderrLine(
+      // SAFE, like refuse()'s writes: process.stderr.write throws
+      // synchronously on a closed fd, and reap() runs BOTH from the finally
+      // (where a throw turns the exit-3 refusal into an exit-1 stack trace
+      // and skips the sentinel cleanup below it) and from onSignal (where it
+      // becomes an uncaughtException — exit 1 instead of 128+sig, the
+      // re-raise never reached, and this very warning lost).
+      writeStderrLineSafe(
         `capture-tui: WARNING — kill-server failed twice; the private tmux ` +
           `server ${server} may still be running (tmux -L ${server} kill-server to reap it by hand).`,
       );
@@ -607,15 +645,24 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // and removing the listeners before that pipe is read swallows it — the
   // process then exits 0 as if nothing happened (measured on the bundled
   // runtime: SIGTERM during a fake render → exit 0, handler never ran).
-  // setImmediate, NOT a 0ms timer: signals dispatch in the poll phase, and
-  // the check phase (setImmediate) is the only one that runs AFTER poll in
-  // the same iteration. A timer runs in the timers phase BEFORE poll — when
-  // ≥1ms elapses between its creation and the next iteration (a loaded
-  // runner), it fires first and releases the listeners with the signal still
-  // in the pipe (measured: 12–16% of SIGTERMs during a blocked sync section
-  // swallowed with sleep(0), 0% with setImmediate).
+  // TWO turns, and neither may be a 0ms timer. libuv delivers signals by
+  // writing to a pipe the POLL phase reads; the JS handler runs from there.
+  // A timer resolves in the timers phase, which precedes poll — it can
+  // release with the byte unread. setImmediate resolves in the check phase,
+  // which follows poll WITHIN THE SAME ITERATION: scheduled from a
+  // poll-phase continuation (where this tail resumes after the render's
+  // blocking spawnSync) its poll has ALREADY run, so one turn releases with
+  // the byte still queued and the signal is dropped when uv_signal_stop
+  // takes the watcher away. A second turn cannot land before the next
+  // iteration's poll, so a full poll phase — the one that dispatches the
+  // handler, which reaps and re-raises — always runs first. Measured on
+  // Linux/Node 22 through the real command: one turn swallowed the SIGTERM
+  // every time (exit 0, success JSON, handler never entered, kernel showing
+  // the signal delivered and no longer pending); two turns died 143.
   const drainSignalsThenRelease = async (): Promise<void> => {
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let turn = 0; turn < 2; turn++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
     releaseSignals();
   };
   function onSignal(sig: NodeJS.Signals): void {
@@ -771,8 +818,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // persist undescribed.
     try {
       // Plain, never recursive: this run wrote a FILE (or nothing); a
-      // directory at the path is not ours to delete.
-      rmSync(ansPath, { force: true });
+      // directory at the path is not ours to delete. And only when nothing
+      // was there after the clear: a write that failed (EISDIR, EACCES,
+      // EROFS) may not have touched the file at all, so a .ans the
+      // signature check deliberately protected must survive the refusal.
+      if (!preExisting.ans) rmSync(ansPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
@@ -877,9 +927,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       );
       // A failed render can leave a partial/0-byte png at the very path the
       // manifest is about to deny — remove it (measured: a fake freeze that
-      // wrote bytes then exited 9 left a torn png behind).
+      // wrote bytes then exited 9 left a torn png behind). Only when the
+      // clear phase left nothing there: freeze can fail without its spawn
+      // ever opening the output (EMFILE, a belt kill), and this SUCCEEDING
+      // run then silently deleted a user's untouched png and reported
+      // ans-only (measured).
       try {
-        rmSync(pngPath, { force: true });
+        if (!preExisting.png) rmSync(pngPath, { force: true });
       } catch {
         // The degradation entry above is the primary signal.
       }
@@ -925,12 +979,18 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // (and possibly a png) with no manifest to describe them — best-effort
     // remove what this run already wrote before refusing.
     try {
-      // Plain, never recursive — same rationale as the .ans catch above.
+      // Plain, never recursive — same rationale as the .ans catch above —
+      // and each path only if this run put it there. Reaching here, the
+      // .ans write SUCCEEDED, so a protected .ans has already been
+      // overwritten by this run and is ours to remove; the png is ours only
+      // when this run's render produced one, and the manifest only when the
+      // clear left the path empty (a failed write can leave the previous
+      // file untouched).
       rmSync(ansPath, { force: true });
-      rmSync(pngPath, { force: true });
+      if (png !== null) rmSync(pngPath, { force: true });
       // The failed write itself can leave a PARTIAL manifest at the path —
       // worse than none: it parses or half-parses as evidence description.
-      rmSync(manifestPath, { force: true });
+      if (!preExisting.manifest) rmSync(manifestPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }

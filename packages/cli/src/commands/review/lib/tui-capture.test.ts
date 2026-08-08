@@ -155,6 +155,31 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(plan.sendKeys('-l')[plan.sendKeys('-l').length - 1]).toBe('-l');
   });
 
+  it('escapes a TRAILING `;` on the user-derived key and cwd elements', () => {
+    // tmux's client splits any argv element ending in `;` into a separate
+    // command before dispatch — `--` ends option parsing but never reaches
+    // that splitter. Measured on tmux 3.3a: `send-keys -- 'x;'` typed only
+    // `x` (exit 0, no warning), and `-c '/tmp/foo;'` turned the cwd element
+    // into a command boundary and failed with a misleading socket error;
+    // `\;` round-trips (pane_current_path came back `/tmp/foo;`).
+    expect(plan.sendKeys('x;').at(-1)).toBe('x\\;');
+    expect(plan.sendKeys(';').at(-1)).toBe('\\;');
+    // Mid-string is literal to tmux already, and an ALREADY-escaped token
+    // stays exactly as the caller wrote it — no double-escaping.
+    expect(plan.sendKeys('a;b').at(-1)).toBe('a;b');
+    expect(plan.sendKeys('q\\;').at(-1)).toBe('q\\;');
+    const withCwd = tmuxPlan({
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: 'node cli.js',
+      cwd: '/tmp/foo;',
+      readyFile: '/tmp/out.holder-ready',
+    });
+    expect(withCwd.start[withCwd.start.indexOf('-c') + 1]).toBe('/tmp/foo\\;');
+  });
+
   it('starts the command behind `--` so a dash-leading command is not getopt fodder', () => {
     const i = plan.start.indexOf('--');
     expect(i).toBeGreaterThan(-1);

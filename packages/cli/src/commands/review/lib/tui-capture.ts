@@ -177,6 +177,19 @@ export function tmuxPlan(opts: {
   // every layer, so no shell parses its text adjacent to the hold
   // (probe-verified with odd-run shapes on this exact plan).
   const inner = `sh -c '${esc(opts.command)}'`;
+  // tmux's CLIENT splits any argv element ending in `;` into a separate
+  // command before dispatch (cmd_parse_from_arguments, unchanged since 3.1 —
+  // the lowest version this command's gate admits); `--` ends option parsing
+  // but does NOT reach the command splitter. Both user-derived elements need
+  // it, measured on 3.3a: `--keys 'x;'` typed only `x` — exit 0, no warning,
+  // silent corruption of the very evidence this command guarantees — and a
+  // `--cwd '/tmp/foo;'` (a legal POSIX dirname that passes the usability
+  // gate) made the `-c` element a command boundary, failing with a
+  // misleading socket error. `\;` is tmux's escape and round-trips (verified:
+  // pane_current_path came back `/tmp/foo;`); a mid-string `;` is literal
+  // already, and one that is ALREADY escaped stays as the caller wrote it.
+  const escapeTrailingSemicolon = (s: string): string =>
+    /(^|[^\\]);$/.test(s) ? `${s.slice(0, -1)}\\;` : s;
   // readyFile is user-derived (--out) and re-parsed by the holder shell —
   // it gets its own esc() (an apostrophe in --out broke the quoting and
   // burned the full sentinel deadline, measured). And the hold is a LOOP,
@@ -226,7 +239,7 @@ export function tmuxPlan(opts: {
       '-y',
       String(opts.rows),
       '-c',
-      opts.cwd,
+      escapeTrailingSemicolon(opts.cwd),
       // `--` ends option parsing: a command that happens to start with `-`
       // must reach the shell, not tmux's getopt (measured: without it,
       // send-keys silently ate `-l` as its literal flag — exit 0, nothing
@@ -262,7 +275,7 @@ export function tmuxPlan(opts: {
       '-t',
       opts.session,
       '--',
-      key,
+      escapeTrailingSemicolon(key),
     ],
   };
 }
