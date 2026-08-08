@@ -594,11 +594,7 @@ Treat these rules as mandatory in investigations, troubleshooting, reviews, and 
 
 **2. Choose the right scope**
 
-| File                      | Use when                                                   |
-| ------------------------- | ---------------------------------------------------------- |
-| `QWEN.md` in project root | The policy applies to the whole team (commit it)           |
-| `~/.qwen/QWEN.md`         | The policy applies to you personally, across all projects  |
-| `.qwen/QWEN.local.md`     | The policy is personal to you and specific to this project |
+See [Where to create QWEN.md](./features/memory.md#where-to-create-qwenmd) for which file applies to whom — commit the project-root `QWEN.md` copy so the policy covers the whole team.
 
 > [!tip]
 >
