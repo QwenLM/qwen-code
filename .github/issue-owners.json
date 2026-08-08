@@ -13,7 +13,16 @@
     {
       "name": "core",
       "labels": ["category/core", "scope/core"],
-      "owners": ["wenshao", "tanzhenxin", "yiliang114", "LaZzyMan", "doudouOUC"]
+      "owners": [
+        "wenshao",
+        "tanzhenxin",
+        "yiliang114",
+        "LaZzyMan",
+        "doudouOUC",
+        "pomelo-nwu",
+        "DennisYu07",
+        "jifeng"
+      ]
     }
   ]
 }
