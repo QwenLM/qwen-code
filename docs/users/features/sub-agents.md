@@ -29,24 +29,57 @@ Tool responses and pure system reminders do not count as user turns. Regular nam
 
 Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but its task prompt identifies the restriction and a call not matched by `fork_tools` is rejected before scheduling or approval.
 
-- Omitting `fork_tools` preserves unrestricted fork execution.
+- Forks never execute `ask_user_question`; when user input is required, they report the blocker to their parent agent.
+- Omitting `fork_tools` allows every other inherited tool.
 - An empty array rejects every tool call.
-- `*` is not accepted; omit `fork_tools` when unrestricted execution is intended.
+- `*` is not accepted; omit `fork_tools` to allow every otherwise-executable inherited tool.
 - Tool names cannot have surrounding whitespace. Wildcards are accepted only as `mcp__*` or as a trailing MCP tool-prefix pattern such as `mcp__github__read_*`.
 - `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.
 - Shell command argument patterns are not supported. Listing `run_shell_command` allows that tool to proceed through its normal permission checks but does not pre-approve any command.
 
 This is a per-invocation restriction supplied by the caller. It narrows a child fork's capabilities but is not an administrator-enforced security sandbox because the caller can omit or expand the list.
 
+## Reusing Fork Restrictions with `fork_profile`
+
+A project can save a named fork restriction in `.qwen/fork-profiles/<name>.md` and select it with `fork_profile`. This is useful when several calls need the same tool boundary and task guidance:
+
+```markdown
+---
+name: ro-research
+tools:
+  - read_file
+  - grep_search
+  - glob
+  - mcp__search__*
+promptHint: |
+  Work read-only. Prefer targeted searches and cite file evidence.
+---
+```
+
+Then launch the fork with:
+
+```text
+agent(description="Research", prompt="Inspect the retry path", subagent_type="fork", fork_profile="ro-research")
+```
+
+- `fork_profile` is valid only for a fork and cannot be combined with `fork_tools` or a named teammate.
+- Profiles are currently project-only. The requested name, filename, and frontmatter `name` must match exactly. The profile must resolve to a regular file inside `.qwen/fork-profiles/` and cannot exceed 64 KiB.
+- `tools` is required and follows the `fork_tools` rules, including empty-array deny-all behavior.
+- `promptHint` is optional and limited to 200 characters. It is escaped and framed as project-supplied guidance after the fork directive and before the authoritative tool restriction; it does not change the inherited system instruction or model-visible tool declarations. Profile files are frontmatter-only, so non-blank Markdown after the closing `---` is rejected instead of silently ignored.
+- The profile is resolved once at launch. A retained fork continues with the resolved tool snapshot even if the project file later changes.
+- Project fork profiles are unavailable in safe mode and bare mode, which disable local customizations.
+
+Like `fork_tools`, a fork profile is a caller-selected restriction rather than an administrator sandbox. Its optional prompt guidance is project-controlled content.
+
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                                                 | Fork Subagent                                                                                                       |
-| ------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                             |
-| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                               |
-| Tools         | Configured declaration set                                     | Keeps the parent-derived declaration set; `fork_tools` can independently narrow execution without changing that set |
-| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                       |
-| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                        |
+|               | Named Subagent                                                 | Fork Subagent                                                                                                                                                                                        |
+| ------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                              |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                |
+| Tools         | Configured declaration set without interactive question tools  | Keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` can independently narrow it without changing that declaration |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                                                                                        |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                                                                                         |
 
 ### When Fork is Used
 

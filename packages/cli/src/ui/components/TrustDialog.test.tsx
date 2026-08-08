@@ -93,7 +93,7 @@ describe('TrustDialog', () => {
 
     await waitFor(() => {
       expect(lastFrame()).toContain(
-        'Note: This folder behaves as a trusted folder because one of the parent folders is trusted.',
+        'currently inherits trust from a parent folder',
       );
     });
   });

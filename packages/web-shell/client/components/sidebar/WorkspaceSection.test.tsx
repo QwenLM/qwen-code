@@ -11,9 +11,39 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import gitStyles from '../ChatEditor.module.css';
 
-const { workspaceGit } = vi.hoisted(() => ({
-  workspaceGit: vi.fn(),
-}));
+const {
+  workspaceGit,
+  workspaceGitBranches,
+  workspaceGitCheckout,
+  pickerWorkspaceClient,
+} = vi.hoisted(() => {
+  const workspaceGit = vi.fn();
+  const workspaceGitBranches = vi.fn();
+  const workspaceGitCheckout = vi.fn();
+  // A stable client so the popover's memoized workspace handle (and thus its
+  // fetch effect) stays referentially stable across renders.
+  const pickerWorkspaceClient = {
+    workspaceByCwd: () => ({
+      workspaceGit,
+      workspaceGitBranches,
+      workspaceGitCheckout,
+      workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+      workspaceGitPush: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
+      workspaceGitPull: vi
+        .fn()
+        .mockResolvedValue({ success: true, output: '' }),
+      listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+    }),
+  };
+  return {
+    workspaceGit,
+    workspaceGitBranches,
+    workspaceGitCheckout,
+    pickerWorkspaceClient,
+  };
+});
 
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
 vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
@@ -22,50 +52,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
   return {
     ...actual,
     useWorkspace: () => ({
-      client: {
-        workspaceGitBranches: vi.fn().mockResolvedValue({
-          v: 1,
-          workspaceCwd: '/tmp/project',
-          available: true,
-          local: [],
-          remote: [],
-          tags: [],
-          recent: [],
-          head: 'main',
-          detached: false,
-        }),
-        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
-        workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
-        workspaceGitPush: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-        workspaceGitPull: vi
-          .fn()
-          .mockResolvedValue({ success: true, output: '' }),
-        workspaceByCwd: () => ({
-          workspaceGit,
-          workspaceGitBranches: vi.fn().mockResolvedValue({
-            v: 1,
-            workspaceCwd: '/tmp/project',
-            available: true,
-            local: [],
-            remote: [],
-            tags: [],
-            recent: [],
-            head: 'main',
-            detached: false,
-          }),
-          workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
-          workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
-          workspaceGitPush: vi
-            .fn()
-            .mockResolvedValue({ success: true, output: '' }),
-          workspaceGitPull: vi
-            .fn()
-            .mockResolvedValue({ success: true, output: '' }),
-          listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-        }),
-      },
+      client: pickerWorkspaceClient,
       capabilities: { features: [] },
     }),
   };
@@ -78,18 +65,8 @@ function makeClient(): DaemonClient {
   return {
     workspaceByCwd: vi.fn(() => ({
       workspaceGit,
-      workspaceGitBranches: vi.fn().mockResolvedValue({
-        v: 1,
-        workspaceCwd: '/tmp/project',
-        available: true,
-        local: [],
-        remote: [],
-        tags: [],
-        recent: [],
-        head: 'main',
-        detached: false,
-      }),
-      workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+      workspaceGitBranches,
+      workspaceGitCheckout,
       workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
       workspaceGitPush: vi
         .fn()
@@ -189,6 +166,20 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   workspaceGit.mockReset();
+  workspaceGitBranches.mockReset();
+  workspaceGitBranches.mockResolvedValue({
+    v: 1,
+    workspaceCwd: '/tmp/project',
+    available: true,
+    local: [],
+    remote: [],
+    tags: [],
+    recent: [],
+    head: 'main',
+    detached: false,
+  });
+  workspaceGitCheckout.mockReset();
+  workspaceGitCheckout.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -274,6 +265,56 @@ describe('WorkspaceSection git chip', () => {
     // directly. The diff dialog is accessible via "View Changes" inside the
     // popover.
     expect(button?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('re-fetches git status right after a picker checkout instead of waiting for the poll', async () => {
+    // The sidebar chip only polls every 60s, so without the onBranchChanged
+    // wiring it would keep showing the old branch for up to a minute after a
+    // checkout made through the branch picker.
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'feat/demo',
+    });
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/project',
+      available: true,
+      local: [
+        { name: 'feat/demo', isHead: true },
+        { name: 'main', isHead: false },
+      ],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'feat/demo',
+      detached: false,
+    });
+    const client = makeClient();
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+
+    const chipButton = gitChip()?.closest('button');
+    expect(chipButton).not.toBeNull();
+    act(() => {
+      chipButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    // The picker content is portaled outside the section container.
+    const mainItem = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent === 'main',
+    );
+    expect(mainItem).toBeTruthy();
+    act(() => {
+      mainItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenCalledWith('main', undefined);
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {

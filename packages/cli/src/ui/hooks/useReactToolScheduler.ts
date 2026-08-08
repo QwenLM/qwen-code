@@ -38,6 +38,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { collectInlineImages } from '../utils/inline-image-parts.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
@@ -263,6 +264,7 @@ export function useReactToolScheduler(
                   resultDisplay: message,
                   error: toolError,
                   errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                  executionStatus: 'not_started',
                   contentLength: message.length,
                 },
               };
@@ -355,7 +357,11 @@ export function mapToDisplay(
       let description: string;
       let renderOutputAsMarkdown = false;
 
-      if (trackedCall.status === 'error') {
+      if (
+        trackedCall.status === 'error' ||
+        trackedCall.tool === undefined ||
+        trackedCall.invocation === undefined
+      ) {
         displayName =
           trackedCall.tool === undefined
             ? trackedCall.request.name
@@ -385,8 +391,15 @@ export function mapToDisplay(
             : undefined,
       };
 
+      const inlineImageCollection =
+        trackedCall.status === 'success' ||
+        trackedCall.status === 'error' ||
+        trackedCall.status === 'cancelled'
+          ? collectInlineImages(trackedCall.response.responseParts)
+          : null;
+
       switch (trackedCall.status) {
-        case 'success':
+        case 'success': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -410,9 +423,19 @@ export function mapToDisplay(
             detailedDisplay: isCollapsibleTool(displayName)
               ? getToolResponseDisplayText(trackedCall.response.responseParts)
               : undefined,
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
+              ? {
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
+        }
         case 'error':
+        case 'cancelled': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -424,22 +447,17 @@ export function mapToDisplay(
                   visionBridgeNotice: trackedCall.response.visionBridgeNotice,
                 }
               : {}),
-            confirmationDetails: undefined,
-          };
-        case 'cancelled':
-          return {
-            ...baseDisplayProperties,
-            status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: compactToolResultDisplayForHistory(
-              trackedCall.response.resultDisplay,
-            ),
-            ...(trackedCall.response.visionBridgeNotice !== undefined
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
               ? {
-                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
                 }
               : {}),
             confirmationDetails: undefined,
           };
+        }
         case 'awaiting_approval':
           return {
             ...baseDisplayProperties,

@@ -425,6 +425,13 @@ jobs:
         run: |-
           npm run build
           npm run bundle
+          # The review staleness check degrades to "could not check" without
+          # this stamp; fail here instead of shipping a release that silently
+          # lost it.
+          test -f dist/review-sources.sha256 || {
+            echo "::error::review source stamp missing — see the copy_bundle_assets warning above"
+            exit 1
+          }
           npm run prepare:package
 
       - name: 'Build Standalone Archives'
@@ -610,6 +617,28 @@ jobs:
             --title "Release ${RELEASE_TAG}" \
             --notes-file "${NOTES_FILE}" \
             ${PRERELEASE_FLAG}
+
+      - name: 'Trigger ECS runner qwen update'
+        # Stable releases only: nightly/preview must not move the fleet.
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' &&
+              needs.prepare.outputs.is_dry_run == 'false' &&
+              needs.prepare.outputs.npm_tag == 'latest' }}
+        # The packages are already published; a dispatch failure must not
+        # fail the release — report it and let maintainers re-run the update
+        # workflow manually instead.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: |-
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
+            --method POST \
+            -f 'event_type=npm-published' \
+            -f "client_payload[version]=${RELEASE_VERSION}" || {
+              echo "::error::npm-published dispatch failed; run the 'Update ECS Runner Qwen' workflow manually."
+              exit 1
+            }
 
   notify_failure:
     name: 'Notify Release Failure'

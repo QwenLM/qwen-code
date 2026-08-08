@@ -12,6 +12,7 @@ import { iconvEncode } from './iconvHelper.js';
 import {
   CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
+  detectLineEndingFromContent,
   readTextCursorWindowFromHandle,
   readTextRange,
   readTextRangeFromHandle,
@@ -300,34 +301,37 @@ describe('readTextRange', () => {
     }
   });
 
-  it('reads the pinned inode after the path is replaced underneath it', async () => {
-    const targetPath = await writeFile(
-      'original.log',
-      'safe-one\nsafe-two\nsafe-three\n',
-    );
-    const replacementPath = await writeFile(
-      'replacement.log',
-      'secret-one\nsecret-two\n',
-    );
-    const fileHandle = await fs.open(targetPath, 'r');
-    try {
-      const stats = await fileHandle.stat();
-      await fs.rename(replacementPath, targetPath);
+  it.skipIf(process.platform === 'win32')(
+    'reads the pinned inode after the path is replaced underneath it',
+    async () => {
+      const targetPath = await writeFile(
+        'original.log',
+        'safe-one\nsafe-two\nsafe-three\n',
+      );
+      const replacementPath = await writeFile(
+        'replacement.log',
+        'secret-one\nsecret-two\n',
+      );
+      const fileHandle = await fs.open(targetPath, 'r');
+      try {
+        const stats = await fileHandle.stat();
+        await fs.rename(replacementPath, targetPath);
 
-      const result = await readTextRangeFromHandle(fileHandle, {
-        offset: 0,
-        limit: 2,
-        fileSize: stats.size,
-        maxOutputBytes: 1_024,
-        maxScanBytes: Number.MAX_SAFE_INTEGER,
-      });
+        const result = await readTextRangeFromHandle(fileHandle, {
+          offset: 0,
+          limit: 2,
+          fileSize: stats.size,
+          maxOutputBytes: 1_024,
+          maxScanBytes: Number.MAX_SAFE_INTEGER,
+        });
 
-      expect(result.content).toBe('safe-one\nsafe-two');
-      expect(result.content).not.toContain('secret');
-    } finally {
-      await fileHandle.close();
-    }
-  });
+        expect(result.content).toBe('safe-one\nsafe-two');
+        expect(result.content).not.toContain('secret');
+      } finally {
+        await fileHandle.close();
+      }
+    },
+  );
 
   it('refuses a line offset that cannot be reached within maxScanBytes', async () => {
     const filePath = await writeFile('budget.log', largeUtf8Lines(5_000));
@@ -935,6 +939,118 @@ describe('readTextCursorWindowFromHandle', () => {
     });
   });
 
+  it('seeds an unterminated tail page from the terminator it resumes after', async () => {
+    // The tail page of 'aa\r\nbb' holds only 'bb' — no terminator to test —
+    // so without the byte pair before the window it would report 'lf' while
+    // the first page reported 'crlf' for the same file.
+    await withHandle('crlf-no-final.log', 'aa\r\nbb', async (fh, size) => {
+      const first = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        limit: 1,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(first.content).toBe('aa\r');
+      expect(first.lineEnding).toBe('crlf');
+      expect(first.nextOffset).toBe(4);
+
+      const tail = await readTextCursorWindowFromHandle(fh, {
+        startOffset: first.nextOffset!,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(tail.content).toBe('bb');
+      expect(tail.nextOffset).toBeUndefined();
+      expect(tail.lineEnding).toBe('crlf');
+    });
+
+    // The LF counterpart stays 'lf': the peek only confirms a CRLF pair.
+    await withHandle('lf-no-final.log', 'aa\nbb', async (fh, size) => {
+      const tail = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 3,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(tail.content).toBe('bb');
+      expect(tail.lineEnding).toBe('lf');
+    });
+  });
+
+  it('seeds from the snapped offset, not the requested one', async () => {
+    // The request lands between '\r' and '\n'; the reader snaps to the next
+    // line start and must seed from there. Seeding from the raw request would
+    // probe 'a','\r' instead of the CRLF pair and misreport 'lf'.
+    await withHandle('crlf-snap.log', 'aa\r\nbb', async (fh, size) => {
+      const page = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 3, // between the '\r' and the '\n'
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(page.startOffset).toBe(4);
+      expect(page.content).toBe('bb');
+      expect(page.lineEnding).toBe('crlf');
+    });
+  });
+
+  it('seeds at the minimum probe offset', async () => {
+    // startOffset 2 is the earliest window that can probe — bytes 0-1 are the
+    // terminator itself. Anything stricter skips the only line-ending evidence
+    // the tail page of '\r\nbb' has.
+    await withHandle('crlf-empty-first.log', '\r\nbb', async (fh, size) => {
+      const first = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        limit: 1,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(first.content).toBe('\r');
+      expect(first.nextOffset).toBe(2);
+
+      const tail = await readTextCursorWindowFromHandle(fh, {
+        startOffset: first.nextOffset!,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(tail.content).toBe('bb');
+      expect(tail.lineEnding).toBe('crlf');
+    });
+  });
+
+  it('counts the terminator a byte-truncated giant line is cut from', async () => {
+    // A line longer than one read chunk (512 KiB) reaches the byte cut before
+    // its terminator is ever decoded, so the cut cannot test it for '\r'. The
+    // re-snap then steps over that terminator; counting it is what keeps this
+    // page's lineEnding equal to the next page's, which seeds from the pair.
+    const body = `${'x'.repeat(600 * 1024)}\r\nbb`;
+    await withHandle('giant-crlf.log', body, async (fh, size) => {
+      const first = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        maxOutputBytes: 100,
+        maxSnapBytes: 1_024,
+      });
+      expect(first.truncatedByBytes).toBe(true);
+      expect(first.content).toBe('x'.repeat(100));
+      expect(first.nextOffset).toBe(600 * 1024 + 2);
+      expect(first.lineEnding).toBe('crlf');
+
+      const second = await readTextCursorWindowFromHandle(fh, {
+        startOffset: first.nextOffset!,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(second.content).toBe('bb');
+      expect(second.lineEnding).toBe('crlf');
+    });
+  });
+
   it('does not let a budget-excluded CRLF line flip lineEnding', async () => {
     // "aaa" (3) + sep (1) + "bbb" (3) = 7 <= 8; "ccc\r" would need 7+1+4 = 12 > 8.
     await withHandle(
@@ -993,5 +1109,15 @@ describe('readTextCursorWindowFromHandle', () => {
       expect(spans[spans.length - 1][1]).toBe(size);
       expect(pages.join('\n')).toBe(body);
     });
+  });
+});
+
+describe('detectLineEndingFromContent', () => {
+  it('reports crlf for small CRLF content', () => {
+    expect(detectLineEndingFromContent('line1\r\nline2\r\n')).toBe('crlf');
+  });
+
+  it('reports lf when no CRLF is present', () => {
+    expect(detectLineEndingFromContent('line1\nline2\n')).toBe('lf');
   });
 });

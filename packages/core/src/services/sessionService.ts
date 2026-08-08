@@ -2169,7 +2169,7 @@ function copyContentForApiHistory(content: Content): Content {
 }
 
 function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
-  if (!record.message) return;
+  if (!record.message || record.subtype === 'realtime_message') return;
 
   const message = copyContentForApiHistory(record.message as Content);
   if (record.subtype === 'mid_turn_user_message') {
@@ -2462,6 +2462,7 @@ export function replayUiTelemetryFromConversation(
 export interface ResumeTokenCounts {
   promptTokenCount: number;
   outputTokenCount: number;
+  isEstimated: boolean;
 }
 
 /**
@@ -2495,6 +2496,7 @@ export function getResumeTokenCounts(
         return {
           promptTokenCount: candidate,
           outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
+          isEstimated: false,
         };
       }
     }
@@ -2507,6 +2509,10 @@ export function getResumeTokenCounts(
         return {
           promptTokenCount: payload.info.newTokenCount,
           outputTokenCount: 0,
+          // Checkpoints created before provenance was persisted are safest to
+          // treat as estimates: this keeps the output clamp's overhead pad on
+          // and prevents an optimistic resume from overflowing the window.
+          isEstimated: payload.info.newTokenCountIsEstimated ?? true,
         };
       }
     }

@@ -72,6 +72,8 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
+  findBoundaryAtOrBefore,
+  isReplayTurnStartType,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -113,6 +115,7 @@ import {
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
   type ChatRecord,
+  type ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -162,9 +165,11 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -193,12 +198,14 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
+import { isCompatibleLiveSessionSource } from '../serve/live/session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
+  SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
 import {
@@ -206,14 +213,15 @@ import {
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
-} from '../serve/workspace-remember-errors.js';
-import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
-import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
+} from '../runtime/workspace-remember-errors.js';
+import { formatWorkspaceMemoryForgetSummary } from '../runtime/workspace-memory-summaries.js';
+import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { ActiveWorkReporter } from './active-work-reporter.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
@@ -292,13 +300,27 @@ import {
   IDLE_HOOK_EVENTS,
 } from '@qwen-code/acp-bridge/status';
 import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  isValidExternalToolGuardDenialReason,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
+import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  clampActiveWorkIntervalMs,
+  type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  DAEMON_MODEL_PROMPT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
@@ -306,7 +328,9 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
@@ -317,14 +341,15 @@ import {
   endAcpBootstrapConfigProfiling,
   markAcpStartup,
 } from '../utils/acp-startup-profiler.js';
-import { isValidServerName } from '../serve/validate-server-name.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
-import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
+import { isValidServerName } from '../runtime/validate-server-name.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import {
   collectContextData,
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
 import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
@@ -345,6 +370,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -700,7 +726,37 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
 }
 
 function isHistoryTurnStart(record: ChatRecord): boolean {
-  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
+  return isReplayTurnStartType(record.type, record.subtype);
+}
+
+// A bulk page can safely start at a turn start or at the assistant record
+// owning any following tool results, mirroring the core reader's page-start
+// rule. Realtime records interleave at wall-clock time and own no tool
+// results, so the pair walk passes through them instead of splitting them.
+function isHistoryPageStart(record: ChatRecord): boolean {
+  return (
+    record.subtype !== 'realtime_message' &&
+    (record.type === 'assistant' || isHistoryTurnStart(record))
+  );
+}
+
+// True when the first tool_result in records[start, end) lost its owning
+// call below `start`, i.e. the selection begins mid-pair. Only the first
+// result needs checking: later results belong to calls at or after it, all
+// inside the page once the first pair is whole.
+function historyOrphansToolResult(
+  records: ChatRecord[],
+  start: number,
+  end: number,
+): boolean {
+  for (let i = start; i < end; i++) {
+    if (records[i]!.type !== 'tool_result') continue;
+    for (let owner = i - 1; owner >= start; owner--) {
+      if (isHistoryPageStart(records[owner]!)) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function selectRecentHistoryRecords(
@@ -717,8 +773,39 @@ function selectRecentHistoryRecords(
       break;
     }
   }
-  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
-    start--;
+  // Turn-boundary alignment may expand the page past the requested window,
+  // but never without bound: a history dominated by a single long in-flight
+  // turn would otherwise replay the WHOLE history in one payload and report
+  // hasMore=false, leaving the client unable to page backward. Allow at
+  // most one extra window of expansion, and only when it reaches a real
+  // turn start; otherwise keep the requested window so pages inside a long
+  // turn stay bounded and chainable.
+  const expansionFloor = Math.max(0, records.length - 2 * pageSize);
+  const aligned = findBoundaryAtOrBefore(
+    records,
+    start,
+    expansionFloor,
+    isHistoryTurnStart,
+  );
+  if (isHistoryTurnStart(records[aligned]!)) {
+    start = aligned;
+  }
+  // Backward replay renders each page independently, so a page that starts
+  // mid-pair (on a tool_result whose owning call lies below) would show the
+  // completed call as failed and its result as an orphan block. When the
+  // bounded selection starts on an orphaned tool_result, extend down to the
+  // owning record within one further window, mirroring the core reader.
+  if (start > 0 && historyOrphansToolResult(records, start, records.length)) {
+    const pairFloor = Math.max(0, start - pageSize);
+    const owner = findBoundaryAtOrBefore(
+      records,
+      start,
+      pairFloor,
+      isHistoryPageStart,
+    );
+    if (isHistoryPageStart(records[owner]!)) {
+      start = owner;
+    }
   }
   return { records: records.slice(start), hasMore: start > 0 };
 }
@@ -2709,6 +2796,94 @@ export async function deliverClientMcpMessage(
   return payload as JSONRPCMessage;
 }
 
+/**
+ * Build the ACP child's side of the managed guard. It carries no provider
+ * endpoint or credential; those remain in the daemon. The private parent
+ * validates the session and active prompt before calling its provider.
+ */
+export function createManagedExternalToolGuard(
+  connection: AgentSideConnection,
+): ToolInvocationGuard {
+  return async (context) => {
+    const invocation = context.invocationContext;
+    if (!invocation) {
+      throw new Error(
+        'Managed external tool guard requires a runtime invocation context.',
+      );
+    }
+    if (context.signal.aborted) {
+      throw new DOMException('Tool invocation aborted', 'AbortError');
+    }
+    if (
+      context.toolName === ToolNames.AGENT ||
+      context.toolName === ToolNames.WORKFLOW ||
+      context.toolName === ToolNames.CREATE_SUB_SESSION ||
+      context.toolName === ToolNames.SEND_MESSAGE
+    ) {
+      return {
+        allowed: false,
+        reason:
+          'Managed external tool guard v1 does not support nested or delegated agent execution.',
+      };
+    }
+
+    let rejectOnAbort: ((error: Error) => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectOnAbort = reject;
+    });
+    const onAbort = () =>
+      rejectOnAbort?.(
+        new DOMException('Tool invocation aborted', 'AbortError'),
+      );
+    context.signal.addEventListener('abort', onAbort, { once: true });
+    // Close the check-to-listener race: AbortSignal does not replay an abort
+    // event to a listener added after the signal has already transitioned.
+    if (context.signal.aborted) onAbort();
+    try {
+      const response = await Promise.race([
+        connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+          {
+            sessionId: invocation.sessionId,
+            promptId: invocation.promptId,
+            toolCallId: context.callId,
+            toolName: context.toolName,
+            arguments: context.args,
+          },
+        ),
+        aborted,
+      ]);
+      const keys = Object.keys(response);
+      if (
+        typeof response['allowed'] !== 'boolean' ||
+        keys.some((key) => key !== 'allowed' && key !== 'reason')
+      ) {
+        throw new Error(
+          'Managed external tool guard returned an invalid reply.',
+        );
+      }
+      if (response['allowed']) {
+        if (Object.hasOwn(response, 'reason')) {
+          throw new Error(
+            'Managed external tool guard allow reply contains a reason.',
+          );
+        }
+        return { allowed: true };
+      }
+      const reason = response['reason'];
+      if (reason === undefined) return { allowed: false };
+      if (!isValidExternalToolGuardDenialReason(reason)) {
+        throw new Error(
+          'Managed external tool guard denial reason is invalid.',
+        );
+      }
+      return { allowed: false, reason };
+    } finally {
+      context.signal.removeEventListener('abort', onAbort);
+    }
+  };
+}
+
 interface RuntimeMcpRequest {
   name: string;
   runtimeClientId: string;
@@ -2823,7 +2998,10 @@ export async function runAcpAgent(
   config: Config,
   settings: LoadedSettings,
   argv: CliArgs,
-  options?: { privateParentCapability?: string },
+  options?: {
+    privateParentCapability?: string;
+    externalToolGuardRequired?: boolean;
+  },
 ) {
   // Freeze the restart-required writer protocol before the first await.
   // Per-request settings reloads must not mix leased and legacy writers
@@ -2837,6 +3015,14 @@ export async function runAcpAgent(
       ? process.env[PRIVATE_ACP_CAPABILITY_ENV]
       : options.privateParentCapability;
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+  const externalToolGuardRequired = options?.externalToolGuardRequired === true;
+  if (externalToolGuardRequired && privateParentCapability === undefined) {
+    throw new Error(
+      'Required external tool guard is available only to a private managed ACP parent.',
+    );
+  }
 
   // Reverse tool channel (issue #5626, Phase 2). Runtime-MCP-add targets the
   // BOOTSTRAP (workspace-level) config's `McpClientManager` — `this.config` in
@@ -2876,6 +3062,7 @@ export async function runAcpAgent(
     process.stderr.write(`${warning}\n`);
   }
   const eventLoopMonitor = startEventLoopLagMonitor({
+    suspendThresholdMs: ACP_EVENT_LOOP_STALL_RESTART_MS,
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
     },
@@ -2957,6 +3144,9 @@ export async function runAcpAgent(
     });
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
+      const managedToolInvocationGuard = externalToolGuardRequired
+        ? createManagedExternalToolGuard(conn)
+        : undefined;
       agentInstance = new QwenAgent(
         config,
         settings,
@@ -2964,6 +3154,7 @@ export async function runAcpAgent(
         conn,
         privateParentCapability,
         sessionWriterLeaseEnabledAtStartup,
+        managedToolInvocationGuard,
       );
       return agentInstance;
     }, stream);
@@ -3372,6 +3563,15 @@ interface ActivePromptCall {
   settled: Promise<void>;
 }
 
+function isOwnerOnlyDirectory(stats: Stats): boolean {
+  if (process.platform === 'win32') return false;
+  if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
+  if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
+    return false;
+  }
+  return (stats.mode & 0o077) === 0;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
@@ -3403,6 +3603,8 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
+  /** Set once the daemon negotiates active-work reporting; one per channel. */
+  private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
     | 'uninitialized'
     | 'trusted'
@@ -3463,6 +3665,15 @@ class QwenAgent implements Agent {
     }
     if (this.managedShuttingDown) {
       throw new SessionWriterUnavailableError();
+    }
+  }
+
+  private rejectUnsupportedGuardedHiddenAgent(operation: string): void {
+    if (this.managedToolInvocationGuard) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Managed external tool guard v1 does not support ${operation}.`,
+      );
     }
   }
 
@@ -3950,6 +4161,9 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // A Session missing from the next snapshot is how the daemon learns the
+    // child released it — including when it never saw our close response.
+    this.activeWorkReporter?.notifyChanged();
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -4069,12 +4283,19 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      /**
+       * Close only if the Session holds no active work — the daemon's
+       * automatic-cleanup path. Explicit close, kill, and shutdown leave this
+       * unset and keep their force semantics.
+       */
+      onlyIfUnheld?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
-      return;
+      // Already gone is the outcome the caller wanted, not a refusal.
+      return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
@@ -4087,6 +4308,19 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    // Checked under the close gate and before anything destructive runs. The
+    // gate is what makes this atomic: with it held the Session admits no new
+    // prompt and starts no new automatic turn, so a hold cannot appear between
+    // this read and the teardown below. Without it, a caller that asked
+    // "anything running?" and then closed would race exactly the work it was
+    // trying to protect.
+    if (opts?.onlyIfUnheld) {
+      const holds = session.collectActiveWorkHolds();
+      if (holds.length > 0) {
+        cancelClose();
+        return { closed: false, holds };
+      }
+    }
     for (const [requestId, generation] of this.generationControllers) {
       if (generation.sessionId !== sessionId) continue;
       generation.controller.abort();
@@ -4142,6 +4376,7 @@ class QwenAgent implements Agent {
     } finally {
       if (!removedFromStore) cancelClose();
     }
+    return { closed: true, holds: [] };
   }
 
   private async discardStoredSessionIfCurrent(
@@ -4161,6 +4396,8 @@ class QwenAgent implements Agent {
   }
 
   async disposeSessions(): Promise<void> {
+    this.activeWorkReporter?.dispose();
+    this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -4191,6 +4428,7 @@ class QwenAgent implements Agent {
     private connection: AgentSideConnection,
     private readonly expectedPrivateParentCapability?: string,
     private readonly sessionWriterLeaseEnabledAtStartup = false,
+    private readonly managedToolInvocationGuard?: ToolInvocationGuard,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -4379,14 +4617,53 @@ class QwenAgent implements Agent {
       !Array.isArray(requestedProfile) &&
       (requestedProfile as Record<string, unknown>)['v'] ===
         CHANNEL_STARTUP_PROFILE_VERSION;
+    const requestedActiveWork = args._meta?.[ACTIVE_WORK_HEARTBEAT_META_KEY];
+    const activeWorkRequested =
+      requestedActiveWork !== null &&
+      typeof requestedActiveWork === 'object' &&
+      !Array.isArray(requestedActiveWork) &&
+      (requestedActiveWork as Record<string, unknown>)['v'] ===
+        ACTIVE_WORK_HEARTBEAT_VERSION;
+    // The daemon proposes a cadence; we answer with the one we will actually
+    // use, clamped into the range both sides agree on. The daemon clamps the
+    // echo again — neither side trusts the other to pick a sane number, and a
+    // flood or a multi-hour interval would each break freshness in its own way.
+    const activeWorkIntervalMs = activeWorkRequested
+      ? clampActiveWorkIntervalMs(
+          (requestedActiveWork as Record<string, unknown>)['intervalMs'],
+        )
+      : undefined;
+    if (activeWorkIntervalMs !== undefined) {
+      this.activeWorkReporter?.dispose();
+      this.activeWorkReporter = new ActiveWorkReporter(
+        (method, params) => this.connection.extNotification(method, params),
+        () => this.sessions.values(),
+        activeWorkIntervalMs,
+      );
+    }
 
-    return profileRequested && startupProfile
-      ? {
-          ...response,
-          _meta: {
-            [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile,
-          },
-        }
+    const responseMeta: Record<string, unknown> = {
+      ...(this.managedToolInvocationGuard
+        ? {
+            [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+              EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          }
+        : {}),
+      ...(profileRequested && startupProfile
+        ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
+        : {}),
+      ...(activeWorkIntervalMs !== undefined
+        ? {
+            [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+              v: ACTIVE_WORK_HEARTBEAT_VERSION,
+              intervalMs: activeWorkIntervalMs,
+              categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+            },
+          }
+        : {}),
+    };
+    return Object.keys(responseMeta).length > 0
+      ? { ...response, _meta: responseMeta }
       : response;
   }
 
@@ -4422,6 +4699,10 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    const requestedSessionId =
+      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
+        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
+        : undefined;
     const sessionSource = getSessionSource(params);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
@@ -4445,7 +4726,7 @@ class QwenAgent implements Agent {
             mcpServers,
             settings,
             sessionSource,
-            undefined,
+            requestedSessionId,
             undefined,
             shouldDeferMcpDiscovery(params)
               ? { skipMcpDiscovery: true }
@@ -4527,8 +4808,18 @@ class QwenAgent implements Agent {
             logger: debugLogger,
           });
           if (!bulkReplay) {
-            for (const update of replay.updates) {
-              await liveSession.sendUpdate(update);
+            try {
+              for (const update of replay.updates) {
+                await liveSession.sendUpdate(update);
+              }
+            } finally {
+              // Replayed plan updates re-stamp the revision via sendUpdate;
+              // drop it so a replayed snapshot cannot bind a later approval
+              // (same rule Session.replayHistory applies to cold loads),
+              // even if delivery fails part-way. The bulk path keeps a live
+              // binding on purpose: it hands the updates to the client
+              // instead of replaying them through this session.
+              liveSession.clearActiveTodoPlanRevision();
             }
             if (replay.replayError !== undefined) {
               throw RequestError.internalError(undefined, replay.replayError);
@@ -4590,6 +4881,9 @@ class QwenAgent implements Agent {
       await this.ensureAuthenticated(config);
       this.setupFileSystem(config);
       await this.createAndStoreSession(config, settings, sessionData, {
+        enableLiveScreenContext: isCompatibleLiveSessionSource(
+          sessionSource ?? {},
+        ),
         ...(bulkReplay ? { replayHistory: false } : {}),
         beforeStartPostReplayServices: async (createdSession) => {
           if (bulkReplay) {
@@ -4726,6 +5020,9 @@ class QwenAgent implements Agent {
         settings,
         config.getResumedSessionData(),
         {
+          enableLiveScreenContext: isCompatibleLiveSessionSource(
+            sessionSource ?? {},
+          ),
           replayHistory: false,
           beforeStartPostReplayServices: async (createdSession) => {
             await this.#restoreWorktreeOnResume(config, createdSession);
@@ -4967,7 +5264,9 @@ class QwenAgent implements Agent {
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
+    delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
@@ -4989,6 +5288,22 @@ class QwenAgent implements Agent {
         'Invalid trusted ACP invocation context',
       );
     }
+    const modelPrompt =
+      this.privateParentState === 'trusted' &&
+      suppliedModelPrompt !== undefined &&
+      isValidTrustedModelPrompt(suppliedModelPrompt)
+        ? suppliedModelPrompt
+        : undefined;
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedModelPrompt !== undefined &&
+      modelPrompt === undefined
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted ACP model prompt',
+      );
+    }
     let settleCall = () => {};
     const call: ActivePromptCall = {
       controller: new AbortController(),
@@ -5007,6 +5322,7 @@ class QwenAgent implements Agent {
         sanitizedParams,
         invocationContext,
         call.controller.signal,
+        modelPrompt,
       );
     } finally {
       calls.delete(call);
@@ -5014,6 +5330,12 @@ class QwenAgent implements Agent {
         this.activePromptCalls.delete(params.sessionId);
       }
       settleCall();
+      // Order a fresh snapshot ahead of this response on the same stream. The
+      // daemon drops its own pending-prompt count the instant the response
+      // lands, so any hold this prompt left behind — a background agent it
+      // started, its terminal notification — has to already be on the wire or
+      // the daemon sees an idle Session for as long as the next report takes.
+      await this.activeWorkReporter?.flush();
     }
   }
 
@@ -6498,14 +6820,24 @@ class QwenAgent implements Agent {
 
       const disabled = config.getDisabledTools();
       const tools: ServeWorkspaceToolStatus[] = registry
-        .getAllTools()
-        .filter((tool) => !('serverName' in tool))
-        .map((tool) => ({
-          name: tool.name,
-          displayName: tool.displayName,
-          description: tool.description,
-          enabled: !disabled.has(tool.name),
-        }));
+        .getAllToolNames()
+        .flatMap((name) => {
+          const tool = registry.getTool(name);
+          if (tool && 'serverName' in tool) return [];
+          return [
+            {
+              name,
+              ...(tool
+                ? {
+                    displayName: tool.displayName,
+                    description: tool.description,
+                  }
+                : {}),
+              enabled: !disabled.has(name),
+            },
+          ];
+        })
+        .sort((left, right) => left.name.localeCompare(right.name));
 
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -7289,6 +7621,15 @@ class QwenAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     try {
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
+        this.privateParentState !== 'trusted'
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Background notifications require a trusted private ACP parent',
+        );
+      }
       return await this.extMethodInternal(method, params);
     } catch (error) {
       const writerError = getSessionWriterError(error);
@@ -7706,6 +8047,8 @@ class QwenAgent implements Agent {
                 ?.flush();
             }
             const reader = new SessionTranscriptReader(cwd);
+            const activePromptBeforeRead =
+              this.activePromptCalls.has(sessionId);
             const page = await reader.readPage(sessionId, {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
               ...(typeof rawBeforeRecordId === 'string'
@@ -7722,6 +8065,9 @@ class QwenAgent implements Agent {
               sessionId,
               page,
               config,
+              finalizeDangling:
+                !activePromptBeforeRead &&
+                !this.activePromptCalls.has(sessionId),
               encodeCursor: (state) =>
                 encodeSessionTranscriptCursor(state, cwd),
               logger: debugLogger,
@@ -7880,9 +8226,14 @@ class QwenAgent implements Agent {
         ) as unknown as Record<string, unknown>;
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
-          available: this.config.isManagedMemoryAvailable(),
+          available:
+            !this.managedToolInvocationGuard &&
+            this.config.isManagedMemoryAvailable(),
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember: {
+        this.rejectUnsupportedGuardedHiddenAgent(
+          'agent-backed workspace memory remember',
+        );
         const content = params['content'];
         if (typeof content !== 'string' || !content.trim()) {
           throw RequestError.invalidParams(
@@ -8069,6 +8420,9 @@ class QwenAgent implements Agent {
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
+        this.rejectUnsupportedGuardedHiddenAgent(
+          'agent-backed workspace memory dream',
+        );
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8899,6 +9253,9 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
+        if (isCompatibleLiveSessionSource(source)) {
+          await session.enableLiveScreenContext();
+        }
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
@@ -8915,6 +9272,172 @@ class QwenAgent implements Agent {
             : {}),
           persisted: ok,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionLiveConversation: {
+        const sessionId = params['sessionId'];
+        const active = params['active'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof active !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing active state',
+          );
+        }
+        await this.sessionOrThrow(sessionId).setLiveConversationActive(active);
+        return { sessionId, active };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript: {
+        const sessionId = params['sessionId'];
+        const entries = params['entries'];
+        const model = params['model'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof model !== 'string' ||
+          model.length === 0 ||
+          model.length > 256
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing realtime model',
+          );
+        }
+        if (!Array.isArray(entries) || entries.length > 128) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid realtime transcript entries',
+          );
+        }
+        const transcript: Array<{
+          role: 'user' | 'assistant';
+          text: string;
+        }> = [];
+        let totalLength = 0;
+        for (const entry of entries) {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid realtime transcript entry',
+            );
+          }
+          const role = (entry as Record<string, unknown>)['role'];
+          const text = (entry as Record<string, unknown>)['text'];
+          if (
+            (role !== 'user' && role !== 'assistant') ||
+            typeof text !== 'string' ||
+            text.length === 0 ||
+            text.length > 32_768
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid realtime transcript entry',
+            );
+          }
+          totalLength += text.length;
+          if (totalLength > 131_072) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Realtime transcript is too large',
+            );
+          }
+          transcript.push({ role, text });
+        }
+        await this.sessionOrThrow(sessionId).appendLiveConversationTranscript(
+          transcript,
+          model,
+        );
+        return { sessionId, persisted: transcript.length };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification: {
+        const sessionId = params['sessionId'];
+        const displayText = params['displayText'];
+        const modelText = params['modelText'];
+        const taskId = params['taskId'];
+        const status = params['status'];
+        const kind = params['kind'];
+        const toolUseId = params['toolUseId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof displayText !== 'string' ||
+          displayText.length === 0 ||
+          displayText.length > 8_192
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification displayText',
+          );
+        }
+        if (
+          typeof modelText !== 'string' ||
+          modelText.length === 0 ||
+          modelText.length > 32_768
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification modelText',
+          );
+        }
+        if (
+          typeof taskId !== 'string' ||
+          taskId.length === 0 ||
+          taskId.length > 256
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification taskId',
+          );
+        }
+        if (
+          status !== 'completed' &&
+          status !== 'failed' &&
+          status !== 'cancelled'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification status',
+          );
+        }
+        if (kind !== 'agent') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification kind',
+          );
+        }
+        if (
+          toolUseId !== undefined &&
+          (typeof toolUseId !== 'string' ||
+            toolUseId.length === 0 ||
+            toolUseId.length > 256)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification toolUseId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const result = await session.enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId,
+          status,
+          kind,
+          ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+        });
+        return { sessionId, accepted: result.accepted };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
@@ -8937,13 +9460,18 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        await this.closeStoredSession(sessionId, {
+        const outcome = await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
             ? { drainTimeoutMs: rawDrainTimeoutMs }
             : {}),
         });
-        return { sessionId, closed: true };
+        // `holds` rides along only on a refusal, so the response every existing
+        // caller already parses keeps its exact shape.
+        return outcome.closed
+          ? { sessionId, closed: true }
+          : { sessionId, closed: false, holds: outcome.holds };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -8965,6 +9493,17 @@ class QwenAgent implements Agent {
             'Invalid or missing path (must be an absolute path)',
           );
         }
+        const managedRelocation = params['managedRelocation'];
+        if (
+          managedRelocation !== undefined &&
+          managedRelocation !== 'live-conversation'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid managed relocation capability',
+          );
+        }
+        const allowedRoots = params['allowedRoots'];
 
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
@@ -8996,12 +9535,116 @@ class QwenAgent implements Agent {
         // Canonicalize path
         const canonicalPath = await fs.realpath(targetPath);
 
+        let containmentRoots = allowedRoots;
+        let managedTrustAllowed = false;
+        if (managedRelocation === 'live-conversation') {
+          if (this.privateParentState !== 'trusted') {
+            throw RequestError.invalidParams(
+              undefined,
+              'Live managed relocation requires a trusted private ACP parent',
+            );
+          }
+          if (
+            !Array.isArray(allowedRoots) ||
+            allowedRoots.length !== 1 ||
+            typeof allowedRoots[0] !== 'string' ||
+            !path.isAbsolute(allowedRoots[0]) ||
+            allowedRoots[0].includes('\0')
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Live managed relocation requires one absolute allowed root',
+            );
+          }
+
+          const rootPath = allowedRoots[0];
+          let rootBefore: Stats;
+          let canonicalRoot: string;
+          let rootAfter: Stats;
+          try {
+            rootBefore = await fs.lstat(rootPath);
+            canonicalRoot = await fs.realpath(rootPath);
+            rootAfter = await fs.lstat(canonicalRoot);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only allowed root',
+              { errorKind: 'containment_violation', path: rootPath },
+            );
+          }
+          if (
+            !isOwnerOnlyDirectory(rootBefore) ||
+            !isOwnerOnlyDirectory(rootAfter) ||
+            rootBefore.dev !== rootAfter.dev ||
+            rootBefore.ino !== rootAfter.ino
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only allowed root',
+              { errorKind: 'containment_violation', path: rootPath },
+            );
+          }
+
+          let targetBefore: Stats;
+          let targetAfter: Stats;
+          try {
+            targetBefore = await fs.lstat(targetPath);
+            targetAfter = await fs.lstat(canonicalPath);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only direct child',
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+          const relativeTarget = path.relative(canonicalRoot, canonicalPath);
+          if (
+            !isOwnerOnlyDirectory(targetBefore) ||
+            !isOwnerOnlyDirectory(targetAfter) ||
+            targetBefore.dev !== targetAfter.dev ||
+            targetBefore.ino !== targetAfter.ino ||
+            relativeTarget.length === 0 ||
+            relativeTarget.startsWith('..') ||
+            path.isAbsolute(relativeTarget) ||
+            relativeTarget.includes(path.sep)
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only direct child',
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+
+          let rootFinal: Stats;
+          try {
+            rootFinal = await fs.lstat(canonicalRoot);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation allowed root changed during validation',
+              { errorKind: 'containment_violation', path: canonicalRoot },
+            );
+          }
+          if (
+            !isOwnerOnlyDirectory(rootFinal) ||
+            rootFinal.dev !== rootAfter.dev ||
+            rootFinal.ino !== rootAfter.ino
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation allowed root changed during validation',
+              { errorKind: 'containment_violation', path: canonicalRoot },
+            );
+          }
+          containmentRoots = [canonicalRoot];
+          managedTrustAllowed = true;
+        }
+
         // Server-controlled containment check (worktree create/restore).
         // Must run BEFORE the no-op check: a no-op cd to a directory
         // outside the allowed roots must still be rejected.
-        const allowedRoots = params['allowedRoots'];
-        if (Array.isArray(allowedRoots) && allowedRoots.length > 0) {
-          const contained = allowedRoots.some((root: unknown) => {
+        if (Array.isArray(containmentRoots) && containmentRoots.length > 0) {
+          const contained = containmentRoots.some((root: unknown) => {
             if (typeof root !== 'string') return false;
             const rel = path.relative(root, canonicalPath);
             return !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -9018,7 +9661,10 @@ class QwenAgent implements Agent {
         const previousCwd = config.getTargetDir();
         let trustValidated = false;
         const validateTrust = () => {
-          if (!isFolderTrustEnabled(this.settings.merged)) {
+          if (
+            managedTrustAllowed ||
+            !isFolderTrustEnabled(this.settings.merged)
+          ) {
             trustValidated = true;
             return;
           }
@@ -9151,6 +9797,9 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         if (current === 'plan') {
+          if (previous !== 'plan') {
+            session.clearActiveTodoPlanRevision();
+          }
           session.clearTodoStopGuardTrust();
         }
         return { previous, current };
@@ -9418,6 +10067,12 @@ class QwenAgent implements Agent {
         return { sessionId, answer: result.text || null };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
+        if (this.managedToolInvocationGuard) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Managed external tool guard v1 does not support /fork.',
+          );
+        }
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
@@ -9871,6 +10526,9 @@ class QwenAgent implements Agent {
             return sessionService.removeSession(sessionId);
           },
         );
+        if (success) {
+          fireSessionDeleteHook(this.config, sessionId, debugLogger);
+        }
         return { success };
       }
       case 'renameSession': {
@@ -10627,6 +11285,7 @@ class QwenAgent implements Agent {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
                   if (newMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
                   }
                 } catch (err) {
@@ -10900,6 +11559,9 @@ class QwenAgent implements Agent {
         );
       });
     } catch (error) {
+      if (error instanceof SessionIdConflictError) {
+        throw RequestError.invalidParams(undefined, error.message);
+      }
       const writerError = getSessionWriterError(error);
       if (writerError) {
         throw new RequestError(writerError.rpcCode, writerError.message, {
@@ -11025,6 +11687,15 @@ class QwenAgent implements Agent {
       // into the first <available_skills> at cold start.
       buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
+      // The daemon owns the settings watcher lifecycle.
+      undefined,
+      // A duplicate caller-supplied session id must fail this one request,
+      // not process.exit(1) the shared ACP child and every session on its
+      // channel. newSessionConfig maps the throw to a RequestError.
+      true,
+      this.managedToolInvocationGuard
+        ? { toolInvocationGuard: this.managedToolInvocationGuard }
+        : undefined,
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
@@ -11206,6 +11877,7 @@ class QwenAgent implements Agent {
     sessionData?: ResumedSessionData,
     options: {
       replayHistory?: boolean;
+      enableLiveScreenContext?: boolean;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
     } = {},
   ): Promise<Session> {
@@ -11223,10 +11895,23 @@ class QwenAgent implements Agent {
       throw new Error(`Session ${sessionId} is already active.`);
     }
 
-    const session = new Session(sessionId, config, this.connection, settings);
+    const session = new Session(
+      sessionId,
+      config,
+      this.connection,
+      settings,
+      () => this.activeWorkReporter?.notifyChanged(),
+    );
     this.sessions.set(sessionId, session);
+    // The Session set itself is part of the snapshot: publish so the daemon
+    // learns about this Session from a report rather than inferring it.
+    this.activeWorkReporter?.notifyChanged();
     this.initializingConfigs.delete(config);
     try {
+      if (options.enableLiveScreenContext) {
+        await session.enableLiveScreenContext();
+      }
+
       if (sessionData?.fileHistorySnapshots?.length) {
         config
           .getFileHistoryService()

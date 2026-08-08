@@ -11,13 +11,23 @@ import {
 } from './nonInteractiveCliCommands.js';
 import {
   __resetActiveGoalStoreForTests,
+  createGoalRuntime,
+  type ChatRecord,
   type Config,
+  type GoalJournal,
+  type GoalStateRecordPayloadV2,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
+
+const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  recordAutoSkillUsage: recordAutoSkillUsageMock,
+}));
 
 // Mock the CommandService
 const mockGetCommands = vi.hoisted(() => vi.fn());
@@ -36,10 +46,32 @@ describe('handleSlashCommand', () => {
   let abortController: AbortController;
   let mockFireUserPromptExpansionEvent: ReturnType<typeof vi.fn>;
 
+  const createJournal = (): GoalJournal => ({
+    getTranscriptCursor: () => ({ recordId: null }),
+    async recordGoalState(
+      recordUuid: string,
+      payload: GoalStateRecordPayloadV2,
+    ): Promise<ChatRecord> {
+      return {
+        uuid: recordUuid,
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/test/project',
+        version: 'test',
+        systemPayload: structuredClone(payload),
+      };
+    },
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     uiTelemetryService.reset();
     __resetActiveGoalStoreForTests();
+    const goalRuntime = createGoalRuntime({ journal: createJournal() });
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
@@ -75,6 +107,8 @@ describe('handleSlashCommand', () => {
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
+      getGoalRuntime: vi.fn(() => goalRuntime),
+      getGoalRuntimeReady: vi.fn(async () => goalRuntime),
       storage: {},
     } as unknown as Config;
 
@@ -221,7 +255,7 @@ describe('handleSlashCommand', () => {
     }
   });
 
-  it('should execute /goal in non-interactive mode as a submit_prompt command', async () => {
+  it('returns canonical goal_control for a non-interactive create', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     const result = await handleSlashCommand(
@@ -231,25 +265,26 @@ describe('handleSlashCommand', () => {
       mockSettings,
     );
 
-    expect(result.type).toBe('submit_prompt');
-    if (result.type === 'submit_prompt') {
-      expect(result.content).toEqual([
-        expect.objectContaining({
-          text: expect.stringContaining('write a hello world script'),
-        }),
-      ]);
-      expect(result.outputHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'goal_status',
-          kind: 'set',
-          condition: 'write a hello world script',
-          setAt: expect.any(Number),
-        }),
-      ]);
-    }
+    expect(result).toMatchObject({
+      type: 'goal_control',
+      operation: {
+        kind: 'set',
+        objective: 'write a hello world script',
+      },
+      response: {
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            objective: 'write a hello world script',
+            status: 'active',
+          },
+        },
+      },
+    });
   });
 
-  it('should report no active goal for empty non-interactive /goal', async () => {
+  it('returns canonical goal_control for empty non-interactive /goal status', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     const result = await handleSlashCommand(
@@ -260,13 +295,15 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'No goal set. Usage: `/goal <condition>` (or `/goal clear`).',
+      type: 'goal_control',
+      operation: { kind: 'status' },
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
   });
 
-  it('should report active goal status after setting a non-interactive /goal', async () => {
+  it('returns the active v2 snapshot for status after create', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     await handleSlashCommand(
@@ -283,18 +320,20 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
+      type: 'goal_control',
+      operation: { kind: 'status' },
+      response: {
+        snapshot: {
+          goal: {
+            objective: 'write a hello world script',
+            status: 'active',
+          },
+        },
+      },
     });
-    if (result.type === 'message') {
-      expect(result.content).toContain(
-        'Goal active: write a hello world script',
-      );
-      expect(result.content).toContain('not yet evaluated');
-    }
   });
 
-  it('should report cleared goal for non-interactive /goal clear', async () => {
+  it('returns the cleared v2 snapshot for non-interactive /goal clear', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     await handleSlashCommand(
@@ -311,20 +350,12 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'Goal cleared: write a hello world script',
+      type: 'goal_control',
+      operation: { kind: 'clear' },
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
-    if (result.type === 'message') {
-      expect(result.outputHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'goal_status',
-          kind: 'cleared',
-          condition: 'write a hello world script',
-          durationMs: expect.any(Number),
-        }),
-      ]);
-    }
   });
 
   it('should report cleared goal for ACP /goal clear', async () => {
@@ -403,6 +434,32 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('passes context-file refresh intent through submit_prompt results', async () => {
+    const mockCommand = {
+      name: 'remember',
+      description: 'Remember a fact',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Remember this fact' }],
+        refreshContextFilesOnWrite: true,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/remember fact',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.refreshContextFilesOnWrite).toBe(true);
+    }
+  });
+
   it('omits modelOverride when the command does not set one', async () => {
     const mockCommand = {
       name: 'custom',
@@ -433,7 +490,11 @@ describe('handleSlashCommand', () => {
       name: 'review',
       description: 'Review code',
       kind: CommandKind.SKILL,
-      skillDetail: { name: 'review-skill' },
+      skillDetail: {
+        name: 'review-skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      },
       action: vi.fn().mockResolvedValue({
         type: 'submit_prompt',
         content: [{ text: 'Review prompt' }],
@@ -458,6 +519,11 @@ describe('handleSlashCommand', () => {
       byName: {
         'review-skill': { count: 1, success: 1, fail: 0 },
       },
+    });
+    expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+      name: 'review-skill',
+      level: 'project',
+      filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
     });
   });
 
@@ -532,6 +598,11 @@ describe('handleSlashCommand', () => {
       name: 'review',
       description: 'Review code',
       kind: CommandKind.SKILL,
+      skillDetail: {
+        name: 'review',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      },
       action: vi.fn().mockResolvedValue({
         type: 'submit_prompt',
         content: 'Review prompt',
@@ -557,6 +628,7 @@ describe('handleSlashCommand', () => {
         review: { count: 1, success: 0, fail: 1 },
       },
     });
+    expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
   });
 
   it('records SKILL submit_prompt commands as failures when hooks throw', async () => {
@@ -1045,6 +1117,31 @@ describe('handleSlashCommand', () => {
       }
     });
 
+    it('preserves context-file refresh intent from stacked skills', async () => {
+      const skillA = {
+        ...createSkillCommand('remember-skill', 'remember workflow'),
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:remember-skill' }],
+          refreshContextFilesOnWrite: true,
+        }),
+      };
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/remember-skill /e2e-testing implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        expect(result.refreshContextFilesOnWrite).toBe(true);
+      }
+    });
+
     it('calls each skill action once', async () => {
       const skillA = createSkillCommand('feat-dev', 'a');
       const skillB = createSkillCommand('review', 'b');
@@ -1059,6 +1156,83 @@ describe('handleSlashCommand', () => {
 
       expect(skillA.action).toHaveBeenCalledTimes(1);
       expect(skillB.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('records successful stacked project auto-skills as used', async () => {
+      const skillA = {
+        ...createSkillCommand('feat-dev', 'a'),
+        skillDetail: {
+          name: 'feat-dev',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+        },
+      };
+      const skillB = {
+        ...createSkillCommand('review', 'b'),
+        skillDetail: {
+          name: 'review',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+        },
+      };
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledTimes(2);
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'feat-dev',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+      });
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'review',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      });
+    });
+
+    it('does not record blocked stacked auto-skills as used', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked by policy',
+        }),
+        shouldStopExecution: () => false,
+      });
+      const skillA = {
+        ...createSkillCommand('feat-dev', 'a'),
+        skillDetail: {
+          name: 'feat-dev',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+        },
+      };
+      const skillB = {
+        ...createSkillCommand('review', 'b'),
+        skillDetail: {
+          name: 'review',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+        },
+      };
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('message');
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
     });
 
     it('handles stacked skills with no remaining text', async () => {

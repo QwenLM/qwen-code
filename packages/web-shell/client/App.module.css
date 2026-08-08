@@ -906,6 +906,20 @@
     overflow: hidden;
   }
 
+  /* Override chatViewWrap's relative positioning so the absolute footer
+     anchors to chatPane. The wrap remains a flex item, so the z-index: 1 it
+     gets from `.appChatEmpty .chatViewWrap` still applies under static
+     positioning and keeps the welcome content and composer above the dot
+     field. The welcome-middle + custom-footer variant keeps the positioned
+     wrap: `.footerWithCustomFooter` renders `display: contents` there, so
+     the wrap must remain the containing block for `.bottomPanels`. */
+  .appChatEmpty
+    .chatViewWithMobileComposerBottom:not(
+      .chatViewWithWelcomeMiddle.chatViewWithCustomFooter
+    ) {
+    position: static;
+  }
+
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {
     position: absolute;
     right: 0;
@@ -963,6 +977,7 @@
 }
 
 .queuedPrompts {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1028,8 +1043,10 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
   margin-left: 8px;
   color: var(--secondary-foreground);
+  white-space: nowrap;
 }
 
 .queuedPromptSpinner {
@@ -1078,7 +1095,17 @@
   height: 14px;
 }
 
-.queuedPromptAction:hover {
+@container (max-width: 699px) {
+  .queuedPromptStateLabel {
+    display: none;
+  }
+
+  .queuedPromptState:not(.queuedPromptStateLoading) {
+    display: none;
+  }
+}
+
+.queuedPromptAction:not(:disabled):hover {
   background: var(--accent);
   color: var(--foreground);
 }

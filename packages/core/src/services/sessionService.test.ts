@@ -225,6 +225,9 @@ describe('SessionService', () => {
 
     it('should list archived sessions from archive directory only', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        // path.join is mocked above to join with '/', so production paths
+        // always use '/' here regardless of host platform — match that, not
+        // path.sep (which stays the real host separator under the automock).
         if (dir.toString().endsWith('/chats/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
@@ -249,7 +252,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts aggregates active and archived membership', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
-        if (dir.toString().endsWith(`${path.sep}archive`)) {
+        if (dir.toString().endsWith('/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
         return [
@@ -282,7 +285,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts excludes sessions from other projects', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
       );
@@ -320,7 +323,7 @@ describe('SessionService', () => {
 
     it('marks counts truncated when a candidate session cannot be read', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
               fs.Dirent<Buffer>
@@ -2420,6 +2423,7 @@ describe('SessionService', () => {
         info: {
           originalTokenCount: 1000,
           newTokenCount: 300,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
         },
         compressedHistory: [],
@@ -2441,7 +2445,11 @@ describe('SessionService', () => {
       ).toBe(450);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 450, outputTokenCount: 0 });
+      ).toEqual({
+        promptTokenCount: 450,
+        outputTokenCount: 0,
+        isEstimated: false,
+      });
     });
 
     it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
@@ -2459,7 +2467,11 @@ describe('SessionService', () => {
       ).toBe(200);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, outputTokenCount: 250 });
+      ).toEqual({
+        promptTokenCount: 200,
+        outputTokenCount: 250,
+        isEstimated: false,
+      });
     });
 
     it('should restore disjoint candidate and thought output tokens when total is unavailable', () => {
@@ -2476,7 +2488,11 @@ describe('SessionService', () => {
       };
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, outputTokenCount: 100 });
+      ).toEqual({
+        promptTokenCount: 200,
+        outputTokenCount: 100,
+        isEstimated: false,
+      });
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -2494,7 +2510,58 @@ describe('SessionService', () => {
       ).toBe(300);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 300, outputTokenCount: 0 });
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: true,
+      });
+    });
+
+    it('conservatively treats legacy compression checkpoints as estimated', () => {
+      const legacyCompressionRecord: ChatRecord = {
+        ...compressionRecord,
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 300,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      };
+
+      expect(
+        getResumeTokenCounts(makeConversation([legacyCompressionRecord])),
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: true,
+      });
+    });
+
+    it('restores an explicit authoritative compression-checkpoint provenance', () => {
+      const authoritativeCompressionRecord: ChatRecord = {
+        ...compressionRecord,
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 300,
+            newTokenCountIsEstimated: false,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      };
+
+      expect(
+        getResumeTokenCounts(
+          makeConversation([authoritativeCompressionRecord]),
+        ),
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: false,
+      });
     });
   });
 
@@ -2517,6 +2584,40 @@ describe('SessionService', () => {
       const history = buildApiHistoryFromConversation(conversation);
 
       expect(history).toEqual([recordA1.message, assistantA1.message]);
+    });
+
+    it('keeps Realtime dialogue out of backend model history', () => {
+      const realtimeUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'realtime-user',
+        subtype: 'realtime_message',
+        message: { role: 'user', parts: [{ text: 'voice question' }] },
+      };
+      const realtimeAssistant: ChatRecord = {
+        ...recordB2,
+        uuid: 'realtime-assistant',
+        parentUuid: realtimeUser.uuid,
+        sessionId: sessionIdA,
+        subtype: 'realtime_message',
+        message: { role: 'model', parts: [{ text: 'voice answer' }] },
+      };
+      const backendUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'backend-user',
+        parentUuid: realtimeAssistant.uuid,
+        message: { role: 'user', parts: [{ text: 'backend task' }] },
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [realtimeUser, realtimeAssistant, backendUser],
+      };
+
+      expect(buildApiHistoryFromConversation(conversation)).toEqual([
+        backendUser.message,
+      ]);
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {

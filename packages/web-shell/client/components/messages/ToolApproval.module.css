@@ -28,6 +28,20 @@
   font-family: var(--font-sans, system-ui, sans-serif);
 }
 
+.floatingWorkflow {
+  display: flex;
+  flex-direction: column;
+  max-height: min(720px, 80vh);
+  overflow-y: hidden;
+}
+
+.workflow {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -100,6 +114,12 @@
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
+}
+
+.planContent {
+  display: block;
+  max-height: min(240px, 25vh);
+  -webkit-line-clamp: unset;
 }
 
 .code {

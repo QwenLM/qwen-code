@@ -22,7 +22,11 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
-import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import {
+  GoalPill,
+  isLiveGoalSnapshot,
+  useFooterGoalState,
+} from './GoalPill.js';
 import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
@@ -183,9 +187,12 @@ export const Footer: React.FC = () => {
   // Goal pill: only present in `rightItems` when a goal is active so the
   // divider chain stays tight; the pill itself does the live elapsed-time
   // refresh internally.
-  const goalActive = useFooterGoalState() !== undefined;
-  if (goalActive) {
-    rightItems.push({ key: 'goal', node: <GoalPill /> });
+  const goalState = useFooterGoalState();
+  if (isLiveGoalSnapshot(goalState)) {
+    rightItems.push({
+      key: 'goal',
+      node: <GoalPill snapshot={goalState} />,
+    });
   }
   const cronTaskCount = useFooterCronTaskCount();
   if (cronTaskCount > 0) {
@@ -263,12 +270,21 @@ export const Footer: React.FC = () => {
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>
+          {/* Every child of this shrinkable row must keep wrap="truncate", or
+              the footer grows mid-turn once the row overflows (#8667/#8666). */}
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {uiState.messageQueue.length > 0 && (
+            <Text color={theme.text.secondary} wrap="truncate">
+              {` ⏳ ${t('{{count}} queued', {
+                count: String(uiState.messageQueue.length),
+              })}`}
+            </Text>
+          )}
           {!uiState.isSkillReviewDialogOpen &&
             (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
-              <Text color={theme.status.warning}>
+              <Text color={theme.status.warning} wrap="truncate">
                 {` ⚠ ${t('{{count}} skill(s) pending review', {
                   count: String(uiState.skillReviewPending!.skills.length),
                 })}`}

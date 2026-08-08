@@ -34,14 +34,12 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Disk-resident cache file (sibling of the telemetry artifacts under
-/// `~/.cua-driver-rs/`). Holds the last-seen latest version plus the list
+/// `~/.cua-driver/`). Holds the last-seen latest version plus the list
 /// of versions the user has actively dismissed.
 const CACHE_FILE_NAME: &str = "version_check.json";
 
-/// `~/.cua-driver-rs/` — same subdirectory the telemetry client uses,
-/// kept separate from the `~/.cua-driver/` config tree that the Swift
-/// reference owns.
-const HOME_SUBDIRECTORY: &str = ".cua-driver-rs";
+/// `~/.cua-driver/` — same subdirectory the telemetry client uses.
+const HOME_SUBDIRECTORY: &str = ".cua-driver";
 
 /// Single-invocation opt-out env var. Recognised values mirror the
 /// telemetry opt-out: `0|false|no|off` disables the check, everything
@@ -65,8 +63,7 @@ pub const RELEASE_TAG_PREFIX: &str = "cua-driver-rs-v";
 /// GitHub releases API endpoint. Paginates newest-first; 40 entries is
 /// plenty of headroom past the most recent stable release even when
 /// pre-releases are sprinkled in between.
-const RELEASES_URL: &str =
-    "https://api.github.com/repos/trycua/cua/releases?per_page=40";
+const RELEASES_URL: &str = "https://api.github.com/repos/QwenLM/qwen-code/releases?per_page=40";
 
 // ── Public API ───────────────────────────────────────────────────────────
 
@@ -93,7 +90,7 @@ pub fn maybe_announce_update() {
     let current = env!("CARGO_PKG_VERSION").to_owned();
 
     let task = move || {
-        run_check_and_announce(&current, fetch_latest_version, std::io::stderr());
+        run_check_and_announce(&current, fetch_latest_version, std::io::stderr(), true);
     };
 
     if tokio::runtime::Handle::try_current().is_ok() {
@@ -107,7 +104,7 @@ pub fn maybe_announce_update() {
 }
 
 /// Structured snapshot returned by [`check_update_state`] — the canonical
-/// payload behind both `cua-driver check-update --json` and the
+/// payload behind both `qwen-cua-driver check-update --json` and the
 /// `check_for_update` MCP tool. Hermes branches on `update_available`.
 ///
 /// Fields mirror the JSON schema documented in the user-facing
@@ -142,6 +139,28 @@ pub struct UpdateState {
     pub error: Option<String>,
 }
 
+/// Emit the bounded result of an explicit update check. The structured state
+/// remains the source of truth for CLI/MCP output; telemetry receives only a
+/// closed outcome, a strict public release version, and the cache flag.
+pub(crate) fn capture_update_state(
+    state: &UpdateState,
+    source: crate::telemetry::UpdateCheckSource,
+) {
+    let outcome = if state.update_available {
+        crate::telemetry::UpdateCheckOutcome::Available
+    } else if state.latest_version.is_some() {
+        crate::telemetry::UpdateCheckOutcome::UpToDate
+    } else {
+        crate::telemetry::UpdateCheckOutcome::Unavailable
+    };
+    crate::telemetry::capture_update_checked(
+        source,
+        outcome,
+        state.latest_version.as_deref(),
+        state.cache_hit,
+    );
+}
+
 /// Build the canonical install one-liner for the current target.
 ///
 /// Lives here (rather than in the `cua-driver` crate's `updater.rs`) so the
@@ -150,11 +169,11 @@ pub struct UpdateState {
 fn install_one_liner() -> String {
     #[cfg(windows)]
     {
-        "irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex".to_owned()
+        "irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex".to_owned()
     }
     #[cfg(not(windows))]
     {
-        "curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh | bash".to_owned()
+        "curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh | bash".to_owned()
     }
 }
 
@@ -225,7 +244,7 @@ pub fn check_update_state(no_cache: bool) -> UpdateState {
         (
             Some(install_one_liner()),
             Some(format!(
-                "https://github.com/trycua/cua/releases/tag/{RELEASE_TAG_PREFIX}{l}"
+                "https://github.com/QwenLM/qwen-code/releases/tag/{RELEASE_TAG_PREFIX}{l}"
             )),
         )
     } else {
@@ -276,7 +295,7 @@ pub fn dismiss_version(version: &str) {
 /// against a stubbed fetcher and capture the banner into an in-memory
 /// buffer. Errors here never propagate — the function consumes them
 /// and converts to `tracing::debug!` lines.
-fn run_check_and_announce<F, W>(current: &str, fetch: F, mut writer: W)
+fn run_check_and_announce<F, W>(current: &str, fetch: F, mut writer: W, capture_telemetry: bool)
 where
     F: FnOnce() -> Result<String, String>,
     W: std::io::Write,
@@ -290,7 +309,7 @@ where
         .map(|t| now.saturating_sub(t) >= CACHE_REFRESH_SECONDS)
         .unwrap_or(true);
 
-    let latest = if needs_refresh {
+    let (latest, cache_hit) = if needs_refresh {
         match fetch() {
             Ok(v) => {
                 // Persist on success so the next launch re-uses the answer.
@@ -304,7 +323,7 @@ where
                     tracing::debug!(target: "cua_driver::version_check",
                                     "failed to write cache: {e}");
                 }
-                v
+                (v, false)
             }
             Err(e) => {
                 tracing::debug!(target: "cua_driver::version_check",
@@ -312,14 +331,14 @@ where
                 // Fall back to the cached value if any — better an old
                 // banner than none on a brief network blip.
                 match cached.latest_version.clone() {
-                    Some(v) => v,
+                    Some(v) => (v, true),
                     None => return,
                 }
             }
         }
     } else {
         match cached.latest_version.clone() {
-            Some(v) => v,
+            Some(v) => (v, true),
             None => return,
         }
     };
@@ -339,6 +358,17 @@ where
         return;
     }
 
+    // Background entry points can be hot-restarted. Record availability only
+    // on the freshness-bounded network check, not on every cached banner.
+    if capture_telemetry && !cache_hit {
+        crate::telemetry::capture_update_checked(
+            crate::telemetry::UpdateCheckSource::Background,
+            crate::telemetry::UpdateCheckOutcome::Available,
+            Some(&latest),
+            false,
+        );
+    }
+
     let banner = format_banner(&latest, current);
     if let Err(e) = writer.write_all(banner.as_bytes()) {
         tracing::debug!(target: "cua_driver::version_check",
@@ -351,9 +381,10 @@ where
 /// readable either way.
 fn format_banner(latest: &str, current: &str) -> String {
     format!(
-        "\n\u{2728} cua-driver v{latest} is available (you have v{current}).\n   \
-         Update with: cua-driver update\n   \
-         Release notes: https://github.com/trycua/cua/releases/tag/{prefix}{latest}\n\n",
+        "\n\u{2728} Qwen Cua Driver v{latest} is available (you have v{current}).\n   \
+         Update with: {cli} update\n   \
+         Release notes: https://github.com/QwenLM/qwen-code/releases/tag/{prefix}{latest}\n\n",
+        cli = crate::bundle::cli_name(),
         prefix = RELEASE_TAG_PREFIX,
     )
 }
@@ -380,12 +411,13 @@ fn is_enabled() -> bool {
 }
 
 /// Read the `update_check_enabled` flag out of the same JSON config file
-/// the `cua-driver config set` subcommand writes to. Returns `None` when
+/// the `qwen-cua-driver config set` subcommand writes to. Returns `None` when
 /// the file is missing, unreadable, or doesn't have the key.
 fn read_config_flag() -> Option<bool> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))?;
-    let path = PathBuf::from(home).join(".cua-driver").join("config.json");
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let path = PathBuf::from(home)
+        .join(crate::bundle::user_home_subdirectory())
+        .join("config.json");
     let raw = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
     json.get("update_check_enabled").and_then(|v| v.as_bool())
@@ -420,14 +452,18 @@ pub(crate) fn is_prerelease(version: &str) -> bool {
 /// available" banner. We'd rather miss a real update than nag the user
 /// about a phantom one.
 pub fn is_newer(latest: &str, current: &str) -> bool {
-    let Ok(l) = semver::Version::parse(latest) else { return false; };
-    let Ok(c) = semver::Version::parse(current) else { return false; };
+    let Ok(l) = semver::Version::parse(latest) else {
+        return false;
+    };
+    let Ok(c) = semver::Version::parse(current) else {
+        return false;
+    };
     l > c
 }
 
 // ── On-disk cache ────────────────────────────────────────────────────────
 
-/// Serialised shape of `~/.cua-driver-rs/version_check.json`.
+/// Serialised shape of `~/.cua-driver/version_check.json`.
 ///
 /// `last_checked_unix` is the source of truth for cache-age decisions;
 /// `last_checked_at` is the same instant rendered as ISO-8601 for human
@@ -472,9 +508,16 @@ fn write_cache(cache: &VersionCache) -> std::io::Result<()> {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(HOME_SUBDIRECTORY).join(CACHE_FILE_NAME))
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(
+        PathBuf::from(home)
+            .join(if crate::bundle::is_local_installation() {
+                ".qwen-cua-driver-local"
+            } else {
+                HOME_SUBDIRECTORY
+            })
+            .join(CACHE_FILE_NAME),
+    )
 }
 
 // ── HTTP fetch (shared with the `update` subcommand) ─────────────────────
@@ -504,7 +547,10 @@ pub fn fetch_latest_version() -> Result<String, String> {
     let response = agent
         .get(RELEASES_URL)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", concat!("cua-driver-rs/", env!("CARGO_PKG_VERSION")))
+        .header(
+            "User-Agent",
+            concat!("cua-driver-rs/", env!("CARGO_PKG_VERSION")),
+        )
         .call()
         .map_err(|e| format!("HTTP error: {e}"))?;
 
@@ -590,23 +636,35 @@ mod tests {
     /// Redirect `HOME` / `USERPROFILE` to a fresh temp dir for the body
     /// of `f`, then restore. Ensures the cache file lives in an isolated
     /// directory and never touches the developer's real
-    /// `~/.cua-driver-rs/version_check.json`.
+    /// `~/.cua-driver/version_check.json`.
     fn with_isolated_home<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
         let tmp = tempfile::tempdir().expect("tempdir");
         let saved_home = std::env::var_os("HOME");
         let saved_userprofile = std::env::var_os("USERPROFILE");
-        unsafe { std::env::set_var("HOME", tmp.path()); }
-        unsafe { std::env::set_var("USERPROFILE", tmp.path()); }
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        unsafe {
+            std::env::set_var("USERPROFILE", tmp.path());
+        }
 
         let result = f(tmp.path());
 
         match saved_home {
-            Some(s) => unsafe { std::env::set_var("HOME", s); },
-            None => unsafe { std::env::remove_var("HOME"); },
+            Some(s) => unsafe {
+                std::env::set_var("HOME", s);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
         }
         match saved_userprofile {
-            Some(s) => unsafe { std::env::set_var("USERPROFILE", s); },
-            None => unsafe { std::env::remove_var("USERPROFILE"); },
+            Some(s) => unsafe {
+                std::env::set_var("USERPROFILE", s);
+            },
+            None => unsafe {
+                std::env::remove_var("USERPROFILE");
+            },
         }
         result
     }
@@ -744,6 +802,7 @@ mod tests {
                     Ok("0.1.4".to_owned()) // newer version returned by network
                 },
                 &mut buf,
+                false,
             );
 
             assert_eq!(
@@ -780,6 +839,7 @@ mod tests {
                     Ok("0.1.5".to_owned())
                 },
                 &mut buf,
+                false,
             );
 
             assert_eq!(
@@ -809,7 +869,7 @@ mod tests {
             write_cache(&cache).unwrap();
 
             let mut buf: Vec<u8> = Vec::new();
-            run_check_and_announce("0.1.3", || Ok("0.1.4".to_owned()), &mut buf);
+            run_check_and_announce("0.1.3", || Ok("0.1.4".to_owned()), &mut buf, false);
             assert!(buf.is_empty(), "dismissed version must suppress banner");
         });
     }
@@ -821,27 +881,37 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os(ENV_UPDATE_CHECK);
 
-        unsafe { std::env::set_var(ENV_UPDATE_CHECK, "false"); }
+        unsafe {
+            std::env::set_var(ENV_UPDATE_CHECK, "false");
+        }
         // Use a separately-redirected HOME so any config file present on
         // the developer's machine can't influence the result.
         with_isolated_home(|_| {
             assert!(!is_enabled(), "explicit false env var must disable");
         });
 
-        unsafe { std::env::set_var(ENV_UPDATE_CHECK, "0"); }
+        unsafe {
+            std::env::set_var(ENV_UPDATE_CHECK, "0");
+        }
         with_isolated_home(|_| {
             assert!(!is_enabled(), "0 must disable");
         });
 
-        unsafe { std::env::set_var(ENV_UPDATE_CHECK, "off"); }
+        unsafe {
+            std::env::set_var(ENV_UPDATE_CHECK, "off");
+        }
         with_isolated_home(|_| {
             assert!(!is_enabled(), "off must disable");
         });
 
         // Restore.
         match saved {
-            Some(s) => unsafe { std::env::set_var(ENV_UPDATE_CHECK, s); },
-            None => unsafe { std::env::remove_var(ENV_UPDATE_CHECK); },
+            Some(s) => unsafe {
+                std::env::set_var(ENV_UPDATE_CHECK, s);
+            },
+            None => unsafe {
+                std::env::remove_var(ENV_UPDATE_CHECK);
+            },
         }
     }
 
@@ -849,27 +919,36 @@ mod tests {
     fn config_flag_disables_check() {
         let _g = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os(ENV_UPDATE_CHECK);
-        unsafe { std::env::remove_var(ENV_UPDATE_CHECK); }
+        unsafe {
+            std::env::remove_var(ENV_UPDATE_CHECK);
+        }
 
         with_isolated_home(|home| {
             // Write a config that disables the check.
-            let cfg_dir = home.join(".cua-driver");
+            let cfg_dir = home.join(crate::bundle::user_home_subdirectory());
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join("config.json"),
                 r#"{"update_check_enabled": false}"#,
-            ).unwrap();
+            )
+            .unwrap();
 
             // Build version is a normal release (this crate's pkg version
             // ships as "0.1.3", a stable release — see workspace Cargo.toml).
             // The env var is unset, so the config flag is the only signal.
-            assert!(!is_enabled(),
-                "persisted update_check_enabled=false must disable the check");
+            assert!(
+                !is_enabled(),
+                "persisted update_check_enabled=false must disable the check"
+            );
         });
 
         match saved {
-            Some(s) => unsafe { std::env::set_var(ENV_UPDATE_CHECK, s); },
-            None => unsafe { std::env::remove_var(ENV_UPDATE_CHECK); },
+            Some(s) => unsafe {
+                std::env::set_var(ENV_UPDATE_CHECK, s);
+            },
+            None => unsafe {
+                std::env::remove_var(ENV_UPDATE_CHECK);
+            },
         }
     }
 
@@ -877,28 +956,39 @@ mod tests {
     fn config_flag_true_or_missing_leaves_check_on() {
         let _g = ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os(ENV_UPDATE_CHECK);
-        unsafe { std::env::remove_var(ENV_UPDATE_CHECK); }
+        unsafe {
+            std::env::remove_var(ENV_UPDATE_CHECK);
+        }
 
         with_isolated_home(|home| {
             // Case A: no config file at all → enabled.
             // CARGO_PKG_VERSION is "0.1.3" (stable), env unset, no config file.
-            assert!(is_enabled(),
-                "no config file + stable version + no env opt-out → enabled");
+            assert!(
+                is_enabled(),
+                "no config file + stable version + no env opt-out → enabled"
+            );
 
             // Case B: config file present but flag = true → still enabled.
-            let cfg_dir = home.join(".cua-driver");
+            let cfg_dir = home.join(crate::bundle::user_home_subdirectory());
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join("config.json"),
                 r#"{"update_check_enabled": true, "other_key": 42}"#,
-            ).unwrap();
-            assert!(is_enabled(),
-                "explicit update_check_enabled=true must leave check on");
+            )
+            .unwrap();
+            assert!(
+                is_enabled(),
+                "explicit update_check_enabled=true must leave check on"
+            );
         });
 
         match saved {
-            Some(s) => unsafe { std::env::set_var(ENV_UPDATE_CHECK, s); },
-            None => unsafe { std::env::remove_var(ENV_UPDATE_CHECK); },
+            Some(s) => unsafe {
+                std::env::set_var(ENV_UPDATE_CHECK, s);
+            },
+            None => unsafe {
+                std::env::remove_var(ENV_UPDATE_CHECK);
+            },
         }
     }
 
@@ -908,15 +998,20 @@ mod tests {
     fn banner_contains_required_lines() {
         let banner = format_banner("0.1.4", "0.1.3");
         // Headline.
-        assert!(banner.contains("cua-driver v0.1.4 is available"), "got: {banner:?}");
+        assert!(
+            banner.contains("Qwen Cua Driver v0.1.4 is available"),
+            "got: {banner:?}"
+        );
         assert!(banner.contains("you have v0.1.3"), "got: {banner:?}");
         // Update instruction.
-        assert!(banner.contains("Update with: cua-driver update"), "got: {banner:?}");
+        assert!(
+            banner.contains("Update with: qwen-cua-driver update"),
+            "got: {banner:?}"
+        );
         // Release notes URL uses the correct tag prefix.
         assert!(
-            banner.contains(
-                "https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.1.4"
-            ),
+            banner
+                .contains("https://github.com/QwenLM/qwen-code/releases/tag/cua-driver-rs-v0.1.4"),
             "got: {banner:?}",
         );
     }

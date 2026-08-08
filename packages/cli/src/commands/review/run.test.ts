@@ -25,6 +25,7 @@ import {
   mkdtempSync,
   mkdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   utimesSync,
 } from 'node:fs';
@@ -202,6 +203,11 @@ describe('review run (handler)', () => {
   }
 
   beforeEach(() => {
+    // Pin POSIX semantics for the whole suite (restored in afterEach): these
+    // tests assert the process-group kill and POSIX paths, so pinning the
+    // platform keeps them green on a Windows runner without pretending to cover
+    // win32 — that path has its own test in killProcessGroup above.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     dir = mkdtempSync(join(tmpdir(), 'run-handler-'));
     cwd = process.cwd();
     process.chdir(dir);
@@ -374,6 +380,90 @@ describe('review run (handler)', () => {
     const i = argvUsed.indexOf('--approval-mode');
     expect(i).toBeGreaterThan(-1);
     expect(argvUsed[i + 1]).toBe('default');
+  });
+
+  describe('child env: QWEN_CODE_CLI version skew', () => {
+    let saved: string | undefined;
+
+    beforeEach(() => {
+      saved = process.env['QWEN_CODE_CLI'];
+    });
+
+    afterEach(() => {
+      if (saved === undefined) {
+        delete process.env['QWEN_CODE_CLI'];
+      } else {
+        process.env['QWEN_CODE_CLI'] = saved;
+      }
+    });
+
+    function childEnvValue(): string | undefined {
+      const [, , opts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: NodeJS.ProcessEnv },
+      ];
+      return opts.env['QWEN_CODE_CLI'];
+    }
+
+    it('blanks an inherited entry that points at a DIFFERENT build', async () => {
+      // The dogfooded failure: a review launched from inside a parent Qwen
+      // session ran the parent's install for every skill subcommand.
+      process.env['QWEN_CODE_CLI'] = process.execPath; // real file, ≠ argv[1]
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      // '' counts as unset in stampCliEntryEnv: the child re-stamps its own.
+      expect(childEnvValue()).toBe('');
+    });
+
+    it('preserves an inherited entry that IS this build', async () => {
+      // The outer-launcher case first-writer-wins exists for: an npm bin shim,
+      // cli-entry.js, or the desktop bundle stamping this same install.
+      process.env['QWEN_CODE_CLI'] = process.argv[1] as string;
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe(process.argv[1]);
+    });
+
+    it('blanks an inherited entry that does not resolve', async () => {
+      process.env['QWEN_CODE_CLI'] = join(dir, 'no-such-qwen');
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe('');
+    });
+
+    it('preserves a sibling entry in the same package root (npm layout)', async () => {
+      // cli-entry.js stamps itself but spawns cli.js: different files, same
+      // directory. An exact-file comparison would blank this valid stamp.
+      const bundle = join(dir, 'cli.js');
+      const wrapper = join(dir, 'cli-entry.js');
+      writeFileSync(bundle, '');
+      writeFileSync(wrapper, '');
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        process.env['QWEN_CODE_CLI'] = wrapper;
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe(wrapper);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it('preserves an inherited entry that is a symlink to this build', async () => {
+      const shim = join(dir, 'qwen-shim');
+      symlinkSync(process.argv[1] as string, shim);
+      process.env['QWEN_CODE_CLI'] = shim;
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe(shim);
+    });
   });
 
   it('treats a composed verdict without a string event as no verdict', async () => {

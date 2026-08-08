@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__external-context__context_remember",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\administrator\\qwen-code\\integrations\\external-context\\dist\\write-confirmation.js'",
+            "shell": "powershell",
+            "timeout": 8000,
+            "name": "external-context-memory-write-confirmation",
+            "statusMessage": "Confirming external memory write"
+          }
+        ]
+      }
+    ]
+  },
+  "$version": 4
+}

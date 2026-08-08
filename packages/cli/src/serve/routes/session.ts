@@ -13,12 +13,15 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionService,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
+  Storage,
   addDaemonRequestAttribute,
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
@@ -31,10 +34,15 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  isReservedLiveSessionSource,
+  readLoadableLiveConversationMetadata,
+} from '../live/session-source.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
-import { parseChannelDelivery } from '../channel-delivery.js';
+import { loadSettingsCached } from '../../config/settings-cache.js';
+import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
+import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
@@ -137,6 +145,20 @@ const GIT_RESERVED_BRANCH = 'HEAD';
 const MAX_BRANCH_NAME_BYTES = 1000;
 const MAX_BRANCH_COMPONENT_BYTES = 200;
 
+// A strict SUBSET of config.ts's isValidSessionId: same v4 version/variant
+// nibbles, minus the `-agent-{suffix}` form (SessionService.SESSION_FILE_PATTERN
+// only matches 32-36 hex/hyphen chars, so a suffixed id would write a transcript
+// the session list can never see).
+//
+// Keeping it a subset in BOTH directions matters: every id the daemon accepts
+// must also be a valid `--session-id` and `/resume <id>` argument, otherwise a
+// session created over HTTP is unreachable from the CLI (resumeCommand.ts gates
+// on isValidSessionId and falls through to title matching when it fails). That
+// rules out UUIDv7, the nil UUID, and non-RFC-4122 variants even though they are
+// harmless as filenames.
+const HTTP_SESSION_ID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
@@ -150,9 +172,19 @@ interface RegisterSessionRoutesDeps {
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
+  materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
+  isLiveSessionActive?: (sessionId: string) => boolean;
 }
 
-const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+// Chosen cap for one serialized transcript response, kept proportional to
+// the core expanded-page ceiling so the two cannot drift arbitrarily. This
+// is not a derived guarantee: a single aggregated record can exceed any
+// page budget (the reader always takes at least one record so pagination
+// cannot dead-end), and replayed SessionUpdate objects are not a fixed
+// multiple of their source records. A page this route cannot serialize
+// returns transcript_page_too_large for that anchor.
+const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
+  2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
@@ -376,6 +408,23 @@ function shouldPreserveTranscriptResolutionError(err: unknown): boolean {
   );
 }
 
+/**
+ * Whether a session with this id is currently live on the daemon.
+ * `getSessionSummary` is a `byId` lookup that signals absence by throwing
+ * `SessionNotFoundError`. Anything else is treated as "assume live" rather
+ * than "not live" — for a uniqueness guard, failing closed on an unreadable
+ * bridge is the safe direction, and it matches how
+ * `SessionService.sessionExistsInAnyState` handles its own read errors.
+ */
+function isSessionLive(bridge: AcpSessionBridge, sessionId: string): boolean {
+  try {
+    bridge.getSessionSummary(sessionId);
+    return true;
+  } catch (err) {
+    return !(err instanceof SessionNotFoundError);
+  }
+}
+
 function parseOptionalApprovalMode(
   body: Record<string, unknown>,
   res: Response,
@@ -434,6 +483,10 @@ export function registerSessionRoutes(
   // after spawn). Closes the TOCTOU where two concurrent requests both pass
   // the guard before either populates `activeBranchSessions`.
   const inFlightBranchWorkspaces = new Set<string>();
+  // Caller-supplied session ids with a creation currently in flight. Closes
+  // the TOCTOU where two concurrent requests with the same sessionId both
+  // pass sessionExistsInAnyState before either session is created.
+  const inFlightSessionIds = new Set<string>();
 
   /** Remove the branch-session tracking entry when a session ends. */
   const clearBranchSessionEntry = (sessionId: string): void => {
@@ -442,6 +495,23 @@ export function registerSessionRoutes(
         activeBranchSessions.delete(cwd);
       }
     }
+  };
+
+  const rejectActiveLiveSessionMutation = (
+    res: Response,
+    sessionIds: readonly string[],
+  ): boolean => {
+    const activeSessionId = sessionIds.find((sessionId) =>
+      deps.isLiveSessionActive?.(sessionId),
+    );
+    if (!activeSessionId) return false;
+    res.status(409).json({
+      error:
+        'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+      code: 'live_session_active',
+      sessionId: activeSessionId,
+    });
+    return true;
   };
 
   /** Roll back a branch creation: restore the base ref and delete the branch. */
@@ -1250,6 +1320,14 @@ export function registerSessionRoutes(
     const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
     if (resolvedRuntime === undefined) return;
     const { runtime, workspaceCwd } = resolvedRuntime;
+    if (runtime.provenance === 'live-conversation') {
+      res.status(400).json({
+        error:
+          'Sessions in the Conversations workspace can only be created by Live Voice.',
+        code: 'live_session_creation_reserved',
+      });
+      return;
+    }
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -1278,289 +1356,380 @@ export function registerSessionRoutes(
       });
       return;
     }
+    if (isReservedLiveSessionSource(source)) {
+      res.status(400).json({
+        error:
+          'The requested session source is reserved for daemon-owned Live Voice sessions.',
+        code: 'reserved_session_source',
+      });
+      return;
+    }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
-    // ── Branch creation ────────────────────────────────────────────
-    // When `branch` is present, create and checkout a new git branch
-    // before spawning. The session runs in the same working directory
-    // but on the new branch. Mutually exclusive with `worktree`.
-    let branchMeta: { name: string; baseBranch: string } | undefined;
-    let branchBaseCommit: string | undefined;
-    const rawBranch = body['branch'];
-    if (rawBranch !== undefined && rawBranch !== null) {
-      if (body['worktree'] !== undefined && body['worktree'] !== null) {
-        res.status(400).json({
-          error: '`branch` and `worktree` are mutually exclusive',
-          code: 'branch_and_worktree_conflict',
-        });
-        return;
-      }
-      if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
-        res.status(400).json({
-          error:
-            '`branch` must be an object (e.g. `{"name":"feat/my-feature"}`)',
-          code: 'invalid_branch',
-        });
-        return;
-      }
-      const branchReq = rawBranch as Record<string, unknown>;
-      const branchName = branchReq['name'];
-      if (typeof branchName !== 'string' || branchName.length === 0) {
-        res.status(400).json({
-          error: '`branch.name` must be a non-empty string',
-          code: 'branch_invalid_name',
-        });
-        return;
-      }
-      // Validate git branch name characters and reserved names.
-      // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
+    // Optional caller-supplied session id. Validated at the route boundary
+    // so a 400 surfaces before touching the bridge. The core Config
+    // constructor uses it verbatim (falling back to randomUUID when absent).
+    const rawSessionId = body['sessionId'];
+    let requestedSessionId: string | undefined;
+    if (rawSessionId !== undefined && rawSessionId !== null) {
       if (
-        /[^\p{L}\p{N}._/-]/u.test(branchName) ||
-        branchName.includes('..') ||
-        branchName.includes('//') ||
-        branchName.startsWith('.') ||
-        branchName.startsWith('-') ||
-        branchName.startsWith('/') ||
-        branchName.endsWith('/') ||
-        branchName.endsWith('.') ||
-        branchName.endsWith('.git') ||
-        branchName.includes('@{') ||
-        branchName
-          .split('/')
-          .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-        branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
-        Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
-        branchName
-          .split('/')
-          .some(
-            (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
-          )
+        typeof rawSessionId !== 'string' ||
+        !HTTP_SESSION_ID_REGEX.test(rawSessionId)
       ) {
         res.status(400).json({
-          error: `Invalid branch name: ${branchName}`,
-          code: 'branch_invalid_name',
-        });
-        return;
-      }
-      // Reject when another branch session is already active for this
-      // workspace — concurrent branch sessions conflict on HEAD. Runs after
-      // shape/name validation so a malformed body gets 400, not 409.
-      const existingBranchSession = activeBranchSessions.get(workspaceCwd);
-      if (existingBranchSession) {
-        try {
-          // Throws if the session is gone, letting us clean up the stale entry.
-          runtime.bridge.getSessionSummary(existingBranchSession);
-          res.status(409).json({
-            error: 'A branch session is already active for this workspace',
-            code: 'branch_session_conflict',
-            existingSessionId: existingBranchSession,
-          });
-          return;
-        } catch {
-          activeBranchSessions.delete(workspaceCwd);
-        }
-      }
-      // Reject when any other live (client-attached) non-worktree session
-      // already runs in this workspace. `git checkout -b` moves the shared
-      // HEAD, so a concurrent current-branch session with a clean tree would
-      // be silently relocated onto the new branch and commit to the wrong
-      // ref. Worktree sessions are exempt (they run in their own cwd). Scoped
-      // to sessions with an attached client so a detached session left behind
-      // by a "new chat" does not block a fresh branch session.
-      const sharedCheckoutSession = runtime.bridge
-        .listWorkspaceSessions(workspaceCwd)
-        .find((session) => !session.worktree && session.clientCount > 0);
-      if (sharedCheckoutSession) {
-        res.status(409).json({
           error:
-            'Another session is already active in this workspace; creating a branch would move its shared checkout',
-          code: 'branch_session_conflict',
-          existingSessionId: sharedCheckoutSession.sessionId,
+            '`sessionId` must be a UUID (e.g. "550e8400-e29b-41d4-a716-446655440000")',
+          code: 'invalid_session_id',
         });
         return;
       }
-      let wtService: GitWorktreeService;
-      try {
-        wtService = new GitWorktreeService(workspaceCwd);
-      } catch {
-        res.status(500).json({
-          error: 'Failed to initialize git service',
-          code: 'branch_init_failed',
-        });
-        return;
-      }
-      if (!(await wtService.isGitRepository())) {
-        res.status(400).json({
-          error: 'Branch creation requires a git repository',
-          code: 'branch_not_git_repo',
-        });
-        return;
-      }
-      // Check the branch doesn't already exist.
-      if (await branchExists(workspaceCwd, branchName)) {
+      requestedSessionId = rawSessionId.toLowerCase();
+      const sessionIdToCheck = requestedSessionId;
+      // Reject an id that is already LIVE on this workspace's bridge.
+      // The disk check below cannot see these: the transcript JSONL is
+      // only written on a session's first message, so a session that was
+      // created and never prompted leaves no file behind — for its whole
+      // lifetime, not just a brief window. Without this, a sequential retry
+      // with the same id falls through to the agent's own
+      // `Session <id> is already active.` guard, which is a bare Error and
+      // surfaces as an opaque `500 / -32603` instead of the 409 this route
+      // documents. `inFlightSessionIds` below only covers requests that
+      // overlap in time; this covers a first request that already returned.
+      //
+      // Per-workspace scope: checks only the current workspace's bridge.
+      // The daemon-wide `inFlightSessionIds` guard covers concurrent
+      // cross-workspace reuse; sequential cross-workspace reuse of the same
+      // id can still produce two live sessions sharing an id (routing then
+      // fails as `ambiguous_session_owner`).
+      if (isSessionLive(runtime.bridge, sessionIdToCheck)) {
         res.status(409).json({
-          error: `Branch "${branchName}" already exists`,
-          code: 'branch_already_exists',
+          error: `Session "${requestedSessionId}" already exists`,
+          code: 'session_id_conflict',
         });
         return;
       }
-      // Gate on a dirty tree as surprise-prevention: `git checkout -b` carries
-      // uncommitted tracked changes onto the new branch, which would silently
-      // mix the user's WIP with a fresh branch. Untracked files are excluded
-      // (`--untracked-files=no`) because they survive any checkout unchanged.
-      let dirty: boolean;
-      try {
-        dirty = await isDirtyTree(workspaceCwd);
-      } catch {
-        res.status(500).json({
-          error: 'Failed to check working tree status',
-          code: 'branch_status_failed',
-        });
-        return;
-      }
-      if (dirty) {
-        res.status(409).json({
-          error: 'Uncommitted changes detected. Commit or stash first.',
-          code: 'branch_dirty_tree',
-        });
-        return;
-      }
-      const baseCommit = await getHeadCommit(workspaceCwd);
-      const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
-      // Reserve the workspace before mutating HEAD. The conflict guard above
-      // runs before several awaits (rev-parse, status, checkout), so two
-      // concurrent `POST /session { branch }` can both pass it and race on
-      // `git checkout -b`. This synchronous check-and-add (no await between)
-      // serializes the checkout; every exit path below clears the reservation
-      // (transferred to `activeBranchSessions` on success). Re-check
-      // `activeBranchSessions` here too: a request that passed the early guard
-      // before a concurrent request registered can still be in flight while
-      // the first request has already completed and populated the map.
+      // Reject an id that already exists on disk (active or archived) at the
+      // route boundary: loadCliConfig calls process.exit(1) on a duplicate,
+      // which would terminate the shared ACP child and every session on its
+      // channel.
+      const runtimeOutputDir =
+        loadSettingsCached(workspaceCwd).merged.advanced?.runtimeOutputDir;
       if (
-        inFlightBranchWorkspaces.has(workspaceCwd) ||
-        activeBranchSessions.has(workspaceCwd)
-      ) {
-        res.status(409).json({
-          error: 'A branch session is already being created for this workspace',
-          code: 'branch_session_conflict',
-        });
-        return;
-      }
-      inFlightBranchWorkspaces.add(workspaceCwd);
-      try {
-        await createBranch(workspaceCwd, branchName);
-      } catch (checkoutErr) {
-        // `git checkout -b` can reject AFTER git already created the ref and
-        // moved HEAD — a failing post-checkout hook or a timeout past the ref
-        // update both leave the workspace on the new branch while the command
-        // exits nonzero. Roll back transactionally (restore the base ref, then
-        // delete the partial branch) so the shared workspace is never silently
-        // left on the new branch; when nothing was created the rollback is a
-        // harmless no-op. Log the full git error but return a generic detail —
-        // git stderr can embed the absolute workspace path, which must not
-        // reach the caller in the 500 body.
-        daemonLog?.warn('branch checkout failed', {
-          error:
-            checkoutErr instanceof Error
-              ? checkoutErr.message
-              : String(checkoutErr),
-        });
-        await rollbackBranchCreation(
+        await Storage.runWithRuntimeBaseDir(
+          runtimeOutputDir,
           workspaceCwd,
-          { name: branchName, baseBranch },
-          baseCommit,
-          daemonLog,
-        );
-        res.status(500).json({
-          error: 'Failed to create branch',
-          code: 'branch_checkout_failed',
+          () =>
+            new SessionService(workspaceCwd).sessionExistsInAnyState(
+              sessionIdToCheck,
+            ),
+        )
+      ) {
+        res.status(409).json({
+          error: `Session "${requestedSessionId}" already exists`,
+          code: 'session_id_conflict',
         });
         return;
       }
-      branchMeta = { name: branchName, baseBranch };
-      branchBaseCommit = baseCommit;
-      sessionScope = 'thread';
+      if (inFlightSessionIds.has(requestedSessionId)) {
+        res.status(409).json({
+          error: `Session "${requestedSessionId}" creation already in progress`,
+          code: 'session_id_conflict',
+        });
+        return;
+      }
+      inFlightSessionIds.add(requestedSessionId);
     }
 
-    // ── Worktree isolation ──────────────────────────────────────────
-    // When `worktree` is present, create a git worktree before spawning
-    // and relocate the session into it immediately after. The workspace
-    // runtime resolution still uses the main workspace cwd; only the
-    // child process's effective working directory changes.
+    let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchBaseCommit: string | undefined;
     let worktreeMeta:
       | { slug: string; path: string; branch: string }
       | undefined;
-    const rawWorktree = body['worktree'];
-    if (rawWorktree !== undefined && rawWorktree !== null) {
-      if (typeof rawWorktree !== 'object' || Array.isArray(rawWorktree)) {
-        res.status(400).json({
-          error:
-            '`worktree` must be an object (e.g. `{}` or `{"slug":"my-task"}`)',
-          code: 'invalid_worktree',
-        });
-        return;
-      }
-      const wtReq = rawWorktree as Record<string, unknown>;
-      let wtService: GitWorktreeService;
-      try {
-        wtService = new GitWorktreeService(workspaceCwd);
-      } catch {
-        res.status(500).json({
-          error: 'Failed to initialize worktree service',
-          code: 'worktree_init_failed',
-        });
-        return;
-      }
-      if (!(await wtService.isGitRepository())) {
-        res.status(400).json({
-          error: 'Worktree isolation requires a git repository',
-          code: 'worktree_not_git_repo',
-        });
-        return;
-      }
-      const rawSlug = wtReq['slug'];
-      let slug: string;
-      if (rawSlug === undefined || rawSlug === null) {
-        slug = GitWorktreeService.generateAutoSlug();
-      } else if (typeof rawSlug !== 'string' || rawSlug.length === 0) {
-        res.status(400).json({
-          error: '`worktree.slug` must be a non-empty string when provided',
-          code: 'worktree_invalid_slug',
-        });
-        return;
-      } else {
-        slug = rawSlug;
-      }
-      const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
-      if (slugError) {
-        res
-          .status(400)
-          .json({ error: slugError, code: 'worktree_invalid_slug' });
-        return;
-      }
-      const baseBranch = await wtService
-        .getCurrentBranch()
-        .catch(() => undefined);
-      const wtResult = await wtService.createUserWorktree(slug, baseBranch);
-      if (!wtResult.success || !wtResult.worktree) {
-        res.status(500).json({
-          error: wtResult.error ?? 'Failed to create worktree',
-          code: 'worktree_create_failed',
-        });
-        return;
-      }
-      worktreeMeta = {
-        slug,
-        path: wtResult.worktree.path,
-        branch: wtResult.worktree.branch,
-      };
-      // Worktree sessions must be independent — never coalesce onto an
-      // existing single-scope session that lives in the main checkout.
-      sessionScope = 'thread';
-    }
 
     try {
+      // ── Branch creation ────────────────────────────────────────────
+      // When `branch` is present, create and checkout a new git branch
+      // before spawning. The session runs in the same working directory
+      // but on the new branch. Mutually exclusive with `worktree`.
+      const rawBranch = body['branch'];
+      if (rawBranch !== undefined && rawBranch !== null) {
+        if (body['worktree'] !== undefined && body['worktree'] !== null) {
+          res.status(400).json({
+            error: '`branch` and `worktree` are mutually exclusive',
+            code: 'branch_and_worktree_conflict',
+          });
+          return;
+        }
+        if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
+          res.status(400).json({
+            error:
+              '`branch` must be an object (e.g. `{"name":"feat/my-feature"}`)',
+            code: 'invalid_branch',
+          });
+          return;
+        }
+        const branchReq = rawBranch as Record<string, unknown>;
+        const branchName = branchReq['name'];
+        if (typeof branchName !== 'string' || branchName.length === 0) {
+          res.status(400).json({
+            error: '`branch.name` must be a non-empty string',
+            code: 'branch_invalid_name',
+          });
+          return;
+        }
+        // Validate git branch name characters and reserved names.
+        // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
+        if (
+          /[^\p{L}\p{N}._/-]/u.test(branchName) ||
+          branchName.includes('..') ||
+          branchName.includes('//') ||
+          branchName.startsWith('.') ||
+          branchName.startsWith('-') ||
+          branchName.startsWith('/') ||
+          branchName.endsWith('/') ||
+          branchName.endsWith('.') ||
+          branchName.endsWith('.git') ||
+          branchName.includes('@{') ||
+          branchName
+            .split('/')
+            .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
+          branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
+          Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+          branchName
+            .split('/')
+            .some(
+              (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
+            )
+        ) {
+          res.status(400).json({
+            error: `Invalid branch name: ${branchName}`,
+            code: 'branch_invalid_name',
+          });
+          return;
+        }
+        // Reject when another branch session is already active for this
+        // workspace — concurrent branch sessions conflict on HEAD. Runs after
+        // shape/name validation so a malformed body gets 400, not 409.
+        const existingBranchSession = activeBranchSessions.get(workspaceCwd);
+        if (existingBranchSession) {
+          try {
+            // Throws if the session is gone, letting us clean up the stale entry.
+            runtime.bridge.getSessionSummary(existingBranchSession);
+            res.status(409).json({
+              error: 'A branch session is already active for this workspace',
+              code: 'branch_session_conflict',
+              existingSessionId: existingBranchSession,
+            });
+            return;
+          } catch {
+            activeBranchSessions.delete(workspaceCwd);
+          }
+        }
+        // Reject when any other live (client-attached) non-worktree session
+        // already runs in this workspace. `git checkout -b` moves the shared
+        // HEAD, so a concurrent current-branch session with a clean tree would
+        // be silently relocated onto the new branch and commit to the wrong
+        // ref. Worktree sessions are exempt (they run in their own cwd). Scoped
+        // to sessions with an attached client so a detached session left behind
+        // by a "new chat" does not block a fresh branch session.
+        const sharedCheckoutSession = runtime.bridge
+          .listWorkspaceSessions(workspaceCwd)
+          .find((session) => !session.worktree && session.clientCount > 0);
+        if (sharedCheckoutSession) {
+          res.status(409).json({
+            error:
+              'Another session is already active in this workspace; creating a branch would move its shared checkout',
+            code: 'branch_session_conflict',
+            existingSessionId: sharedCheckoutSession.sessionId,
+          });
+          return;
+        }
+        let wtService: GitWorktreeService;
+        try {
+          wtService = new GitWorktreeService(workspaceCwd);
+        } catch {
+          res.status(500).json({
+            error: 'Failed to initialize git service',
+            code: 'branch_init_failed',
+          });
+          return;
+        }
+        if (!(await wtService.isGitRepository())) {
+          res.status(400).json({
+            error: 'Branch creation requires a git repository',
+            code: 'branch_not_git_repo',
+          });
+          return;
+        }
+        // Check the branch doesn't already exist.
+        if (await branchExists(workspaceCwd, branchName)) {
+          res.status(409).json({
+            error: `Branch "${branchName}" already exists`,
+            code: 'branch_already_exists',
+          });
+          return;
+        }
+        // Gate on a dirty tree as surprise-prevention: `git checkout -b` carries
+        // uncommitted tracked changes onto the new branch, which would silently
+        // mix the user's WIP with a fresh branch. Untracked files are excluded
+        // (`--untracked-files=no`) because they survive any checkout unchanged.
+        let dirty: boolean;
+        try {
+          dirty = await isDirtyTree(workspaceCwd);
+        } catch {
+          res.status(500).json({
+            error: 'Failed to check working tree status',
+            code: 'branch_status_failed',
+          });
+          return;
+        }
+        if (dirty) {
+          res.status(409).json({
+            error: 'Uncommitted changes detected. Commit or stash first.',
+            code: 'branch_dirty_tree',
+          });
+          return;
+        }
+        const baseCommit = await getHeadCommit(workspaceCwd);
+        const baseBranch = await wtService
+          .getCurrentBranch()
+          .catch(() => 'HEAD');
+        // Reserve the workspace before mutating HEAD. The conflict guard above
+        // runs before several awaits (rev-parse, status, checkout), so two
+        // concurrent `POST /session { branch }` can both pass it and race on
+        // `git checkout -b`. This synchronous check-and-add (no await between)
+        // serializes the checkout; every exit path below clears the reservation
+        // (transferred to `activeBranchSessions` on success). Re-check
+        // `activeBranchSessions` here too: a request that passed the early guard
+        // before a concurrent request registered can still be in flight while
+        // the first request has already completed and populated the map.
+        if (
+          inFlightBranchWorkspaces.has(workspaceCwd) ||
+          activeBranchSessions.has(workspaceCwd)
+        ) {
+          res.status(409).json({
+            error:
+              'A branch session is already being created for this workspace',
+            code: 'branch_session_conflict',
+          });
+          return;
+        }
+        inFlightBranchWorkspaces.add(workspaceCwd);
+        try {
+          await createBranch(workspaceCwd, branchName);
+        } catch (checkoutErr) {
+          // `git checkout -b` can reject AFTER git already created the ref and
+          // moved HEAD — a failing post-checkout hook or a timeout past the ref
+          // update both leave the workspace on the new branch while the command
+          // exits nonzero. Roll back transactionally (restore the base ref, then
+          // delete the partial branch) so the shared workspace is never silently
+          // left on the new branch; when nothing was created the rollback is a
+          // harmless no-op. Log the full git error but return a generic detail —
+          // git stderr can embed the absolute workspace path, which must not
+          // reach the caller in the 500 body.
+          daemonLog?.warn('branch checkout failed', {
+            error:
+              checkoutErr instanceof Error
+                ? checkoutErr.message
+                : String(checkoutErr),
+          });
+          await rollbackBranchCreation(
+            workspaceCwd,
+            { name: branchName, baseBranch },
+            baseCommit,
+            daemonLog,
+          );
+          res.status(500).json({
+            error: 'Failed to create branch',
+            code: 'branch_checkout_failed',
+          });
+          return;
+        }
+        branchMeta = { name: branchName, baseBranch };
+        branchBaseCommit = baseCommit;
+        sessionScope = 'thread';
+      }
+
+      // ── Worktree isolation ──────────────────────────────────────────
+      // When `worktree` is present, create a git worktree before spawning
+      // and relocate the session into it immediately after. The workspace
+      // runtime resolution still uses the main workspace cwd; only the
+      // child process's effective working directory changes.
+      const rawWorktree = body['worktree'];
+      if (rawWorktree !== undefined && rawWorktree !== null) {
+        if (typeof rawWorktree !== 'object' || Array.isArray(rawWorktree)) {
+          res.status(400).json({
+            error:
+              '`worktree` must be an object (e.g. `{}` or `{"slug":"my-task"}`)',
+            code: 'invalid_worktree',
+          });
+          return;
+        }
+        const wtReq = rawWorktree as Record<string, unknown>;
+        let wtService: GitWorktreeService;
+        try {
+          wtService = new GitWorktreeService(workspaceCwd);
+        } catch {
+          res.status(500).json({
+            error: 'Failed to initialize worktree service',
+            code: 'worktree_init_failed',
+          });
+          return;
+        }
+        if (!(await wtService.isGitRepository())) {
+          res.status(400).json({
+            error: 'Worktree isolation requires a git repository',
+            code: 'worktree_not_git_repo',
+          });
+          return;
+        }
+        const rawSlug = wtReq['slug'];
+        let slug: string;
+        if (rawSlug === undefined || rawSlug === null) {
+          slug = GitWorktreeService.generateAutoSlug();
+        } else if (typeof rawSlug !== 'string' || rawSlug.length === 0) {
+          res.status(400).json({
+            error: '`worktree.slug` must be a non-empty string when provided',
+            code: 'worktree_invalid_slug',
+          });
+          return;
+        } else {
+          slug = rawSlug;
+        }
+        const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+        if (slugError) {
+          res
+            .status(400)
+            .json({ error: slugError, code: 'worktree_invalid_slug' });
+          return;
+        }
+        const baseBranch = await wtService
+          .getCurrentBranch()
+          .catch(() => undefined);
+        const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+        if (!wtResult.success || !wtResult.worktree) {
+          res.status(500).json({
+            error: wtResult.error ?? 'Failed to create worktree',
+            code: 'worktree_create_failed',
+          });
+          return;
+        }
+        worktreeMeta = {
+          slug,
+          path: wtResult.worktree.path,
+          branch: wtResult.worktree.branch,
+        };
+        // Worktree sessions must be independent — never coalesce onto an
+        // existing single-scope session that lives in the main checkout.
+        sessionScope = 'thread';
+      }
+      // A caller-supplied sessionId implies a new, distinct session —
+      // never coalesce onto an existing single-scope session.
+      if (requestedSessionId !== undefined) {
+        sessionScope = 'thread';
+      }
+
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
         modelServiceId,
@@ -1573,7 +1742,57 @@ export function registerSessionRoutes(
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
         ...(branchMeta ? { branch: branchMeta } : {}),
+        ...(requestedSessionId !== undefined
+          ? { sessionId: requestedSessionId }
+          : {}),
       });
+      // Defensive: the bridge/agent must honor a caller-supplied id. If it was
+      // dropped anywhere in the chain (older agent binary, coalesced attach),
+      // never return a surprise id — fail the request instead. Same silent-drop
+      // class as #7831, one layer down.
+      if (
+        requestedSessionId !== undefined &&
+        session.sessionId !== requestedSessionId
+      ) {
+        if (daemonLog) {
+          daemonLog.warn('session id not honored by agent', {
+            requested: requestedSessionId,
+            actual: session.sessionId,
+          });
+        }
+        if (!session.attached) {
+          await runWithWorkspaceRuntimeStorage(runtime, () =>
+            deleteDaemonSessionIfOrphan({
+              sessionId: session.sessionId,
+              service: createWorkspaceRuntimeSessionService(runtime),
+              bridge: runtime.bridge,
+              coordinator: archiveCoordinator,
+            }),
+          ).catch(() => false);
+        }
+        // This early return runs inside the outer try, but a return skips
+        // that try's catch — so replicate the catch's resource cleanup here.
+        // Otherwise the branch/worktree created for this request is orphaned
+        // and inFlightBranchWorkspaces permanently blocks the workspace.
+        if (worktreeMeta) {
+          await new GitWorktreeService(workspaceCwd)
+            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+            .catch(() => {});
+        }
+        if (branchMeta) {
+          await rollbackBranchCreation(
+            workspaceCwd,
+            branchMeta,
+            branchBaseCommit,
+            daemonLog,
+          );
+        }
+        res.status(500).json({
+          error: 'Agent did not honor the requested session id',
+          code: 'session_id_not_honored',
+        });
+        return;
+      }
       try {
         runtime.generationGuard?.assertOpen();
       } catch (error) {
@@ -1823,6 +2042,10 @@ export function registerSessionRoutes(
         );
       }
       sendBridgeError(res, err, { route: 'POST /session' });
+    } finally {
+      if (requestedSessionId !== undefined) {
+        inFlightSessionIds.delete(requestedSessionId);
+      }
     }
   });
 
@@ -1932,28 +2155,106 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
+            const sessionService =
+              createWorkspaceRuntimeSessionService(runtime);
             const metadata =
-              await createWorkspaceRuntimeSessionService(
-                runtime,
-              ).readCreationMetadata(sessionId);
+              runtime.provenance === 'live-conversation'
+                ? await readLoadableLiveConversationMetadata(
+                    sessionId,
+                    (candidateId) =>
+                      sessionService.readCreationMetadata(candidateId),
+                  )
+                : await sessionService.readCreationMetadata(sessionId);
+            if (metadata === undefined) {
+              throw new SessionNotFoundError(sessionId);
+            }
+            let liveConversationCwd: string | undefined;
+            if (runtime.provenance === 'live-conversation') {
+              const materialize = deps.materializeLiveConversationDirectory;
+              if (!materialize) {
+                throw new Error('Live conversation workspace is unavailable.');
+              }
+              liveConversationCwd = await materialize(sessionId);
+            }
             runtime.generationGuard?.assertOpen();
-            return action === 'load'
-              ? await runtime.bridge.loadSession({
+            const restored =
+              action === 'load'
+                ? await runtime.bridge.loadSession({
+                    sessionId,
+                    workspaceCwd,
+                    historyReplay: 'response',
+                    ...(historyPageSize !== undefined
+                      ? { historyPageSize }
+                      : {}),
+                    ...(clientId !== undefined ? { clientId } : {}),
+                    ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...metadata,
+                  })
+                : await runtime.bridge.resumeSession({
+                    sessionId,
+                    workspaceCwd,
+                    ...(clientId !== undefined ? { clientId } : {}),
+                    ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...metadata,
+                  });
+            // Every path that can register a Live entry relocates it before a
+            // prompt can start. Re-queuing cd for an active entry would block
+            // this load behind the prompt it is meant to observe.
+            if (liveConversationCwd !== undefined) {
+              if (restored.hasActivePrompt) {
+                if (restored.currentCwd === liveConversationCwd) {
+                  return restored;
+                }
+                try {
+                  if (restored.clientId) {
+                    await runtime.bridge.detachClient(
+                      restored.sessionId,
+                      restored.clientId,
+                    );
+                  }
+                } catch {
+                  // Preserve the isolation error. Never kill an active owner.
+                }
+                throw new Error(
+                  'Active Live session is outside its isolated conversation directory.',
+                );
+              }
+              try {
+                const changed = await runtime.bridge.changeSessionCwd(
                   sessionId,
-                  workspaceCwd,
-                  historyReplay: 'response',
-                  ...(historyPageSize !== undefined ? { historyPageSize } : {}),
-                  ...(clientId !== undefined ? { clientId } : {}),
-                  ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...metadata,
-                })
-              : await runtime.bridge.resumeSession({
-                  sessionId,
-                  workspaceCwd,
-                  ...(clientId !== undefined ? { clientId } : {}),
-                  ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...metadata,
-                });
+                  {
+                    path: liveConversationCwd,
+                    allowedRoots: [runtime.workspaceCwd],
+                    managedRelocation: 'live-conversation',
+                  },
+                );
+                if (changed.newCwd !== liveConversationCwd) {
+                  throw new Error(
+                    'Live conversation directory relocation was rejected.',
+                  );
+                }
+                restored.currentCwd = changed.newCwd;
+              } catch (error) {
+                try {
+                  if (restored.attached) {
+                    if (restored.clientId) {
+                      await runtime.bridge.detachClient(
+                        restored.sessionId,
+                        restored.clientId,
+                      );
+                    }
+                  } else {
+                    await runtime.bridge.killSession(restored.sessionId, {
+                      requireZeroAttaches: true,
+                    });
+                  }
+                } catch {
+                  // Preserve the relocation error.
+                }
+                throw error;
+              }
+            }
+            return restored;
           },
         );
         try {
@@ -2008,7 +2309,7 @@ export function registerSessionRoutes(
         // Note: the !res.writable early-return above skips this restore;
         // a client that disconnects mid-load leaves the session parked in
         // the main workspace (pre-existing shape, low frequency).
-        if (!session.worktree) {
+        if (runtime.provenance !== 'live-conversation' && !session.worktree) {
           const sidecar = await readWorktreeSession(
             createWorkspaceRuntimeSessionService(
               runtime,
@@ -2589,6 +2890,16 @@ export function registerSessionRoutes(
               runtime.workspaceCwd,
               codec,
             );
+            const hasActivePrompt = (): boolean => {
+              try {
+                return runtime.bridge.getSessionSummary(sessionId)
+                  .hasActivePrompt;
+              } catch (error) {
+                if (error instanceof SessionNotFoundError) return false;
+                throw error;
+              }
+            };
+            const activePromptBeforeRead = hasActivePrompt();
             let page;
             try {
               page = await reader.readPage(sessionId, {
@@ -2616,9 +2927,12 @@ export function registerSessionRoutes(
             if (page.records.some((record) => record.sessionId !== sessionId)) {
               throw new SessionTranscriptSnapshotUnavailableError(sessionId);
             }
+            const activePromptAfterRead = hasActivePrompt();
             const replay = await replayTranscriptRecordPage({
               sessionId,
               page,
+              finalizeDangling:
+                !activePromptBeforeRead && !activePromptAfterRead,
               encodeCursor: (state) => codec.encode(state),
             });
             const cursorTooLarge =
@@ -3371,6 +3685,7 @@ export function registerSessionRoutes(
 
   app.delete('/session/:id', async (req, res) => {
     const sessionId = req.params['id'];
+    if (rejectActiveLiveSessionMutation(res, [sessionId])) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     const runtime = resolveLiveSessionRuntime(
@@ -3403,6 +3718,7 @@ export function registerSessionRoutes(
     if (clientId === null) return;
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
     try {
       const runtime = workspaceRegistry.primary;
       const service = createWorkspaceRuntimeSessionService(runtime);
@@ -3431,6 +3747,7 @@ export function registerSessionRoutes(
   app.post('/sessions/archive', mutate(), async (req, res) => {
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     const runtime = workspaceRegistry.primary;
     const service = createWorkspaceRuntimeSessionService(runtime, {
@@ -3496,6 +3813,7 @@ export function registerSessionRoutes(
       if (clientId === null) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const service = createWorkspaceRuntimeSessionService(runtime);
         const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
@@ -3530,6 +3848,7 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       const service = createWorkspaceRuntimeSessionService(runtime, {
         onWarning: logSessionArchiveWarning,
       });
@@ -4270,10 +4589,10 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted }`: `false` when the session is idle (or the per-session
-  // queue is full), so the browser keeps the message in its own queue and sends
-  // it as a normal next-turn prompt. Synchronous — the bridge only pushes onto
-  // an in-memory queue.
+  // Returns `{ accepted, messageId? }`: `false` when the session is idle (or the
+  // per-session queue is full), so the browser keeps the message in its own
+  // queue and sends it as a normal next-turn prompt. Synchronous — the bridge
+  // only pushes onto an in-memory queue.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
   // only the global 10 MB body limit applies. Not a UX limit — a rejected
@@ -4314,6 +4633,31 @@ export function registerSessionRoutes(
         const result = runtime.bridge.enqueueMidTurnMessage(
           sessionId,
           trimmed,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/mid-turn-messages/:messageId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/mid-turn-messages/:messageId',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const messageId = req.params['messageId'];
+        if (!messageId) {
+          res
+            .status(400)
+            .json({ error: '`messageId` route parameter is required' });
+          return;
+        }
+        const result = runtime.bridge.removeMidTurnMessage(
+          sessionId,
+          messageId,
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(result);

@@ -50,11 +50,11 @@ import {
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
+import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import {
   parseChannelDelivery,
   type PublicChannelDelivery,
-} from '../channel-delivery.js';
+} from '../../runtime/channel-delivery.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import type {
   WorkspaceRegistry,
@@ -1245,6 +1245,18 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
       );
       if (!runtime) return null;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return null;
+      if (
+        runtime.provenance === 'live-conversation' &&
+        req.method === 'POST' &&
+        req.params['id'] === undefined
+      ) {
+        res.status(400).json({
+          error:
+            'Generic scheduled tasks cannot create sessions in the Conversations workspace.',
+          code: 'live_session_creation_reserved',
+        });
+        return null;
+      }
       return {
         workspaceCwd: runtime.workspaceCwd,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,

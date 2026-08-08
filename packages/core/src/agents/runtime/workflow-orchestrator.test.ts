@@ -17,6 +17,11 @@ import {
   resolveConcurrencyLimit,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
+import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
+import { ToolConfirmationOutcome } from '../../tools/tools.js';
+import { WorkflowRunRegistry } from '../workflow-run-registry.js';
+import { WorkflowRunner } from './workflow-runner.js';
+import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -32,6 +37,7 @@ const {
   nextTerminateMode,
   nextOutputTokens,
   nextExecuteThrow,
+  nextExecuteHook,
 } = vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
@@ -61,6 +67,11 @@ const {
   // `createChat` early-return path, NOT the production reasoning-
   // loop throw path.
   nextExecuteThrow: { value: null as Error | null },
+  nextExecuteHook: {
+    value: undefined as
+      | ((emitter: AgentEventEmitter, signal?: AbortSignal) => Promise<void>)
+      | undefined,
+  },
 }));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
@@ -153,6 +164,10 @@ vi.mock('./agent-headless.js', () => ({
             'orchestrator did not pass workflow subagent system prompt',
           );
         }
+        await nextExecuteHook.value?.(
+          _eventEmitter as AgentEventEmitter,
+          signal,
+        );
         // R3 (wenshao #6): simulate the production ERROR path where
         // AgentHeadless.execute() itself throws (see agent-headless.ts
         // catch arm at :287-294). If `nextExecuteThrow.value` is set,
@@ -462,7 +477,7 @@ describe('WorkflowOrchestrator', () => {
     expect(caught).toBeInstanceOf(Error);
     // Cross-realm: the sandbox wraps the host error in a vm-realm Error
     // (per T1/T8/T14 defense). The dispatch is never invoked because the
-    // gate short-circuits before limiter.run.
+    // gate short-circuits before scheduler.run.
     expect(String(caught)).toContain('exceeded the token budget');
     expect(String(caught)).toContain('1000');
     expect(dispatchCalls).toBe(0);
@@ -528,31 +543,39 @@ describe('WorkflowOrchestrator', () => {
     expect(dispatchCalls).toBe(2);
   });
 
-  it('P5 R1 #2: parallel-batch overshoot is bounded by the intra-limiter re-check', async () => {
-    // R1 Critical #2 — without the intra-limiter gate, a parallel() of N
+  it('P5 R1 #2: parallel-batch overshoot is bounded by the in-scheduler re-check', async () => {
+    // R1 Critical #2 — without the slot-acquire gate, a parallel() of N
     // thunks queues them all in one microtask burst with spent=0, so the
     // entry gate passes for every queued dispatch and the budget
     // overshoots by up to `(N-1) × per_dispatch_tokens`.
     //
-    // With the intra-limiter re-check, the gate observes budget mutations
+    // With the slot-acquire re-check, the gate observes budget mutations
     // from already-completed in-flight dispatches at slot-acquire time, so
     // queued thunks that arrive AFTER the budget is busted are refused
     // (the parallel() batch collapses them to `null`).
     const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
     const budget = new WorkflowBudgetImpl(100);
+    const scheduler = new WorkflowDispatchScheduler(1);
     let dispatchCalls = 0;
+    let dispatched = 0;
+    let completed = 0;
     const orchestrator = new WorkflowOrchestrator(async () => {
       dispatchCalls += 1;
       budget.recordSpent(40); // 3 successful dispatches saturate the cap
       return 'ok';
     });
     // 10 thunks — far more than the budget (100 / 40 ≈ 3 successful).
-    // The intra-limiter gate must reject the rest BEFORE this.dispatch
-    // runs, so `dispatchCalls` should be 3 (or 4 — see below), NOT 10.
+    // The slot-acquire gate must reject the rest BEFORE this.dispatch
+    // runs, so `dispatchCalls` is exactly 3, NOT 10.
     const outcome = await orchestrator.run({
       script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
       args: undefined,
       budget,
+      scheduler,
+      emitter: {
+        agentDispatched: () => dispatched++,
+        agentCompleted: () => completed++,
+      },
     });
     // parallel() treats budget rejections as errors-as-data → null per slot.
     expect(Array.isArray(outcome.result)).toBe(true);
@@ -561,15 +584,14 @@ describe('WorkflowOrchestrator', () => {
     const successes = results.filter((r) => r === 'ok').length;
     const nulls = results.filter((r) => r === null).length;
     expect(successes + nulls).toBe(10);
-    // Bounded overshoot: at most `concurrency_window` dispatches can be
-    // already inside `limiter.run` when the budget tips over, so the
-    // upper bound on successful dispatches is
-    // `ceil(cap / per_dispatch) + concurrency_window`. The concurrency
-    // window on test machines is `min(16, cpus-2)` ≥ 1. With cap=100,
-    // per=40, the soft cap is reached at 3 dispatches (spent=120). We
-    // ASSERT it doesn't reach 10 (the without-fix overshoot value).
-    expect(dispatchCalls).toBeLessThan(10);
-    expect(successes).toBeLessThan(10);
+    // ASSERT it doesn't reach 10 (the without-fix overshoot value):
+    // with the scheduler pinned to limit 1, slot-acquire re-checks are
+    // serialized, so exactly 3 dispatches pass (spent 0/40/80 at acquire;
+    // cap 100).
+    expect(dispatchCalls).toBe(3);
+    expect(successes).toBe(3);
+    expect(dispatched).toBe(10);
+    expect(completed).toBe(dispatched);
   });
 
   // R1 #4 fix landed in production code (debugLogger.warn at both gate
@@ -781,6 +803,217 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('parent:nested-agent:inner');
   });
 
+  it('merges nested workflow logs into the parent run logs', async () => {
+    // R11-22: nested logs (here the unconsumed-rejection mirror) reach
+    // no production surface on the nested sandbox's own buffer — the
+    // orchestrator reads getLogs() only on the top-level sandbox. The
+    // merge must surface a failed nested dispatch in the parent run.
+    const orchestrator = new WorkflowOrchestrator(() =>
+      Promise.reject(new Error('nested-boom')),
+    );
+    const outcome = await orchestrator.run({
+      script: `return 'parent:' + (await workflow('child'));`,
+      args: undefined,
+      resolveSavedWorkflow: async () => ({
+        // The fire-and-forget dispatch fails but the nested script
+        // still completes — the only trace of the failure is the
+        // nested mirror line, which the merge must carry upward.
+        script: `agent('x'); return 'child-done';`,
+      }),
+    });
+    expect(outcome.result).toBe('parent:child-done');
+    expect(outcome.logs).toContain(
+      'dispatch failed (result not consumed): nested-boom',
+    );
+  });
+
+  it('keeps a nested agent result behind the shared pause gate', async () => {
+    let finishDispatch: ((value: string) => void) | undefined;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+    const run = orchestrator.run({
+      script: `return await workflow('child');`,
+      args: undefined,
+      scheduler,
+      resolveSavedWorkflow: async () => ({
+        script: `return await agent('inner');`,
+      }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    scheduler.pause();
+    finishDispatch?.('nested result');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    let settled = false;
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: 'nested result' });
+  });
+
+  // R12 (doudouOUC): the budget gate and agent cap used to return bare
+  // Promise.reject, bypassing the pause gate — a paused run whose script
+  // caught the rejection kept executing. Entry-gate rejections must
+  // settle through the same gate as every other settlement path.
+  it('holds a budget-gate rejection behind the pause gate until resume', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100); // already over cap at entry
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    expect(scheduler.snapshot().state).toBe('paused');
+
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'unused';
+    });
+    const run = orchestrator.run({
+      script: `
+        let msg = 'none';
+        try { await agent('over-budget'); } catch (e) { msg = e.message; }
+        return msg;
+      `,
+      args: undefined,
+      budget,
+      scheduler,
+    });
+
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush microtasks + a timer tick: without the gate the rejection
+    // settles in a few microtasks, so a still-pending run after a tick
+    // proves the pause gate held it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({
+      result: expect.stringContaining('exceeded the token budget'),
+    });
+    expect(dispatchCalls).toBe(0);
+  });
+
+  it('holds an agent-cap rejection behind the pause gate until resume', async () => {
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '1';
+    try {
+      const scheduler = new WorkflowDispatchScheduler(1);
+      scheduler.pause();
+      expect(scheduler.snapshot().state).toBe('paused');
+
+      let dispatchCalls = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatchCalls += 1;
+        return 'ok';
+      });
+      const run = orchestrator.run({
+        script: `
+          const p = agent('first');
+          let msg = 'none';
+          try { await agent('second'); } catch (e) { msg = e.message; }
+          return msg;
+        `,
+        args: undefined,
+        scheduler,
+      });
+
+      let settled = false;
+      void run.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(settled).toBe(false);
+
+      scheduler.resume();
+      await expect(run).resolves.toMatchObject({
+        result: expect.stringMatching(/exceeded the maximum of 1 agent/),
+      });
+      // 'first' passed the cap and dispatched on resume; 'second' never did.
+      await vi.waitFor(() => expect(dispatchCalls).toBe(1));
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
+
+  it('preserves an entry-gate rejection when cancellation aborts its pause gate', async () => {
+    // Mirrors the dispatch-error variant: abort rejects the gate waiter,
+    // and the reject arm must still surface the real entry-gate error.
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100);
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    scheduler.pause();
+    expect(scheduler.snapshot().state).toBe('paused');
+
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const run = orchestrator.run({
+      script: `
+        let msg = 'none';
+        try { await agent('over-budget'); } catch (e) { msg = e.message; }
+        return msg;
+      `,
+      args: undefined,
+      budget,
+      scheduler,
+    });
+
+    // Mirror the sibling hold tests: a bare Promise.reject regression
+    // settles the run during this wait, and abort() then finds no
+    // waiters — the unsettled assertion is what pins the gate.
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({
+      result: expect.stringContaining('exceeded the token budget'),
+    });
+  });
+
   it('P-nested: nested args are passed to the child script', async () => {
     const orchestrator = new WorkflowOrchestrator(async () => 'unused');
     const resolveSavedWorkflow = async () => ({
@@ -934,6 +1167,358 @@ describe('WorkflowOrchestrator', () => {
     expect((results[1] as { result: unknown }).result).toBe('r:b');
   });
 
+  it('assigns journal ids before paused parallel dispatches can dequeue', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (entry: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(entry);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      dispatchCalls++;
+      return prompt;
+    });
+
+    const run = orchestrator.run({
+      script: `return await parallel([
+        () => agent('a'),
+        () => agent('b'),
+        () => agent('c'),
+      ]);`,
+      args: undefined,
+      journal,
+      scheduler,
+    });
+    await vi.waitFor(() =>
+      expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(
+        3,
+      ),
+    );
+    const started = entries.filter((entry) => entry.type === 'started');
+    expect(started.map((entry) => entry.agentId)).toEqual(['1', '2', '3']);
+    expect(new Set(started.map((entry) => entry.key)).size).toBe(3);
+    expect(dispatchCalls).toBe(0);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: ['a', 'b', 'c'] });
+  });
+
+  it('appends an in-flight result before the paused result gate opens', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (entry: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(entry);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    let finish: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `return await agent('a');`,
+      args: undefined,
+      journal,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    scheduler.pause();
+    finish?.('done');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    expect(entries.filter((entry) => entry.type === 'result')).toHaveLength(1);
+    let settled = false;
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: 'done' });
+  });
+
+  it('preserves a dispatch error when cancellation aborts its pause gate', async () => {
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `return await agent('a');`,
+      args: undefined,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    scheduler.pause();
+    rejectDispatch?.(new Error('dispatch-boom'));
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    await expect(run).rejects.toThrow('dispatch-boom');
+  });
+
+  it('delivers a successful dispatch result when cancellation aborts its pause gate', async () => {
+    // A dispatch that succeeded before the run was cancelled must resolve
+    // with its result even though abort rejects the pause-gate waiter:
+    // the success arm resolves held results on abort, so this AWAITING
+    // script (two-arm .then + `await p`) observes the completed work
+    // instead of an AbortError. The unhandledRejection rationale for the
+    // resolve-on-abort arm belongs to the next test, whose fixture is
+    // genuinely fire-and-forget.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `
+        let saw = 'none';
+        const p = agent('a').then(
+          (v) => { saw = 'resolved:' + v; },
+          (e) => { saw = 'rejected:' + e.message; }
+        );
+        try { await agent('keep'); } catch (e) {}
+        await p;
+        return saw;
+      `,
+      args: undefined,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    scheduler.pause();
+    finishDispatch?.('A');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({ result: 'resolved:A' });
+  });
+
+  it('raises no unhandledRejection for an un-awaited successful dispatch on cancel', async () => {
+    // The reviewer-reported alarm: a fire-and-forget agent() call whose
+    // dispatch succeeded before the cancel must not surface a
+    // process-level unhandledRejection ("CRITICAL: Unhandled Promise
+    // Rejection") for a correctly-cancelled run.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    let unhandled = 0;
+    const onUnhandled = () => {
+      unhandled += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const run = orchestrator.run({
+        script: `
+          agent('notify');
+          try { await agent('keep'); } catch (e) {}
+          return 'done';
+        `,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('A');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+      controller.abort();
+
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+      // Let any pending unhandledRejection events fire before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('raises no unhandledRejection for an un-awaited queued dispatch on cancel', async () => {
+    // Error-arm counterpart of the success-path test above: a
+    // fire-and-forget dispatch still QUEUED when the run is cancelled is
+    // rejected with AbortError by abortPending(). The rethrow must still
+    // reach awaiting callers, but the unobserved rejection must not
+    // surface as a process-level unhandledRejection alarm on a
+    // correctly-cancelled run.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    let unhandled = 0;
+    const onUnhandled = () => {
+      unhandled += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const run = orchestrator.run({
+        script: `
+          agent('inflight');
+          agent('notify');
+          try { await agent('keep'); } catch (e) {}
+          return 'done';
+        `,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('A');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+      controller.abort();
+
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+      // Let any pending unhandledRejection events fire before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('delivers a cached dispatch result when cancellation aborts its pause gate', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('keep'); return 'done';`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    scheduler.pause();
+    let completed = 0;
+    const emitter = {
+      agentCompleted: () => {
+        completed += 1;
+      },
+    };
+    const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+    const run = orch2.run({
+      script: `
+        let saw = 'none';
+        const p = agent('a').then(
+          (v) => { saw = 'resolved:' + v; },
+          (e) => { saw = 'rejected:' + e.message; }
+        );
+        try { await agent('keep'); } catch (e) {}
+        await p;
+        return saw;
+      `,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+      scheduler,
+      emitter,
+    });
+    // Both dispatches are cached; their results park behind the gate.
+    await vi.waitFor(() => expect(completed).toBe(2));
+
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({ result: 'resolved:r:a' });
+  });
+
+  it('keeps a paused run alive past the wall-clock budget and completes it after resume', async () => {
+    // The wall clock is a hang backstop armed at sandbox.run start; a
+    // run paused mid-flight executes nothing, so the watchdog must
+    // suspend on pause and re-arm on resume instead of killing the run
+    // mid-pause (after which resume is impossible).
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = '0.4';
+    try {
+      const scheduler = new WorkflowDispatchScheduler(1);
+      let finishDispatch: ((value: string) => void) | undefined;
+      const orchestrator = new WorkflowOrchestrator(
+        () =>
+          new Promise<string>((resolve) => {
+            finishDispatch = resolve;
+          }),
+      );
+      const run = orchestrator.run({
+        script: `return await agent('a');`,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('done');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+      // Sleep past the 400 ms budget while paused.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      let settled = false;
+      void run.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+
+      scheduler.resume();
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = prev;
+    }
+  });
+
   it('P6: resume serves the cached prefix without re-dispatching', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     // Run 1: record the journal.
@@ -961,12 +1546,35 @@ describe('WorkflowOrchestrator', () => {
     const journal2 = {
       append: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
-    const outcome = await orch2.run({
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    const run = orch2.run({
       script: `const a = await agent('a'); const b = await agent('b'); return a + '|' + b;`,
       args: undefined,
       journal: journal2,
       resumeReplay: buildReplay(entries),
+      scheduler,
     });
+    let settled = false;
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less cached resolve
+    // (which settles in ~4 microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(dispatchCalls).toBe(0);
+    scheduler.resume();
+    const outcome = await run;
     expect(dispatchCalls).toBe(0); // fully cached
     expect(outcome.result).toBe('r:a|r:b'); // cached values, not LIVE
   });
@@ -1089,6 +1697,7 @@ describe('createProductionDispatch', () => {
     created.length = 0;
     nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
+    nextExecuteHook.value = undefined;
   });
 
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
@@ -1144,6 +1753,110 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.signal!.aborted).toBe(false);
   });
 
+  it('installs and cleans up the approval bridge for every stalled attempt', async () => {
+    let attempt = 0;
+    nextExecuteHook.value = async (emitter, signal) => {
+      attempt += 1;
+      if (attempt > 1) {
+        nextTerminateMode.value = 'GOAL';
+        return;
+      }
+      nextTerminateMode.value = 'CANCELLED';
+      emitter.emit(AgentEventType.ROUND_START, {
+        subagentId: 'workflow-agent',
+        round: 1,
+        promptId: 'prompt-1',
+        timestamp: Date.now(),
+      });
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve();
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+    const installed: AgentEventEmitter[] = [];
+    const cleaned: AgentEventEmitter[] = [];
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      (emitter) => {
+        installed.push(emitter);
+        return () => cleaned.push(emitter);
+      },
+    );
+
+    await expect(dispatch('hello', { label: 'h1', stallMs: 5 })).resolves.toBe(
+      'headless-said:hello',
+    );
+    expect(installed).toHaveLength(2);
+    expect(installed[0]).not.toBe(installed[1]);
+    expect(cleaned).toEqual(installed);
+  });
+
+  it('bubbles a production subagent approval through the run registry and resumes after ProceedOnce', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setApprovalChangeCallback(() => {});
+    const config = {
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    let releaseApproval!: () => void;
+    const approvalResolved = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    const respond = vi.fn(async (outcome: ToolConfirmationOutcome) => {
+      expect(outcome).toBe(ToolConfirmationOutcome.ProceedOnce);
+      releaseApproval();
+    });
+    nextExecuteHook.value = async (emitter) => {
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'workflow-agent-approval',
+        round: 1,
+        callId: 'call-approval',
+        name: 'Shell',
+        description: 'Run git status',
+        args: { command: 'git status' },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command?',
+          command: 'git status',
+          rootCommand: 'git status',
+        },
+        respond,
+        timestamp: Date.now(),
+      });
+      await approvalResolved;
+    };
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `return await agent('approval-required')`,
+      args: undefined,
+    });
+
+    await vi.waitFor(() => {
+      expect(registry.get(handle.runId)?.pendingApprovals).toHaveLength(1);
+    });
+    expect(respond).not.toHaveBeenCalled();
+    const approval = registry.get(handle.runId)!.pendingApprovals[0];
+
+    await expect(
+      registry.resolvePendingApproval(
+        handle.runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    ).resolves.toBe(true);
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: 'headless-said:approval-required' },
+    });
+    expect(respond).toHaveBeenCalledOnce();
+    expect(registry.get(handle.runId)?.pendingApprovals).toEqual([]);
+    expect(registry.get(handle.runId)?.status).toBe('completed');
+  });
+
   // FIX-C2 (UP-2-C1): the subagent system prompt must include the binary's
   // §XmO bullets. We assert the JSON-format instruction is present because
   // its absence causes JSON-returning subagents to wrap output in code fences.
@@ -1175,6 +1888,7 @@ describe('createProductionDispatch', () => {
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
+      'ask_user_question',
       'send_message',
       'monitor',
       'enter_plan_mode',
@@ -1955,10 +2669,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
-    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode,
-    // Agent] must be unioned in.
+    // Workflow floor [AskUserQuestion, SendMessage, Monitor, EnterPlanMode,
+    // ExitPlanMode, Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining([
+        'ask_user_question',
         'send_message',
         'monitor',
         'enter_plan_mode',
@@ -2042,6 +2757,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(disallowed).toEqual(
       expect.arrayContaining([
         'Foo',
+        'ask_user_question',
         'send_message',
         'monitor',
         'enter_plan_mode',
@@ -2443,6 +3159,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(disallowed).toEqual(
       expect.arrayContaining([
         'Foo',
+        'ask_user_question',
         'send_message',
         'monitor',
         'enter_plan_mode',

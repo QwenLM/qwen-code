@@ -7,7 +7,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { DeclarativeTool, hasCycleInSchema, Kind } from './tools.js';
+import {
+  DeclarativeTool,
+  hasCycleInSchema,
+  isTerminalImageDisplay,
+  Kind,
+} from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 
 class TestToolInvocation implements ToolInvocation<object, ToolResult> {
@@ -231,5 +236,51 @@ describe('hasCycleInSchema', () => {
 
   it('should return false for an empty schema', () => {
     expect(hasCycleInSchema({})).toBe(false);
+  });
+});
+
+describe('isTerminalImageDisplay', () => {
+  it('accepts a well-formed terminal image display', () => {
+    expect(
+      isTerminalImageDisplay({
+        type: 'terminal_image',
+        filePath: '/workspace/chart.png',
+        mimeType: 'image/png',
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects null, wrong type, non-string filePath, and wrong mimeType', () => {
+    expect(isTerminalImageDisplay(null)).toBe(false);
+    expect(isTerminalImageDisplay(undefined)).toBe(false);
+    expect(isTerminalImageDisplay('terminal_image')).toBe(false);
+    expect(isTerminalImageDisplay({})).toBe(false);
+    expect(
+      isTerminalImageDisplay({
+        type: 'something_else',
+        filePath: '/workspace/chart.png',
+        mimeType: 'image/png',
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalImageDisplay({
+        type: 'terminal_image',
+        filePath: 123,
+        mimeType: 'image/png',
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalImageDisplay({
+        type: 'terminal_image',
+        filePath: '/workspace/chart.png',
+      }),
+    ).toBe(false);
+    expect(
+      isTerminalImageDisplay({
+        type: 'terminal_image',
+        filePath: '/workspace/chart.png',
+        mimeType: 'image/jpeg',
+      }),
+    ).toBe(false);
   });
 });

@@ -321,6 +321,10 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   addEvent: vi.fn(),
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
+const mockInteractionTelemetry = vi.hoisted(() => ({
+  getActiveInteractionSpan: vi.fn(),
+  addUserPromptAttributes: vi.fn(),
+}));
 vi.mock('../telemetry/tracer.js', () => ({
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
   API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
@@ -332,6 +336,8 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     ...actual,
     uiTelemetryService: mockUiTelemetryService,
     logMemoryRecallDelivery: mockLogMemoryRecallDelivery,
+    getActiveInteractionSpan: mockInteractionTelemetry.getActiveInteractionSpan,
+    addUserPromptAttributes: mockInteractionTelemetry.addUserPromptAttributes,
     // We keep the real implementations of logChatCompression, etc.
     // but we can spy on QwenLogger if needed
   };
@@ -582,6 +588,9 @@ describe('Gemini Client (client.ts)', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(32000),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
+      getTelemetryIncludeSensitiveSpanAttributes: vi
+        .fn()
+        .mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
       restorePendingManualPlanExitNotice: vi.fn(),
@@ -756,7 +765,53 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
-      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80, false);
+    });
+
+    it('restores estimated provenance from a compression checkpoint', async () => {
+      const seedResumeTokenCountsSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'seedResumeTokenCounts',
+      );
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'compression-1',
+              parentUuid: null,
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'system',
+              subtype: 'chat_compression',
+              cwd: '/test/project',
+              version: '1.0.0',
+              systemPayload: {
+                info: {
+                  originalTokenCount: 1000,
+                  newTokenCount: 200,
+                  newTokenCountIsEstimated: true,
+                  compressionStatus: CompressionStatus.COMPRESSED,
+                },
+                compressedHistory: [],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 0, true);
+      expect(resumedClient.getChat().isLastPromptTokenCountEstimated()).toBe(
+        true,
+      );
     });
 
     it('seeds recently completed tools from resumed history', async () => {
@@ -3509,7 +3564,7 @@ describe('Gemini Client (client.ts)', () => {
             functionResponse: {
               id: 'pending-shell',
               name: 'run_shell_command',
-              response: { output: 'Y'.repeat(50_000) },
+              response: { output: 'Y'.repeat(140_000) },
             },
           },
         ],
@@ -3527,14 +3582,70 @@ describe('Gemini Client (client.ts)', () => {
         compacted[1]!.parts![0]!.functionResponse!.response!['output'],
       ).toBe('[Old tool result content cleared]');
       expect(clear).not.toHaveBeenCalled();
-      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      // Three reads are blanked while clearing down to the 250K watermark.
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(3);
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining(
-          '[TOOL-RESULT MC] tool result chars 530000 > 500000',
+          '[TOOL-RESULT MC] tool result chars 620000 > 500000',
         ),
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining('history now 360000 (+50000 pending)'),
+        expect.stringContaining(
+          'history now 120000 (+140000 pending), target 250000 (soft-exceeded)',
+        ),
+      );
+    });
+
+    it('omits the soft-exceeded marker when clearing lands exactly on the watermark', async () => {
+      // Pins the marker's absence at the boundary: virtual total after
+      // clearing == watermark must NOT be flagged (kills the `>=` and
+      // always-true mutants of the marker condition).
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(3, 150_000);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+      client['lastApiCompletionTimestamp'] = Date.now();
+      mockClientDebugLogger.info.mockClear();
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'pending-shell-exact',
+              name: 'run_shell_command',
+              response: { output: 'Y'.repeat(100_000) },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-toolresult-watermark-boundary',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // 550K total → clear two 150K reads → 150K committed + 100K pending
+      // sits exactly on the 250K watermark.
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(2);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'history now 150000 (+100000 pending), target 250000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('(soft-exceeded)'),
       );
     });
 
@@ -3575,6 +3686,9 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('cleared 0 tool result(s)'),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('target 250000 (soft-exceeded)'),
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('history now 800000'),
@@ -3851,7 +3965,7 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(client.tryCompressChat).mockRestore();
     });
 
-    it('forwards prompt id, model, force, and signal to chat.tryCompress', async () => {
+    it('forwards prompt id, force, and signal to chat.tryCompress', async () => {
       const tryCompress = vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -3861,21 +3975,14 @@ describe('Gemini Client (client.ts)', () => {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
-      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
       const signal = new AbortController().signal;
 
       await client.tryCompressChat('p1', true, signal);
 
-      // 5th arg is the `options` bag — undefined when the caller supplies no
+      // 4th arg is the `options` bag — undefined when the caller supplies no
       // customInstructions (the output reservation was retired in favor of
       // the send-path window clamp).
-      expect(tryCompress).toHaveBeenCalledWith(
-        'p1',
-        'the-model',
-        true,
-        signal,
-        undefined,
-      );
+      expect(tryCompress).toHaveBeenCalledWith('p1', true, signal, undefined);
     });
 
     it('forwards customInstructions through the options bag when supplied', async () => {
@@ -3888,17 +3995,12 @@ describe('Gemini Client (client.ts)', () => {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
-      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
 
       await client.tryCompressChat('p1', true, undefined, 'focus on auth bug');
 
-      expect(tryCompress).toHaveBeenCalledWith(
-        'p1',
-        'the-model',
-        true,
-        undefined,
-        { customInstructions: 'focus on auth bug' },
-      );
+      expect(tryCompress).toHaveBeenCalledWith('p1', true, undefined, {
+        customInstructions: 'focus on auth bug',
+      });
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
@@ -3908,6 +4010,7 @@ describe('Gemini Client (client.ts)', () => {
           newTokenCount: 200,
           compressionStatus: CompressionStatus.COMPRESSED,
         }),
+        isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
@@ -3915,6 +4018,7 @@ describe('Gemini Client (client.ts)', () => {
       await client.tryCompressChat('p2');
 
       expect(client['forceFullIdeContext']).toBe(true);
+      expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
     });
 
     it('re-prepends startup context and seeds the new chat after compression', async () => {
@@ -3923,11 +4027,13 @@ describe('Gemini Client (client.ts)', () => {
         { role: 'model', parts: [{ text: 'ok' }] },
       ];
       const originalChat = client.getChat();
+      originalChat.setLastPromptTokenCount(200, true);
       vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
         originalChat.setHistory(compressedHistory);
         return {
           originalTokenCount: 1000,
           newTokenCount: 200,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
         };
       });
@@ -3948,6 +4054,7 @@ describe('Gemini Client (client.ts)', () => {
         ...compressedHistory,
       ]);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
+      expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -6843,6 +6950,9 @@ hello
             config: mockConfig,
           }),
         );
+        expect(
+          mockMemoryManager.scheduleSkillReview.mock.calls[0][0],
+        ).not.toHaveProperty('maxTurns');
       });
 
       it('should reset toolCallCount and push promise when review is scheduled', async () => {
@@ -9625,6 +9735,81 @@ Other open files:
         expect(hookRequest.input).toEqual({ prompt: 'Hi' });
       });
 
+      it('records clean user text separately from tagged hook context', async () => {
+        const recordUserMessage = vi.fn();
+        const interactionSpan = {};
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                additionalContext: '<hook-only context>',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        vi.mocked(
+          mockConfig.getTelemetryIncludeSensitiveSpanAttributes,
+        ).mockReturnValue(true);
+        mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
+          interactionSpan,
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'expanded model prompt' }],
+            new AbortController().signal,
+            'prompt-hook-display-text',
+            {
+              type: SendMessageType.UserQuery,
+              submittedPrompt: 'raw @file prompt',
+            },
+          ),
+        );
+
+        expect(recordUserMessage).toHaveBeenCalledWith(
+          [
+            { text: 'expanded model prompt' },
+            {
+              text: [
+                '<qwen:user-prompt-submit-context>',
+                '&lt;hook-only context&gt;',
+                '</qwen:user-prompt-submit-context>',
+              ].join('\n'),
+            },
+          ],
+          undefined,
+          {
+            displayText: 'raw @file prompt',
+            hookContext: '&lt;hook-only context&gt;',
+          },
+        );
+        expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+          '/test/project/root',
+          'expanded model prompt',
+          expect.any(Object),
+        );
+        expect(
+          mockInteractionTelemetry.addUserPromptAttributes,
+        ).toHaveBeenCalledWith(
+          mockConfig,
+          interactionSpan,
+          'expanded model prompt',
+        );
+      });
+
       it('passes a non-empty submitted prompt for UserQuery hooks', async () => {
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({ output: undefined }),
@@ -9712,7 +9897,10 @@ Other open files:
         expect(recordUserMessage).toHaveBeenCalledWith(
           [{ text: 'my prompt' }, { text: taggedContext }],
           undefined,
-          { displayText: 'my prompt' },
+          {
+            displayText: 'my prompt',
+            hookContext: 'extra hook context',
+          },
         );
       });
 

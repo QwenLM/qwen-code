@@ -60,7 +60,6 @@ const daemonActions = {
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
-const insertQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
@@ -105,7 +104,6 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
     queuedTexts: queuedTextsMock,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -146,6 +144,21 @@ vi.mock('./MessageList', () => ({
       data-approval={props.pendingApproval ? 'yes' : 'no'}
     >
       {props.messages.length}
+      <button
+        data-testid="pane-open-turn-output"
+        type="button"
+        onClick={() =>
+          props.onTurnOutputOpen?.({
+            id: 'artifact:turn-artifact',
+            kind: 'artifact',
+            title: 'Turn artifact',
+            turnId: 'turn-1',
+            artifactId: 'turn-artifact',
+            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+            workspaceCwd: '/w',
+          })
+        }
+      />
     </div>
   ),
 }));
@@ -221,7 +234,12 @@ vi.mock('./ChatEditor', () => ({
 }));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
-    <div data-testid="pane-queue">{String(props.prompts.length)}</div>
+    <div
+      data-testid="pane-queue"
+      data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
+    >
+      {String(props.prompts.length)}
+    </div>
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
@@ -229,6 +247,9 @@ vi.mock('./messages/ToolApproval', () => ({
     <button
       data-testid="tool-approval"
       data-keyboard-active={String(props.keyboardActive)}
+      data-plan-todos={JSON.stringify(
+        props.planTodos?.map((todo: any) => todo.id) ?? [],
+      )}
       onClick={() => props.onConfirm(props.request.id, 'proceed')}
     >
       approve
@@ -289,7 +310,6 @@ beforeEach(() => {
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
-  insertQueuedPrompt.mockClear();
   editQueuedPrompt.mockClear();
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
@@ -701,11 +721,29 @@ describe('ChatPane', () => {
       await Promise.resolve();
     });
 
-    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
-      'sess-1',
-      [artifact],
-      expect.any(Object),
-    );
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith('sess-1', [
+      artifact,
+    ]);
+  });
+
+  it('stamps its session identity on turn-output open requests', () => {
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+
+    act(() => {
+      testid('pane-open-turn-output')?.click();
+    });
+
+    expect(onRightPanelOpen).toHaveBeenCalledWith({
+      id: 'artifact:turn-artifact',
+      kind: 'artifact',
+      title: 'Turn artifact',
+      turnId: 'turn-1',
+      artifactId: 'turn-artifact',
+      artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+      workspaceCwd: '/w',
+      sourceSessionId: 'sess-1',
+    });
   });
 
   it('suppresses the rotating loading phrase in its compact status', () => {
@@ -971,6 +1009,109 @@ describe('ChatPane', () => {
     );
   });
 
+  it('passes this pane workflow to its exit-plan approval', () => {
+    messagesState = [
+      {
+        id: 'plan-update',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-1',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Prepare',
+                  status: 'completed',
+                  _meta: { qwenTodo: { id: 'prepare' } },
+                },
+                {
+                  content: 'Ship',
+                  status: 'pending',
+                  _meta: {
+                    qwenTodo: { id: 'ship', blockedBy: ['prepare'] },
+                  },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      {
+        id: 'plan-update-newer',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-2',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Ship v2',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'ship-v2' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    messagesState.push({
+      id: 'revision',
+      role: 'user',
+      content: 'Revise the wording',
+    });
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+      rawInput: {},
+    };
+
+    render({ sessionWorkflowEnabled: true });
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
+      '["prepare","ship"]',
+    );
+  });
+
+  it('keeps the exit-plan approval text-only when Session Workflow is off', () => {
+    messagesState = [
+      {
+        id: 'plan-update',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-1',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [{ content: 'Ship', status: 'pending' }],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+      rawInput: {},
+    };
+
+    render();
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe('[]');
+  });
+
   it('reflects streaming state on the composer', () => {
     streamingStateValue = 'responding';
     render();
@@ -1106,6 +1247,20 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onClearQueuedMessages()).toBe(false);
     expect(editLastQueuedPrompt).toHaveBeenCalledTimes(1);
     expect(clearQueuedPrompts).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables mid-turn queue mutations only when advertised', () => {
+    connectionState.capabilities = {
+      features: ['session_mid_turn_message_mutation'],
+    };
+    render();
+
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('true');
+  });
+
+  it('disables mid-turn queue mutations when not advertised', () => {
+    render();
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });
 
   it('passes follow-up suggestions to the pane editor', () => {

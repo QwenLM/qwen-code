@@ -50,14 +50,18 @@ import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 
 const ESC = '\u001B';
 // On macOS, when the terminal's Option key is in its default "compose
-// character" mode (iTerm2 "Normal", VS Code without macOptionIsMeta), Option+t
-// is delivered to the app as the dagger glyph "†" (U+2020) with no modifier
-// metadata — so there is no way to tell Option was held. Terminals that speak
-// the Kitty keyboard protocol (e.g. Ghostty) instead report a real Alt+t event,
-// which is why the shortcut already works there. We treat a lone "†" as Alt+t so
-// the "expand thinking" shortcut works everywhere without requiring users to
-// reconfigure their terminal. See handleKeypress for where this is applied.
-const OPTION_T_COMPOSED_GLYPH = '†';
+// character" mode (Terminal.app, iTerm2 "Normal", VS Code without
+// macOptionIsMeta), Option+<key> is delivered to the app as a bare glyph with
+// no modifier metadata — so there is no way to tell Option was held. Terminals
+// that speak the Kitty keyboard protocol (e.g. Ghostty, WezTerm) instead report
+// a real Alt event, which is why those shortcuts already work there. We rewrite
+// each lone glyph to its synthetic Alt equivalent so the shortcuts work
+// everywhere without requiring users to reconfigure their terminal. See
+// handleKeypress for where this is applied.
+const OPTION_COMPOSED_GLYPHS: Record<string, string> = {
+  '†': 't', // Option+t → "expand thinking"
+  '√': 'v', // Option+v → paste clipboard image
+};
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
 export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
@@ -1180,18 +1184,19 @@ export function KeypressProvider({
         key.meta = true;
       }
 
-      // macOS "Option as compose character" terminals turn Option+t into the
-      // bare glyph "†" (U+2020) with no modifier metadata. Rewrite it to a
-      // synthetic Alt+t so the "expand thinking" shortcut fires; the meta flag
-      // also stops the glyph from being inserted into the input buffer (the
-      // text buffer skips printable input when meta/ctrl is set), so it looks
-      // exactly like Alt was pressed.
-      if (
-        process.platform === 'darwin' &&
-        !isPaste &&
-        key.sequence === OPTION_T_COMPOSED_GLYPH
-      ) {
-        key.name = 't';
+      // macOS "Option as compose character" terminals turn Option+<key> into a
+      // bare glyph with no modifier metadata. Rewrite it to a synthetic Alt so
+      // the shortcut fires; the meta flag also stops the glyph from being
+      // inserted into the input buffer (the text buffer skips printable input
+      // when meta/ctrl is set), so it looks exactly like Alt was pressed.
+      const composedKeyName = Object.hasOwn(
+        OPTION_COMPOSED_GLYPHS,
+        key.sequence,
+      )
+        ? OPTION_COMPOSED_GLYPHS[key.sequence]
+        : undefined;
+      if (process.platform === 'darwin' && !isPaste && composedKeyName) {
+        key.name = composedKeyName;
         key.meta = true;
       }
 

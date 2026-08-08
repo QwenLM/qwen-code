@@ -8,8 +8,10 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
-import type { PermissionRequest } from '../../adapters/types';
+import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { PlanExecutionView } from './PlanExecutionView';
+import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
@@ -28,6 +30,7 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  planTodos?: readonly TodoItem[];
 }
 
 export function parseTitle(title?: string): {
@@ -145,6 +148,9 @@ function getOptionI18nKey(
   if (option.id === 'proceed_once_and_switch_to_default') {
     return 'approval.option.allowOnceAndSwitchToDefault';
   }
+  if (option.id === 'restore_previous') {
+    return 'approval.option.restorePrevious';
+  }
   if (option.kind === 'allow_once') return 'approval.option.allowOnce';
   if (option.kind === 'reject_once') return 'approval.option.rejectOnce';
   if (option.kind === 'allow_always') {
@@ -159,6 +165,26 @@ function getOptionI18nKey(
     if (option.id === 'proceed_always') return 'approval.option.allowAllEdits';
   }
   return undefined;
+}
+
+// Production producers (toPermissionOptions) emit distinct ids, so this
+// rarely fires; it guards the key={option.id} React duplicate-key warning
+// if a producer ever repeats an id.
+function deduplicateOptions(
+  options: PermissionRequest['options'],
+): PermissionRequest['options'] {
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    if (seen.has(option.id)) return false;
+    seen.add(option.id);
+    return true;
+  });
+}
+
+function prepareDisplayOptions(
+  options: PermissionRequest['options'],
+): PermissionRequest['options'] {
+  return deduplicateOptions(orderPermissionOptions(options));
 }
 
 function getOptionClassName(
@@ -177,33 +203,59 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   keyboardActive = true,
+  planTodos = [],
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
-    () => orderPermissionOptions(request.options),
+    () => prepareDisplayOptions(request.options),
     [request.options],
   );
-  const [selected, setSelected] = useState(() =>
-    getSafeDefaultIndex(orderPermissionOptions(request.options)),
+  const safeDefaultIndex = useMemo(
+    () => getSafeDefaultIndex(displayOptions),
+    [displayOptions],
   );
+  // Prefer the localized label. Known producers give every option a distinct
+  // i18n key (plan mode's restore_previous has its own), so this normally
+  // localizes everything. The key count is a last-resort guard: if a future
+  // producer repeats a generic key, those options fall back to the server's
+  // distinct labels instead of identical buttons. An empty server label still
+  // degrades to the localized text, never a blank button without an accessible
+  // name.
+  const labelForOption = useMemo(() => {
+    const keyCount = new Map<string, number>();
+    for (const option of displayOptions) {
+      const key = getOptionI18nKey(option);
+      if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
+    }
+    return (option: PermissionRequest['options'][number]) => {
+      const key = getOptionI18nKey(option);
+      if (key && keyCount.get(key) === 1) return t(key);
+      return option.label || (key ? t(key) : '');
+    };
+  }, [displayOptions, t]);
+  const [selected, setSelected] = useState(safeDefaultIndex);
   const requestRef = useRef(request);
   requestRef.current = request;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const submittedRef = useRef(false);
+  const safeDefaultIndexRef = useRef(safeDefaultIndex);
+  safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const headingId = useId();
   const questionId = useId();
   const descId = useId();
   const commandId = useId();
 
+  // Reset only when a NEW request arrives. Reading the safe default through a
+  // ref keeps this keyed strictly to request identity: if the same request's
+  // options (and thus its safe default) change mid-flight, re-running the
+  // effect would clear submittedRef and re-enable a second confirm for a
+  // request the user already answered.
   useEffect(() => {
-    const safeDefaultIndex = getSafeDefaultIndex(
-      orderPermissionOptions(requestRef.current.options),
-    );
     submittedRef.current = false;
-    selectedRef.current = safeDefaultIndex;
-    setSelected(safeDefaultIndex);
+    selectedRef.current = safeDefaultIndexRef.current;
+    setSelected(safeDefaultIndexRef.current);
   }, [request.id]);
 
   const parsedTitle = parseTitle(request.title);
@@ -250,14 +302,8 @@ export function ToolApproval({
     // Fresh request → safe default; same request re-activated (e.g. a covering
     // panel closed) → restore the option the user had selected rather than
     // snapping focus back to the default and silently changing their choice.
-    focusOption(
-      requestChanged
-        ? getSafeDefaultIndex(
-            orderPermissionOptions(requestRef.current.options),
-          )
-        : selectedRef.current,
-    );
-  }, [keyboardActive, request.id, focusOption]);
+    focusOption(requestChanged ? safeDefaultIndex : selectedRef.current);
+  }, [keyboardActive, request.id, focusOption, safeDefaultIndex]);
 
   const moveSelection = useCallback(
     (delta: number) => {
@@ -279,6 +325,13 @@ export function ToolApproval({
   // the focused option natively; digits confirm by position; Escape rejects.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        e.key !== 'Escape' &&
+        e.target instanceof Element &&
+        e.target.closest('[data-plan-interactive]')
+      ) {
+        return;
+      }
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
@@ -320,6 +373,8 @@ export function ToolApproval({
   const showsCommandBlock = Boolean(
     (isExec && command) || (contentText && contentText !== request.title),
   );
+  const isExitPlanApproval = isExitPlanApprovalRequest(request);
+  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const questionText = isAgent
     ? t('approval.launchAgentQuestion')
     : isExec
@@ -330,7 +385,9 @@ export function ToolApproval({
     <div
       className={
         variant === 'floating'
-          ? `${styles.approval} ${styles.floating}`
+          ? `${styles.approval} ${styles.floating}${
+              showsPlanWorkflow ? ` ${styles.floatingWorkflow}` : ''
+            }`
           : styles.approval
       }
       data-web-shell-permission-panel
@@ -372,10 +429,22 @@ export function ToolApproval({
           </pre>
         </div>
       ) : contentText && contentText !== request.title ? (
-        <pre className={styles.content} id={commandId} title={contentText}>
+        <pre
+          className={`${styles.content}${
+            isExitPlanApproval ? ` ${styles.planContent}` : ''
+          }`}
+          id={commandId}
+          title={contentText}
+        >
           {contentText}
         </pre>
       ) : null}
+
+      {showsPlanWorkflow && (
+        <div className={styles.workflow}>
+          <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
+        </div>
+      )}
 
       <div className={styles.question} id={questionId}>
         {questionText}
@@ -388,8 +457,7 @@ export function ToolApproval({
       <div className={styles.options} role="radiogroup">
         {displayOptions.map((option, i) => {
           const isSelected = i === selected;
-          const i18nKey = getOptionI18nKey(option);
-          const label = i18nKey ? t(i18nKey) : option.label;
+          const label = labelForOption(option);
           return (
             <button
               key={option.id}
@@ -418,7 +486,9 @@ export function ToolApproval({
               <span className={styles.num} aria-hidden="true">
                 {i + 1}.
               </span>
-              <span className={styles.label}>{label}</span>
+              <span className={styles.label} data-web-shell-option-label>
+                {label}
+              </span>
             </button>
           );
         })}

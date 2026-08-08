@@ -13,6 +13,7 @@ const mockState = vi.hoisted(() => ({
   // try/catch hardening in end*Span helpers (span.end() must still run).
   throwOnSetAttributes: false,
   throwOnSetStatus: false,
+  throwOnStartSpan: false,
   // When set, `context.active()` returns a context that carries this fake
   // span and `trace.getSpan()` reports it. Lets tests exercise the
   // active-OTel-span fallback in resolveParentContext (#4212).
@@ -123,7 +124,12 @@ vi.mock('@opentelemetry/api', async () => {
       name: string,
       opts?: { kind?: number; attributes?: Record<string, unknown> },
       parentCtx?: unknown,
-    ) => createMockSpan(name, opts, parentCtx),
+    ) => {
+      if (mockState.throwOnStartSpan) {
+        throw new Error('startSpan failed');
+      }
+      return createMockSpan(name, opts, parentCtx);
+    },
   };
 
   return {
@@ -200,6 +206,7 @@ describe('session-tracing', () => {
     mockState.sdkInitialized = true;
     mockState.throwOnSetAttributes = false;
     mockState.throwOnSetStatus = false;
+    mockState.throwOnStartSpan = false;
     mockState.activeOtelSpan = undefined;
   });
 
@@ -616,7 +623,7 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
-    it('keeps private ttft_ms without emitting the incompatible GenAI alias', () => {
+    it('keeps private ttft_ms and derives sampling_ms without the incompatible GenAI alias', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -626,6 +633,7 @@ describe('session-tracing', () => {
 
       const attrs = mockSpans[0]!.attributes;
       expect(attrs['ttft_ms']).toBe(234);
+      expect(attrs['sampling_ms']).toBe(766);
       expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
     });
 
@@ -1081,6 +1089,15 @@ describe('session-tracing', () => {
   });
 
   describe('tool spans', () => {
+    it('returns a NOOP span when telemetry start fails', () => {
+      mockState.throwOnStartSpan = true;
+
+      const span = startToolSpan('ReadFile');
+
+      expect(span.spanContext().traceId).toBe('0'.repeat(32));
+      expect(mockSpans).toHaveLength(0);
+    });
+
     it('creates and ends a tool span', () => {
       const span = startToolSpan('ReadFile', { 'tool.call_id': 'call-1' });
 
@@ -1125,6 +1142,17 @@ describe('session-tracing', () => {
 
       expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
       expect(mockSpans[0]!.statuses[0]!.message).toBe('command failed');
+    });
+
+    it('records cancellation without marking the tool span as an error', () => {
+      const span = startToolSpan('Bash');
+      endToolSpan(span, { success: false, cancelled: true });
+
+      expect(mockSpans[0]!.attributes).toMatchObject({
+        success: false,
+        'tool.failure_kind': 'cancelled',
+      });
+      expect(mockSpans[0]!.statuses).toEqual([{ code: SpanStatusCode.UNSET }]);
     });
 
     it('does not set status when no metadata is passed', () => {
@@ -1482,6 +1510,18 @@ describe('session-tracing', () => {
   });
 
   describe('tool execution sub-spans', () => {
+    it('returns a NOOP span when execution telemetry start fails', () => {
+      mockState.throwOnStartSpan = true;
+
+      const span = startToolExecutionSpan({
+        toolName: 'Bash',
+        callId: 'call-1',
+      });
+
+      expect(span.spanContext().traceId).toBe('0'.repeat(32));
+      expect(mockSpans).toHaveLength(0);
+    });
+
     it('creates a tool execution span as child of tool span via runInToolSpanContext', () => {
       const toolSpan = startToolSpan('Bash');
 
@@ -1498,6 +1538,21 @@ describe('session-tracing', () => {
       endToolSpan(toolSpan, { success: true });
 
       expect(mockSpans[1]!.ended).toBe(true);
+    });
+
+    it('records optional tool identity on execution spans', () => {
+      const execSpan = startToolExecutionSpan({
+        toolName: 'Bash',
+        callId: 'call-1',
+      });
+
+      const record = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.attributes['gen_ai.tool.name']).toBe('Bash');
+      expect(record?.attributes['tool.call_id']).toBe('call-1');
+
+      endToolExecutionSpan(execSpan, { success: true });
     });
 
     it('returns NOOP span when SDK is not initialized', () => {
@@ -1568,6 +1623,38 @@ describe('session-tracing', () => {
       expect(record?.statuses).toHaveLength(1);
       expect(record?.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
       expect(record?.statuses[0]!.message).toBe('Tool execution failed');
+    });
+
+    it('records canonical execution outcome and structured error type', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        error: 'Tool execution failed',
+        executionStatus: 'error',
+        errorType: 'execution_failed',
+      });
+
+      const record = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.attributes['execution_status']).toBe('error');
+      expect(record?.attributes['error_type']).toBe('execution_failed');
+      expect(record?.attributes['error.type']).toBe('execution_failed');
+      expect(record?.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it('uses execution_status to keep cancellation UNSET', () => {
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        executionStatus: 'cancelled',
+      });
+
+      const record = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool.execution',
+      );
+      expect(record?.attributes['execution_status']).toBe('cancelled');
+      expect(record?.statuses).toHaveLength(0);
     });
   });
 

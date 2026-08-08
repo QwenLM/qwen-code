@@ -287,6 +287,57 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('reads an uploaded archive from a local path without persisting that path', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'uploaded-extension');
+        },
+      );
+      const manager = createExtensionManager();
+
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: 'upload:uploaded.zip' },
+        localSourcePath: archivePath,
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+
+      expect(mockExtractArchiveFile).toHaveBeenLastCalledWith(
+        archivePath,
+        expect.any(String),
+        undefined,
+      );
+      expect(prepared.installMetadata.source).toBe('upload:uploaded.zip');
+
+      await manager.commitPreparedExtension(prepared);
+      const metadata = manager.loadInstallMetadata(
+        path.join(userExtensionsDir, 'uploaded-extension'),
+      );
+      expect(metadata?.source).toBe('upload:uploaded.zip');
+      await manager.disposePreparedExtension(prepared);
+      expect(fs.existsSync(archivePath)).toBe(true);
+    });
+
+    it('rejects a local source path for non-local installs', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      const manager = createExtensionManager();
+
+      await expect(
+        manager.prepareExtensionInstall({
+          installMetadata: {
+            type: 'git',
+            source: 'https://example.com/extension.git',
+          },
+          localSourcePath: archivePath,
+          initialActivation: { scope: 'user' },
+          requestConsent: async () => {},
+        }),
+      ).rejects.toThrow('A local source path requires a local install.');
+    });
+
     it('signals the durable commit before runtime refresh completes', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'commit-boundary.zip');
       fs.writeFileSync(archivePath, 'archive');
@@ -438,9 +489,11 @@ describe('extension tests', () => {
       try {
         await manager.commitPreparedExtension(prepared);
         expect(
-          fs.readFileSync(
-            path.join(prepared.destinationDirectory, 'README.md'),
-            'utf8',
+          path.normalize(
+            fs.readFileSync(
+              path.join(prepared.destinationDirectory, 'README.md'),
+              'utf8',
+            ),
           ),
         ).toBe(path.join(prepared.destinationDirectory, 'scripts', 'setup.sh'));
       } finally {
@@ -1183,10 +1236,24 @@ describe('extension tests', () => {
 
       // Triggered by the enablement file moving, so the first refresh does not
       // observe ext-b.
-      fs.writeFileSync(
-        path.join(userExtensionsDir, 'extension-enablement.json'),
-        JSON.stringify({ touched: true }),
+      //
+      // Its mtime is pushed a second into the past on purpose. Hand-writing
+      // this file is how the test simulates "something outside the store
+      // changed the legacy projection", and that is precisely the condition
+      // `ExtensionStore` fails closed on when the two timestamps cannot be
+      // ordered. Left at `now`, the write lands in the same tick as the
+      // store's own often enough to trip that guard: measured, 3 failures in 6
+      // runs here and on unrelated branches, blocking CI on PRs that never
+      // touch extensions. An explicitly older projection is orderable, which
+      // is what this test needs and all it needs — the guard itself is doing
+      // its job and is left alone.
+      const enablementFile = path.join(
+        userExtensionsDir,
+        'extension-enablement.json',
       );
+      fs.writeFileSync(enablementFile, JSON.stringify({ touched: true }));
+      const older = new Date(Date.now() - 1_000);
+      fs.utimesSync(enablementFile, older, older);
       expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
       expect(manager.getLoadedExtensions()).toHaveLength(1);
 
@@ -2900,6 +2967,20 @@ describe('extension tests', () => {
         const metadata = { type: 'local' as const, source: '/path/to/ext' };
         const id = getExtensionId(config, metadata);
         expect(id).toBe(hashValue('/path/to/ext'));
+      });
+
+      it('gives same-named uploads distinct ids', () => {
+        const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
+        const first = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:first:extension.zip',
+        });
+        const second = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:second:extension.zip',
+        });
+
+        expect(first).not.toBe(second);
       });
 
       it('should use GitHub URL for git install', () => {
