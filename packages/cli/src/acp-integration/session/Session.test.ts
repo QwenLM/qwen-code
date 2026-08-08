@@ -411,7 +411,11 @@ describe('Session', () => {
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
     setNotificationCallback: ReturnType<typeof vi.fn>;
+    setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    clearStatusChangeCallback: ReturnType<typeof vi.fn>;
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
+    hasRunningTasks: ReturnType<typeof vi.fn>;
+    listUnfinalizedBackgroundAgentIds: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
   };
@@ -576,7 +580,11 @@ describe('Session', () => {
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
       setNotificationCallback: vi.fn(),
+      setStatusChangeCallback: vi.fn(),
+      clearStatusChangeCallback: vi.fn(),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+      hasRunningTasks: vi.fn().mockReturnValue(false),
+      listUnfinalizedBackgroundAgentIds: vi.fn().mockReturnValue([]),
       getAll: vi.fn().mockReturnValue([]),
       get: vi.fn().mockImplementation((taskId: string) =>
         (
@@ -834,6 +842,194 @@ describe('Session', () => {
       .mocked(mockClient.sessionUpdate)
       .mock.calls.at(-1)?.[0]?.update;
     expect(replayDelivered).toBe(replayUpdate);
+  });
+
+  describe('active work holds', () => {
+    let changes: number;
+
+    function createReportingSession(): void {
+      session.dispose();
+      changes = 0;
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        () => {
+          changes++;
+        },
+      );
+    }
+
+    function holdIds(category: 'agent' | 'notification'): string[] {
+      return session
+        .collectActiveWorkHolds()
+        .filter((hold) => hold.category === category)
+        .map((hold) => hold.id);
+    }
+
+    it('derives agent holds from the registry, covering the cancel window', async () => {
+      createReportingSession();
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+
+      // A cancelled-but-unfinalized agent still owes its terminal
+      // notification. hasRunningTasks() would already call this idle, which is
+      // exactly how a detached session got reaped inside the cancel window.
+      mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
+        ['agent-cancelled'],
+      );
+      expect(holdIds('agent')).toEqual(['agent-cancelled']);
+      expect(session.isIdle()).toBe(false);
+
+      mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
+        [],
+      );
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('notifies the owner when the registry reports a status change', async () => {
+      createReportingSession();
+      const statusChanged =
+        mockBackgroundTaskRegistry.setStatusChangeCallback.mock.calls.at(
+          -1,
+        )?.[0] as (() => void) | undefined;
+      const before = changes;
+      statusChanged?.();
+      expect(changes).toBe(before + 1);
+
+      session.dispose();
+      // Retracts the exact callback it installed rather than blanking the slot.
+      // The registry holds one callback and the TUI uses the same registry, so
+      // an unconditional clear on dispose would unhook whoever owns it now.
+      expect(
+        mockBackgroundTaskRegistry.clearStatusChangeCallback,
+      ).toHaveBeenCalledWith(statusChanged);
+      expect(
+        mockBackgroundTaskRegistry.setStatusChangeCallback,
+      ).not.toHaveBeenCalledWith(undefined);
+    });
+
+    it('holds an Agent terminal notification from persistence to continuation', async () => {
+      let finishPersistence!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPersistence = resolve;
+          }),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+
+      const notification = session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'agent-persisting',
+        status: 'completed',
+        kind: 'agent',
+      });
+      await vi.waitFor(() =>
+        expect(holdIds('notification')).toEqual(['agent-persisting']),
+      );
+      expect(session.isIdle()).toBe(false);
+
+      finishPersistence();
+      await expect(notification).resolves.toEqual({ accepted: true });
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('does not hold for a Monitor notification', async () => {
+      let finishPersistence!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPersistence = resolve;
+          }),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+
+      const notification = session.enqueueBackgroundNotification({
+        displayText: 'Monitor fired.',
+        modelText: '<task-notification />',
+        taskId: 'monitor-persisting',
+        status: 'completed',
+        kind: 'monitor',
+      });
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce(),
+      );
+      // Monitors are outside activeWork's declared scope.
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+
+      finishPersistence();
+      await expect(notification).resolves.toEqual({ accepted: true });
+      session.dispose();
+    });
+
+    it('keeps holding while the parent continuation runs', async () => {
+      let releaseNotification!: () => void;
+      const notificationGate = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      async function* notificationStream() {
+        yield {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            candidates: [{ content: { parts: [{ text: 'working' }] } }],
+          },
+        };
+        await notificationGate;
+      }
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(notificationStream());
+      createReportingSession();
+      const notify =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+
+      notify('Agent completed.', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(holdIds('notification')).toEqual(['agent-1']),
+      );
+      expect(session.isIdle()).toBe(false);
+
+      // The agent itself is finished; the hold now belongs to the terminal
+      // notification and its continuation turn, so the session stays held.
+      mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
+        [],
+      );
+      await Promise.resolve();
+      expect(holdIds('notification')).toEqual(['agent-1']);
+
+      releaseNotification();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
   });
 
   it('bridges workflow approvals through ACP permission requests', async () => {

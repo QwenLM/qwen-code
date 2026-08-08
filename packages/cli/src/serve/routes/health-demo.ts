@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { gradeActiveWorkCoverage } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getDemoHtml } from '../demo.js';
@@ -107,8 +108,16 @@ export function createHealthDemoRoutes(
       let sessions = 0;
       let pendingPermissions = 0;
       let activePrompts = 0;
+      let activeWork = false;
       let channelAlive = false;
       let lastActivity: number | null = null;
+      // Coverage is summed as counts and graded once, at the end. Grading per
+      // runtime and combining the grades does not work: a runtime with zero
+      // Sessions is vacuously `full`, and treating that as evidence let an
+      // empty workspace vouch for another workspace's unreported Sessions.
+      let coveredSessions = 0;
+      let sessionsOnNegotiatedChannel = 0;
+      let oldestReportAt: number | null = null;
 
       for (const runtime of runtimes) {
         failedWorkspaceId = runtime.workspaceId;
@@ -116,12 +125,24 @@ export function createHealthDemoRoutes(
         const runtimeSessions = bridge.sessionCount;
         const runtimePendingPermissions = bridge.pendingPermissionCount;
         const runtimeActivePrompts = bridge.activePromptCount;
+        const runtimeActiveWork = bridge.activeWork;
+        const runtimeCoverage = bridge.activeWorkCoverage;
+        const runtimeOldestReportAt = runtimeCoverage.oldestCoveredReportAt;
         const runtimeChannelAlive = bridge.isChannelLive();
         const runtimeLastActivity = bridge.lastActivityAt;
 
         sessions += runtimeSessions;
         pendingPermissions += runtimePendingPermissions;
         activePrompts += runtimeActivePrompts;
+        activeWork = activeWork || runtimeActiveWork;
+        coveredSessions += runtimeCoverage.covered;
+        sessionsOnNegotiatedChannel += runtimeCoverage.onNegotiatedChannel;
+        if (
+          runtimeOldestReportAt !== null &&
+          (oldestReportAt === null || runtimeOldestReportAt < oldestReportAt)
+        ) {
+          oldestReportAt = runtimeOldestReportAt;
+        }
         channelAlive = channelAlive || runtimeChannelAlive;
         if (
           runtimeLastActivity !== null &&
@@ -140,6 +161,17 @@ export function createHealthDemoRoutes(
         sessions,
         pendingPermissions,
         activePrompts,
+        activeWork,
+        activeWorkReporting: gradeActiveWorkCoverage({
+          total: sessions,
+          covered: coveredSessions,
+          onNegotiatedChannel: sessionsOnNegotiatedChannel,
+        }),
+        // 0 rather than null when nothing is covered: an idle daemon with no
+        // sessions must not read as infinitely stale to a controller applying
+        // its own freshness floor. `oldestReportAt` is the oldest *covered*
+        // report, so this never disagrees with the grade above.
+        activeWorkStaleMs: oldestReportAt === null ? 0 : now - oldestReportAt,
         connectedClients: getActiveSseCount(),
         channelAlive,
         lastActivityAt:
