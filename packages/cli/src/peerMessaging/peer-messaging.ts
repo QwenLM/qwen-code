@@ -86,6 +86,15 @@ export class PeerMessaging {
       onHeldChange: (held) => messaging.emitHeldChange(held),
     });
 
+    // Wire the gate before binding, not after. The socket accepts from
+    // `listen()` onward while `startPeerInbox` is still awaiting its chmod,
+    // so a frame arriving in that window would reach `onFrame` with a null
+    // gate and be dropped with no receipt at all — neither delivered nor
+    // held. `reportStatus` already tolerates a not-yet-assigned inbox (it
+    // reads `messaging.inbox?.socketPath`), so the gate is safe to install
+    // this early.
+    messaging.gate = gate;
+
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
@@ -95,7 +104,6 @@ export class PeerMessaging {
     if (!inbox) return null;
 
     messaging.inbox = inbox;
-    messaging.gate = gate;
 
     // Advertise the address only once the socket is actually accepting.
     // Publishing it earlier would hand peers an address that refuses

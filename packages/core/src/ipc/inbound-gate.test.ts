@@ -290,12 +290,29 @@ describe('shutdown', () => {
     expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
   });
 
-  it('still delivers after shutdown when the policy accepts', () => {
-    // Shutdown must not silently start dropping messages that were never
-    // going to be held in the first place.
+  it('expires an accept-policy arrival instead of receipting it delivered', () => {
+    // The dangerous case is a *false* receipt: the socket is still
+    // accepting while the session tears down, so delivering into a queue
+    // that `process.exit()` is about to kill would tell the sender the
+    // message landed when no model will ever see it.
     const h = harness({ mode: ApprovalMode.DEFAULT });
     h.gate.shutdown();
-    expect(h.gate.admit(frame())).toBe('accept');
+
+    const late = frame();
+    expect(h.gate.admit(late)).toBe('refused');
+    expect(h.delivered).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
+  });
+
+  it('still reports a refuse-policy arrival as denied, not expired', () => {
+    // Shutdown changes what we can promise about delivery; it does not
+    // change the fact that this receiver refuses peer messages outright.
+    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'refuse' });
+    h.gate.shutdown();
+
+    const late = frame();
+    expect(h.gate.admit(late)).toBe('refused');
+    expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'denied' });
   });
 });
 

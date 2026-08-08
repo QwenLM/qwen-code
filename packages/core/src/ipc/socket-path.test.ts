@@ -12,6 +12,12 @@ import {
   resolvePeerSocketPath,
 } from './socket-path.js';
 
+// `resolvePeerSocketPath` builds with `path.join`, so every expectation
+// spelled with forward slashes is POSIX-only; `isLocalIpcPath` likewise
+// swaps to a named-pipe rule on win32. The sibling `uds-inbox.test.ts`
+// guards for the same reason.
+const isWindows = process.platform === 'win32';
+
 const originalRuntimeDir = process.env['XDG_RUNTIME_DIR'];
 
 beforeEach(() => {
@@ -27,27 +33,30 @@ afterEach(() => {
 });
 
 describe('resolvePeerSocketPath', () => {
-  it('prefers XDG_RUNTIME_DIR', () => {
+  it.skipIf(isWindows)('prefers XDG_RUNTIME_DIR', () => {
     process.env['XDG_RUNTIME_DIR'] = '/run/user/1000';
     expect(resolvePeerSocketPath(4242)).toBe(
       '/run/user/1000/qwen-socks/4242.sock',
     );
   });
 
-  it('falls back to the system temp dir', () => {
+  it.skipIf(isWindows)('falls back to the system temp dir', () => {
     expect(resolvePeerSocketPath(4242)).toBe(
       `${os.tmpdir()}/qwen-socks/4242.sock`.replace(/\/+/g, '/'),
     );
   });
 
-  it('falls back to a short /tmp path when the preferred one cannot be bound', () => {
-    process.env['XDG_RUNTIME_DIR'] = `/run/${'d'.repeat(120)}`;
-    const resolved = resolvePeerSocketPath(4242);
-    expect(resolved).toMatch(/^\/tmp\/qwen-socks-\d+\/4242\.sock$/);
-    expect(Buffer.byteLength(resolved)).toBeLessThanOrEqual(
-      MAX_SOCKET_PATH_BYTES,
-    );
-  });
+  it.skipIf(isWindows)(
+    'falls back to a short /tmp path when the preferred one cannot be bound',
+    () => {
+      process.env['XDG_RUNTIME_DIR'] = `/run/${'d'.repeat(120)}`;
+      const resolved = resolvePeerSocketPath(4242);
+      expect(resolved).toMatch(/^\/tmp\/qwen-socks-\d+\/4242\.sock$/);
+      expect(Buffer.byteLength(resolved)).toBeLessThanOrEqual(
+        MAX_SOCKET_PATH_BYTES,
+      );
+    },
+  );
 
   it('keeps a path that is exactly at the limit', () => {
     // Build a runtime dir that lands the full path on the boundary.
@@ -61,8 +70,20 @@ describe('resolvePeerSocketPath', () => {
 });
 
 describe('isLocalIpcPath', () => {
-  it('accepts an absolute posix path', () => {
+  it.skipIf(isWindows)('accepts an absolute posix path', () => {
     expect(isLocalIpcPath('/run/user/1000/qwen-socks/1.sock')).toBe(true);
+  });
+
+  it.runIf(isWindows)('accepts a local named pipe on win32', () => {
+    expect(isLocalIpcPath('\\\\.\\pipe\\qwen-socks-1')).toBe(true);
+    expect(isLocalIpcPath('\\\\?\\pipe\\qwen-socks-1')).toBe(true);
+    // Forward slashes are a legal spelling of the same local pipe.
+    expect(isLocalIpcPath('//./pipe/qwen-socks-1')).toBe(true);
+  });
+
+  it.runIf(isWindows)('rejects a posix path on win32', () => {
+    // It is not a pipe, so nothing on this platform can be listening there.
+    expect(isLocalIpcPath('/run/user/1000/qwen-socks/1.sock')).toBe(false);
   });
 
   it('rejects relative paths', () => {

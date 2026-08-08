@@ -165,21 +165,26 @@ export class InboundGate {
       return 'refused';
     }
 
+    // Checked before the accept branch, not after: teardown strands an
+    // accepted message just as surely as a parked one. The socket keeps
+    // accepting until the inbox closes, and every exit path calls
+    // `process.exit()` right after the cleanup chain, so a message
+    // delivered into the queue here dies before any model reads it — and
+    // the `delivered` receipt would tell the sender the opposite. A parked
+    // one strands the same way: nothing will ever release it, and the
+    // sender would wait on a decision that cannot come.
+    if (this.shuttingDown) {
+      debugLogger.debug(
+        `not admitting peer message ${frame.msgId} during shutdown; expiring it`,
+      );
+      this.options.reportStatus?.(frame, 'expired');
+      return 'refused';
+    }
+
     if (policy === 'accept') {
       this.options.deliver(frame);
       this.options.reportStatus?.(frame, 'delivered');
       return 'accept';
-    }
-
-    if (this.shuttingDown) {
-      // Parking a message during teardown would strand it: nothing will
-      // ever release it, and the sender would wait on a decision that
-      // cannot come.
-      debugLogger.debug(
-        `not parking peer message ${frame.msgId} during shutdown; expiring it`,
-      );
-      this.options.reportStatus?.(frame, 'expired');
-      return 'refused';
     }
 
     if (this.held.length >= MAX_HELD_MESSAGES) {
