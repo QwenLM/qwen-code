@@ -142,6 +142,14 @@ export default defineConfig({
       fileName: () => 'index.js',
     },
     rollupOptions: {
+      output: {
+        // The published artifact must stay a single index.js: build-artifact
+        // guards assert externalized imports on the entry bundle, and host
+        // loaders do not resolve sibling chunks. Dynamic imports (e.g. the
+        // lazy xterm TerminalPanel) are inlined here; the app build keeps
+        // real code splitting via vite.config.ts.
+        inlineDynamicImports: true,
+      },
       external: [
         'react',
         'react/jsx-runtime',

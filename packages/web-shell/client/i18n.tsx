@@ -2940,6 +2940,7 @@ const ZH: Messages = {
   'toolName.list_agents': '列出 Agent',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
+  'toolName.tmux': '终端',
   'toolName.notebook_edit': '编辑 Notebook',
   'toolName.tool_search': '工具搜索',
   'toolName.enter_worktree': '进入 Worktree',
