@@ -209,6 +209,92 @@ describe('acpModelUtils', () => {
     ).toBe('shared-model');
   });
 
+  it('keeps distinct route ids for Token CN vs Token Intl and Token vs Coding', () => {
+    const tokenCnVsIntl = [
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Token Plan] qwen3.7-plus',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://cn.example/v1',
+        registryBaseUrl: 'https://cn.example/v1',
+      },
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Token Plan for Global/Intl] qwen3.7-plus',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://intl.example/v1',
+        registryBaseUrl: 'https://intl.example/v1',
+      },
+    ];
+    const tokenVsCoding = [
+      {
+        id: 'qwen3.7-max',
+        label: '[ModelStudio Token Plan] qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://token.example/v1',
+        registryBaseUrl: 'https://token.example/v1',
+      },
+      {
+        id: 'qwen3.7-max',
+        label: '[ModelStudio Coding Plan] qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://coding.example/v1',
+        registryBaseUrl: 'https://coding.example/v1',
+      },
+    ];
+    const cnIntlIds = buildAcpModelOptions(tokenCnVsIntl).map((o) => o.modelId);
+    const tokenCodingIds = buildAcpModelOptions(tokenVsCoding).map(
+      (o) => o.modelId,
+    );
+    expect(new Set(cnIntlIds)).toHaveLength(2);
+    expect(new Set(tokenCodingIds)).toHaveLength(2);
+    expect(cnIntlIds[0]).not.toBe(cnIntlIds[1]);
+    expect(tokenCodingIds[0]).not.toBe(tokenCodingIds[1]);
+  });
+
+  it('uses legacy id(authType) when model id is unique', () => {
+    const options = buildAcpModelOptions([
+      {
+        id: 'qwen3.7-max',
+        label: '[ModelStudio Token Plan] qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://token.example/v1',
+        registryBaseUrl: 'https://token.example/v1',
+      },
+    ]);
+    expect(options[0]?.modelId).toBe(`qwen3.7-max(${AuthType.USE_OPENAI})`);
+  });
+
+  it('route modelIds are stable for fixed prefixed-label fixtures', () => {
+    const models = [
+      {
+        id: 'qwen3.7-max',
+        label: '[ModelStudio Token Plan] qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://token.example/v1',
+        registryBaseUrl: 'https://token.example/v1',
+      },
+      {
+        id: 'qwen3.7-max',
+        label: '[ModelStudio Coding Plan] qwen3.7-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://coding.example/v1',
+        registryBaseUrl: 'https://coding.example/v1',
+      },
+      {
+        id: 'unique-model',
+        label: '[OpenRouter] unique-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://openrouter.example/v1',
+        registryBaseUrl: 'https://openrouter.example/v1',
+      },
+    ];
+    const first = buildAcpModelOptions(models).map((o) => o.modelId);
+    const second = buildAcpModelOptions(models).map((o) => o.modelId);
+    expect(first).toEqual(second);
+    expect(first[2]).toBe(`unique-model(${AuthType.USE_OPENAI})`);
+  });
+
   it('extracts base model id when string ends with parentheses', () => {
     expect(parseAcpBaseModelId(`qwen3(${AuthType.USE_OPENAI})`)).toBe('qwen3');
   });
