@@ -94,6 +94,15 @@ export interface SessionRegistryRecord {
   startedAt: number;
   qwenVersion: string | null;
   peerProtocol: number;
+  /**
+   * Path to this session's peer-messaging socket, when it has one.
+   *
+   * Absent means the session is discoverable but not messageable — the
+   * feature is off, or the inbox failed to bind. Readers must treat this
+   * as a hint and dial the socket to confirm: a record can outlive the
+   * process by the width of a crash.
+   */
+  ipcPath?: string;
 }
 
 export interface RegisterSessionFields {
@@ -357,6 +366,7 @@ async function readRecord(
   const procStart = value['procStart'];
   const qwenVersion = value['qwenVersion'];
   const peerProtocol = value['peerProtocol'];
+  const ipcPath = value['ipcPath'];
 
   return {
     schemaVersion,
@@ -369,6 +379,7 @@ async function readRecord(
     startedAt,
     qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
     peerProtocol: typeof peerProtocol === 'number' ? peerProtocol : 0,
+    ...(typeof ipcPath === 'string' && ipcPath.length > 0 ? { ipcPath } : {}),
   };
 }
 

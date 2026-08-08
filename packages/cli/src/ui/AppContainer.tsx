@@ -41,6 +41,7 @@ import {
   IdeClient,
   ideContextStore,
   createDebugLogger,
+  describeHoldCause,
   getErrorMessage,
   getAllGeminiMdFilenames,
   ShellExecutionService,
@@ -242,6 +243,7 @@ import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
+import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -2273,6 +2275,44 @@ export const AppContainer = (props: AppContainerProps) => {
       return true;
     });
   }, [addMessage, remoteInput]);
+
+  // Cross-session messaging: accepted peer messages enter the same queue
+  // as typed input, but carry their own envelope as the model-bound text
+  // and a one-line summary for the transcript.
+  const peerMessaging = usePeerMessaging();
+  useEffect(() => {
+    if (!peerMessaging) return;
+    peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
+      addMessage(modelText, false, displayText);
+    });
+  }, [addMessage, peerMessaging]);
+
+  // Surface parked messages. The model never sees a held message, so
+  // without a notice the only symptom is a peer that seems to be ignored.
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onHeldChange((held) => {
+      if (held.length === 0) return;
+      const newest = held[held.length - 1];
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
+            `${held.length} waiting — /peers to review.`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // A held message may only be waiting on a mode mismatch, so re-run the
+  // gate whenever the approval mode changes rather than making the user
+  // approve something the new mode would have accepted outright.
+  const approvalModeForPeers = config.getApprovalMode();
+  useEffect(() => {
+    peerMessaging?.reevaluate('approval-mode-changed');
+  }, [approvalModeForPeers, peerMessaging]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
