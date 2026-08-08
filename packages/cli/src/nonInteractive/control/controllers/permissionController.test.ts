@@ -420,6 +420,66 @@ describe('PermissionController', () => {
     });
   });
 
+  it('binds an outgoing permission request to the turn that created it', async () => {
+    const firstTurn = new AbortController();
+    const secondTurn = new AbortController();
+    let activeTurnSignal = firstTurn.signal;
+    const context = {
+      ...createContext(120_000),
+      getActiveTurnAbortSignal: () => activeTurnSignal,
+    } satisfies IControlContext;
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    let requestSignal: AbortSignal | undefined;
+    vi.spyOn(controller, 'sendControlRequest').mockImplementation(
+      (_payload, _timeout, signal) => {
+        requestSignal = signal;
+        return new Promise((_, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new Error('Request aborted')),
+            { once: true },
+          );
+        });
+      },
+    );
+    const onConfirm = vi.fn();
+
+    const updateToolCalls = controller.getToolCallUpdateCallback();
+    activeTurnSignal = secondTurn.signal;
+    updateToolCalls([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-turn-owned',
+          name: 'run_shell_command',
+          args: { command: 'sleep 10' },
+        },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(requestSignal).toBeDefined();
+    });
+    firstTurn.abort();
+
+    await vi.waitFor(() => {
+      expect(requestSignal?.aborted).toBe(true);
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: 'Error: Request aborted',
+      });
+    });
+    expect(secondTurn.signal.aborted).toBe(false);
+  });
+
   it('routes ask_user_question answers from updatedInput into the confirmation payload', async () => {
     const context = createContext(120_000);
     const controller = new PermissionController(
