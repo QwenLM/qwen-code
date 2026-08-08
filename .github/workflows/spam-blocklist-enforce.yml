@@ -1,0 +1,432 @@
+name: 'Spam blocklist enforcement'
+
+# Enforce .github/spam-blocklist.txt: delete comments authored by blocklisted
+# users, and close + lock the issues/PRs they open.
+#
+# The blocklist is a plain-text file in the repo — one username per line,
+# case-insensitive, # for comments.
+#
+# Two lanes:
+#   enforce — event-driven, fires on the comment/thread that just landed so
+#             spam disappears in seconds rather than at the next sweep.
+#   sweep   — hourly backstop for anything the event lane missed (a comment
+#             posted before the username was added to the blocklist, or an
+#             enforce run that failed).
+#
+# Only the thread AUTHOR being blocklisted closes a thread. A spam comment on
+# someone else's PR deletes the comment and leaves the PR open — closing it
+# would punish the legitimate author.
+#
+# Deletion runs on the default GITHUB_TOKEN. The predecessor of this workflow
+# minimized comments instead, which needs the GraphQL `minimizeComment`
+# mutation and therefore a PAT with the full `repo` scope; the PAT it used had
+# only `public_repo`, so every run failed with INSUFFICIENT_SCOPES and no spam
+# was ever hidden. REST delete needs nothing beyond issues:write +
+# pull-requests:write, which GITHUB_TOKEN grants.
+#
+# Coverage limit: a review BODY (as opposed to an inline review comment) has no
+# REST delete endpoint, so the event lane minimizes it as SPAM instead and the
+# sweep skips it — there is no repo-wide "list reviews" endpoint to sweep with.
+
+on:
+  issue_comment:
+    types:
+      - 'created'
+      - 'edited'
+  pull_request_review_comment:
+    types:
+      - 'created'
+      - 'edited'
+  pull_request_review:
+    types:
+      - 'submitted'
+      - 'edited'
+  # Deliberately NOT `issues:`. The repository holds qwen-triage to being the
+  # single immediate owner of issue opened/reopened/edited, enforced by
+  # scripts/tests/issue-triage-ownership-workflow.test.js — a second workflow
+  # racing it on issue open is exactly what that invariant exists to prevent.
+  # A spam issue is therefore closed by the sweep lane within the hour rather
+  # than instantly. Spam pull requests keep the instant lane below, and a spam
+  # issue that its author then comments on is closed by the issue_comment lane.
+  #
+  # pull_request_target, not pull_request: a fork PR from a blocklisted user
+  # must be closable, and `pull_request` grants a read-only token on forks.
+  # Nothing here checks out or executes PR code — see the pinned checkout ref
+  # below — so the elevated token is not exposed to the PR branch.
+  pull_request_target:
+    types:
+      - 'opened'
+      - 'reopened'
+  schedule:
+    - cron: '30 * * * *' # Every hour at :30
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: 'Sweep lane: look back this many hours (default 2)'
+        required: false
+        default: 2
+        type: 'number'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+jobs:
+  enforce:
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    concurrency:
+      # Keyed on the subject this event is about so unrelated spam is handled
+      # in parallel, and a comment plus its own edit are serialised. Not
+      # cancel-in-progress: a cancelled run leaves the spam standing.
+      group: >-
+        spam-blocklist-enforce-${{
+          github.event.comment.id || github.event.review.id ||
+          github.event.issue.number || github.event.pull_request.number ||
+          github.run_id
+        }}
+      cancel-in-progress: false
+    steps:
+      - name: 'Checkout blocklist'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          # Pinned to the default branch, never the event's ref. On
+          # pull_request_target the default would be the base branch anyway,
+          # but stating it makes it impossible for a future edit to start
+          # reading the blocklist out of a PR head.
+          ref: '${{ github.event.repository.default_branch }}'
+          sparse-checkout: '.github/spam-blocklist.txt'
+          persist-credentials: false
+
+      - name: 'Enforce blocklist on this event'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          BLOCKLIST_PATH: '.github/spam-blocklist.txt'
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const { readFileSync } = require('node:fs');
+
+            const parseBlocklist = (text) =>
+              new Set(
+                text
+                  .split('\n')
+                  .map((line) => line.trim())
+                  .filter((line) => line !== '' && !line.startsWith('#'))
+                  .map((line) => line.toLowerCase()),
+              );
+
+            let blocked;
+            try {
+              blocked = parseBlocklist(
+                readFileSync(process.env.BLOCKLIST_PATH, 'utf8'),
+              );
+            } catch (error) {
+              core.info(`No blocklist at ${process.env.BLOCKLIST_PATH}; nothing to do.`);
+              return;
+            }
+            if (blocked.size === 0) {
+              core.info('Blocklist is empty; nothing to do.');
+              return;
+            }
+            const isBlocked = (login) =>
+              typeof login === 'string' && blocked.has(login.toLowerCase());
+
+            const { owner, repo } = context.repo;
+            const eventName = context.eventName;
+            const payload = context.payload;
+            const actions = [];
+            const failures = [];
+
+            const run = async (label, fn) => {
+              try {
+                await fn();
+                actions.push(label);
+                core.info(`ok: ${label}`);
+              } catch (error) {
+                // 404 means someone (a maintainer, the spammer, a concurrent
+                // run of this workflow) already removed it. That is the
+                // desired end state, so it is not a failure.
+                if (error?.status === 404) {
+                  core.info(`already gone: ${label}`);
+                  return;
+                }
+                failures.push(`${label}: ${error?.status ?? ''} ${error?.message ?? error}`);
+                core.warning(`failed: ${label} — ${error?.message ?? error}`);
+              }
+            };
+
+            // Close + lock a thread opened by a blocklisted user. Issues close
+            // through issues.update so they can carry state_reason; PRs close
+            // through pulls.update, which is the endpoint that owns PR state.
+            // Locking is issues.lock for both — a PR is an issue as far as
+            // conversation locking is concerned.
+            const closeThread = async (number, isPullRequest) => {
+              const kind = isPullRequest ? 'pull request' : 'issue';
+              await run(`close ${kind} #${number}`, () =>
+                isPullRequest
+                  ? github.rest.pulls.update({
+                      owner,
+                      repo,
+                      pull_number: number,
+                      state: 'closed',
+                    })
+                  : github.rest.issues.update({
+                      owner,
+                      repo,
+                      issue_number: number,
+                      state: 'closed',
+                      state_reason: 'not_planned',
+                    }),
+              );
+              await run(`lock ${kind} #${number}`, () =>
+                github.rest.issues.lock({
+                  owner,
+                  repo,
+                  issue_number: number,
+                  lock_reason: 'spam',
+                }),
+              );
+            };
+
+            if (eventName === 'issue_comment') {
+              const comment = payload.comment;
+              if (isBlocked(comment?.user?.login)) {
+                await run(`delete issue comment ${comment.id}`, () =>
+                  github.rest.issues.deleteComment({
+                    owner,
+                    repo,
+                    comment_id: comment.id,
+                  }),
+                );
+              }
+              // The comment may have arrived on a thread the spammer also
+              // opened — e.g. they bump their own spam issue. Handle the
+              // thread here so the sweep is not the only path that closes it.
+              const issue = payload.issue;
+              if (issue && issue.state !== 'closed' && isBlocked(issue.user?.login)) {
+                await closeThread(issue.number, Boolean(issue.pull_request));
+              }
+            } else if (eventName === 'pull_request_review_comment') {
+              const comment = payload.comment;
+              if (isBlocked(comment?.user?.login)) {
+                await run(`delete review comment ${comment.id}`, () =>
+                  github.rest.pulls.deleteReviewComment({
+                    owner,
+                    repo,
+                    comment_id: comment.id,
+                  }),
+                );
+              }
+            } else if (eventName === 'pull_request_review') {
+              const review = payload.review;
+              if (isBlocked(review?.user?.login)) {
+                // No REST delete for a review body; SPAM-classify it instead.
+                await run(`minimize review ${review.id}`, () =>
+                  github.graphql(
+                    `mutation MinimizeComment($id: ID!) {
+                      minimizeComment(input: {subjectId: $id, classifier: SPAM}) {
+                        minimizedComment { isMinimized }
+                      }
+                    }`,
+                    { id: review.node_id },
+                  ),
+                );
+              }
+            } else if (eventName === 'pull_request_target') {
+              const pull = payload.pull_request;
+              if (isBlocked(pull?.user?.login)) {
+                await closeThread(pull.number, true);
+              }
+            }
+
+            // Both empty means the author was not blocklisted. Checking
+            // `failures` too matters: when the single action attempted is the
+            // one that failed, `actions` is still empty, and returning here
+            // would skip the setFailed below and report the run green.
+            if (actions.length === 0 && failures.length === 0) {
+              core.info('No blocklisted author on this event.');
+              return;
+            }
+
+            await core.summary
+              .addHeading('Spam blocklist enforcement')
+              .addList([...actions, ...failures.map((f) => `FAILED — ${f}`)])
+              .write();
+
+            if (failures.length > 0) {
+              core.setFailed(failures.join('\n'));
+            }
+
+  sweep:
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    concurrency:
+      group: 'spam-blocklist-sweep'
+      cancel-in-progress: false
+    steps:
+      - name: 'Checkout blocklist'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          sparse-checkout: '.github/spam-blocklist.txt'
+          persist-credentials: false
+
+      - name: 'Sweep recent activity for blocklisted authors'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          BLOCKLIST_PATH: '.github/spam-blocklist.txt'
+          LOOKBACK_HOURS: "${{ inputs.hours || '2' }}"
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const { readFileSync } = require('node:fs');
+
+            const parseBlocklist = (text) =>
+              new Set(
+                text
+                  .split('\n')
+                  .map((line) => line.trim())
+                  .filter((line) => line !== '' && !line.startsWith('#'))
+                  .map((line) => line.toLowerCase()),
+              );
+
+            let blocked;
+            try {
+              blocked = parseBlocklist(
+                readFileSync(process.env.BLOCKLIST_PATH, 'utf8'),
+              );
+            } catch {
+              core.info(`No blocklist at ${process.env.BLOCKLIST_PATH}; nothing to do.`);
+              return;
+            }
+            if (blocked.size === 0) {
+              core.info('Blocklist is empty; nothing to do.');
+              return;
+            }
+            const isBlocked = (login) =>
+              typeof login === 'string' && blocked.has(login.toLowerCase());
+
+            const { owner, repo } = context.repo;
+            const hours = Number(process.env.LOOKBACK_HOURS) || 2;
+            const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+            core.info(`Sweeping ${owner}/${repo} since ${since} for ${blocked.size} blocklisted user(s).`);
+
+            const actions = [];
+            const failures = [];
+            const run = async (label, fn) => {
+              try {
+                await fn();
+                actions.push(label);
+                core.info(`ok: ${label}`);
+              } catch (error) {
+                if (error?.status === 404) {
+                  core.info(`already gone: ${label}`);
+                  return;
+                }
+                failures.push(`${label}: ${error?.status ?? ''} ${error?.message ?? error}`);
+                core.warning(`failed: ${label} — ${error?.message ?? error}`);
+              }
+            };
+
+            // Repo-wide comment listings, not a walk over recently-updated
+            // threads: they honour `since` directly, so a spam comment on a
+            // year-old thread is still in scope, and they are the only listing
+            // that surfaces inline review comments at all. The predecessor
+            // workflow walked threads and consequently never saw a single
+            // inline review comment.
+            const issueComments = await github.paginate(
+              github.rest.issues.listCommentsForRepo,
+              { owner, repo, since, per_page: 100 },
+            );
+            for (const comment of issueComments) {
+              if (!isBlocked(comment.user?.login)) continue;
+              await run(`delete issue comment ${comment.id}`, () =>
+                github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                }),
+              );
+            }
+
+            const reviewComments = await github.paginate(
+              github.rest.pulls.listReviewCommentsForRepo,
+              { owner, repo, since, per_page: 100 },
+            );
+            for (const comment of reviewComments) {
+              if (!isBlocked(comment.user?.login)) continue;
+              await run(`delete review comment ${comment.id}`, () =>
+                github.rest.pulls.deleteReviewComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                }),
+              );
+            }
+
+            // listForRepo returns issues AND pull requests; `state: 'open'`
+            // keeps the sweep from re-locking threads that were already dealt
+            // with on a previous run.
+            const threads = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              since,
+              sort: 'updated',
+              direction: 'desc',
+              per_page: 100,
+            });
+            for (const thread of threads) {
+              if (!isBlocked(thread.user?.login)) continue;
+              const isPullRequest = Boolean(thread.pull_request);
+              const kind = isPullRequest ? 'pull request' : 'issue';
+              await run(`close ${kind} #${thread.number}`, () =>
+                isPullRequest
+                  ? github.rest.pulls.update({
+                      owner,
+                      repo,
+                      pull_number: thread.number,
+                      state: 'closed',
+                    })
+                  : github.rest.issues.update({
+                      owner,
+                      repo,
+                      issue_number: thread.number,
+                      state: 'closed',
+                      state_reason: 'not_planned',
+                    }),
+              );
+              await run(`lock ${kind} #${thread.number}`, () =>
+                github.rest.issues.lock({
+                  owner,
+                  repo,
+                  issue_number: thread.number,
+                  lock_reason: 'spam',
+                }),
+              );
+            }
+
+            await core.summary
+              .addHeading('Spam blocklist sweep')
+              .addTable([
+                [
+                  { data: 'Field', header: true },
+                  { data: 'Value', header: true },
+                ],
+                ['Since', since],
+                ['Blocklisted users', String(blocked.size)],
+                ['Issue comments scanned', String(issueComments.length)],
+                ['Review comments scanned', String(reviewComments.length)],
+                ['Open threads scanned', String(threads.length)],
+                ['Actions taken', String(actions.length)],
+              ])
+              .addList(actions)
+              .write();
+
+            if (failures.length > 0) {
+              core.setFailed(failures.join('\n'));
+            }

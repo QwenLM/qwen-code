@@ -1,4 +1,10 @@
-# Users whose comments should be auto-minimized as off-topic.
+# Users treated as spam by .github/workflows/spam-blocklist-enforce.yml.
 # One username per line, case-insensitive. Lines starting with # are comments.
-# Add entries here when a user is blocked at the org level or identified as spam.
+#
+# For every user listed here the workflow deletes their comments, and closes
+# and locks the issues and pull requests they open. Only the thread AUTHOR
+# matters for closing — a spam comment on someone else's PR is deleted and the
+# PR is left open.
+#
+# Add entries when a user is blocked at the org level or identified as spam.
 danialzivehdadr
