@@ -74,6 +74,15 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('identifies UserPromptSubmit hook context as distinct from user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Text inside a `<qwen:user-prompt-submit-context>` tag is model context added by a configured `UserPromptSubmit` hook, not user input.',
+    );
+  });
+
   it.each([
     [
       'interactive',

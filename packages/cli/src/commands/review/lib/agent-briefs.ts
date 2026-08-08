@@ -163,6 +163,19 @@ export interface Brief {
    * instructs exactly as it counts the brief's.
    */
   acceptsFindings?: boolean;
+  /**
+   * This role's brief never carries the soft tool-call ceiling
+   * (`agentToolBudget`).
+   *
+   * Declarative for the same reason `acceptsChunk` is: the exemption used to
+   * be three role names hardcoded in the prompt builder, which is exactly how
+   * a later role whose mandatory work does not scale with the diff would
+   * silently receive a diff-derived ceiling. Each exemption carries its own
+   * reason at the role's entry; a new role decides here, next to everything
+   * else it declares, and the roster test walks `BRIEFS` so the exempt set
+   * cannot drift unpinned.
+   */
+  budgetExempt?: boolean;
   /** The agent-facing text. */
   brief: string;
 }
@@ -178,6 +191,10 @@ export const REVERSE_AUDIT_EXAMPLE_RECEIPT =
 
 export const BRIEFS: Record<RoleId, Brief> = {
   '0': {
+    // Budget-exempt: Issue-sized mandatory work, not diff-sized: a small bugfix
+    // referencing many issues would exhaust a diff-derived ceiling on
+    // required fetches alone.
+    budgetExempt: true,
     label: 'Agent 0: Issue fidelity & root-cause ownership',
     publicLabel: 'the linked-issue fidelity pass',
     publicLabelZh: '关联 issue 一致性检查',
@@ -481,6 +498,10 @@ You are undirected on purpose. Do not restrict yourself to the list.`,
   },
 
   '7': {
+    // Budget-exempt: Deterministic build/test commands — the run costs what the
+    // project scripts cost, and stopping early is the one thing it must
+    // never do.
+    budgetExempt: true,
     label: 'Agent 7: Build & test verification',
     publicLabel: 'the build-and-test check',
     publicLabelZh: '构建与测试验证',
@@ -571,6 +592,9 @@ Report a **Critical** for each violation, and give **both** locations that toget
   },
 
   verify: {
+    // Budget-exempt: Its per-finding re-trace must not stop early; `verifyShard`
+    // already governs its load.
+    budgetExempt: true,
     reviewsCode: true,
     output: 'verdicts',
     acceptsFindings: true,
