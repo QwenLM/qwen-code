@@ -567,6 +567,11 @@
   background: linear-gradient(180deg, var(--muted), var(--card) 28%);
 }
 
+.executionRailViewport {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
 .executionRail {
   position: relative;
   height: 98px;
@@ -1676,6 +1681,25 @@ button.activityRow:hover {
     width: 34px;
     justify-content: center;
     padding: 0;
+  }
+
+  .workIdentity {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .runtime,
+  .agentCards em {
+    grid-column: 2;
+    justify-self: start;
+    text-align: left;
+  }
+
+  .dependencyCards {
+    grid-template-columns: 1fr;
+  }
+
+  .agentCards button {
+    grid-template-columns: 35px minmax(0, 1fr);
   }
 }
 

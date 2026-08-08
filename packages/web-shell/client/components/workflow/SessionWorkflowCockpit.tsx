@@ -884,29 +884,40 @@ export function SessionWorkflowCockpit({
                   </div>
                 ) : (
                   <div className={styles.workStage}>
-                    <div className={styles.executionRail}>
-                      <div className={styles.railLine}>
-                        <i style={{ width: `${progress}%` }} />
+                    <div className={styles.executionRailViewport}>
+                      <div
+                        className={styles.executionRail}
+                        style={{
+                          minWidth: `${Math.max(todos.length, 1) * 44}px`,
+                        }}
+                      >
+                        <div className={styles.railLine}>
+                          <i style={{ width: `${progress}%` }} />
+                        </div>
+                        {todos.map((todo, index) => (
+                          <button
+                            aria-label={todo.content}
+                            className={
+                              todo.id === selectedTodoId
+                                ? styles.railCurrent
+                                : ''
+                            }
+                            key={todo.id}
+                            onClick={() => setSelectedTodoId(todo.id)}
+                            style={{
+                              left: `${todos.length === 1 ? 50 : 5 + (index / (todos.length - 1)) * 90}%`,
+                            }}
+                            title={todo.content}
+                            type="button"
+                          >
+                            <i>
+                              {states.get(todo.id)?.status === 'completed'
+                                ? '✓'
+                                : index + 1}
+                            </i>
+                          </button>
+                        ))}
                       </div>
-                      {todos.map((todo, index) => (
-                        <button
-                          className={
-                            todo.id === selectedTodoId ? styles.railCurrent : ''
-                          }
-                          key={todo.id}
-                          onClick={() => setSelectedTodoId(todo.id)}
-                          style={{
-                            left: `${todos.length === 1 ? 50 : 5 + (index / (todos.length - 1)) * 90}%`,
-                          }}
-                          type="button"
-                        >
-                          <i>
-                            {states.get(todo.id)?.status === 'completed'
-                              ? '✓'
-                              : index + 1}
-                          </i>
-                        </button>
-                      ))}
                     </div>
                     <div className={styles.workDetail}>
                       <div className={styles.workIdentity}>
