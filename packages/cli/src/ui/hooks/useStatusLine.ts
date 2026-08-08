@@ -20,6 +20,7 @@ import {
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
   normalizeStatusLinePresetConfig,
   type StatusLinePresetConfig,
+  type StatusLinePresetItemId,
 } from '../statusLinePresets.js';
 
 /**
@@ -100,6 +101,33 @@ interface StatusLineCommandConfig {
   // When true, the built-in context usage indicator in the footer right
   // section is hidden. Useful when the statusline already shows context info.
   hideContextIndicator?: boolean;
+}
+
+// Preset items that already render context usage. When one of them is active
+// the footer indicator would show the same information twice (issue #8695).
+const CONTEXT_PRESET_ITEM_IDS = new Set<StatusLinePresetItemId>([
+  'context-used',
+  'context-remaining',
+]);
+
+/**
+ * Resolves the tri-state `hideContextIndicator` setting:
+ * - explicit `true`/`false` always wins, so users can force either behavior;
+ * - when unset, a preset status line that already shows context usage hides
+ *   the footer indicator to avoid duplicating it;
+ * - when unset for a `command` status line, the indicator stays visible — the
+ *   command output is opaque, so we never guess what it contains.
+ */
+export function resolveHideContextIndicator(
+  config: StatusLineConfig | undefined,
+): boolean {
+  if (typeof config?.hideContextIndicator === 'boolean') {
+    return config.hideContextIndicator;
+  }
+  if (config?.type === 'preset') {
+    return config.items.some((item) => CONTEXT_PRESET_ITEM_IDS.has(item));
+  }
+  return false;
 }
 
 type StatusLineConfig = StatusLineCommandConfig | StatusLinePresetConfig;
@@ -732,6 +760,6 @@ export function useStatusLine(): {
     respectUserColors:
       statusLineConfig?.type === 'command' &&
       statusLineConfig.respectUserColors === true,
-    hideContextIndicator: statusLineConfig?.hideContextIndicator === true,
+    hideContextIndicator: resolveHideContextIndicator(statusLineConfig),
   };
 }

@@ -319,6 +319,16 @@ describe('useStatusLine', () => {
       expect(result.current.hideContextIndicator).toBe(true);
     });
 
+    it('returns hideContextIndicator false when explicitly disabled for command config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        hideContextIndicator: false,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
     it('returns hideContextIndicator true when set in preset config', () => {
       setStatusLineConfig({
         type: 'preset',
@@ -327,6 +337,52 @@ describe('useStatusLine', () => {
       });
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it.each(['context-used', 'context-remaining'])(
+      'hides the footer indicator when an unset preset shows %s',
+      (contextItem) => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model', contextItem],
+        });
+        const { result } = renderHook(() => useStatusLine());
+        expect(result.current.hideContextIndicator).toBe(true);
+      },
+    );
+
+    it.each(['context-used', 'context-remaining'])(
+      'keeps the footer indicator when a preset showing %s sets hideContextIndicator false',
+      (contextItem) => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model', contextItem],
+          hideContextIndicator: false,
+        });
+        const { result } = renderHook(() => useStatusLine());
+        expect(result.current.hideContextIndicator).toBe(false);
+      },
+    );
+
+    it('keeps the footer indicator for a preset without context items', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'git-branch'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('hides the footer indicator for the built-in default preset', () => {
+      setStatusLineConfig(undefined);
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('keeps the footer indicator when the status line is disabled (null)', () => {
+      setStatusLineConfig(null);
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
     });
   });
 
