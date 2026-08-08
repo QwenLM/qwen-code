@@ -49,6 +49,7 @@ import {
   getErrorMessage,
   getErrorStatus,
   getErrorType,
+  isUserCancel,
 } from '../../utils/errors.js';
 import {
   startLLMRequestSpan,
@@ -262,7 +263,32 @@ export class LoggingContentGenerator implements ContentGenerator {
     error: unknown,
     model: string,
     prompt_id: string,
+    abortSignal?: AbortSignal,
   ): void {
+    // A user cancel is not an API error, so skip the api_error event entirely —
+    // the span already records the cancellation through its aborted status, so
+    // the signal isn't lost. Without this gate a user cancel is emitted as a
+    // `qwen-code.api_error` event with error_type `APIUserAbortError`, which is
+    // exactly what #8356 reported; `isAbortError` gating the debug log alone
+    // does not cover this separate telemetry path. `isUserCancel` (not a bare
+    // `aborted && isAbortError`) is what keeps a timed-out internal side query
+    // — a genuine failure that also aborts this signal — reported.
+    if (isUserCancel(error, abortSignal)) {
+      // Leave an attributed trace. `shouldSuppressErrorLogging` shares this
+      // predicate, so a misclassified abort would otherwise vanish from
+      // telemetry and the debug log at once, and the span cannot disambiguate
+      // either. The identifying fields matter: this line is the only
+      // debug-side evidence a suppression happened, and without them oncall
+      // can only correlate against spans by timing.
+      const reason: unknown = abortSignal?.reason;
+      debugLogger.debug(
+        `Skipping api_error telemetry: request was cancelled by the caller ` +
+          `(model=${model}, prompt_id=${prompt_id}, ` +
+          `error=${getErrorType(error)}, ` +
+          `reason=${reason instanceof Error ? reason.name : typeof reason})`,
+      );
+      return;
+    }
     try {
       this._logApiError(responseId, durationMs, error, model, prompt_id);
     } catch (loggingError) {
@@ -402,7 +428,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         config: this.config,
       });
       await context.with(spanContext, async () => {
-        this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
+        this.safelyLogApiError(
+          '',
+          durationMs,
+          error,
+          req.model,
+          userPromptId,
+          req.config?.abortSignal,
+        );
         try {
           await this.safelyLogOpenAIInteraction(
             await session.resolve(req),
@@ -490,7 +523,14 @@ export class LoggingContentGenerator implements ContentGenerator {
       const durationMs = Date.now() - startTime;
       const observedFinishReasons = exchange.controller.finalize(false);
       context.with(spanContext, () =>
-        this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
+        this.safelyLogApiError(
+          '',
+          durationMs,
+          error,
+          req.model,
+          userPromptId,
+          req.config?.abortSignal,
+        ),
       );
       const aborted = req.config?.abortSignal?.aborted ?? false;
       endLLMRequestSpan(llmSpan, {
@@ -802,6 +842,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             error,
             firstModelVersion || model,
             userPromptId,
+            abortSignal,
           ),
         );
         const openaiRequest = await openaiRequestPromise;

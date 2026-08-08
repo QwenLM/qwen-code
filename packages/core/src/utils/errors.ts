@@ -17,8 +17,11 @@ export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 /**
- * Check if the error is an abort error (user cancellation).
- * This handles both DOMException-style AbortError and Node.js abort errors.
+ * Check if the error is abort-shaped — a user cancel OR an internal deadline
+ * firing; the pinned SDKs reject abort-shaped for ANY aborted signal, so this
+ * alone cannot tell who aborted. For "the user cancelled", gate on
+ * `isUserCancel()` instead. Handles DOMException-style AbortError, Node.js
+ * abort errors, and the provider SDKs' `APIUserAbortError` (by class name).
  */
 export function isAbortError(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
@@ -35,7 +38,72 @@ export function isAbortError(error: unknown): boolean {
     return true;
   }
 
+  // A user cancel on a provider SDK path surfaces as `APIUserAbortError`. That
+  // class does not set `.name` (it stays 'Error') and carries no ABORT_ERR
+  // code, so the checks above miss it — leaving user cancels logged as
+  // api_errors and classified 'unknown' rather than 'abort'. Both SDKs this
+  // package depends on (`openai`, `@anthropic-ai/sdk`) are Stainless-generated
+  // and share this class name, so one check covers both. Match on the class
+  // name — as `getErrorType` below already does for SDK errors — so this
+  // provider-agnostic util needs no SDK import. The CLI bundle preserves class
+  // names (esbuild `keepNames: true` in esbuild.config.js); other bundles that
+  // minify without keepNames (e.g. vscode-ide-companion) do not, but they don't
+  // drive provider SDK requests, so the match holds where it runs.
+  if (
+    error instanceof Error &&
+    error.constructor?.name === 'APIUserAbortError'
+  ) {
+    return true;
+  }
+
   return false;
+}
+
+/**
+ * Whether an error represents a cancel the *user* initiated, as opposed to any
+ * other abort. Callers that suppress reporting for user cancels should gate on
+ * this rather than on `signal.aborted && isAbortError(error)`, so the
+ * definition of "user cancel" lives in one place.
+ *
+ * An aborted signal alone is not enough. Internal side queries compose a
+ * deadline into the same `config.abortSignal` a user cancel travels on:
+ * `memory/relevanceSelector.ts` (30s), `memory/forget.ts` (8s) and
+ * `agents/arena/ArenaManager.ts` all route `AbortSignal.timeout(...)` — alone
+ * or via `AbortSignal.any([...])` — through `baseLlmClient` into the request.
+ * When such a budget runs out the provider SDK still rejects abort-shaped
+ * (`openai` throws `APIUserAbortError` for any aborted signal, `@google/genai`
+ * surfaces a DOMException `AbortError`), but nobody cancelled anything. That is
+ * a genuine failure and it must stay reported.
+ *
+ * Node sets `signal.reason` to a DOMException named 'TimeoutError' for
+ * `AbortSignal.timeout()`, and `AbortSignal.any()` adopts the firing source's
+ * reason, so the reason separates the two cases.
+ */
+export function isUserCancel(error: unknown, signal?: AbortSignal): boolean {
+  if (!signal?.aborted) {
+    return false;
+  }
+
+  const reason: unknown = signal.reason;
+  if (reason instanceof Error && reason.name === 'TimeoutError') {
+    return false;
+  }
+
+  return isAbortError(error);
+}
+
+/**
+ * The abort reason an internal deadline must signal so `isUserCancel` can tell
+ * it apart from a user cancel. This is the producer half of that contract:
+ * budgets on model-request paths abort with this (`AbortSignal.timeout()`
+ * produces the same shape natively, and `combineAbortSignals(signals,
+ * { timeoutMs })` in `utils/abortController.ts` is the composed spelling
+ * when a parent signal is also involved). A bare `abort()`
+ * or an `Error`-reason abort reads downstream as a user cancel, and the
+ * timed-out request's api_error is silently suppressed.
+ */
+export function timeoutAbortReason(message: string): DOMException {
+  return new DOMException(message, 'TimeoutError');
 }
 
 /**

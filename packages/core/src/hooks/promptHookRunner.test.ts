@@ -402,6 +402,36 @@ describe('PromptHookRunner', () => {
       }
     });
 
+    it('signals its timeout as a TimeoutError on the request signal', async () => {
+      // The hook budget aborts the signal it hands to generateContent. That
+      // reason has to be TimeoutError-shaped, or a timed-out hook is
+      // classified downstream as a user cancel and its api_error is dropped.
+      vi.useFakeTimers();
+      let captured: AbortSignal | undefined;
+      mockGenerateContent.mockImplementation(
+        (request: { config?: { abortSignal?: AbortSignal } }) => {
+          captured = request.config?.abortSignal;
+          return new Promise(() => {});
+        },
+      );
+
+      try {
+        const execution = promptRunner.execute(
+          createMockConfig({ timeout: 0.1 }),
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+
+        await vi.advanceTimersByTimeAsync(150);
+        await execution;
+
+        expect(captured?.aborted).toBe(true);
+        expect((captured?.reason as Error).name).toBe('TimeoutError');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should handle abort signal (already aborted)', async () => {
       const controller = new AbortController();
       controller.abort();

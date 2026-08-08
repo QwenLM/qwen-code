@@ -35,6 +35,7 @@ import type {
 } from '@google/genai';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import type OpenAI from 'openai';
+import { APIUserAbortError } from 'openai';
 
 describe('OpenAIContentGenerator (Refactored)', () => {
   let generator: OpenAIContentGenerator;
@@ -313,6 +314,50 @@ describe('OpenAIContentGenerator (Refactored)', () => {
 
       const result = testGenerator.testShouldSuppressErrorLogging(
         abortError,
+        request,
+      );
+
+      expect(result).toBe(false);
+    });
+
+    it('should suppress logging for the SDK user-abort error on an aborted signal', () => {
+      // The existing cases all use hand-built `name === 'AbortError'` errors —
+      // cells where the old inline predicate and isUserCancel agree. This one
+      // covers the SDK's own class, which the old predicate missed.
+      const abortController = new AbortController();
+      abortController.abort();
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+        config: { abortSignal: abortController.signal },
+      };
+
+      const result = testGenerator.testShouldSuppressErrorLogging(
+        new APIUserAbortError({ message: 'Request was aborted.' }),
+        request,
+      );
+
+      expect(result).toBe(true);
+    });
+
+    it('should not suppress logging when an internal timeout budget fired', async () => {
+      // The other behaviour change at this call site: an abort-shaped error on
+      // a signal aborted by a deadline is a genuine failure and must stay
+      // logged. Re-inlining the old `isAbortError && aborted` expression from
+      // git history would silently re-suppress it, so this is the test that
+      // catches that regression.
+      const signal = AbortSignal.timeout(1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(signal.aborted).toBe(true);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+        config: { abortSignal: signal },
+      };
+
+      const result = testGenerator.testShouldSuppressErrorLogging(
+        new APIUserAbortError({ message: 'Request was aborted.' }),
         request,
       );
 

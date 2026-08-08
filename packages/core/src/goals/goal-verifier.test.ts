@@ -259,4 +259,31 @@ describe('createGoalVerifier', () => {
     await expect(verification).rejects.toThrow('attempt superseded');
     expect(signal?.aborted).toBe(true);
   });
+
+  it('signals its own timeout as a TimeoutError, not a plain Error', async () => {
+    // This deadline reaches a model request, so its abort reason has to be
+    // distinguishable from a user cancel. With a plain Error (or a bare
+    // abort) the timed-out verification is suppressed as though the user had
+    // pressed Esc, and its api_error never reaches telemetry.
+    const { config, generateText } = configFor('unused');
+    let signal: AbortSignal | undefined;
+    generateText.mockImplementation(async (request) => {
+      signal = request.abortSignal;
+      await new Promise<never>((_resolve, reject) => {
+        request.abortSignal.addEventListener(
+          'abort',
+          () => reject(request.abortSignal.reason),
+          { once: true },
+        );
+      });
+      throw new Error('unreachable');
+    });
+
+    const verification = createGoalVerifier(config, { timeoutMs: 5 })(input());
+    await vi.waitFor(() => expect(signal).toBeDefined());
+
+    await expect(verification).rejects.toThrow();
+    expect(signal?.aborted).toBe(true);
+    expect((signal?.reason as Error).name).toBe('TimeoutError');
+  });
 });

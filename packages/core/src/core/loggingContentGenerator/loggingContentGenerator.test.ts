@@ -25,6 +25,7 @@ import {
 import { isTelemetrySdkInitialized } from '../../telemetry/index.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
+import { APIUserAbortError } from 'openai';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 const activeOtelContext = vi.hoisted(() => ({ current: 'root' }));
@@ -762,6 +763,313 @@ describe('LoggingContentGenerator', () => {
     expect(
       genAiExchangeState.controllers.at(-1)?.finalize,
     ).toHaveBeenCalledWith(false);
+  });
+
+  it('does not emit an api_error event when the user cancelled the request', async () => {
+    // A user cancel surfaces as the SDK's APIUserAbortError with the caller's
+    // signal aborted. It must not be reported as a qwen-code.api_error — the
+    // span already records the cancellation. Regression for #8356 at the layer
+    // the bug is about: the util-level isAbortError fix alone does not gate this
+    // separate telemetry path.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-cancel'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).not.toHaveBeenCalled();
+  });
+
+  it('still emits an api_error event for a real failure that is not a cancel', async () => {
+    // The gate is scoped to genuine user cancels: a non-abort failure, even
+    // with an unrelated aborted flag absent, must still be reported.
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('upstream-down')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-real-error'),
+    ).rejects.toThrow('upstream-down');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for an abort-shaped error the user did not cause', async () => {
+    // Half of the gate's truth table: an abort-shaped error can also come from
+    // the network rather than the user. With the caller's signal never fired
+    // that is a genuine failure and must still be reported, so the gate cannot
+    // key on the error shape alone.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-network-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for a real failure that races a cancel', async () => {
+    // The other half: a genuine upstream failure landing just as the user
+    // cancels is still a real error, so the gate cannot key on the aborted
+    // signal alone.
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('rate limited')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-race'),
+    ).rejects.toThrow('rate limited');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event when an internal timeout budget fires', async () => {
+    // Not every aborted signal is a user cancel. Internal side queries compose
+    // `AbortSignal.timeout(...)` into the same `config.abortSignal` — memory
+    // recall (30s), forget (8s), arena summary — via baseLlmClient. When such a
+    // budget runs out the SDK still rejects abort-shaped, but this is a genuine
+    // failure: suppressing it would hide background LLM work failing behind a
+    // clean model-health chart. The signal's reason is what separates the two.
+    const timeoutSignal = AbortSignal.timeout(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(timeoutSignal.aborted).toBe(true);
+
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: timeoutSignal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-timeout-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for an abort-shaped error when the request has no signal', async () => {
+    // The remaining truth-table cell: no `config.abortSignal` at all. Nobody
+    // could have cancelled, so an abort-shaped rejection here is a real
+    // failure. Pins against relaxing the signal check to `?? true`.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-no-signal-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not emit an api_error event when the user cancels during stream setup', async () => {
+    // Cancelling before any chunk exists — Esc while the SDK request is still
+    // being established — rejects stream *setup* rather than the iterator, a
+    // separate call site from both the non-stream and mid-stream cases. Unlike
+    // a mid-stream abort the openai SDK does not swallow this one (the swallow
+    // lives in the stream iterator, not in the create call), so
+    // APIUserAbortError is the shape that genuinely arrives here. Dropping the
+    // signal argument at this site would re-emit the #8356 noise.
+    const controller = new AbortController();
+    controller.abort();
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContentStream(request, 'prompt-stream-setup-cancel'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).not.toHaveBeenCalled();
+  });
+
+  it('does not emit an api_error event when the user cancels mid-stream', async () => {
+    // The stream wrapper's catch is a third call site, distinct from the two
+    // above, so the gate needs its own coverage here. On the shape: the pinned
+    // openai SDK swallows a mid-stream abort (`core/streaming.mjs`:
+    // `if (isAbortError(e)) return;`), so an openai stream cancel ends the
+    // iterator normally and never reaches this catch at all. This case keeps
+    // the wrapper's contract honest for a provider that does propagate the SDK
+    // error; the shape that genuinely lands here is pinned in the test below.
+    const controller = new AbortController();
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'partial' }]);
+        controller.abort();
+        throw new APIUserAbortError({ message: 'Request was aborted.' });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-cancel',
+    );
+
+    await expect(
+      (async () => {
+        for await (const _ of stream) {
+          // consume until the cancel surfaces
+        }
+      })(),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).not.toHaveBeenCalled();
+  });
+
+  it('does not emit an api_error event for a DOMException-shaped mid-stream cancel', async () => {
+    // The shape a mid-stream cancel really takes on the @google/genai path: its
+    // SSE reader (`processStreamResponse`) has no abort special-case, so an
+    // abort during a read rejects with the fetch DOMException named
+    // 'AbortError' and propagates. This pins the AbortError-name branch of
+    // isAbortError at the stream call site — narrowing the gate to the openai
+    // APIUserAbortError alone has to fail here.
+    const controller = new AbortController();
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'partial' }]);
+        controller.abort();
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-cancel-dom',
+    );
+
+    await expect(
+      (async () => {
+        for await (const _ of stream) {
+          // consume until the cancel surfaces
+        }
+      })(),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(logApiError).not.toHaveBeenCalled();
   });
 
   it('forwards usage attached to the final response after it was yielded', async () => {

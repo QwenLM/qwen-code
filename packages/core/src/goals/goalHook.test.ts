@@ -349,6 +349,10 @@ describe('createGoalStopHookCallback', () => {
       const out = await pending;
 
       expect(capturedSignal?.aborted).toBe(true);
+      // The judge call is a model request, so this deadline must not look
+      // like a user cancel downstream — a bare abort() reasons as
+      // 'AbortError' and its api_error would be suppressed as an Esc.
+      expect((capturedSignal?.reason as Error).name).toBe('TimeoutError');
       expect(out).toMatchObject({
         continue: true,
         systemMessage: expect.stringMatching(/goal.*paused/i),

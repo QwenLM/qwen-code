@@ -385,7 +385,7 @@ export function createProductionDispatch(
     // retry loop. The wrapper owns the per-attempt AbortController +
     // AgentEventEmitter; it chains the caller's `signal` into the
     // per-attempt controller and hands both into `runSingleDispatch`. A
-    // stall fires `controller.abort('stalled')`, the attempt returns
+    // stall fires a TimeoutError-shaped abort (see workflow-stall.ts), the attempt returns
     // CANCELLED, runSingleDispatch throws its "did not complete" terminal,
     // and the wrapper retries (up to 3) when `watchdog.stalled()` is set
     // and the parent signal is NOT aborted.
