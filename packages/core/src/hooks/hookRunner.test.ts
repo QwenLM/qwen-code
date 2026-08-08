@@ -1090,9 +1090,9 @@ describe('HookRunner', () => {
       // Verify spawn was called with powershell configuration
       expect(mockSpawn).toHaveBeenCalled();
       const spawnArgs = mockSpawn.mock.calls[0];
-      // Should use powershell executable
+      // Should use powershell executable with -NoProfile
       expect(spawnArgs[0]).toBe('powershell');
-      expect(spawnArgs[1]).toContain('-Command');
+      expect(spawnArgs[1]).toEqual(['-NoProfile', '-Command', expect.any(String)]);
       expect(spawnArgs[2].shell).toBe(false);
     });
 

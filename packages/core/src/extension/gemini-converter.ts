@@ -16,6 +16,11 @@ import type { ExtensionSetting } from './extensionSettings.js';
 import { ExtensionStorage } from './storage.js';
 import { convertTomlToMarkdown } from '../utils/toml-to-markdown-converter.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  isPathWithin,
+  realPathWithin,
+  readExtensionManifest,
+} from './variables.js';
 
 const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
@@ -113,29 +118,6 @@ export async function convertGeminiExtensionPackage(
       // Ignore cleanup errors
     }
     throw error;
-  }
-}
-
-/**
- * True when `child` equals or is nested under `parent`. Both must already be
- * absolute, resolved paths. Shared containment primitive for the symlink
- * confinement guards (kept in one place so the rule can't drift between files).
- */
-export function isPathWithin(child: string, parent: string): boolean {
-  return child === parent || child.startsWith(parent + path.sep);
-}
-
-/**
- * True when `target` exists and its real (symlink-resolved) path stays within
- * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
- * symlink in an untrusted source cannot point a read/copy at a file outside
- * the package. Returns false for missing or broken paths.
- */
-export function realPathWithin(target: string, root: string): boolean {
-  try {
-    return isPathWithin(fs.realpathSync(target), fs.realpathSync(root));
-  } catch {
-    return false;
   }
 }
 
@@ -254,23 +236,10 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
  * @returns true if config appears to be Gemini format
  */
 export function isGeminiExtensionConfig(extensionDir: string) {
-  const configFilePath = path.join(extensionDir, 'gemini-extension.json');
-  if (!fs.existsSync(configFilePath)) {
+  const obj = readExtensionManifest(extensionDir, 'gemini-extension.json');
+  if (!obj) {
     return false;
   }
-  // Don't read through a symlink that escapes the extension during detection.
-  if (!realPathWithin(configFilePath, extensionDir)) {
-    return false;
-  }
-
-  const configContent = fs.readFileSync(configFilePath, 'utf-8');
-  const parsedConfig = JSON.parse(configContent);
-
-  if (typeof parsedConfig !== 'object' || parsedConfig === null) {
-    return false;
-  }
-
-  const obj = parsedConfig as Record<string, unknown>;
 
   // Must have name and version
   if (typeof obj['name'] !== 'string' || typeof obj['version'] !== 'string') {

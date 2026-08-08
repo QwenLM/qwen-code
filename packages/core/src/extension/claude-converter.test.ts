@@ -13,7 +13,6 @@ import {
   convertClaudeAgentConfig,
   mergeClaudeConfigs,
   isClaudePluginConfig,
-  isClaudePluginStandaloneConfig,
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
   normalizeClaudeMcpServer,
@@ -200,117 +199,74 @@ describe('isClaudePluginConfig', () => {
   let testDir: string;
 
   beforeEach(() => {
-    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-market-'));
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-plugin-'));
   });
 
   afterEach(() => {
     fs.rmSync(testDir, { recursive: true, force: true });
   });
 
-  const writeMarketplace = (content: unknown) => {
+  const writeManifest = (subpath: string, content: unknown) => {
     fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
     fs.writeFileSync(
-      path.join(testDir, '.claude-plugin', 'marketplace.json'),
+      path.join(testDir, '.claude-plugin', subpath),
       JSON.stringify(content),
       'utf-8',
     );
   };
 
-  it('identifies a spec-compliant marketplace', () => {
-    writeMarketplace({
-      name: 'test',
-      owner: { name: 'Test' },
+  it('classifies a marketplace that lists pluginName', () => {
+    writeManifest('marketplace.json', {
       plugins: [{ name: 'test-plugin', source: './' }],
     });
-    expect(
-      isClaudePluginConfig(testDir, {
-        extensionSource: '',
-        pluginName: 'test-plugin',
-      }),
-    ).toBe(true);
+    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBe('marketplace');
   });
 
-  it('identifies a marketplace without top-level name/owner', () => {
-    writeMarketplace({
-      plugins: [{ name: 'test-plugin', source: './' }],
-    });
-    expect(
-      isClaudePluginConfig(testDir, {
-        extensionSource: '',
-        pluginName: 'test-plugin',
-      }),
-    ).toBe(true);
-  });
-
-  it('returns false when the plugin is not listed', () => {
-    writeMarketplace({
-      name: 'test',
-      owner: { name: 'Test' },
+  it('throws when the marketplace does not list pluginName', () => {
+    writeManifest('marketplace.json', {
       plugins: [{ name: 'other', source: './' }],
     });
-    expect(
-      isClaudePluginConfig(testDir, {
-        extensionSource: '',
-        pluginName: 'missing',
-      }),
-    ).toBe(false);
+    expect(() => isClaudePluginConfig(testDir, 'missing')).toThrow(
+      'Plugin missing not found in marketplace.json',
+    );
   });
 
-  it('returns false when there is no marketplace.json', () => {
-    expect(
-      isClaudePluginConfig(testDir, {
-        extensionSource: '',
-        pluginName: 'test-plugin',
-      }),
-    ).toBe(false);
-  });
-});
-
-describe('isClaudePluginStandaloneConfig', () => {
-  let testDir: string;
-
-  beforeEach(() => {
-    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-standalone-test-'));
+  it('returns null when there is no Claude manifest', () => {
+    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBeNull();
   });
 
-  afterEach(() => {
-    if (fs.existsSync(testDir)) {
-      fs.rmSync(testDir, { recursive: true, force: true });
-    }
+  it('classifies a standalone plugin via plugin.json without pluginName', () => {
+    writeManifest('plugin.json', { name: 'test-plugin', version: '1.0.0' });
+    expect(isClaudePluginConfig(testDir)).toBe('standalone');
   });
 
-  it('returns true when plugin.json exists with a name', () => {
+  it('throws for a standalone plugin.json lacking a name', () => {
+    writeManifest('plugin.json', { version: '1.0.0' });
+    expect(() => isClaudePluginConfig(testDir)).toThrow(
+      'Invalid .claude-plugin/plugin.json: missing "name"',
+    );
+  });
+
+  it('returns null for unparseable manifests', () => {
     fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
     fs.writeFileSync(
       path.join(testDir, '.claude-plugin', 'plugin.json'),
-      JSON.stringify({ name: 'test-plugin', version: '1.0.0' }),
+      '{',
     );
-
-    expect(isClaudePluginStandaloneConfig(testDir)).toBe(true);
+    expect(isClaudePluginConfig(testDir)).toBeNull();
   });
 
-  it('returns false when plugin.json is absent', () => {
-    expect(isClaudePluginStandaloneConfig(testDir)).toBe(false);
-  });
-
-  it('returns false for invalid JSON content', () => {
+  it('returns null when a standalone manifest symlinks outside the package', () => {
+    const outside = path.join(
+      path.dirname(testDir),
+      `${path.basename(testDir)}-outside.json`,
+    );
+    fs.writeFileSync(outside, JSON.stringify({ name: 'evil' }), 'utf-8');
     fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
-    fs.writeFileSync(
-      path.join(testDir, '.claude-plugin', 'plugin.json'),
-      'null',
-    );
+    fs.symlinkSync(outside, path.join(testDir, '.claude-plugin', 'plugin.json'));
 
-    expect(isClaudePluginStandaloneConfig(testDir)).toBe(false);
-  });
-
-  it('returns false when plugin.json lacks a name', () => {
-    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
-    fs.writeFileSync(
-      path.join(testDir, '.claude-plugin', 'plugin.json'),
-      JSON.stringify({ version: '1.0.0' }),
-    );
-
-    expect(isClaudePluginStandaloneConfig(testDir)).toBe(false);
+    expect(isClaudePluginConfig(testDir)).toBeNull();
+    fs.rmSync(outside, { force: true });
   });
 });
 
@@ -410,6 +366,9 @@ describe('convertClaudePluginPackage', () => {
     // Verify csv and txt skills are NOT installed
     expect(fs.existsSync(path.join(convertedSkillsDir, 'csv'))).toBe(false);
     expect(fs.existsSync(path.join(convertedSkillsDir, 'txt'))).toBe(false);
+
+    // source "." resolves to the marketplace dir itself; no empty scratch dir is left behind
+    expect(fs.readdirSync(pluginSourceDir).filter((f) => f.startsWith('plugin'))).toEqual([]);
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
@@ -974,8 +933,46 @@ describe('convertClaudePluginPackage', () => {
     // Verify: the string hooks path is preserved; the hook file is loaded at
     // runtime against the installed directory (see loadExtension).
     expect(result.config.hooks).toBe('./hooks/hooks.json');
+    // The referenced hooks file must be copied into the converted directory so
+    // the runtime loader can find it.
+    expect(fs.existsSync(path.join(result.convertedDir, 'hooks', 'hooks.json'))).toBe(true);
 
     // Clean up converted directory
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('drops a hooks string path that escapes the plugin', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-hooks-escape');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          hooks: '../outside-hooks.json', // Escapes the plugin dir
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
+    // The escaping hooks path is confined away rather than persisted.
+    expect(result.config.hooks).toBeUndefined();
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 

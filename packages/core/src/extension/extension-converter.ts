@@ -15,7 +15,6 @@ import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
   isClaudePluginConfig,
-  isClaudePluginStandaloneConfig,
 } from './claude-converter.js';
 import type {
   ExtensionNetworkPolicy,
@@ -36,37 +35,55 @@ export async function convertGeminiOrClaudeExtension(
   signal?: AbortSignal,
 ): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
   signal?.throwIfAborted();
-  let newExtensionDir = extensionDir;
-  let originSource: ExtensionOriginSource = 'QwenCode';
   const configFilePath = path.join(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[0],
   );
-  // Prefer Claude manifests when present
+  // Native Qwen extension wins.
   if (fs.existsSync(configFilePath)) {
-    newExtensionDir = extensionDir;
-  } else if (
-    pluginName &&
-    isClaudePluginConfig(extensionDir, { extensionSource: '', pluginName })
-  ) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(
-        extensionDir,
-        pluginName,
-        networkPolicy,
-        signal,
-      )
-    ).convertedDir;
-    originSource = 'Claude';
-  } else if (isClaudePluginStandaloneConfig(extensionDir)) {
-    newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
-      .convertedDir;
-    originSource = 'Claude';
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-    originSource = 'Gemini';
+    signal?.throwIfAborted();
+    return { extensionDir, originSource: 'QwenCode' };
   }
+  // Try Claude first; a defective manifest is recorded and we fall back.
+  let claudeError: unknown;
+  try {
+    const kind = isClaudePluginConfig(extensionDir, pluginName);
+    if (kind === 'marketplace') {
+      signal?.throwIfAborted();
+      return {
+        extensionDir: (
+          await convertClaudePluginPackage(
+            extensionDir,
+            pluginName as string,
+            networkPolicy,
+            signal,
+          )
+        ).convertedDir,
+        originSource: 'Claude',
+      };
+    }
+    if (kind === 'standalone') {
+      signal?.throwIfAborted();
+      return {
+        extensionDir: (await convertClaudePluginStandalone(extensionDir))
+          .convertedDir,
+        originSource: 'Claude',
+      };
+    }
+  } catch (error) {
+    claudeError = error;
+  }
+  // Fall back to Gemini.
+  if (isGeminiExtensionConfig(extensionDir)) {
+    signal?.throwIfAborted();
+    return {
+      extensionDir: (await convertGeminiExtensionPackage(extensionDir))
+        .convertedDir,
+      originSource: 'Gemini',
+    };
+  }
+  // Nothing matched: surface the Claude manifest error if one occurred.
+  if (claudeError) throw claudeError;
   signal?.throwIfAborted();
-  return { extensionDir: newExtensionDir, originSource };
+  return { extensionDir, originSource: 'QwenCode' };
 }

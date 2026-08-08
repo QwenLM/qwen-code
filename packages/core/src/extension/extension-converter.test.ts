@@ -10,7 +10,6 @@ const mocks = vi.hoisted(() => ({
   convertClaudePluginStandalone: vi.fn(),
   convertClaudePluginPackage: vi.fn(),
   isClaudePluginConfig: vi.fn(),
-  isClaudePluginStandaloneConfig: vi.fn(),
   convertGeminiExtensionPackage: vi.fn(),
   isGeminiExtensionConfig: vi.fn(),
   existsSync: vi.fn(),
@@ -20,7 +19,6 @@ vi.mock('./claude-converter.js', () => ({
   convertClaudePluginStandalone: mocks.convertClaudePluginStandalone,
   convertClaudePluginPackage: mocks.convertClaudePluginPackage,
   isClaudePluginConfig: mocks.isClaudePluginConfig,
-  isClaudePluginStandaloneConfig: mocks.isClaudePluginStandaloneConfig,
 }));
 
 vi.mock('./gemini-converter.js', () => ({
@@ -56,8 +54,30 @@ describe('convertGeminiOrClaudeExtension', () => {
     expect(mocks.convertGeminiExtensionPackage).not.toHaveBeenCalled();
   });
 
-  it('routes to the Claude marketplace converter when pluginName matches a marketplace entry', async () => {
-    mocks.isClaudePluginConfig.mockReturnValue(true);
+  it('throws when pluginName is not listed in an existing marketplace', async () => {
+    mocks.isClaudePluginConfig.mockImplementation(() => {
+      throw new Error('Plugin my-plugin not found in marketplace.json');
+    });
+
+    await expect(
+      convertGeminiOrClaudeExtension('/dir', 'my-plugin'),
+    ).rejects.toThrow('Plugin my-plugin not found in marketplace.json');
+  });
+
+  it('falls back to Gemini when no Claude manifest is present', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue(null);
+    mocks.isGeminiExtensionConfig.mockReturnValue(true);
+
+    const result = await convertGeminiOrClaudeExtension('/dir');
+
+    expect(result.originSource).toBe('Gemini');
+    expect(result.extensionDir).toBe(convertedDir);
+    expect(mocks.convertGeminiExtensionPackage).toHaveBeenCalledWith('/dir');
+  });
+
+  it('prefers Claude marketplace over Gemini when a Claude manifest is present', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue('marketplace');
+    mocks.isGeminiExtensionConfig.mockReturnValue(true);
 
     const result = await convertGeminiOrClaudeExtension('/dir', 'my-plugin');
 
@@ -72,35 +92,28 @@ describe('convertGeminiOrClaudeExtension', () => {
     expect(mocks.convertGeminiExtensionPackage).not.toHaveBeenCalled();
   });
 
-  it('routes to the standalone Claude converter when plugin.json is present', async () => {
-    mocks.isClaudePluginStandaloneConfig.mockReturnValue(true);
-
-    const result = await convertGeminiOrClaudeExtension('/dir');
-
-    expect(result.originSource).toBe('Claude');
-    expect(result.extensionDir).toBe(convertedDir);
-    expect(mocks.convertClaudePluginStandalone).toHaveBeenCalledWith('/dir');
-    expect(mocks.convertGeminiExtensionPackage).not.toHaveBeenCalled();
-  });
-
-  it('falls back to Gemini when no Claude manifest is present', async () => {
-    mocks.isGeminiExtensionConfig.mockReturnValue(true);
-
-    const result = await convertGeminiOrClaudeExtension('/dir');
-
-    expect(result.originSource).toBe('Gemini');
-    expect(result.extensionDir).toBe(convertedDir);
-    expect(mocks.convertGeminiExtensionPackage).toHaveBeenCalledWith('/dir');
-  });
-
-  it('prefers Claude over Gemini when both manifests are present', async () => {
-    mocks.isClaudePluginConfig.mockReturnValue(true);
+  it('prefers a native Qwen extension over any Claude manifest', async () => {
+    mocks.existsSync.mockReturnValue(true);
+    mocks.isClaudePluginConfig.mockReturnValue('marketplace');
     mocks.isGeminiExtensionConfig.mockReturnValue(true);
 
     const result = await convertGeminiOrClaudeExtension('/dir', 'my-plugin');
 
+    expect(result.originSource).toBe('QwenCode');
+    expect(result.extensionDir).toBe('/dir');
+    expect(mocks.convertClaudePluginPackage).not.toHaveBeenCalled();
+    expect(mocks.convertClaudePluginStandalone).not.toHaveBeenCalled();
+    expect(mocks.convertGeminiExtensionPackage).not.toHaveBeenCalled();
+  });
+
+  it('prefers standalone Claude over Gemini when a Claude manifest is present', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue('standalone');
+    mocks.isGeminiExtensionConfig.mockReturnValue(true);
+
+    const result = await convertGeminiOrClaudeExtension('/dir');
+
     expect(result.originSource).toBe('Claude');
-    expect(mocks.convertClaudePluginPackage).toHaveBeenCalled();
+    expect(mocks.convertClaudePluginStandalone).toHaveBeenCalledWith('/dir');
     expect(mocks.convertGeminiExtensionPackage).not.toHaveBeenCalled();
   });
 });

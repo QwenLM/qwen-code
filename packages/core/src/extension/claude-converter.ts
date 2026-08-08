@@ -19,11 +19,8 @@ import type {
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
-import {
-  copyDirectory,
-  isPathWithin,
-  realPathWithin,
-} from './gemini-converter.js';
+import { copyDirectory } from './gemini-converter.js';
+import { isPathWithin, realPathWithin, readExtensionManifest } from './variables.js';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
@@ -626,6 +623,17 @@ async function buildQwenExtensionFromPlugin(
     }
   }
 
+  // Confine a hooks string path to the plugin the same way as mcpServers, so
+  // an absolute or `../`-laden value can't point at a file outside it.
+  if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
+    if (!resolvePluginRelativeFile(pluginSource, mergedConfig.hooks)) {
+      debugLogger.warn(
+        `Dropping hooks path "${mergedConfig.hooks}" that escapes the plugin; hooks will not load.`,
+      );
+      delete mergedConfig.hooks;
+    }
+  }
+
   const tmpDir = await ExtensionStorage.createTmpDir();
 
   try {
@@ -939,78 +947,40 @@ export function mergeClaudeConfigs(
 }
 
 /**
- * Checks if a config object is in Claude plugin format.
- * @param config Configuration object to check
- * @returns true if config appears to be Claude format
+ * Classifies a directory as a Claude plugin: `'marketplace'` when a plugin
+ * named `pluginName` is listed, `'standalone'` when a valid plugin.json exists,
+ * or `null` when neither applies. An explicitly requested pluginName that is
+ * absent, or a defective plugin.json, throws the precise error.
+ * @param extensionDir The extension directory to check
+ * @param pluginName When provided, checks the marketplace for this plugin;
+ *   otherwise probes for a standalone plugin.
+ * @returns `'marketplace'`, `'standalone'`, or `null` when no Claude plugin.
  */
 export function isClaudePluginConfig(
   extensionDir: string,
-  marketplace: { extensionSource: string; pluginName: string },
-) {
-  const marketplaceConfigFilePath = path.join(
-    extensionDir,
-    '.claude-plugin/marketplace.json',
-  );
-  if (!fs.existsSync(marketplaceConfigFilePath)) {
-    return false;
+  pluginName?: string,
+): 'standalone' | 'marketplace' | null {
+  // pluginName given = user explicitly chose a marketplace plugin.
+  if (pluginName) {
+    const m = readExtensionManifest(extensionDir, '.claude-plugin/marketplace.json');
+    if (m) {
+      if (Array.isArray(m['plugins']) &&
+          m['plugins'].some((p) => (p as { name?: string }).name === pluginName)) {
+        return 'marketplace';
+      }
+      throw new Error(`Plugin ${pluginName} not found in marketplace.json`);
+    }
+    // No marketplace.json — fall through to the standalone probe.
   }
-
-  const marketplaceConfigContent = fs.readFileSync(
-    marketplaceConfigFilePath,
-    'utf-8',
-  );
-  const marketplaceConfig = JSON.parse(marketplaceConfigContent);
-
-  if (typeof marketplaceConfig !== 'object' || marketplaceConfig === null) {
-    return false;
+  // No pluginName = probe a single-source standalone plugin.
+  const p = readExtensionManifest(extensionDir, '.claude-plugin/plugin.json');
+  if (p) {
+    if (typeof p['name'] !== 'string') {
+      throw new Error('Invalid .claude-plugin/plugin.json: missing "name"');
+    }
+    return 'standalone';
   }
-
-  const marketplaceConfigObj = marketplaceConfig as Record<string, unknown>;
-
-  if (!Array.isArray(marketplaceConfigObj['plugins'])) {
-    return false;
-  }
-
-  const marketplacePluginObj = marketplaceConfigObj['plugins'].find(
-    (plugin: ClaudeMarketplacePluginConfig) =>
-      plugin.name === marketplace.pluginName,
-  );
-
-  if (!marketplacePluginObj) return false;
-
-  return true;
-}
-
-/**
- * Checks if a directory is a standalone Claude plugin, i.e. it carries a
- * `.claude-plugin/plugin.json` manifest.
- * @param extensionDir The extension directory to check
- * @returns true if the directory is a standalone Claude plugin
- */
-export function isClaudePluginStandaloneConfig(extensionDir: string): boolean {
-  const pluginJsonPath = path.join(
-    extensionDir,
-    '.claude-plugin',
-    'plugin.json',
-  );
-  if (!fs.existsSync(pluginJsonPath)) {
-    return false;
-  }
-  // A symlinked manifest that escapes the package is treated as absent
-  if (!realPathWithin(pluginJsonPath, extensionDir)) {
-    return false;
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf-8'));
-    return (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      !Array.isArray(parsed) &&
-      typeof (parsed as { name?: unknown }).name === 'string'
-    );
-  } catch {
-    return false;
-  }
+  return null;
 }
 
 /**

@@ -31,9 +31,10 @@ import {
   EXTENSION_SETTINGS_FILENAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
-  substituteHookVariables,
   performVariableReplacement,
+  readExtensionManifest,
 } from './variables.js';
+import type { JsonValue } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   checkForExtensionUpdate,
@@ -1395,11 +1396,10 @@ export class ExtensionManager {
       );
 
       if (config.hooks && typeof config.hooks !== 'string') {
-        // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
-        extension.hooks = this.substituteHookVariables(
-          config.hooks,
-          effectiveExtensionPath,
-        );
+        // Inline hooks are already hydrated by loadExtensionConfig.
+        extension.hooks = config.hooks as {
+          [K in HookEventName]?: HookDefinition[];
+        };
       }
 
       // Also load hooks from hooks directory or from config.hooks string path if available and not already set
@@ -1439,11 +1439,17 @@ export class ExtensionManager {
               };
             }
 
-            // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
-            extension.hooks = this.substituteHookVariables(
-              hooksData,
-              effectiveExtensionPath,
-            );
+            // Hydrate the same variables as inline hooks (see loadExtensionConfig).
+            extension.hooks = recursivelyHydrateStrings(
+              hooksData as unknown as JsonValue,
+              {
+                extensionPath: effectiveExtensionPath,
+                CLAUDE_PLUGIN_ROOT: effectiveExtensionPath,
+                workspacePath: workspaceDir ?? this.workspaceDir,
+                '/': path.sep,
+                pathSeparator: path.sep,
+              },
+            ) as { [K in HookEventName]?: HookDefinition[] };
           } catch (error) {
             debugLogger.warn(
               `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1462,16 +1468,6 @@ export class ExtensionManager {
       );
       return null;
     }
-  }
-
-  /**
-   * Substitute variables in hook configurations, particularly ${CLAUDE_PLUGIN_ROOT}
-   */
-  private substituteHookVariables(
-    hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
-    extensionPath: string,
-  ): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    return substituteHookVariables(hooks, extensionPath);
   }
 
   loadInstallMetadata(
@@ -1494,8 +1490,14 @@ export class ExtensionManager {
       throw new Error(`Configuration file not found at ${configFilePath}`);
     }
     try {
-      const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const rawConfig = recursivelyHydrateStrings(JSON.parse(configContent), {
+      const manifest = readExtensionManifest(
+        extensionDir,
+        EXTENSIONS_CONFIG_FILENAME,
+      );
+      if (!manifest) {
+        throw new Error(`Invalid configuration in ${configFilePath}`);
+      }
+      const rawConfig = recursivelyHydrateStrings(manifest as unknown as JsonValue, {
         extensionPath: extensionDir,
         CLAUDE_PLUGIN_ROOT: extensionDir,
         workspacePath: workspaceDir,

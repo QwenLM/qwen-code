@@ -7,16 +7,11 @@
 import { type VariableSchema, VARIABLE_SCHEMA } from './variableSchema.js';
 import path from 'node:path';
 import { QWEN_DIR } from '../config/storage.js';
-import type { HookDefinition } from '../hooks/types.js';
-import type { HookEventName } from '../hooks/types.js';
 import * as fs from 'node:fs';
 import { glob } from 'glob';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('Extension:variables');
-
-// Re-export types for substituteHookVariables
-export type { HookDefinition };
 
 export const EXTENSIONS_DIRECTORY_NAME = path.join(QWEN_DIR, 'extensions');
 export const EXTENSIONS_CONFIG_FILENAME = 'qwen-extension.json';
@@ -32,6 +27,48 @@ export type JsonValue =
   | null
   | JsonObject
   | JsonArray;
+
+/**
+ * True when `child` equals or is nested under `parent`. Both must already be
+ * absolute, resolved paths. Shared containment primitive for the symlink
+ * confinement guards (kept in one place so the rule can't drift between files).
+ */
+export function isPathWithin(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/**
+ * True when `target` exists and its real (symlink-resolved) path stays within
+ * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
+ * symlink in an untrusted source cannot point a read/copy at a file outside
+ * the package. Returns false for missing or broken paths.
+ */
+export function realPathWithin(target: string, root: string): boolean {
+  try {
+    return isPathWithin(fs.realpathSync(target), fs.realpathSync(root));
+  } catch {
+    return false;
+  }
+}
+
+/** Reads a package-relative JSON manifest, or null when absent/unparseable/escaping. */
+export function readExtensionManifest(
+  extensionDir: string,
+  filename: string,
+): Record<string, unknown> | null {
+  const filePath = path.join(extensionDir, filename);
+  if (!fs.existsSync(filePath) || !realPathWithin(filePath, extensionDir)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export type VariableContext = {
   [key in keyof typeof VARIABLE_SCHEMA]?: string;
@@ -79,44 +116,6 @@ export function recursivelyHydrateStrings(
     return newObj;
   }
   return obj;
-}
-
-/**
- * Substitute variables in hook configurations, in particular ${CLAUDE_PLUGIN_ROOT}
- * (Claude plugins) and ${extensionPath} (Gemini extensions)
- * @param hooks - The hooks configuration object
- * @param basePath - The path to substitute for the path variables
- * @returns A deep cloned hooks object with variables substituted
- */
-export function substituteHookVariables(
-  hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
-  basePath: string,
-): { [K in HookEventName]?: HookDefinition[] } | undefined {
-  if (!hooks) return hooks;
-
-  // Deep clone the hooks to avoid modifying the original
-  const clonedHooks = JSON.parse(JSON.stringify(hooks));
-
-  // Replace the path variables with the actual extension path in all command hooks
-  for (const eventName in clonedHooks) {
-    const eventHooks = clonedHooks[eventName as HookEventName];
-    if (eventHooks && Array.isArray(eventHooks)) {
-      for (const hookDef of eventHooks) {
-        if (hookDef.hooks && Array.isArray(hookDef.hooks)) {
-          for (const hook of hookDef.hooks) {
-            if (hook.type === 'command' && hook.command) {
-              hook.command = hook.command.replace(
-                /\$\{(CLAUDE_PLUGIN_ROOT|extensionPath)\}/g,
-                basePath,
-              );
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return clonedHooks;
 }
 
 /**
