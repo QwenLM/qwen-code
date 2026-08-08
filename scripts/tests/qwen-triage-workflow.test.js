@@ -69,6 +69,84 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
+// Executed-harness factory shared by the claim and finalize lifecycle tests:
+// a stubbed `gh` on PATH with failure-injection arms, the real step script
+// run under GitHub's exact shell flags, and capture of the body/call the
+// stub saw plus whatever the step appended to $GITHUB_OUTPUT. GitHub runs
+// `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`, and a step's
+// own `set -uo pipefail` does not turn `-e` back off — match that, or an
+// unguarded failing command kills the real step in production while the
+// harness stays green. One shared copy keeps that fidelity contract in one
+// place: the two pasted copies already diverged once (only the finalize stub
+// had the failure arms), and a later fix made on only one copy would silently
+// degrade exactly one test. The failure arms stay inert unless a scenario
+// sets GH_STUB_FAIL_LIST / GH_STUB_FAIL_WRITE; a POST (any write that is not
+// a PATCH) answers with GH_STUB_POST_ID (default 7777) like the comments
+// API's created-id payload.
+function makeGhHarness(label) {
+  const dir = mkdtempSync(join(tmpdir(), `triage-${label}-`));
+  const commentsFile = join(dir, 'comments.json');
+  const bodyOut = join(dir, 'body.md');
+  const callOut = join(dir, 'call.txt');
+  const outputFile = join(dir, 'github_output');
+  writeFileSync(
+    join(dir, 'gh'),
+    [
+      '#!/usr/bin/env bash',
+      'body=""',
+      'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
+      'if [ -n "$body" ]; then',
+      '  printf "%s" "$body" > "$GH_STUB_OUT"',
+      '  printf "%s\\n" "$*" > "$GH_STUB_CALL"',
+      'fi',
+      'case "$*" in',
+      "  'api user --jq .login') echo qwen-code-ci-bot ;;",
+      '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
+      '  *PATCH*) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1 ;;',
+      '  *) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1; echo "${GH_STUB_POST_ID:-7777}" ;;',
+      'esac',
+      'exit 0',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
+  const bashArgs = ['--noprofile', '--norc', '-eo', 'pipefail', '-c'];
+  const run = (script, env) => {
+    rmSync(bodyOut, { force: true });
+    rmSync(callOut, { force: true });
+    rmSync(outputFile, { force: true });
+    const proc = spawnSync('bash', [...bashArgs, script], {
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        GH_TOKEN: 'x',
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        NUMBER: '7999',
+        RUN_URL,
+        GITHUB_OUTPUT: outputFile,
+        GH_STUB_OUT: bodyOut,
+        GH_STUB_CALL: callOut,
+        GH_STUB_COMMENTS: commentsFile,
+        ...env,
+      },
+      encoding: 'utf8',
+    });
+    expect(proc.status, proc.stderr).toBe(0);
+    return {
+      body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
+      call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
+      out: `${proc.stdout}${proc.stderr}`,
+      outputs: existsSync(outputFile) ? readFileSync(outputFile, 'utf8') : '',
+    };
+  };
+  return {
+    commentsFile,
+    run,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    RUN_URL,
+  };
+}
+
 // Spawns the real proxy against a streaming upstream (20 chunks, 200 ms
 // apart = 4 s total) and a stalling upstream (headers + one chunk, then
 // silence), with the proxy's 120 s watchdog shortened to 1.5 s. The healthy
@@ -470,25 +548,296 @@ describe('qwen-triage tmux workflow', () => {
     // Best-effort: a failed status post warns and continues, never fails triage.
     expect(statusStep).toContain('set -uo pipefail');
     expect(statusStep).toContain('continuing.');
+    // The claim exports the id of the comment it wrote; finalize PATCHes
+    // exactly that id, so the two steps cannot disagree about which comment
+    // this run owns — no body-URL matching, no second selection to race.
+    expect(statusStep).toContain("id: 'status'");
+    expect(statusStep).toContain(
+      'echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"',
+    );
+    // The executed claim harness's stub answers a POST with the already-
+    // extracted id, so nothing there exercises the POST arm's `--jq '.id'`
+    // (removing the flag keeps the suite green). Pin the flag statically.
+    expect(statusStep).toContain("--jq '.id'");
+    expect(statusStep).toContain('[watch live progress]($RUN_URL)');
+    expect(statusStep).toContain('[查看实时进度]($RUN_URL)');
 
     const finalizeStep = step('Finalize triage status comment');
-    // Runs on both outcomes and edits the SAME marker comment (no second post).
-    expect(finalizeStep).toContain("MARKER='<!-- qwen-triage lifecycle -->'");
+    // Runs on EVERY terminal outcome and PATCHes exactly the comment the
+    // claim step exported. always(), not success() || failure():
+    // cancellation — cancel-in-progress superseding the run, job timeout, or
+    // manual cancel — used to skip the step and leave the early comment
+    // claiming the run was still in progress.
     expect(finalizeStep).toContain(
-      "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
+      'if: "always() && steps.resolve.outputs.number != \'\'"',
     );
-    expect(finalizeStep).toContain('success() || failure()');
+    expect(finalizeStep).not.toContain('success() || failure()');
     expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain("JOB_STATUS: '${{ job.status }}'");
+    expect(finalizeStep).toContain('Qwen Triage was cancelled');
+    expect(finalizeStep).toContain('已取消');
     expect(finalizeStep).toContain(
-      'Cannot resolve bot identity; skipping final status comment upsert.',
+      'elif [ "${JOB_STATUS:-}" = \'cancelled\' ]',
     );
-    expect(finalizeStep).toContain('select(.user.login == $bot)');
-    expect(finalizeStep).toContain('startswith($m)');
-    expect(finalizeStep).not.toContain('contains($m)');
+    expect(finalizeStep).toContain(
+      'if [ "${TRIAGE_OUTCOME:-}" = \'success\' ] && [ "${JOB_STATUS:-}" != \'failure\' ]; then',
+    );
+    // The id arrives through env like the other step inputs — and finalize
+    // must NOT re-derive it by listing comments: re-running a selection at
+    // finalize time is exactly the race this coupling removes.
+    expect(finalizeStep).toContain(
+      "STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'",
+    );
+    expect(finalizeStep).not.toContain('--paginate');
+    expect(finalizeStep).not.toContain('gh api user');
+    expect(finalizeStep).toContain(
+      'repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID',
+    );
     expect(finalizeStep).toContain('--method PATCH');
+    // An empty id means this run never ended up owning a comment (a cancel
+    // landing before the claim posted, or a transiently failed claim write):
+    // no-op, never a fresh post or a lookup that could clobber a previous
+    // run's terminal wording.
+    expect(finalizeStep).toContain('if [ -z "${STATUS_COMMENT_ID:-}" ]; then');
+    expect(finalizeStep).toContain(
+      'This run claimed no status comment; nothing to finalize.',
+    );
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
+    expect(finalizeStep).toContain('[view run]($RUN_URL)');
   });
+
+  // Unordered substring pinning cannot tell which terminal state PATCHes which
+  // wording (swapping the success and cancelled bodies survives it), nor
+  // whether the ZH half is really Chinese. Execute the real composer against
+  // a stubbed `gh` and assert the body it sends for each terminal state.
+  const finalizeWordings = {
+    finished: ['Qwen Triage finished', 'Qwen Triage 已完成'],
+    cancelled: ['Qwen Triage was cancelled', 'Qwen Triage 已取消'],
+    early: ['Qwen Triage ended early', 'Qwen Triage 提前结束'],
+  };
+  const finalizeCombos = [
+    [
+      'green job',
+      { TRIAGE_OUTCOME: 'success', JOB_STATUS: 'success' },
+      'finished',
+    ],
+    // A timeout/manual cancel landing AFTER the triage step already
+    // succeeded still reports the success.
+    [
+      'triage success, job cancelled after',
+      { TRIAGE_OUTCOME: 'success', JOB_STATUS: 'cancelled' },
+      'finished',
+    ],
+    // A red job despite a successful triage step — 'Check triage response'
+    // exits 1 on an empty summary — must NOT say "finished" and point at
+    // stage comments that were never posted.
+    [
+      'triage success, job failed',
+      { TRIAGE_OUTCOME: 'success', JOB_STATUS: 'failure' },
+      'early',
+    ],
+    [
+      'triage cancelled',
+      { TRIAGE_OUTCOME: 'cancelled', JOB_STATUS: 'cancelled' },
+      'cancelled',
+    ],
+    [
+      'triage failed, job cancelled',
+      { TRIAGE_OUTCOME: 'failure', JOB_STATUS: 'cancelled' },
+      'cancelled',
+    ],
+    [
+      'triage failed, job failed',
+      { TRIAGE_OUTCOME: 'failure', JOB_STATUS: 'failure' },
+      'early',
+    ],
+    [
+      'triage skipped, job failed',
+      { TRIAGE_OUTCOME: 'skipped', JOB_STATUS: 'failure' },
+      'early',
+    ],
+  ];
+
+  it.each(finalizeCombos)(
+    'finalizes the claimed comment: %s',
+    (_label, env, expected) => {
+      const finalizeStep = step('Finalize triage status comment');
+      const script = finalizeStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+
+      const { run, cleanup } = makeGhHarness('finalize');
+      try {
+        const { body, call } = run(script, {
+          ...env,
+          STATUS_COMMENT_ID: '43',
+        });
+        expect(call).toContain('--method PATCH');
+        expect(call).toContain('issues/comments/43');
+        expect(body.startsWith('<!-- qwen-triage lifecycle -->'), body).toBe(
+          true,
+        );
+        for (const [kind, [en, zh]] of Object.entries(finalizeWordings)) {
+          if (kind === expected) {
+            expect(body, JSON.stringify(env)).toContain(en);
+            expect(body, JSON.stringify(env)).toContain(zh);
+          } else {
+            expect(body, JSON.stringify(env)).not.toContain(en);
+            expect(body, JSON.stringify(env)).not.toContain(zh);
+          }
+        }
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
+  it('skips finalize when the run never claimed a comment, and survives a failed PATCH', () => {
+    const finalizeStep = step('Finalize triage status comment');
+    const script = finalizeStep
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(script).toBeTruthy();
+
+    const { run, cleanup } = makeGhHarness('finalize-noop');
+    try {
+      // A cancel landing before the claim posted leaves the id empty: no
+      // write at all — a fresh post here would clobber a previous run's
+      // terminal wording, and a lookup-based finalize would PATCH whatever
+      // comment happens to be newest.
+      const noop = run(script, {
+        TRIAGE_OUTCOME: 'skipped',
+        JOB_STATUS: 'cancelled',
+      });
+      expect(noop.body).toBe(null);
+      expect(noop.call).toBe(null);
+      expect(noop.out).toContain(
+        'This run claimed no status comment; nothing to finalize.',
+      );
+
+      // A failing PATCH must not fail the step: under GitHub's `-eo
+      // pipefail` an unguarded write turns a transient API error into a red
+      // job even under if: always(). `run` asserts exit 0.
+      const patchFailed = run(script, {
+        TRIAGE_OUTCOME: 'failure',
+        JOB_STATUS: 'cancelled',
+        STATUS_COMMENT_ID: '43',
+        GH_STUB_FAIL_WRITE: '1',
+      });
+      expect(patchFailed.out).toContain(
+        'Failed to finalize triage status comment; continuing.',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  // The claim step is the only selection left in the lifecycle: newest-wins
+  // marker reuse (the shared slot), with the chosen or created id exported
+  // for finalize to PATCH. Execute the real claim script against a stubbed
+  // `gh`.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'claims the newest marker and exports the comment id for finalize',
+    () => {
+      const statusStep = step('Post triage status comment');
+      const script = statusStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+
+      const { commentsFile, run, cleanup } = makeGhHarness('claim');
+      try {
+        const marker = '<!-- qwen-triage lifecycle -->';
+        const comment = (id, body) => ({
+          id,
+          user: { login: 'qwen-code-ci-bot' },
+          body,
+        });
+        const tombstone = (runId) =>
+          `${marker}\n\n✅ earlier verdict [finalize run](https://github.com/QwenLM/qwen-code/actions/runs/${runId})`;
+
+        // No marker yet: POST the running claim and export the created id.
+        // The body must START with the lifecycle marker — the selector is
+        // gated on startswith($m), so a composer that drops the marker posts
+        // a claim nothing ever recognizes or flips.
+        writeFileSync(commentsFile, '[]');
+        const fresh = run(script, {});
+        expect(fresh.call).toContain('issues/7999/comments');
+        expect(fresh.call).not.toContain('--method PATCH');
+        expect(fresh.body).toContain('Qwen Triage is running');
+        expect(fresh.body.startsWith(marker), fresh.body).toBe(true);
+        expect(fresh.outputs).toContain('comment_id=7777');
+
+        // Existing markers: reuse the NEWEST one — the marker comment is a
+        // shared slot, not a per-run log — and export the reused id.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(42, tombstone(55)),
+            comment(44, tombstone(456)),
+          ]),
+        );
+        const newest = run(script, {});
+        expect(newest.call).toContain('--method PATCH');
+        expect(newest.call).toContain('issues/comments/44');
+        expect(newest.call).not.toContain('issues/comments/42');
+        expect(newest.outputs).toContain('comment_id=44');
+
+        // A legacy marker body is still a reusable slot: dropping
+        // startswith($legacy) from the claim jq loses single-slot healing
+        // for pre-migration threads and survives the suite.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(
+              41,
+              '<!-- qwen-triage stage=status -->\n\nlegacy status wording',
+            ),
+          ]),
+        );
+        const legacy = run(script, {});
+        expect(legacy.call).toContain('--method PATCH');
+        expect(legacy.call).toContain('issues/comments/41');
+        expect(legacy.outputs).toContain('comment_id=41');
+
+        // A failing write exports an EMPTY id — finalize must see "this run
+        // never claimed anything", not a guessed id — and never fails the
+        // step: under GitHub's `-eo pipefail` an unguarded POST/PATCH turns
+        // a transient comments-API blip into a red job BEFORE 'Run Qwen
+        // Triage' starts. `run` asserts exit 0 for each arm.
+        writeFileSync(commentsFile, '[]');
+        const postFailed = run(script, { GH_STUB_FAIL_WRITE: '1' });
+        expect(postFailed.out).toContain(
+          'Failed to post triage status comment; continuing.',
+        );
+        expect(postFailed.outputs).toContain('comment_id=');
+        expect(postFailed.outputs).not.toContain('comment_id=7777');
+
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([comment(45, tombstone(55))]),
+        );
+        const patchFailed = run(script, { GH_STUB_FAIL_WRITE: '1' });
+        expect(patchFailed.out).toContain(
+          'Failed to update triage status comment; continuing.',
+        );
+        expect(patchFailed.outputs).toContain('comment_id=');
+        expect(patchFailed.outputs).not.toContain('comment_id=45');
+
+        // An unreadable comment list is best-effort too: `|| EXISTING_ID=''`
+        // falls back to a fresh claim post; deleting the guard kills the
+        // step on a transient blip.
+        const listFailed = run(script, { GH_STUB_FAIL_LIST: '1' });
+        expect(listFailed.call).toContain('issues/7999/comments');
+        expect(listFailed.call).not.toContain('--method PATCH');
+        expect(listFailed.outputs).toContain('comment_id=7777');
+      } finally {
+        cleanup();
+      }
+    },
+  );
 
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
@@ -5370,6 +5719,7 @@ describe('qwen-triage npm cache producer', () => {
       "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
     );
     expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    expect(cacheProducerWorkflow).toContain("options: '--init --user node'");
     for (const jobName of ['verify', 'tmux-testing']) {
       expect(job(jobName)).toContain(
         "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",

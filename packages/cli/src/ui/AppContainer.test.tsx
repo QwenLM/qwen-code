@@ -230,7 +230,22 @@ describe('AppContainer State Management', () => {
   const mockedUseKeypress = useKeypress as Mock;
   let originalStdoutIsTTY: boolean | undefined;
   let restoreCiEnv = () => {};
+  let mockClearPendingState: Mock;
   const mockedRestorePromptStash = vi.mocked(restorePromptStash);
+
+  // Shared helper to extract AppContainer's global keypress handler
+  // (handleGlobalKeypress) from the useKeypress mock. The handler stringifies
+  // to include TOGGLE_THINKING_EXPANDED, so that token is the stable
+  // discovery idiom. Used by the Ctrl+O and Cancel Handler describe blocks.
+  const getGlobalKeypress = (): ((key: Key) => void) | undefined =>
+    mockedUseKeypress.mock.calls
+      .map((call) => call[0])
+      .reverse()
+      .find(
+        (handler): handler is (key: Key) => void =>
+          typeof handler === 'function' &&
+          handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
+      );
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -249,6 +264,7 @@ describe('AppContainer State Management', () => {
     capturedUIActions = null!;
     capturedRenderMode = 'render';
     capturedThoughtExpanded = null!;
+    mockClearPendingState = vi.fn();
 
     // **Provide a default return value for EVERY mocked hook.**
     mockedUseHistory.mockReturnValue({
@@ -338,6 +354,7 @@ describe('AppContainer State Management', () => {
       retryLastPrompt: vi.fn(),
       streamingResponseLengthRef: { current: 0 },
       isReceivingContent: false,
+      clearPendingState: mockClearPendingState,
     });
     mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
     mockedUseFolderTrust.mockReturnValue({
@@ -1259,6 +1276,7 @@ describe('AppContainer State Management', () => {
       capturedUIActions.handleClearScreen();
 
       expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(mockClearPendingState).toHaveBeenCalledTimes(1);
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
@@ -2567,6 +2585,15 @@ describe('AppContainer State Management', () => {
     // signature change surfaces as a clear test failure rather than silently
     // grabbing the wrong callback.
     const ON_CANCEL_SUBMIT_ARG_INDEX = 15;
+    // Shared ESC key fixture for the Cancel Handler describe block.
+    const escKey: Key = {
+      name: 'escape',
+      sequence: '\u001b',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+    };
     type CapturedCancelSubmit = (info?: {
       pendingItem: HistoryItemWithoutId | null;
       lastTurnUserItem: {
@@ -2666,28 +2693,75 @@ describe('AppContainer State Management', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      const handleKeypress = mockedUseKeypress.mock.calls
-        .map((call) => call[0])
-        .reverse()
-        .find(
-          (handler): handler is (key: Key) => void =>
-            typeof handler === 'function' &&
-            handler.toString().includes('handleExit'),
-        ) as ((key: Key) => void) | undefined;
+      const handleKeypress = getGlobalKeypress();
       expect(handleKeypress).toBeDefined();
 
-      const escKey: Key = {
-        name: 'escape',
-        sequence: '\u001b',
-        ctrl: false,
-        meta: false,
-        shift: false,
-        paste: false,
-      };
       handleKeypress!(escKey);
 
       // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
       expect(cancelSpy).not.toHaveBeenCalled();
+    });
+
+    it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
+      // Positive counterpart to the vim-INSERT guard above: while the agent
+      // is Responding and the buffer is empty, one Esc must reach the
+      // cancel-work branch of the global handler. InputPrompt must NOT pop
+      // the queue into the buffer on that Esc (its Responding guard skips
+      // the pop; #8201). The global handler itself does not touch the
+      // queue either — end-to-end the cancel path drains it back into the
+      // buffer via the cancel handler, but that hop is severed here because
+      // cancelOngoingRequest is replaced by a spy.
+      const cancelSpy = vi.fn();
+      const mockPopAllMessages = vi.fn().mockReturnValue(null);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: cancelSpy,
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['queued follow-up'],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
+        popAllMessages: mockPopAllMessages,
+        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!(escKey);
+
+      // A single Esc cancels the in-flight request...
+      expect(cancelSpy).toHaveBeenCalledOnce();
+      // ...and the global keypress handler itself must not pop the queue
+      // (InputPrompt owns the ESC pop decision and skips it while Responding;
+      // #8201). End-to-end the cancel path then drains the queue back into
+      // the buffer via the cancel handler - that hop is severed here because
+      // cancelOngoingRequest is replaced by a spy.
+      expect(mockPopAllMessages).not.toHaveBeenCalled();
     });
 
     it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
@@ -5412,16 +5486,6 @@ describe('AppContainer State Management', () => {
         ...overrides,
       }) as Key;
 
-    const getGlobalKeypress = () =>
-      mockedUseKeypress.mock.calls
-        .map((call) => call[0])
-        .reverse()
-        .find(
-          (handler): handler is (key: Key) => void =>
-            typeof handler === 'function' &&
-            handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
-        ) as ((key: Key) => void) | undefined;
-
     const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 
     it('Ctrl+O flips the full-detail state that expands thoughts and tool output', () => {
@@ -5774,6 +5838,10 @@ describe('AppContainer State Management', () => {
         rewindUserItem(1, 'first prompt', 'prompt-1'),
         { id: 2, type: 'gemini', text: 'first response' },
       ]);
+      expect(mockClearPendingState).toHaveBeenCalledTimes(1);
+      expect(mockClearPendingState.mock.invocationCallOrder[0]).toBeLessThan(
+        harness.loadHistory.mock.invocationCallOrder[0]!,
+      );
       expect(harness.setText).toHaveBeenCalledWith('second prompt');
       expect(harness.addItem).toHaveBeenCalledWith(
         expect.objectContaining({

@@ -35,6 +35,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, basename, resolve } from 'node:path';
+import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
 /**
  * Where the prompts this plan's agents were built from are recorded.
@@ -61,6 +62,87 @@ const fileFor = (key: string) => `${encodeURIComponent(key)}.txt`;
 /** Where this agent's brief lives — the file it is told to read first. */
 export function briefPath(planPath: string, key: string): string {
   return join(promptRecordDir(planPath), `${encodeURIComponent(key)}.brief.md`);
+}
+
+/** Where a round's findings list lives — the file the launch block points at. */
+export function findingsFilePath(planPath: string, key: string): string {
+  return join(
+    promptRecordDir(planPath),
+    `${encodeURIComponent(key)}.findings.md`,
+  );
+}
+
+/**
+ * The findings file a recorded launch prompt points at, if any — the pointer
+ * `findingsSection` bakes into the block. Anchored to the exact shape that
+ * builder emits: the pointer sits alone on its own line inside its fence.
+ * The anchor matters because of the write-failure fallback: when the findings
+ * file could not be written, `findingsSection` inlines the LIST in that same
+ * position, and a finding entry there can itself quote a
+ * `read_file(file_path="….findings.md")` line. A loose first-match would then
+ * extract the QUOTATION as the pointer — and the readers diverge: coverage
+ * demands a read of a path no agent was told to read (spurious
+ * `findings-unread` on an already-degraded run), and retirement, worse,
+ * confines-and-reads an earlier round's file, flipping `yielded` to dry and
+ * retiring a chunk that just reported — the one direction this module's
+ * header says it never fails. A quoted pointer inside a findings entry is
+ * indented or embedded in prose, so requiring it standalone removes it. A
+ * brief path (`.brief.md`) can never match the `.findings.md` suffix.
+ * Shared by every reader of the pointer: the delivery floor (coverage) and
+ * the retirement echo-guard both extract it from the recorded prompt rather
+ * than deriving a path from the record key — a per-chunk record key and its
+ * round's findings file are keyed differently, so the prompt is the only
+ * source that is always right.
+ */
+export function findingsPointerOf(prompt: string): string | null {
+  const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(prompt);
+  return m && m[1] !== undefined ? m[1] : null;
+}
+
+/**
+ * Write the findings list a verify/reverse-audit launch block points at.
+ *
+ * The list used to be folded verbatim into every printed block — the point was
+ * a record a partial delivery cannot satisfy, and inlining made the findings
+ * part of the recorded prompt. On a 12-14-chunk round that made the orchestrator
+ * re-emit 65-82 KB in ONE assistant message, and the stream generating that
+ * message never completed (issue #8597). So the list goes where the brief already
+ * goes: on disk, named by the same digest that keys the record, read by the
+ * agent. The block carries the pointer; dropping it mismatches the recorded
+ * prompt exactly as dropping the list did, and the delivery floor counts the
+ * read it instructs exactly as it counts the brief's — an agent that opens
+ * its brief but skips this file does not clear it.
+ *
+ * Returns null when the write fails (a read-only tmp dir): the caller then
+ * inlines the list into the block — the pre-#8597 shape — instead of
+ * pointing a whole round at a file that does not exist.
+ */
+export function writeFindingsFile(
+  planPath: string,
+  key: string,
+  content: string,
+): string | null {
+  const p = findingsFilePath(planPath, key);
+  try {
+    mkdirSync(promptRecordDir(planPath), { recursive: true });
+    writeFileSync(p, content);
+  } catch (err) {
+    // A read-only tmp dir must not stop a review being BUILT — and it must
+    // not send a whole round pointing at a file that does not exist either:
+    // null makes findingsSection inline the list (the pre-#8597 shape), so
+    // the agents read what they were launched with, instead of 12-14 of
+    // them burning a full round against a dead path before the delivery
+    // floor fails it. Say so now: a silent miss used to leave the round
+    // pointing at nothing with no notice anywhere. Safe writer: this catch
+    // exists to keep the build alive, so the diagnostic must not throw out
+    // of it on EPIPE (`qwen … | head`).
+    writeStderrLineSafe(
+      `agent-prompt: failed to write findings file ${p}: ` +
+        `${(err as Error).message} — inlining the list instead`,
+    );
+    return null;
+  }
+  return p;
 }
 
 const RULES_MARKER = '## Project rules';
@@ -156,7 +238,12 @@ export function readRecordedPrompts(
   const dir = promptRecordDir(planPath);
   let names: string[];
   try {
-    names = readdirSync(dir);
+    // Sorted: this module reasons per-record and pairs records against
+    // transcripts, and a filesystem-order walk (`readdir` is filename-hash
+    // order on ext4, not insertion order) makes the analysis order-sensitive —
+    // e.g. which record's state poisons a shared cache first. A deterministic
+    // walk removes that whole class.
+    names = readdirSync(dir).sort();
   } catch {
     return out; // Never run, or nothing to record. The caller decides what that means.
   }

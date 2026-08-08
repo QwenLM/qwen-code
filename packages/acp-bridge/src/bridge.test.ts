@@ -64,6 +64,17 @@ import { createInMemoryChannel } from './inMemoryChannel.js';
 import { EventBus, type BridgeEvent } from './eventBus.js';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_MAX_SESSION_HOLDS,
+  ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
+  ACTIVE_WORK_STALE_INTERVALS,
+  gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_MODEL_PROMPT_META_KEY,
@@ -109,7 +120,690 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+async function sendActiveWorkSnapshot(
+  handle: { agentConnection: { extNotification: ExtNotificationFn } },
+  seq: number,
+  sessions: Array<{
+    sessionId: string;
+    holds: Array<{ category: string; id: string }>;
+  }>,
+): Promise<void> {
+  await handle.agentConnection.extNotification(
+    ACTIVE_WORK_NOTIFICATION_METHOD,
+    {
+      v: ACTIVE_WORK_HEARTBEAT_VERSION,
+      seq,
+      sessions,
+    },
+  );
+}
+
+type ExtNotificationFn = (
+  method: string,
+  params: Record<string, unknown>,
+) => Promise<void>;
+
+/** A cooperative child: conditional closes succeed, everything else no-ops. */
+const activeWorkCloseImpl = async (method: string) =>
+  method === SERVE_CONTROL_EXT_METHODS.sessionClose
+    ? { closed: true, holds: [] }
+    : {};
+
+function activeWorkInitializeResponse(
+  overrides: Record<string, unknown> = {},
+): InitializeResponse {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    agentInfo: { name: 'active-work-agent', version: '0' },
+    authMethods: [],
+    agentCapabilities: {},
+    _meta: {
+      [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+        v: ACTIVE_WORK_HEARTBEAT_VERSION,
+        intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+        categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+        ...overrides,
+      },
+    },
+  };
+}
+
+function agentHold(id: string) {
+  return { category: 'agent' as const, id };
+}
+
+/**
+ * The grade `/health?deep=1` would report for a single-runtime daemon. The
+ * bridge exposes counts rather than a grade (an empty runtime must not vouch
+ * for another one's unreported sessions), so tests grade through the same
+ * function the route uses instead of reimplementing the collapse.
+ */
+function reportingGrade(bridge: {
+  activeWorkCoverage: {
+    total: number;
+    covered: number;
+    onNegotiatedChannel: number;
+  };
+}): 'full' | 'partial' | 'none' {
+  return gradeActiveWorkCoverage(bridge.activeWorkCoverage);
+}
+
 describe('createAcpSessionBridge', () => {
+  describe('active work', () => {
+    it('negotiates the capability and counts accepted prompts locally', async () => {
+      const prompt = deferred<PromptResponse>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        promptImpl: () => prompt.promise,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(handle.agent.initializeCalls[0]?._meta).toMatchObject({
+        [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+        },
+        [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+          v: CHANNEL_STARTUP_PROFILE_VERSION,
+        },
+      });
+
+      // No snapshot has arrived yet, so the session is "unknown": busy rather
+      // than idle, and graded `partial` — the channel did negotiate, it just
+      // has not spoken yet, which is not the same as `none`.
+      expect(bridge.activeWork).toBe(true);
+      expect(reportingGrade(bridge)).toBe('partial');
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.activeWork).toBe(false);
+      expect(reportingGrade(bridge)).toBe('full');
+
+      // Prompts are a daemon-owned fact: no child report is involved.
+      const running = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+      expect(bridge.activeWork).toBe(true);
+      prompt.resolve({ stopReason: 'end_turn' });
+      await running;
+      expect(bridge.activeWork).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('grades a child that never acknowledges the capability as none', async () => {
+      const handle = makeChannel({});
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Unsupported must not behave like unknown: an older child would
+      // otherwise pin every session as permanently busy and unreapable.
+      expect(bridge.activeWork).toBe(false);
+      expect(reportingGrade(bridge)).toBe('none');
+      expect(bridge.activeWorkCoverage.oldestCoveredReportAt).toBeNull();
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('grades a child that omits a category as partial', async () => {
+      const handle = makeChannel({
+        initializeImpl: () =>
+          activeWorkInitializeResponse({ categories: ['agent'] }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.activeWork).toBe(false);
+      expect(reportingGrade(bridge)).toBe('partial');
+
+      await bridge.shutdown();
+    });
+
+    it('ignores reordered snapshots and foreign sessions', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 5, [
+        { sessionId: session.sessionId, holds: [agentHold('a1')] },
+        { sessionId: 'foreign-session', holds: [agentHold('a2')] },
+      ]);
+      expect(bridge.activeWork).toBe(true);
+
+      // Lower sequence: reordered, must not roll the state back.
+      await sendActiveWorkSnapshot(handle, 4, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.activeWork).toBe(true);
+
+      await sendActiveWorkSnapshot(handle, 6, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.activeWork).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('rejects a malformed snapshot outright instead of applying part of it', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [agentHold('a1')] },
+      ]);
+      expect(bridge.activeWork).toBe(true);
+
+      await handle.agentConnection.extNotification(
+        ACTIVE_WORK_NOTIFICATION_METHOD,
+        {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          seq: 2,
+          sessions: [
+            { sessionId: session.sessionId, holds: [{ category: 'bogus' }] },
+          ],
+        },
+      );
+      // Partially applying it would have cleared the hold.
+      expect(bridge.activeWork).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps a detached session until the child reports it unheld', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [agentHold('a1')] },
+      ]);
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      await sendActiveWorkSnapshot(handle, 2, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('does not close when the child refuses because work appeared', async () => {
+      let closeCalls = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          closeCalls++;
+          // Work started between the snapshot and the close request — exactly
+          // the race a read-only "are you idle?" query could not close.
+          if (params['onlyIfUnheld'] === true) {
+            return { closed: false, holds: [agentHold('late-agent')] };
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      expect(closeCalls).toBeGreaterThan(0);
+      expect(bridge.sessionCount).toBe(1);
+      // The refusal's hold set is adopted, so the daemon now agrees it is busy.
+      expect(bridge.activeWork).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('leaves the session in place when the close request never resolves', async () => {
+      let closeAttempts = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          closeAttempts++;
+          return new Promise<never>(() => {});
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      vi.useFakeTimers();
+      try {
+        const detached = bridge
+          .detachClient(session.sessionId, session.clientId)
+          .catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000);
+        await detached;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // Ambiguous outcome: the daemon neither retried nor assumed the child
+      // closed it. The session waits for the next snapshot to settle it.
+      expect(closeAttempts).toBe(1);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps a session the child drops while a client is still registered', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Absence makes the session a teardown *candidate*, not a casualty. The
+      // spawn owner's client id is still registered, and that guard binds here
+      // exactly as it binds every other automatic close — otherwise one
+      // snapshot could destroy a session someone is holding.
+      await sendActiveWorkSnapshot(handle, 2, []);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.shutdown();
+    });
+
+    it('does not tear down a dropped session while an SSE subscriber watches', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const pending = iter[Symbol.asyncIterator]().next();
+      await vi.waitFor(() =>
+        expect(
+          bridge.getDaemonStatusSnapshot().sessions[0]?.subscriberCount,
+        ).toBe(1),
+      );
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      await sendActiveWorkSnapshot(handle, 1, []);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.sessionCount).toBe(1);
+
+      abort.abort();
+      await pending.catch(() => undefined);
+      await bridge.shutdown();
+    });
+
+    it('recovers a lost close response once nothing local holds the session', async () => {
+      let closeAttempts = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          // Count only conditional closes: the unconditional close that local
+          // teardown sends afterwards is a different request.
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true) {
+            return { closed: true, holds: [] };
+          }
+          closeAttempts++;
+          // First request's response is lost; the retry succeeds.
+          return closeAttempts === 1
+            ? new Promise<never>(() => {})
+            : { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      vi.useFakeTimers();
+      try {
+        const detached = bridge
+          .detachClient(session.sessionId, session.clientId)
+          .catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS + 1_000);
+        await detached;
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(bridge.sessionCount).toBe(1);
+
+      // The child omits the session it already closed. With no client left,
+      // the daemon asks once more rather than assuming, and this time gets an
+      // answer it can act on.
+      await sendActiveWorkSnapshot(handle, 2, []);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(closeAttempts).toBe(2);
+
+      await bridge.shutdown();
+    });
+
+    it('asks the child about a session it has never reported on', async () => {
+      const closeCalls: Array<Record<string, unknown>> = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            closeCalls.push(params);
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // No snapshot has arrived, so the child's side is unknown. Health reads
+      // that as busy...
+      expect(bridge.activeWork).toBe(true);
+      // ...but unknown must not make the Session unreapable. Retaining without
+      // ever asking leaves nothing that can resolve it; the ask is bounded and
+      // still retains on any non-answer.
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      await vi.waitFor(() => expect(closeCalls.length).toBe(1));
+      expect(closeCalls[0]?.['sessionId']).toBe(session.sessionId);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('keeps an unreported session when the child says it holds work', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true) {
+            return { closed: true, holds: [] };
+          }
+          return { closed: false, holds: [agentHold('never-reported')] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Asking is what resolves the unknown, and a refusal resolves it toward
+      // retention with the reason attached rather than leaving it a guess.
+      await bridge
+        .detachClient(session.sessionId, session.clientId)
+        .catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.sessionCount).toBe(1);
+      expect(bridge.activeWork).toBe(true);
+      expect(reportingGrade(bridge)).toBe('full');
+
+      await bridge.shutdown();
+    });
+
+    it('treats a snapshot aged past the freshness window as no evidence', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.activeWork).toBe(false);
+      expect(reportingGrade(bridge)).toBe('full');
+      expect(bridge.activeWorkCoverage.oldestCoveredReportAt).not.toBeNull();
+
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(
+          Date.now() +
+            ACTIVE_WORK_HEARTBEAT_INTERVAL_MS * ACTIVE_WORK_STALE_INTERVALS +
+            1_000,
+        );
+        // A snapshot older than the grading window is the absence of evidence,
+        // not evidence of idleness — a background agent could have started at
+        // any point since. It must read as busy, exactly like never-reported,
+        // and it must not drag the reported staleness along with it.
+        expect(bridge.activeWork).toBe(true);
+        expect(reportingGrade(bridge)).toBe('partial');
+        expect(bridge.activeWorkCoverage.oldestCoveredReportAt).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+
+      await bridge.shutdown();
+    });
+
+    it('refuses new prompts while a conditional close is in flight', async () => {
+      const closeRequested = deferred<void>();
+      const closeResponse = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          closeRequested.resolve();
+          return closeResponse.promise;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      const detached = bridge
+        .detachClient(session.sessionId, session.clientId)
+        .catch(() => undefined);
+      await closeRequested.promise;
+
+      // The teardown is authorized but not yet done. Admitting a prompt here
+      // would lose it: the close it raced is about to complete. `closing` alone
+      // does not cover this span, which is the whole reason the in-flight flag
+      // is checked alongside it.
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'race the teardown' }],
+        }),
+      ).rejects.toThrow(/closing/);
+      await expect(
+        bridge.rewindSession(session.sessionId, { promptId: 'whatever' }),
+      ).rejects.toThrow(/closing/);
+
+      closeResponse.resolve({ closed: true, holds: [] });
+      await detached;
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('refuses a restore-path attach while a conditional close is in flight', async () => {
+      const closeRequested = deferred<void>();
+      const closeResponse = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          closeRequested.resolve();
+          return closeResponse.promise;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      const detached = bridge
+        .detachClient(session.sessionId, session.clientId)
+        .catch(() => undefined);
+      await closeRequested.promise;
+
+      // `session/load` is an admission path too. Guarding it on bare `closing`
+      // let a client attach inside the round trip and have the teardown it
+      // raced destroy the session under it.
+      await expect(
+        bridge.loadSession({
+          sessionId: session.sessionId,
+          workspaceCwd: WS_A,
+        }),
+      ).rejects.toThrow(/closing/);
+
+      closeResponse.resolve({ closed: true, holds: [] });
+      await detached;
+
+      await bridge.shutdown();
+    });
+
+    it('discards an oversized snapshot whole rather than applying part of it', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [agentHold('a1')] },
+      ]);
+      expect(bridge.activeWork).toBe(true);
+
+      // Over the per-session hold bound. Rejecting the packet outright is the
+      // safe direction: truncating it would look like work being released.
+      await sendActiveWorkSnapshot(handle, 2, [
+        {
+          sessionId: session.sessionId,
+          holds: Array.from(
+            { length: ACTIVE_WORK_MAX_SESSION_HOLDS + 1 },
+            (_unused, index) => agentHold(`h${index}`),
+          ),
+        },
+      ]);
+      expect(bridge.activeWork).toBe(true);
+
+      // Over the per-snapshot session bound, and claiming this session is idle.
+      await sendActiveWorkSnapshot(handle, 3, [
+        { sessionId: session.sessionId, holds: [] },
+        ...Array.from(
+          { length: ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS },
+          (_unused, index) => ({ sessionId: `filler-${index}`, holds: [] }),
+        ),
+      ]);
+      expect(bridge.activeWork).toBe(true);
+
+      // A well-formed snapshot still lands, so the bound rejects packets rather
+      // than wedging the channel.
+      await sendActiveWorkSnapshot(handle, 4, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(1));
+      expect(bridge.activeWork).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('asks the child before reaping an idle session', async () => {
+      const closeCalls: string[] = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          closeCalls.push(String(params?.['sessionId']));
+          // A hold appeared after the cached empty snapshot — precisely the
+          // stale-empty race the reaper used to lose.
+          return { closed: false, holds: [agentHold('late-agent')] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 20,
+        sessionIdleTimeoutMs: 20,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      // The reaper deliberately ignores `clientIds` (it exists for the crash
+      // path), so the cached empty snapshot is all it had to go on.
+      await vi.waitFor(() => expect(closeCalls.length).toBeGreaterThan(0));
+      expect(closeCalls[0]).toBe(session.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      // The refusal is adopted, so the session now reads busy rather than
+      // being re-attempted from the same stale cache every tick.
+      expect(bridge.activeWork).toBe(true);
+
+      await bridge.shutdown();
+    });
+  });
+
   it('streams workspace content without requiring a session', async () => {
     const completion = deferred<Record<string, unknown>>();
     const handle = makeChannel({
@@ -13404,7 +14098,7 @@ describe('createAcpSessionBridge', () => {
       );
     });
 
-    it('publishes session_update events to subscribers when the agent sends them', async () => {
+    it('publishes ACP usage updates to subscribers unchanged', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
         // Build a channel pair where we capture the agent-side connection
@@ -13434,8 +14128,9 @@ describe('createAcpSessionBridge', () => {
       void capturedConn!.sessionUpdate({
         sessionId: session.sessionId,
         update: {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'hi' },
+          sessionUpdate: 'usage_update',
+          used: 42,
+          size: 128_000,
         },
       });
 
@@ -13446,6 +14141,14 @@ describe('createAcpSessionBridge', () => {
       }
       expect(collected[0]?.type).toBe('session_update');
       expect(collected[0]?.id).toBe(1);
+      expect(collected[0]?.data).toMatchObject({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 42,
+          size: 128_000,
+        },
+      });
 
       abort.abort();
       await bridge.shutdown();
@@ -19194,6 +19897,39 @@ describe('activePromptCount and lastActivityAt', () => {
 });
 
 describe('createAcpSessionBridge — background notifications', () => {
+  it('counts a notification while the child is accepting it', async () => {
+    const acceptance = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification
+          ? acceptance.promise
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const notification = bridge.enqueueBackgroundNotification(
+      session.sessionId,
+      {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-persisting',
+        status: 'completed',
+        kind: 'agent',
+      },
+    );
+    expect(bridge.activeWork).toBe(true);
+    await bridge.detachClient(session.sessionId, session.clientId);
+    expect(bridge.sessionCount).toBe(1);
+
+    acceptance.resolve({ sessionId: session.sessionId, accepted: false });
+    await notification;
+    expect(bridge.activeWork).toBe(false);
+    await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+    await bridge.shutdown();
+  });
+
   it('forwards a daemon-owned worker completion to the live parent session', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method, params) =>
@@ -19920,6 +20656,44 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
       await vi.waitFor(() => expect(wrCalls()).toBe(2));
       release?.();
       await p3;
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('ages the snapshot, and drops it entirely once past the staleness window', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceResource
+          ? { rssBytes: 4096, cpuPercent: 7 }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.refreshChildResource!();
+
+      const fresh = bridge.getChildResourceSnapshot!();
+      expect(fresh).toMatchObject({ rssBytes: 4096, cpuPercent: 7 });
+      // A reading just taken is not in the future and not already expired.
+      expect(fresh!.ageMs).toBeGreaterThanOrEqual(0);
+      expect(fresh!.ageMs).toBeLessThan(30_000);
+
+      // Walk the clock past the cliff. `STALE_CHILD_RESOURCE_MS` is a const
+      // inside the bridge factory closure, not an export, so drive the
+      // boundary with the clock rather than exporting it for a test.
+      // `vi.spyOn` rather than assigning `Date.now` directly: the restore is
+      // registered with the test runner, so it survives an assertion throwing
+      // between here and a `finally`, and it is what the rest of the repo uses.
+      const staleAt = Date.now() + 30_001;
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(staleAt);
+      try {
+        // Dropped, not returned-and-stale: a zombie child must not read as
+        // healthy just because its last good value is still in the cache.
+        expect(bridge.getChildResourceSnapshot!()).toBeUndefined();
+      } finally {
+        nowSpy.mockRestore();
+      }
     } finally {
       await bridge.shutdown();
     }

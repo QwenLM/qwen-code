@@ -686,6 +686,8 @@ describe('serve fast path argument parsing', () => {
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
+      ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
+      ['child-heap-mode', ['--child-heap-mode', 'observe']],
       ['mcp-client-budget', ['--mcp-client-budget', '10']],
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
@@ -763,6 +765,40 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --memory-pressure-mode and falls back on an unknown value', () => {
+    for (const argv of [
+      ['serve', '--memory-pressure-mode', 'off'],
+      ['serve', '--memory-pressure-mode=off'],
+    ]) {
+      expect(parseServeFastPathArgs(argv)).toMatchObject({
+        kind: 'serve',
+        options: { memoryPressureMode: 'off' },
+      });
+    }
+    // An out-of-range choice defers to yargs rather than the fast path
+    // inventing a second wording for the same error.
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-pressure-mode', 'enforce']),
+    ).toEqual({ kind: 'fallback' });
+  });
+
+  it('parses --child-heap-mode and falls back on an unknown value', () => {
+    for (const argv of [
+      ['serve', '--child-heap-mode', 'off'],
+      ['serve', '--child-heap-mode=off'],
+    ]) {
+      expect(parseServeFastPathArgs(argv)).toMatchObject({
+        kind: 'serve',
+        options: { childHeapMode: 'off' },
+      });
+    }
+    // `enforce` is deliberately not a value yet, so it is the sample worth
+    // pinning: the fast path must defer to yargs rather than smuggle it in.
+    expect(
+      parseServeFastPathArgs(['serve', '--child-heap-mode', 'enforce']),
+    ).toEqual({ kind: 'fallback' });
   });
 
   it('parses --memory-budget-mb on the fast path in both spellings', () => {
@@ -1354,6 +1390,8 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
     delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    delete process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_DESKTOP'];
     tempLaunchCwd = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-fake-home-')),
     );
@@ -1369,7 +1407,11 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempLaunchCwd, '.env'),
-      'QWEN_RUNTIME_DIR=from-home-env\n',
+      [
+        'QWEN_RUNTIME_DIR=from-home-env',
+        'QWEN_CODE_SERVE=1',
+        'QWEN_CODE_DESKTOP=1',
+      ].join('\n'),
     );
     writeFileSync(
       join(tempQwenHome, '.env'),
@@ -1389,6 +1431,8 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']).toBe(
       'from-discovered-trust',
     );
+    expect(process.env['QWEN_CODE_SERVE']).toBeUndefined();
+    expect(process.env['QWEN_CODE_DESKTOP']).toBeUndefined();
   });
 
   it('still pre-resolves missing home-scoped keys when QWEN_HOME and runtime are already set', () => {
@@ -1662,7 +1706,7 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
 
-  it('prioritizes trusted parent folders over nested distrust rules', async () => {
+  it('does not load env from an explicitly untrusted nested workspace', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -1689,7 +1733,75 @@ describe('serve fast path environment bootstrap', () => {
 
     await bootstrapServeFastPathEnvironment(childWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('does not load env from a descendant of an explicitly untrusted workspace', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-descendant-')),
+    );
+    const childWorkspace = join(tempWorkspace, 'evil-repo');
+    const subDir = join(childWorkspace, 'packages', 'foo');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.TRUST_FOLDER,
+        [childWorkspace]: TrustLevel.DO_NOT_TRUST,
+      }),
+    );
+    writeFileSync(
+      join(childWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-untrusted-descendant-env\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(subDir);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('allows a trusted child rule to override an untrusted parent', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-opt-in-')),
+    );
+    const trustedWorkspace = join(tempWorkspace, 'good-repo');
+    const subDir = join(trustedWorkspace, 'src');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.DO_NOT_TRUST,
+        [trustedWorkspace]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+    writeFileSync(
+      join(trustedWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-trusted-child-env\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(subDir);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-child-env');
   });
 
   it('treats TRUST_PARENT as trusting the containing folder', async () => {
