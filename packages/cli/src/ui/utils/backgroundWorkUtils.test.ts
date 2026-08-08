@@ -322,6 +322,23 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(summary?.lines[0]).not.toContain('\u0007');
   });
 
+  it('flattens newlines in labels so one entry stays one line', () => {
+    const config = createEnumeratingMockConfig({
+      shells: [
+        {
+          shellId: 'shell_multi',
+          status: 'running',
+          command: 'npm run dev\necho forged line',
+          startTime: now,
+        },
+      ],
+    });
+    const summary = describeBlockingBackgroundWork(config);
+    expect(summary?.lines).toHaveLength(1);
+    expect(summary?.lines[0]).toContain('npm run dev echo forged line');
+    expect(summary?.lines[0]).not.toContain('\n');
+  });
+
   it('caps enumeration at 10 lines plus an overflow tail', () => {
     const shells = Array.from({ length: 12 }, (_, i) => ({
       shellId: `shell_${i}`,

@@ -136,7 +136,10 @@ export function describeBlockingBackgroundWork(
   const listed = entries.slice(0, MAX_LISTED_BLOCKING_ENTRIES);
   const lines = listed.map((entry) =>
     stripUnsafeCharacters(
-      `  [${entry.id}] ${entry.label} (${entry.status} ${formatDuration(
+      // Labels are user/process-supplied and may contain newlines
+      // (multi-line shell commands, workflow meta from files) — flatten
+      // them so one entry cannot forge extra lines in the message.
+      `  [${entry.id}] ${entry.label.replace(/[\r\n]+/g, ' ')} (${entry.status} ${formatDuration(
         now - entry.startTime,
         { hideTrailingZeros: true },
       )})`,
