@@ -210,12 +210,17 @@ function denyTarget(prefix: string, target: string): GuardDenial {
   };
 }
 
+// `{a,b}` is expanded by the shell after this parse, so `git {-C,<outside>}
+// reset --hard` reaches git as a relocation the token scan never saw.
+const BRACE_EXPANSION_PATTERN = /\{[^{}]*,[^{}]*\}/;
+
 function isDynamicPathValue(token: GuardToken | undefined): boolean {
   return (
     token === undefined ||
     token.dynamic ||
     token.text.includes('`') ||
-    token.text.startsWith('~')
+    token.text.startsWith('~') ||
+    BRACE_EXPANSION_PATTERN.test(token.text)
   );
 }
 
@@ -258,14 +263,9 @@ function tokenizeSegment(segment: string): GuardToken[][] | null {
     return null;
   }
   const runs: GuardToken[][] = [[]];
-  let skipRedirectOperand = false;
   for (let index = 0; index < parsed.length; index++) {
     const token = parsed[index];
     if (typeof token === 'string') {
-      if (skipRedirectOperand) {
-        skipRedirectOperand = false;
-        continue;
-      }
       // A `$(...)` substitution arrives as a string ending in `$` followed
       // by an `(` operator. Consume the whole body as one opaque dynamic
       // token so the assignment/flag it belongs to keeps its place instead
@@ -291,7 +291,6 @@ function tokenizeSegment(segment: string): GuardToken[][] | null {
             }
           }
           runs.at(-1)!.push({ text: token, dynamic: true });
-          skipRedirectOperand = false;
           continue;
         }
       }
@@ -305,7 +304,6 @@ function tokenizeSegment(segment: string): GuardToken[][] | null {
     if ('comment' in token) break;
     if (!('op' in token)) return null;
     const op = token.op;
-    skipRedirectOperand = false;
     if (op === 'glob') {
       // Glob expansion is resolved by the shell at runtime; the daemon
       // cannot evaluate it statically.
@@ -321,7 +319,9 @@ function tokenizeSegment(segment: string): GuardToken[][] | null {
       continue;
     }
     if (REDIRECT_OPERATORS.has(op)) {
-      skipRedirectOperand = true;
+      // The operand stays in the run: a here-string (`sh <<< 'git -C … reset
+      // --hard'`) carries an executable payload, and an ordinary redirect
+      // target is inert text that no analysis step acts on.
       continue;
     }
     runs.push([]);
@@ -870,7 +870,7 @@ function readGitInvocation(tokens: GuardToken[]): GitInvocation {
   let index = 1;
   while (index < tokens.length) {
     const token = tokens[index]!;
-    if (token.dynamic) {
+    if (token.dynamic || BRACE_EXPANSION_PATTERN.test(token.text)) {
       unresolved = true;
       index++;
       continue;
@@ -1002,6 +1002,29 @@ async function resolveGitDirRepository(
 }
 
 /**
+ * Resolve a directory change the way `chdir(2)` does — following each
+ * component's symlinks before applying the next one. `git -C` and `cd -P` use
+ * it, so `-C <symlink>/..` lands in the parent of the symlink's real target,
+ * while a lexical `path.resolve` would collapse it back to the starting
+ * directory. Bash's default `cd` is logical and keeps the lexical behavior.
+ */
+async function resolvePhysicalPath(
+  base: string,
+  target: string,
+): Promise<string> {
+  let current = path.isAbsolute(target) ? path.parse(target).root : base;
+  for (const segment of target.split(/[\\/]+/)) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      current = path.dirname(await realpathNearestExistingAsync(current));
+      continue;
+    }
+    current = await realpathNearestExistingAsync(path.join(current, segment));
+  }
+  return current;
+}
+
+/**
  * Git discovers its repository by walking up from the working directory, so a
  * directory that is itself inside the boundary can still hand git an outside
  * repository through a `.git` gitfile (`gitdir: <outside>/.git`). Resolve the
@@ -1098,14 +1121,12 @@ async function evaluateGitInvocation(
     repositoryRelocations.length > 0;
   if (!relocated) return undefined;
 
+  // `-C`, `env -C` and `sudo -D` all reach the kernel as a chdir, so each
+  // component resolves through its symlinks before the next one applies.
   let gitCwd = basisCwd;
   for (const relocation of cwdRelocations) {
-    if (path.isAbsolute(relocation.target)) {
-      gitCwd = relocation.target;
-      continue;
-    }
-    if (gitCwd === undefined) break;
-    gitCwd = path.resolve(gitCwd, relocation.target);
+    if (gitCwd === undefined && !path.isAbsolute(relocation.target)) break;
+    gitCwd = await resolvePhysicalPath(gitCwd ?? '', relocation.target);
   }
   if (gitCwd === undefined) {
     return denyDynamicRelocation();
@@ -1376,11 +1397,14 @@ async function evaluateCommandWithCwd(
             trackedCwd = undefined;
             break;
           }
-          if (analysis.physical && target.text.split(/[\\/]/).includes('..')) {
-            // Under `-P` the shell resolves `link/..` to the parent of the
-            // symlink's real target, which a lexical resolve would place back
-            // inside the boundary.
-            trackedCwd = undefined;
+          if (analysis.physical) {
+            // `cd -P` resolves each component through its symlinks, so
+            // `link/..` is the parent of the symlink's real target rather
+            // than the directory the link sits in.
+            trackedCwd =
+              trackedCwd === undefined && !path.isAbsolute(target.text)
+                ? undefined
+                : await resolvePhysicalPath(trackedCwd ?? '', target.text);
             break;
           }
           if (path.isAbsolute(target.text)) {

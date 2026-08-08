@@ -1065,6 +1065,55 @@ it -C ${outsideRepo} reset --hard`,
     ).resolves.toEqual({ allowed: true });
   });
 
+  // `git -C` reaches the kernel as a chdir, which resolves each component's
+  // symlinks — unlike bash's default (logical) `cd`.
+  it('resolves git -C physically through symlinks', async () => {
+    const outward = path.join(effectiveCwd, 'physical-link');
+    await symlink(path.join(outsideRepo, 'sub'), outward, 'dir');
+    await mkdir(path.join(outsideRepo, 'sub'), { recursive: true });
+
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request('git -C physical-link/.. reset --hard')),
+    ).resolves.toMatchObject({ allowed: false });
+    await expect(guard(request('git -C nested/.. status'))).resolves.toEqual({
+      allowed: true,
+    });
+  });
+
+  // A here-string carries its payload in the command line itself.
+  it.each([
+    () => `sh <<< 'git -C ${outsideRepo} reset --hard'`,
+    () => `bash -s <<< 'cd ${outsideRepo} && git reset --hard'`,
+  ])('denies a payload delivered by here-string %#', async (buildCommand) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('keeps ordinary redirects allowed', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(request('git -C nested status > out.txt 2> err.txt')),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  // Brace expansion happens after this parse, so the tokens git receives are
+  // not the tokens the guard saw.
+  it.each([
+    () => `git {-C,${outsideRepo}} reset --hard`,
+    () => `git -C{,${outsideRepo}} reset --hard`,
+  ])('denies a relocation hidden in a brace expansion %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
