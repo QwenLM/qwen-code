@@ -126,6 +126,10 @@ export interface StubDaemonOptions {
    * `['review']`).
    */
   supportedSkills?: string[];
+  /** Status for GET /session/:id/context (default 200). Non-200 → { error }. */
+  contextStatusCode?: number;
+  /** Full body to return from GET /session/:id/context (overrides the default). */
+  contextStatus?: unknown;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -248,6 +252,55 @@ export async function startStubDaemon(
       availableSkills: opts.supportedSkills ?? ['review'],
       availableCommands: [],
     });
+  });
+
+  app.get('/session/:id/context', (req, res) => {
+    const status = opts.contextStatusCode ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const cwd = opts.workspaceCwd ?? '/proj';
+    res.status(200).json(
+      opts.contextStatus ?? {
+        v: 1,
+        sessionId: req.params.id,
+        workspaceCwd: cwd,
+        state: {
+          models: {
+            v: 1,
+            workspaceCwd: cwd,
+            initialized: true,
+            current: { authType: 'openai', modelId: 'qwen3-coder:30b' },
+            providers: [
+              {
+                kind: 'model_provider',
+                authType: 'openai',
+                current: true,
+                models: [
+                  {
+                    modelId: 'qwen3-coder:30b',
+                    baseModelId: 'qwen3-coder:30b',
+                    name: 'Qwen3 Coder 30B',
+                    contextLimit: 262144,
+                    isCurrent: true,
+                    isRuntime: false,
+                  },
+                ],
+              },
+            ],
+          },
+          modes: {
+            currentModeId: 'default',
+            availableModes: [
+              { id: 'default', name: 'Auto mode', description: 'auto' },
+              { id: 'yolo', name: 'YOLO', description: 'yolo' },
+            ],
+          },
+          configOptions: [],
+        },
+      },
+    );
   });
 
   app.post('/session/:id/end', (req, res) => {

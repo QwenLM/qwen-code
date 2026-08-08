@@ -116,6 +116,7 @@ import { InviteStore } from './bridges/inviteStore.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
+import { createSessionContextRoute } from './routes/sessionContext.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import {
@@ -632,6 +633,15 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       undefined,
       promptEventBroadcaster,
     ),
+  );
+  // GET /session/:id/context — read-scope; relays the daemon's per-session
+  // context status (current model + context-window limit, approval mode, cwd)
+  // for the web UI's status footer. Bare namespace, 1:1 with the daemon route.
+  app.get(
+    '/session/:id/context',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionContextRoute(deps.daemon),
   );
   // POST /session/:id/end — write-scope; tells the daemon to terminate the
   // session. On success the daemon emits `session_died` on the event stream.

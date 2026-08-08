@@ -374,6 +374,21 @@
         opacity: 0.7;
       }
     </style>
+    <div
+      id="session-footer"
+      style="
+        display: none;
+        margin-top: 8px;
+        padding: 6px 8px;
+        background: #14171c;
+        border-radius: 6px;
+        color: #9aa0a6;
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        line-height: 1.5;
+        word-break: break-word;
+      "
+    ></div>
     <div style="margin-top: 8px">
       <label style="font-size: 0.8rem; color: #888"
         ><input type="checkbox" id="raw-toggle" /> raw JSON</label
@@ -425,6 +440,9 @@
         $('transcript').innerHTML = '';
         toolEls.clear();
         resetTurn();
+        ctxInfo = null;
+        liveInputTokens = 0;
+        renderFooter();
       }
       function makeBubble(cls, roleLabel) {
         const b = document.createElement('div');
@@ -510,9 +528,104 @@
           .join('\n');
         if (lines) addSystem('Plan:\n' + lines, false);
       }
+      // ---- Session status footer (model · context · mode · cwd) -------------
+      // Static bits (model name, context-window limit, approval mode, cwd) come
+      // from GET /session/:id/context; the live context-fill % comes from the
+      // stream — agent_message_chunk frames carry _meta.usage.inputTokens (the
+      // current prompt-token count), same value the terminal footer shows.
+      let ctxInfo = null; // { modelName, contextLimit, modeName, cwd }
+      let liveInputTokens = 0;
+
+      const fmtK = (n) =>
+        typeof n === 'number' && n > 0
+          ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+          : '0';
+
+      function renderFooter() {
+        const f = $('session-footer');
+        if (!ctxInfo) {
+          f.style.display = 'none';
+          return;
+        }
+        const parts = [];
+        parts.push('🧠 ' + ctxInfo.modelName);
+        if (ctxInfo.contextLimit) {
+          let ctx = fmtK(ctxInfo.contextLimit) + ' ctx';
+          if (liveInputTokens > 0) {
+            const pct = (
+              (liveInputTokens / ctxInfo.contextLimit) *
+              100
+            ).toFixed(1);
+            ctx =
+              fmtK(liveInputTokens) +
+              ' / ' +
+              fmtK(ctxInfo.contextLimit) +
+              ' ctx (' +
+              pct +
+              '%)';
+          }
+          parts.push(ctx);
+        }
+        if (ctxInfo.modeName) parts.push(ctxInfo.modeName);
+        if (ctxInfo.cwd) parts.push(ctxInfo.cwd);
+        f.textContent = parts.join('   ·   ');
+        f.style.display = '';
+      }
+
+      function updateLiveTokens(n) {
+        if (typeof n === 'number' && n >= 0 && n !== liveInputTokens) {
+          liveInputTokens = n;
+          renderFooter();
+        }
+      }
+
+      // Pull the current model (name + context-window limit) and approval mode
+      // out of the daemon's context status, defensively (state.models/modes are
+      // typed as opaque across the daemon boundary).
+      function parseContext(ctx) {
+        const cwd = (ctx && ctx.workspaceCwd) || '';
+        const st = (ctx && ctx.state) || {};
+        const models = st.models || {};
+        let cur = null;
+        for (const p of (models.providers || []))
+          for (const m of (p.models || [])) if (m && m.isCurrent) cur = m;
+        const modelName = cur
+          ? cur.name || cur.modelId
+          : (models.current && models.current.modelId) || '(unknown model)';
+        const contextLimit =
+          cur && typeof cur.contextLimit === 'number' ? cur.contextLimit : null;
+        const modes = st.modes || {};
+        let modeName = '';
+        const found = (modes.availableModes || []).find(
+          (x) => x && x.id === modes.currentModeId,
+        );
+        modeName = found ? found.name : modes.currentModeId || '';
+        return { modelName: clean(modelName), contextLimit, modeName: clean(modeName), cwd: clean(cwd) };
+      }
+
+      async function fetchContext(id) {
+        if (!id || !token()) return;
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/context',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) return; // footer stays hidden; not fatal to watching
+          ctxInfo = parseContext(await res.json());
+          renderFooter();
+        } catch {
+          /* transient; leave footer as-is */
+        }
+      }
+
       function renderSessionUpdate(u) {
         if (!u || typeof u !== 'object') return;
         const su = u.sessionUpdate;
+        // Token usage rides on agent_message_chunk _meta.usage (the frame may
+        // carry empty text), so read it before the text guard below.
+        const usage = u._meta && u._meta.usage;
+        if (usage && typeof usage.inputTokens === 'number')
+          updateLiveTokens(usage.inputTokens);
         const text = u.content && u.content.text;
         if (su === 'agent_message_chunk' && text) return appendAssistant(text);
         if (su === 'agent_thought_chunk' && text) return appendThought(text);
@@ -546,6 +659,9 @@
               true,
             );
           case 'model_switched':
+            // The context-window limit changes with the model — refresh the
+            // footer's static bits from the daemon.
+            void fetchContext(watchedSessionId);
             return addSystem(
               'model switched to ' + strOr(ev.data && ev.data.modelId, '?'),
               false,
@@ -984,6 +1100,7 @@
           setStatus('streaming');
           $('composer').style.display = '';
           clearTranscript(); // fresh transcript for this watch session
+          void fetchContext(id); // populate the model/context/mode footer
           void refreshIdleToggle(); // reflect this session's idle-suggest state
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
