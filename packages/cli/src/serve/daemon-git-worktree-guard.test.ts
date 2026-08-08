@@ -551,13 +551,39 @@ it -C ${outsideRepo} reset --hard`,
   it('denies relocated mutations whose target does not exist at decision time', async () => {
     const guard = createDaemonToolGuard();
 
-    // The command itself can create an outward symlink before git runs, so
-    // a target that is missing now cannot be proven safe.
+    // A target that is missing now cannot be proven safe: it may exist as an
+    // outward symlink by the time git runs.
     await expect(
-      guard(request(`ln -s ${outsideRepo} link && git -C link reset --hard`)),
+      guard(request('git -C not-created-yet reset --hard')),
     ).resolves.toMatchObject({
       allowed: false,
       reason: expect.stringContaining('unresolvable repository location'),
+    });
+  });
+
+  // A path the command itself re-points defeats any containment proved before
+  // it runs — `bait` is still the original directory when the guard looks.
+  it.each([
+    () => `ln -s ${outsideRepo} link && git -C link reset --hard`,
+    () =>
+      `rm -rf nested && ln -s ${outsideRepo} nested && git -C nested reset --hard`,
+    () => `mv ${outsideRepo} nested && git -C nested reset --hard`,
+  ])(
+    'denies a relocation after the command relinks a path %#',
+    async (build) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('leaves ordinary in-boundary Git alone after an unrelated copy', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request('cp a b && git commit -m x'))).resolves.toEqual({
+      allowed: true,
     });
   });
 
@@ -848,7 +874,8 @@ it -C ${outsideRepo} reset --hard`,
     () => `git -C ${outsideRepo} cat-file --textconv --path=f.txt HEAD:f.txt`,
     () => `git -C ${outsideRepo} cat-file --filters --path=f.txt HEAD:f.txt`,
     () => `git -C ${outsideRepo} rev-parse --output=${outsideRepo}/o.txt HEAD`,
-    () => `git -C ${outsideRepo} ls-files --output ${outsideRepo}/o.txt`,
+    () =>
+      `git -C ${outsideRepo} cat-file --output ${outsideRepo}/o.txt -p HEAD`,
   ])(
     'denies a relocated read-only subcommand carrying a disqualifying flag %#',
     async (buildCommand) => {
@@ -866,11 +893,24 @@ it -C ${outsideRepo} reset --hard`,
 
     for (const command of [
       `git -C ${outsideRepo} cat-file -p HEAD:f.txt`,
-      `git -C ${outsideRepo} ls-files`,
       `git -C ${outsideRepo} rev-parse HEAD`,
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
+  });
+
+  // `ls-files` executes the target repository's core.fsmonitor hook — the
+  // same property that excluded `status` (measured on git 2.47.3).
+  it.each([
+    () => `git -C ${outsideRepo} ls-files`,
+    () => `git -C ${outsideRepo} ls-files --others`,
+  ])('denies a relocated ls-files %#', async (buildCommand) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(outsideRepo),
+    });
   });
 
   // `describe --dirty`/`--broken` rewrite the target repository's index
@@ -1131,6 +1171,102 @@ it -C ${outsideRepo} reset --hard`,
     await expect(guard(request(build()))).resolves.toMatchObject({
       allowed: false,
     });
+  });
+
+  // A redirection operand is scanned for markers but is never argv, so an
+  // `eval` payload must not absorb it.
+  it.each([
+    () => `eval > /dev/null 'cd ${outsideRepo} && git reset --hard'`,
+    () => `eval 2> /dev/null 'cd ${outsideRepo} && git reset --hard'`,
+  ])('keeps redirections out of an eval payload %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  // `cd` glued to a control operator is still a relocation.
+  it.each([
+    () => `su -c 'true;cd ${outsideRepo} && git reset --hard'`,
+    () => `su -c 'true&&cd ${outsideRepo} && git reset --hard'`,
+  ])('treats an operator-glued cd as a marker %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  // Letters after `c` in a bundle are more flags; the payload is a later argv
+  // entry, and `-o`/`-O` among them consumes one first.
+  it.each([
+    () => `bash -cx 'cd ${outsideRepo} && git reset --hard'`,
+    () => `sh -co ignoreeof 'cd ${outsideRepo} && git reset --hard'`,
+    () => `bash -c'cd ${outsideRepo} && git reset --hard'`,
+  ])('reads the -c payload from the right argv entry %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it.each([
+    // `sudo -R <rootfs>` moves the filesystem root out from under every path.
+    () => `sudo -R ${outsideRepo} git reset --hard`,
+    () => `sudo --chroot=${outsideRepo} git reset --hard`,
+    // A command that chooses its own `git` binary defeats the classification.
+    () => `PATH=/tmp/evilbin git commit -m x`,
+    () => `GIT_EXEC_PATH=/tmp/evil git commit -m x`,
+  ])(
+    'fails closed when the run redefines its own context %#',
+    async (build) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  // Values assigned earlier in the same command are visible to the guard.
+  it.each([
+    () => `X='git reset --hard'; cd ${outsideRepo}; $X`,
+    () => `X=git; Y='-C ${outsideRepo} reset --hard'; $X $Y`,
+    () =>
+      `eval 'GIT_WORK_TREE=${outsideRepo}'; export GIT_WORK_TREE; git reset --hard`,
+    () => `GIT_WORK_TREE=${outsideRepo}; export $NAME; git reset --hard`,
+  ])('resolves a relocation through shell variables %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('scopes a parenthesized subshell the way the shell does', async () => {
+    const guard = createDaemonToolGuard();
+
+    // The subshell's cwd dies with its parentheses...
+    await expect(
+      guard(request(`(cd ${outsideRepo}); git commit -m x`)),
+    ).resolves.toEqual({ allowed: true });
+    // ...but a Git command inside them is still judged against it.
+    await expect(
+      guard(request(`(cd ${outsideRepo} && git reset --hard)`)),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('keeps env value flags in their attached forms decidable', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'env --unset=GIT_DIR git commit -m x',
+      'env -uGIT_DIR git commit -m x',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
   });
 
   // The shell-executing set pins ToolNames literals in acp-bridge, which
