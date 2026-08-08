@@ -3034,6 +3034,106 @@ describe('artifact panel fullscreen', () => {
     }
   });
 
+  it('restores the app to AT when a locked floating fullscreen hands back to the dock', async () => {
+    // Narrow viewport: the panel floats in vaul's drawer, a Radix modal
+    // dialog whose hideOthers lock aria-hides every body-level sibling and
+    // marks it with data-aria-hidden. Widening across the breakpoint
+    // mid-fullscreen unmounts the drawer and mounts the docked surface in
+    // one commit; the sweep's layout-phase setup captures aria-hidden values
+    // while the lock still owns them (its unlock runs in the passive phase).
+    const dockQuery = '(min-width: 1001px)';
+    let dockMatches = false;
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches:
+          query === dockQuery ? dockMatches : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-web-shell-portal-root] aside[aria-label="Right panel"] button[aria-label="Fullscreen"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[class*="panelFullscreen"]',
+      ),
+    ).not.toBeNull();
+    // The drawer's modal lock owns the app container.
+    expect(container.getAttribute('aria-hidden')).toBe('true');
+    expect(container.hasAttribute('data-aria-hidden')).toBe(true);
+
+    // Widen: the docked surface mounts while the lock still owns the
+    // container, so the sweep must not record the lock's value as the
+    // container's original state.
+    dockMatches = true;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: true }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+    // The lock's unlock restored the true original value by now.
+    expect(container.hasAttribute('data-aria-hidden')).toBe(false);
+
+    // Shrink back via Escape.
+    await act(async () => {
+      document
+        .querySelector('[class*="artifactPanelFullscreen"]')
+        ?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+    // The deferred restore must not re-apply the lock's aria-hidden as if it
+    // were the container's original state: the shell stays visible to AT.
+    expect(container.getAttribute('aria-hidden')).toBeNull();
+  });
+
   it('keeps an open modal focus trap active when the docked panel mounts', async () => {
     // Stand-in for an open DialogShell modal: a real Radix FocusScope trap,
     // on the same module-global focus-scope stack a dialog registers in.
@@ -3215,6 +3315,105 @@ describe('artifact panel fullscreen', () => {
     expect(
       document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
+  });
+
+  it('keeps the docked fullscreen surface keyboard-operable in shadow-DOM portal mode', async () => {
+    const { container } = renderApp({ shadowDom: { portals: true } });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const portalHost = document.querySelector<HTMLElement>(
+      '[data-web-shell-shadow-host="portals"]',
+    );
+    const shadowRoot = portalHost?.shadowRoot;
+    const surface = shadowRoot?.querySelector<HTMLElement>(
+      '[class*="artifactPanelFullscreen"]',
+    );
+    expect(surface).not.toBeNull();
+
+    // focusin is composed: the browser retargets it to the shadow host at
+    // document level while composedPath() keeps the real node. Model that
+    // delivery and require the pull handler to resolve the real node...
+    const exitFullscreen = surface!.querySelector<HTMLElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+    expect(exitFullscreen).not.toBeNull();
+    exitFullscreen!.focus();
+    expect(shadowRoot!.activeElement).toBe(exitFullscreen);
+    const composedFocusin = new FocusEvent('focusin', {
+      bubbles: true,
+      composed: true,
+    });
+    Object.defineProperty(composedFocusin, 'composedPath', {
+      value: () => [
+        exitFullscreen,
+        surface,
+        portalHost,
+        document.body,
+        document.documentElement,
+        document,
+      ],
+    });
+    await act(async () => {
+      portalHost!.dispatchEvent(composedFocusin);
+      await Promise.resolve();
+    });
+    // ...instead of snapping every focus change back onto the surface.
+    expect(shadowRoot!.activeElement).toBe(exitFullscreen);
+
+    // Focus that genuinely left the shell is still pulled back.
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    try {
+      outside.focus();
+      await act(async () => {
+        outside.dispatchEvent(
+          new FocusEvent('focusin', { bubbles: true, composed: true }),
+        );
+        await Promise.resolve();
+      });
+      expect(shadowRoot!.activeElement).toBe(surface);
+    } finally {
+      outside.remove();
+    }
+
+    // Tab wraps at the surface edges off the shadow root's active element,
+    // not the retargeted document.activeElement.
+    const tabbables = Array.from(
+      surface!.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    expect(tabbables.length).toBeGreaterThan(1);
+    const first = tabbables[0]!;
+    const last = tabbables[tabbables.length - 1]!;
+    last.focus();
+    expect(shadowRoot!.activeElement).toBe(last);
+    await act(async () => {
+      surface!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(shadowRoot!.activeElement).toBe(first);
   });
 
   it('shrinks fullscreen with one Escape while a forced session drawer is open', async () => {

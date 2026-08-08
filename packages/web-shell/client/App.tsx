@@ -3814,20 +3814,32 @@ export function App({
         if (sibling.matches('[data-web-shell-toast-host]')) continue;
         hidden.push({
           element: sibling,
-          previous: sibling.getAttribute('aria-hidden'),
+          // A live hideOthers lock (e.g. the floating drawer unmounting in
+          // the same commit that mounts the surface) owns this value; its
+          // unlock restores the true original itself.
+          previous: sibling.hasAttribute('data-aria-hidden')
+            ? null
+            : sibling.getAttribute('aria-hidden'),
         });
         sibling.setAttribute('aria-hidden', 'true');
       }
       node = parent;
     }
-    if (!surface.contains(document.activeElement)) surface.focus();
+    // document.activeElement retargets to the shadow host in shadow-DOM
+    // portal mode; read the focused node from the surface's own root.
+    const surfaceRoot = surface.getRootNode() as Document | ShadowRoot;
+    if (!surface.contains(surfaceRoot.activeElement)) surface.focus();
     // Keydowns inside the sandboxed HTML preview iframe never reach the
     // surface's Tab-wrap handler or the window Escape handler, and a Tab
     // past the preview's last focusable lands focus natively outside the
     // surface. Pull stray focus back like the floating variant's Radix
     // focus trap, so the keyboard stays the surface's escape route.
     const pullStrayFocusIntoSurface = (event: FocusEvent) => {
-      const target = event.target as Element | null;
+      // focusin is composed: at this document-level listener the browser
+      // retargets it to the shadow host, so resolve the real node.
+      const target =
+        (event.composedPath()[0] as Element | undefined) ??
+        (event.target as Element | null);
       if (!target || surface.contains(target) || target.contains(surface)) {
         return;
       }
@@ -3876,7 +3888,9 @@ export function App({
         return;
       }
       const [first, last] = getFullscreenSurfaceTabEdges(event.currentTarget);
-      const focused = document.activeElement;
+      const focused = (
+        event.currentTarget.getRootNode() as Document | ShadowRoot
+      ).activeElement;
       if (!first || !last) {
         if (focused === event.currentTarget) event.preventDefault();
         return;
