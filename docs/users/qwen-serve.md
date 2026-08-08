@@ -465,7 +465,7 @@ target that cannot be fully resolved before execution — a dynamic target
 (`$VAR`, backticks, `~`, globs), a path that does not exist yet, or an
 unreadable indirection — is denied for mutating or unclassifiable subcommands.
 Relocated commands whose subcommand is one of a small verified read-only set
-(`rev-parse`, `ls-files`, `describe`, `cat-file`) remain allowed, unless the
+(`rev-parse`, `ls-files`, `cat-file`) remain allowed, unless the
 target is unresolvable, the command carries command-executing `-c` config, or
 it carries a `--output`, `--textconv`, or `--filters` flag: those write a file
 or run the target repository's configured drivers. Commands with no recognized

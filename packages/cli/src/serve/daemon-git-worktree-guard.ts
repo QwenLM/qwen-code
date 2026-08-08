@@ -27,12 +27,12 @@ import type {
 // execute programs configured by the target repository on the managed
 // (non-tty) output path. `diff`/`log`/`show`/`blame` are excluded: `--output`
 // writes files and textconv drivers run commands from target-repository
-// config. `grep` takes the same `--textconv` path, and `status` refreshes
-// the target index and runs the target repository's core.fsmonitor, so
-// neither is read-only here.
+// config. `grep` takes the same `--textconv` path, `status` refreshes the
+// target index and runs the target repository's core.fsmonitor, and
+// `describe` refreshes the target index even without `--dirty`, so none of
+// them is read-only here.
 const RELOCATED_READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'cat-file',
-  'describe',
   'ls-files',
   'rev-parse',
 ]);

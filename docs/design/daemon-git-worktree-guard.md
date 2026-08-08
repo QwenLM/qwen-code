@@ -104,12 +104,13 @@ hold:
 2. its Git subcommand is mutating or cannot be classified as read-only.
 
 Relocated commands whose subcommand is in a small verified read-only set
-(`rev-parse`, `ls-files`, `describe`, `cat-file`) remain allowed. `diff`,
+(`rev-parse`, `ls-files`, `cat-file`) remain allowed. `diff`,
 `log`, `show`, and `blame` are excluded from that set: `--output` writes
 files, and textconv-style drivers execute programs configured by the target
-repository. `grep` takes the same `--textconv` path, and `status` refreshes
-the target index and runs the target repository's `core.fsmonitor`, so
-neither is read-only here. A `--output`, `--textconv`, or `--filters` flag
+repository. `grep` takes the same `--textconv` path, `status` refreshes
+the target index and runs the target repository's `core.fsmonitor`, and
+`describe` refreshes the target index even without `--dirty`, so none of
+them is read-only here. A `--output`, `--textconv`, or `--filters` flag
 demotes an invocation wherever it appears: the first writes a file, and the
 other two run the target repository's configured drivers even for an
 allowlisted subcommand (`git -C <outside> cat-file --textconv --path=f HEAD:f`

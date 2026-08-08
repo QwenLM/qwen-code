@@ -866,12 +866,29 @@ it -C ${outsideRepo} reset --hard`,
 
     for (const command of [
       `git -C ${outsideRepo} cat-file -p HEAD:f.txt`,
-      `git -C ${outsideRepo} describe --tags`,
       `git -C ${outsideRepo} ls-files`,
       `git -C ${outsideRepo} rev-parse HEAD`,
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
+  });
+
+  // `describe` refreshes the target repository's index even without
+  // `--dirty`/`--broken`, so it does not qualify as read-only (verified with
+  // real git: the outside repo's .git/index is rewritten).
+  it.each([
+    () => `git -C ${outsideRepo} describe`,
+    () => `git -C ${outsideRepo} describe --tags`,
+    () => `git -C ${outsideRepo} describe --dirty`,
+    () => `git -C ${outsideRepo} describe --always --dirty`,
+    () => `git -C ${outsideRepo} describe --broken`,
+  ])('denies a relocated describe %#', async (buildCommand) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(outsideRepo),
+    });
   });
 
   // `monitor` runs its `command` through the same shell as the shell tool.
