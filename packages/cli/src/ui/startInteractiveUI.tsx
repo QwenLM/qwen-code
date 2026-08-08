@@ -78,6 +78,17 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
   options: StartInteractiveUIOptions = {},
 ) {
+  // Dual-renderer dispatch: `QWEN_TUI_RENDERER=opentui` boots the experimental
+  // OpenTUI backend; the default ink path never imports @opentui (dynamic import).
+  const { pickRenderer, isExperimentalRenderer } = await import(
+    './render/dispatch.js'
+  );
+  if (isExperimentalRenderer(pickRenderer())) {
+    const { startOpenTuiUI } = await import('./render/opentui-entry.js');
+    await startOpenTuiUI({ config });
+    return;
+  }
+
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
 
