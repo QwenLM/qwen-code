@@ -38,6 +38,13 @@ const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
+const mockRunTerminalTeardown = vi.hoisted(() => vi.fn());
+const mockSetTerminalTeardown = vi.hoisted(() =>
+  vi.fn((_teardown: () => void) => vi.fn()),
+);
+const mockSignalExit = vi.hoisted(() =>
+  vi.fn((_handler: () => void, _options?: { alwaysLast?: boolean }) => vi.fn()),
+);
 const lspConfigWatcherMock = vi.hoisted(() => ({
   instances: [] as Array<{
     listener?: (event: unknown) => void | Promise<void>;
@@ -183,6 +190,15 @@ vi.mock('./commands/extensions/list.js', () => ({
 
 vi.mock('./ui/AppContainer.js', () => ({
   AppContainer: () => null,
+}));
+
+vi.mock('./ui/utils/terminal-teardown.js', () => ({
+  runTerminalTeardown: mockRunTerminalTeardown,
+  setTerminalTeardown: mockSetTerminalTeardown,
+}));
+
+vi.mock('signal-exit', () => ({
+  default: mockSignalExit,
 }));
 
 // Stub the settings watcher: main() constructs one and calls startWatching()
@@ -1317,6 +1333,7 @@ describe('gemini.tsx main function kitty protocol', () => {
   let setRawModeSpy: MockInstance<
     (mode: boolean) => NodeJS.ReadStream & { fd: 0 }
   >;
+  let initialSighupListeners: NodeJS.SignalsListener[];
   let initialSigintListeners: NodeJS.SignalsListener[];
   let initialSigtermListeners: NodeJS.SignalsListener[];
 
@@ -1324,6 +1341,9 @@ describe('gemini.tsx main function kitty protocol', () => {
     // Set no relaunch in tests since process spawning causing issues in tests
     originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    initialSighupListeners = process.listeners(
+      'SIGHUP',
+    ) as NodeJS.SignalsListener[];
     initialSigintListeners = process.listeners(
       'SIGINT',
     ) as NodeJS.SignalsListener[];
@@ -1349,6 +1369,11 @@ describe('gemini.tsx main function kitty protocol', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('SIGHUP')) {
+      if (!initialSighupListeners.includes(listener)) {
+        process.removeListener('SIGHUP', listener as NodeJS.SignalsListener);
+      }
+    }
     for (const listener of process.listeners('SIGINT')) {
       if (!initialSigintListeners.includes(listener)) {
         process.removeListener('SIGINT', listener as NodeJS.SignalsListener);
@@ -1936,7 +1961,11 @@ describe('gemini.tsx main function kitty protocol', () => {
       eventName: string | symbol,
       listener: (...args: unknown[]) => void,
     ) => {
-      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+      if (
+        eventName === 'SIGHUP' ||
+        eventName === 'SIGTERM' ||
+        eventName === 'SIGINT'
+      ) {
         // Keep only the first (named) handler per signal; the swallow
         // listener registered when cleanup begins is tracked separately.
         if (!signalHandlers.has(eventName as string)) {
@@ -1984,19 +2013,30 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect(processExitSpy).not.toHaveBeenCalled();
 
       // Second real press inside the confirm window: cleanup once, exit 130.
+      mockRunTerminalTeardown.mockClear();
       nowSpy.mockReturnValue(100_400);
       signalHandlers.get('SIGINT')?.();
       await Promise.resolve();
       await Promise.resolve();
 
       expect(setRawModeSpy).toHaveBeenCalledWith(false);
+      expect(mockRunTerminalTeardown).toHaveBeenCalledTimes(1);
       expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(mockRunTerminalTeardown.mock.invocationCallOrder[0]).toBeLessThan(
+        runExitCleanupMock.mock.invocationCallOrder[0],
+      );
       expect(processExitSpy).toHaveBeenCalledWith(130);
       // Cleanup registered a stand-in SIGINT listener so a stray Ctrl+C
       // while cleanup runs cannot fall back to Node's default handler
       // (#6776).
       expect(
         processOnSpy.mock.calls.filter(([event]) => event === 'SIGINT').length,
+      ).toBeGreaterThan(1);
+      expect(
+        processOnSpy.mock.calls.filter(([event]) => event === 'SIGHUP').length,
+      ).toBeGreaterThan(1);
+      expect(
+        processOnSpy.mock.calls.filter(([event]) => event === 'SIGTERM').length,
       ).toBeGreaterThan(1);
 
       // Further SIGINTs during cleanup are ignored (single cleanup pass).
@@ -2023,7 +2063,11 @@ describe('gemini.tsx main function kitty protocol', () => {
       eventName: string | symbol,
       listener: (...args: unknown[]) => void,
     ) => {
-      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+      if (
+        eventName === 'SIGHUP' ||
+        eventName === 'SIGTERM' ||
+        eventName === 'SIGINT'
+      ) {
         if (!signalHandlers.has(eventName as string)) {
           signalHandlers.set(eventName as string, listener);
         }
@@ -2072,99 +2116,64 @@ describe('gemini.tsx main function kitty protocol', () => {
     }
   });
 
-  it('still exits on the first SIGTERM with code 143', async () => {
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
-    const { loadSettings } = await import('./config/settings.js');
-    const cleanupModule = await import('./utils/cleanup.js');
-    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
-    const realProcessOn = process.on.bind(process);
-    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
-      eventName: string | symbol,
-      listener: (...args: unknown[]) => void,
-    ) => {
-      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
-        if (!signalHandlers.has(eventName as string)) {
-          signalHandlers.set(eventName as string, listener);
-        }
-        return process;
-      }
-      return realProcessOn(
-        eventName as string,
-        listener as (...args: unknown[]) => void,
+  it.each([
+    ['SIGHUP', 129],
+    ['SIGTERM', 143],
+  ] as const)(
+    'exits on the first %s with code %i',
+    async (signal, exitCode) => {
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
       );
-    }) as typeof process.on);
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => undefined) as unknown as typeof process.exit);
-    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
-    runExitCleanupMock.mockResolvedValue(undefined);
-    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
-    vi.mocked(parseArguments).mockResolvedValue({
-      extensions: undefined,
-    } as never);
-
-    await main();
-    signalHandlers.get('SIGTERM')?.();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
-    expect(processExitSpy).toHaveBeenCalledWith(143);
-
-    processOnSpy.mockRestore();
-    processExitSpy.mockRestore();
-  });
-
-  it('still exits on SIGHUP with code 129', async () => {
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
-    const { loadSettings } = await import('./config/settings.js');
-    const cleanupModule = await import('./utils/cleanup.js');
-    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
-    const realProcessOn = process.on.bind(process);
-    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
-      eventName: string | symbol,
-      listener: (...args: unknown[]) => void,
-    ) => {
-      if (
-        eventName === 'SIGTERM' ||
-        eventName === 'SIGINT' ||
-        eventName === 'SIGHUP'
-      ) {
-        if (!signalHandlers.has(eventName as string)) {
-          signalHandlers.set(eventName as string, listener);
+      const { loadSettings } = await import('./config/settings.js');
+      const cleanupModule = await import('./utils/cleanup.js');
+      const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+      const realProcessOn = process.on.bind(process);
+      const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+        eventName: string | symbol,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        if (
+          eventName === 'SIGHUP' ||
+          eventName === 'SIGTERM' ||
+          eventName === 'SIGINT'
+        ) {
+          if (!signalHandlers.has(eventName as string)) {
+            signalHandlers.set(eventName as string, listener);
+          }
+          return process;
         }
-        return process;
-      }
-      return realProcessOn(
-        eventName as string,
-        listener as (...args: unknown[]) => void,
-      );
-    }) as typeof process.on);
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => undefined) as unknown as typeof process.exit);
-    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
-    runExitCleanupMock.mockResolvedValue(undefined);
-    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
-    vi.mocked(parseArguments).mockResolvedValue({
-      extensions: undefined,
-    } as never);
+        return realProcessOn(
+          eventName as string,
+          listener as (...args: unknown[]) => void,
+        );
+      }) as typeof process.on);
+      const processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(
+          (() => undefined) as unknown as typeof process.exit,
+        );
+      const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+      runExitCleanupMock.mockResolvedValue(undefined);
+      applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+      vi.mocked(parseArguments).mockResolvedValue({
+        extensions: undefined,
+      } as never);
 
-    await main();
-    signalHandlers.get('SIGHUP')?.();
-    await Promise.resolve();
-    await Promise.resolve();
+      await main();
+      mockRunTerminalTeardown.mockClear();
+      signalHandlers.get(signal)?.();
+      await Promise.resolve();
+      await Promise.resolve();
 
-    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
-    expect(processExitSpy).toHaveBeenCalledWith(129);
+      expect(mockRunTerminalTeardown).toHaveBeenCalledTimes(1);
+      expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(exitCode);
 
-    processOnSpy.mockRestore();
-    processExitSpy.mockRestore();
-  });
+      processOnSpy.mockRestore();
+      processExitSpy.mockRestore();
+    },
+  );
 
   it('rejects --json-schema when running in interactive (TUI) mode', async () => {
     // The synthetic structured_output tool only terminates the run inside
@@ -2261,6 +2270,12 @@ describe('gemini.tsx main function kitty protocol', () => {
     ]);
     expect(exitCodes).toEqual([1]);
 
+    const startupTeardown = mockSetTerminalTeardown.mock.calls.at(-1)?.[0];
+    expect(startupTeardown).toBeTypeOf('function');
+    setRawModeSpy.mockClear();
+    startupTeardown?.();
+    expect(setRawModeSpy).toHaveBeenCalledWith(false);
+
     processExitSpy.mockRestore();
   });
 });
@@ -2294,6 +2309,8 @@ describe('validateDnsResolutionOrder', () => {
 });
 
 describe('startInteractiveUI', () => {
+  let originalExitListeners: Set<NodeJS.ExitListener>;
+
   // Mock dependencies
   const mockConfig = {
     getProjectRoot: () => '/root',
@@ -2319,6 +2336,7 @@ describe('startInteractiveUI', () => {
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     disableKittyProtocol: vi.fn(),
+    popKittyProtocolFlags: vi.fn(),
     pushKittyProtocolFlags: vi.fn(),
   }));
 
@@ -2343,12 +2361,13 @@ describe('startInteractiveUI', () => {
     };
   });
 
-  let initialExitListeners: NodeJS.ExitListener[] = [];
   let originalStdoutIsTTY: boolean | undefined;
   let restoreCiEnv = () => {};
 
   beforeEach(() => {
+    originalExitListeners = new Set(process.listeners('exit'));
     vi.clearAllMocks();
+    mockSignalExit.mockImplementation(() => vi.fn());
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -2356,7 +2375,6 @@ describe('startInteractiveUI', () => {
       value: true,
       configurable: true,
     });
-    initialExitListeners = process.listeners('exit') as NodeJS.ExitListener[];
   });
 
   afterEach(() => {
@@ -2370,11 +2388,8 @@ describe('startInteractiveUI', () => {
     }
     vi.unstubAllEnvs();
     restoreCiEnv();
-    const currentExitListeners = process.listeners(
-      'exit',
-    ) as NodeJS.ExitListener[];
-    for (const listener of currentExitListeners) {
-      if (!initialExitListeners.includes(listener)) {
+    for (const listener of process.listeners('exit')) {
+      if (!originalExitListeners.has(listener)) {
         process.removeListener('exit', listener);
       }
     }
@@ -2613,11 +2628,11 @@ describe('startInteractiveUI', () => {
 
     // Verify all startup tasks were called
     expect(getCliVersion).toHaveBeenCalledTimes(1);
-    expect(registerCleanup).toHaveBeenCalledTimes(1);
+    expect(registerCleanup).toHaveBeenCalledTimes(2);
 
-    // Verify cleanup handler is registered with unmount function
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
-    expect(typeof cleanupFn).toBe('function');
+    expect(vi.mocked(registerCleanup).mock.calls[0][1]).toEqual({
+      priority: true,
+    });
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
       mockConfig,
@@ -2688,16 +2703,11 @@ describe('startInteractiveUI', () => {
     );
   });
 
-  // Regression for #6776: the kitty keyboard flags are tracked per screen
-  // (main vs alternate). The protocol is enabled on the main screen before
-  // render, so the pop must be written after Ink unmounts — i.e. after the
-  // alternate screen (when enabled) has been left — or the main screen's
-  // flags survive the exit and the shell receives kitty escape codes.
-  it('disables the Kitty keyboard protocol only after Ink has unmounted', async () => {
+  it('restores Kitty flags on both sides of Ink unmount', async () => {
     const unmount = vi.fn();
     const { render } = await import('ink');
     vi.mocked(render).mockReturnValue({ unmount } as never);
-    const { disableKittyProtocol } = await import(
+    const { disableKittyProtocol, popKittyProtocolFlags } = await import(
       './ui/utils/kittyProtocolDetector.js'
     );
 
@@ -2714,18 +2724,161 @@ describe('startInteractiveUI', () => {
       },
     );
 
-    const { registerCleanup } = await import('./utils/cleanup.js');
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
-      | (() => Promise<void> | void)
-      | undefined;
-    expect(cleanupFn).toBeTypeOf('function');
-    await cleanupFn?.();
+    const terminalTeardown = mockSetTerminalTeardown.mock.calls.at(-1)?.[0];
+    expect(terminalTeardown).toBeTypeOf('function');
+    terminalTeardown?.();
 
     expect(unmount).toHaveBeenCalledTimes(1);
+    expect(popKittyProtocolFlags).toHaveBeenCalledTimes(1);
     expect(disableKittyProtocol).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(popKittyProtocolFlags).mock.invocationCallOrder[0],
+    ).toBeLessThan(unmount.mock.invocationCallOrder[0]);
     expect(
       vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
     ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
+  });
+
+  it('registers terminal teardown before the Ink exit callback', async () => {
+    const signalExitHandlers: Array<() => void> = [];
+    mockSignalExit.mockImplementation((handler, options) => {
+      if (!options?.alwaysLast) {
+        signalExitHandlers.push(handler);
+      }
+      return vi.fn();
+    });
+    const unmount = vi.fn();
+    const inkExit = vi.fn(() => unmount());
+    const { render } = await import('ink');
+    vi.mocked(render).mockImplementationOnce(() => {
+      mockSignalExit(inkExit, { alwaysLast: false });
+      return { unmount } as never;
+    });
+    const { disableKittyProtocol, popKittyProtocolFlags } = await import(
+      './ui/utils/kittyProtocolDetector.js'
+    );
+
+    await startInteractiveUI(
+      mockConfig,
+      {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            useTerminalBuffer: true,
+          },
+        },
+      } as LoadedSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    for (const handler of signalExitHandlers) {
+      handler();
+    }
+
+    expect(signalExitHandlers).toHaveLength(2);
+    expect(
+      vi.mocked(popKittyProtocolFlags).mock.invocationCallOrder[0],
+    ).toBeLessThan(unmount.mock.invocationCallOrder[0]);
+    expect(unmount.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
+    );
+    expect(
+      vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
+    ).toBeLessThan(inkExit.mock.invocationCallOrder[0]);
+  });
+
+  it('leaves the alternate screen before restoring main-screen Kitty flags when render fails', async () => {
+    const { render } = await import('ink');
+    const { disableKittyProtocol, popKittyProtocolFlags } = await import(
+      './ui/utils/kittyProtocolDetector.js'
+    );
+    const exitHandlers: Array<() => void> = [];
+    const finalExitHandlers: Array<() => void> = [];
+    mockSignalExit.mockImplementation((handler, options) => {
+      (options?.alwaysLast ? finalExitHandlers : exitHandlers).push(handler);
+      return vi.fn();
+    });
+    const exitAlternateScreen = vi.fn(() => {
+      process.stdout.write('\x1b[?1049l\x1b[?25h');
+    });
+    vi.mocked(render).mockImplementationOnce(() => {
+      process.stdout.write('\x1b[?1049h');
+      mockSignalExit(exitAlternateScreen, { alwaysLast: false });
+      throw new Error('render failed');
+    });
+    const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+      process.stdout,
+      'isTTY',
+    );
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    const writeSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      await expect(
+        startInteractiveUI(
+          mockConfig,
+          {
+            ...mockSettings,
+            merged: {
+              ...mockSettings.merged,
+              ui: {
+                ...mockSettings.merged.ui,
+                useTerminalBuffer: true,
+              },
+            },
+          } as LoadedSettings,
+          mockStartupWarnings,
+          mockWorkspaceRoot,
+          {
+            authError: null,
+            themeError: null,
+            shouldOpenAuthDialog: false,
+            geminiMdFileCount: 0,
+          },
+        ),
+      ).rejects.toThrow('render failed');
+
+      expect(disableKittyProtocol).not.toHaveBeenCalled();
+      for (const handler of [...exitHandlers, ...finalExitHandlers]) {
+        handler();
+      }
+
+      const exitAlternateScreenCall = writeSpy.mock.calls.findIndex(
+        ([data]) => data === '\x1b[?1049l\x1b[?25h',
+      );
+      expect(exitAlternateScreenCall).toBeGreaterThanOrEqual(0);
+      expect(exitAlternateScreen).toHaveBeenCalledTimes(1);
+      expect(
+        vi.mocked(popKittyProtocolFlags).mock.invocationCallOrder[0],
+      ).toBeLessThan(exitAlternateScreen.mock.invocationCallOrder[0]);
+      expect(exitAlternateScreen.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
+      );
+      expect(mockSignalExit).toHaveBeenLastCalledWith(expect.any(Function), {
+        alwaysLast: true,
+      });
+    } finally {
+      writeSpy.mockRestore();
+      if (stdoutDescriptor) {
+        Object.defineProperty(process.stdout, 'isTTY', stdoutDescriptor);
+      } else {
+        delete (process.stdout as { isTTY?: boolean }).isTTY;
+      }
+    }
   });
 
   it('echoes a stored render error to stderr on cleanup (VP exit-time echo)', async () => {
@@ -2747,6 +2900,13 @@ describe('startInteractiveUI', () => {
         geminiMdFileCount: 0,
       },
     );
+
+    // The coordinated teardown (priority cleanup / signal path) unmounts
+    // Ink and restores the main screen before the final cleanup echoes
+    // the stored render error.
+    const terminalTeardown = mockSetTerminalTeardown.mock.calls.at(-1)?.[0];
+    expect(terminalTeardown).toBeTypeOf('function');
+    terminalTeardown?.();
 
     const { registerCleanup } = await import('./utils/cleanup.js');
     const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
@@ -2865,16 +3025,23 @@ describe('startInteractiveUI', () => {
       expect(beforeCleanup).toBeGreaterThan(0);
 
       const { registerCleanup } = await import('./utils/cleanup.js');
-      const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
-        | (() => Promise<void> | void)
-        | undefined;
-      expect(cleanupFn).toBeTypeOf('function');
-      await cleanupFn?.();
+      const cleanupCalls = vi.mocked(registerCleanup).mock.calls;
+      const terminalCleanup = cleanupCalls.find(
+        ([, options]) => options?.priority,
+      )?.[0];
+      const resourceCleanup = cleanupCalls.find(
+        ([, options]) => !options?.priority,
+      )?.[0];
+      expect(terminalCleanup).toBeTypeOf('function');
+      expect(resourceCleanup).toBeTypeOf('function');
+      await terminalCleanup?.();
+      await resourceCleanup?.();
 
-      // Final pre-unmount reclaim ran, then Ink was unmounted, and the
-      // interval was cleared (no further checks fire).
       expect(performCheck.mock.calls.length).toBeGreaterThan(beforeCleanup);
       expect(unmount).toHaveBeenCalledTimes(1);
+      expect(performCheck.mock.invocationCallOrder.at(-1)).toBeLessThan(
+        unmount.mock.invocationCallOrder[0],
+      );
       const afterCleanup = performCheck.mock.calls.length;
       await vi.advanceTimersByTimeAsync(90_000);
       expect(performCheck.mock.calls.length).toBe(afterCleanup);
