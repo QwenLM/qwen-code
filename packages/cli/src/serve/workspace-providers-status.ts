@@ -259,7 +259,10 @@ function sanitizeProviderWarning(warning: string): string {
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
     const segment = warning.slice(next.index, segmentEnd);
-    result += sanitizeProviderBaseUrl(segment);
+    const urlBreak = segment.search(/[\s'"`<>]/);
+    const urlToken = urlBreak === -1 ? segment : segment.slice(0, urlBreak);
+    const trailing = urlBreak === -1 ? '' : segment.slice(urlBreak);
+    result += sanitizeProviderBaseUrl(urlToken) + trailing;
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);

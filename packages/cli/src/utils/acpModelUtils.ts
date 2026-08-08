@@ -187,8 +187,16 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
     }
     // WHATWG accepts spaces in userinfo (encoded as %20), but our authority
     // span stops at raw whitespace — so `@` can sit past authorityEnd for a
-    // password that contains a space. Fall through to the same recovery used
-    // when parsing fails.
+    // password that contains a space. Strip at the first `@` after authorityEnd
+    // when the gap still looks like userinfo, not trailing prose.
+    const userinfoAt = baseUrl.indexOf('@', authorityEnd);
+    if (userinfoAt !== -1) {
+      const gap = baseUrl.slice(authorityEnd, userinfoAt);
+      if (parsed.password || /^\s*\S+$/.test(gap)) {
+        return stripAt(userinfoAt);
+      }
+    }
+    return baseUrl;
   } catch {
     if (authorityAtIndex >= authorityStart) {
       return stripAt(authorityAtIndex);
@@ -208,8 +216,8 @@ function findUnescapedUserInfoFallbackAt(
   authorityStart: number,
   authorityEnd: number,
 ): number {
-  const at = baseUrl.lastIndexOf('@');
-  if (at < authorityStart || authorityEnd >= at) {
+  const at = baseUrl.indexOf('@', authorityEnd);
+  if (at === -1 || at < authorityStart) {
     return -1;
   }
 
