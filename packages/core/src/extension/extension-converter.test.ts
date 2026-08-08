@@ -321,6 +321,75 @@ describe('convertGeminiOrClaudeExtension', () => {
     },
   );
 
+  it('ignores an escaping marketplace manifest when selecting dual-manifest root hooks', async () => {
+    fs.writeFileSync(
+      path.join(extensionDir, 'gemini-extension.json'),
+      JSON.stringify({ name: 'safe-root', version: '1.0.0' }),
+    );
+    const manifestDir = path.join(extensionDir, '.claude-plugin');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'safe-root',
+        version: '1.0.0',
+        hooks: {
+          SessionStart: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: '${CLAUDE_PLUGIN_ROOT}/scripts/root-hook.sh',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const outsideDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'dual-marketplace-'),
+    );
+    fs.writeFileSync(
+      path.join(outsideDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'untrusted',
+        owner: { name: 'Untrusted' },
+        plugins: [{ name: 'safe-root', source: './' }],
+      }),
+    );
+    fs.symlinkSync(
+      path.join(outsideDir, 'marketplace.json'),
+      path.join(manifestDir, 'marketplace.json'),
+    );
+
+    try {
+      const converted = await convertGeminiOrClaudeExtension(
+        extensionDir,
+        'safe-root',
+      );
+      convertedDir = converted.extensionDir;
+      const config = JSON.parse(
+        fs.readFileSync(
+          path.join(converted.extensionDir, 'qwen-extension.json'),
+          'utf-8',
+        ),
+      ) as ExtensionConfig;
+
+      expect(converted.originSource).toBe('Gemini');
+      expect(converted.requiresClaudeFileAdaptation).toBe(true);
+      expect(
+        (
+          config.hooks?.['SessionStart']?.[0].hooks?.[0] as {
+            command?: string;
+          }
+        )?.command,
+      ).toBe('${CLAUDE_PLUGIN_ROOT}/scripts/root-hook.sh');
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     {
       format: 'Qwen',
@@ -627,19 +696,35 @@ describe('convertGeminiOrClaudeExtension', () => {
     const manifestDir = path.join(extensionDir, '.claude-plugin');
     fs.mkdirSync(manifestDir, { recursive: true });
     fs.writeFileSync(path.join(manifestDir, 'plugin.json'), '{');
+    const createTmpDir = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+    const tempDirs: string[] = [];
+    const createTmpDirSpy = vi
+      .spyOn(ExtensionStorage, 'createTmpDir')
+      .mockImplementation(async () => {
+        const tempDir = await createTmpDir();
+        tempDirs.push(tempDir);
+        return tempDir;
+      });
 
-    const converted = await convertGeminiOrClaudeExtension(extensionDir);
-    convertedDir = converted.extensionDir;
-    const config = JSON.parse(
-      fs.readFileSync(
-        path.join(converted.extensionDir, 'qwen-extension.json'),
-        'utf-8',
-      ),
-    ) as ExtensionConfig;
+    try {
+      const converted = await convertGeminiOrClaudeExtension(extensionDir);
+      convertedDir = converted.extensionDir;
+      const config = JSON.parse(
+        fs.readFileSync(
+          path.join(converted.extensionDir, 'qwen-extension.json'),
+          'utf-8',
+        ),
+      ) as ExtensionConfig;
 
-    expect(converted.originSource).toBe('Gemini');
-    expect(converted.requiresClaudeFileAdaptation).toBe(false);
-    expect(config.name).toBe('valid-gemini');
+      expect(converted.originSource).toBe('Gemini');
+      expect(converted.requiresClaudeFileAdaptation).toBe(false);
+      expect(config.name).toBe('valid-gemini');
+      expect(tempDirs.filter((tempDir) => fs.existsSync(tempDir))).toEqual([
+        converted.extensionDir,
+      ]);
+    } finally {
+      createTmpDirSpy.mockRestore();
+    }
   });
 
   it('removes the temporary Claude conversion after a successful merge', async () => {
