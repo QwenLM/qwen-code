@@ -310,7 +310,77 @@
         style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
       ></div>
     </section>
-    <pre id="log"></pre>
+    <style>
+      #transcript {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 8px;
+        background: #111;
+        border-radius: 6px;
+        min-height: 60px;
+      }
+      #transcript .bubble {
+        max-width: 92%;
+        padding: 8px 10px;
+        border-radius: 10px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.4;
+        font-size: 0.95rem;
+      }
+      #transcript .role {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        opacity: 0.6;
+        margin-bottom: 2px;
+      }
+      #transcript .user {
+        align-self: flex-end;
+        background: #1d4ed8;
+        color: #fff;
+      }
+      #transcript .asst {
+        align-self: flex-start;
+        background: #26292e;
+        color: #e6e6e6;
+      }
+      #transcript .thought {
+        align-self: flex-start;
+        background: transparent;
+        color: #8a8f98;
+        font-style: italic;
+        font-size: 0.85rem;
+        border-left: 2px solid #3a3f47;
+      }
+      #transcript .tool {
+        align-self: flex-start;
+        background: #17203a;
+        color: #cdd6f4;
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+      }
+      #transcript .system {
+        align-self: center;
+        color: #9aa0a6;
+        font-size: 0.8rem;
+      }
+      #transcript .system.err {
+        color: #f38ba8;
+        font-weight: 600;
+      }
+      #transcript .tool .st {
+        opacity: 0.7;
+      }
+    </style>
+    <div style="margin-top: 8px">
+      <label style="font-size: 0.8rem; color: #888"
+        ><input type="checkbox" id="raw-toggle" /> raw JSON</label
+      >
+    </div>
+    <div id="transcript"></div>
+    <pre id="log" style="display: none"></pre>
     <script>
       const $ = (id) => document.getElementById(id);
       const TOKEN_KEY = 'qwen-rc-token';
@@ -323,6 +393,169 @@
         el.scrollTop = el.scrollHeight;
       };
       const cards = new Map();
+
+      // ---- Readable transcript ----------------------------------------------
+      // The gateway relays the daemon's raw SSE frames. Rather than dump JSON,
+      // render them as a chat transcript, mirroring the terminal TUI's reducer
+      // (packages/cli/src/ui/daemon/DaemonTuiAdapter.ts): a `session_update`
+      // carries `data.update.{sessionUpdate, content:{text}, ...}`. Raw JSON is
+      // still written to a hidden <pre> and revealed by the "raw JSON" toggle.
+      let curAsst = null; // current assistant bubble (coalesce message chunks)
+      let curThought = null; // current thinking bubble
+      const toolEls = new Map(); // toolCallId -> row element
+
+      // Strip terminal control chars (the daemon may emit them); keep \n and \t.
+      // textContent is used everywhere below, so there's no HTML-injection path.
+      const clean = (t) =>
+        typeof t === 'string'
+          ? // eslint-disable-next-line no-control-regex
+            t.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+          : '';
+      const strOr = (v, d) => (typeof v === 'string' && v ? clean(v) : d);
+
+      function scrollTranscript() {
+        const el = $('transcript');
+        el.scrollTop = el.scrollHeight;
+      }
+      function resetTurn() {
+        curAsst = null;
+        curThought = null;
+      }
+      function clearTranscript() {
+        $('transcript').innerHTML = '';
+        toolEls.clear();
+        resetTurn();
+      }
+      function makeBubble(cls, roleLabel) {
+        const b = document.createElement('div');
+        b.className = 'bubble ' + cls;
+        if (roleLabel) {
+          const r = document.createElement('div');
+          r.className = 'role';
+          r.textContent = roleLabel;
+          b.appendChild(r);
+        }
+        const body = document.createElement('span');
+        b.appendChild(body);
+        $('transcript').appendChild(b);
+        b._body = body;
+        return b;
+      }
+      function addUser(text) {
+        resetTurn();
+        makeBubble('user', 'you')._body.textContent = clean(text);
+        scrollTranscript();
+      }
+      function appendAssistant(text) {
+        curThought = null;
+        if (!curAsst) curAsst = makeBubble('asst', 'assistant');
+        curAsst._body.textContent += clean(text);
+        scrollTranscript();
+      }
+      function appendThought(text) {
+        curAsst = null;
+        if (!curThought) curThought = makeBubble('thought', 'thinking');
+        curThought._body.textContent += clean(text);
+        scrollTranscript();
+      }
+      function addSystem(text, err) {
+        resetTurn();
+        const b = document.createElement('div');
+        b.className = 'system' + (err ? ' err' : '');
+        b.textContent = clean(text);
+        $('transcript').appendChild(b);
+        scrollTranscript();
+      }
+      function renderTool(u) {
+        resetTurn();
+        const id = strOr(u.toolCallId, '');
+        const status = strOr(u.status, '');
+        let row = id ? toolEls.get(id) : null;
+        if (!row) {
+          row = makeBubble('tool', null);
+          if (id) toolEls.set(id, row);
+        }
+        // A later status-only update may omit title/kind — keep the name the
+        // first frame gave this call (mirrors the TUI reducer's previous?.name).
+        const label =
+          strOr(u.title, '') ||
+          strOr(u.kind, '') ||
+          row._label ||
+          id ||
+          'tool';
+        row._label = label;
+        row._body.innerHTML = '';
+        row._body.appendChild(document.createTextNode('🔧 ' + label));
+        if (status) {
+          const st = document.createElement('span');
+          st.className = 'st';
+          st.textContent = '  [' + status + ']';
+          row._body.appendChild(st);
+        }
+        scrollTranscript();
+      }
+      function renderPlan(entries) {
+        if (!Array.isArray(entries)) return;
+        const lines = entries
+          .slice(0, 20)
+          .map(
+            (e, i) =>
+              i +
+              1 +
+              '. [' +
+              strOr(e && e.status, '?') +
+              '] ' +
+              strOr(e && e.content, ''),
+          )
+          .join('\n');
+        if (lines) addSystem('Plan:\n' + lines, false);
+      }
+      function renderSessionUpdate(u) {
+        if (!u || typeof u !== 'object') return;
+        const su = u.sessionUpdate;
+        const text = u.content && u.content.text;
+        if (su === 'agent_message_chunk' && text) return appendAssistant(text);
+        if (su === 'agent_thought_chunk' && text) return appendThought(text);
+        if (su === 'tool_call' || su === 'tool_call_update')
+          return renderTool(u);
+        if (su === 'plan') return renderPlan(u.entries);
+        // user_message_chunk is ignored — we echo the prompt locally on send.
+      }
+      // Turn a relayed daemon frame into transcript UI. Permission cards are
+      // handled separately (in #cards); noise frames are suppressed here and
+      // remain visible via the raw-JSON toggle.
+      function renderFrame(ev) {
+        if (!ev || typeof ev !== 'object') return;
+        switch (ev.type) {
+          case 'session_update':
+            return renderSessionUpdate(ev.data && ev.data.update);
+          case 'stream_error':
+            return addSystem(
+              'error: ' + strOr(ev.data && ev.data.error, 'stream_error'),
+              true,
+            );
+          case 'session_died':
+            return addSystem(
+              'session ended: ' + strOr(ev.data && ev.data.reason, 'session_died'),
+              true,
+            );
+          case 'client_evicted':
+            return addSystem(
+              'disconnected: ' +
+                strOr(ev.data && ev.data.reason, 'client_evicted'),
+              true,
+            );
+          case 'model_switched':
+            return addSystem(
+              'model switched to ' + strOr(ev.data && ev.data.modelId, '?'),
+              false,
+            );
+          // suppressed noise (still in raw JSON): client_joined, client_left,
+          // usage_tick, permission_* (rendered as cards)
+          default:
+            return;
+        }
+      }
 
       const token = () => localStorage.getItem(TOKEN_KEY);
 
@@ -649,6 +882,7 @@
         if (!watchedSessionId) return setStatus('watch a session first');
         $('send').disabled = true;
         setStatus('sending…');
+        addUser(prompt); // echo locally; the daemon's user_message_chunk is ignored
         try {
           const res = await fetch(
             '/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
@@ -749,6 +983,7 @@
           }
           setStatus('streaming');
           $('composer').style.display = '';
+          clearTranscript(); // fresh transcript for this watch session
           void refreshIdleToggle(); // reflect this session's idle-suggest state
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
@@ -781,10 +1016,11 @@
                 ev.data.requestId
               ) {
                 resolveCard(ev.data.requestId);
-                log(JSON.stringify(ev));
-              } else {
-                log(JSON.stringify(ev));
               }
+              // Always keep the raw frame (hidden unless the raw-JSON toggle is
+              // on) and render the readable transcript view.
+              log(JSON.stringify(ev));
+              renderFrame(ev);
             }
           }
           setStatus('stream ended');
@@ -846,6 +1082,14 @@
       }
 
       $('enable').onclick = enableNotifications;
+
+      // Raw-JSON toggle: swap between the readable transcript and the raw frame
+      // dump (kept for debugging). Transcript is the default view.
+      $('raw-toggle').onchange = () => {
+        const raw = $('raw-toggle').checked;
+        $('log').style.display = raw ? '' : 'none';
+        $('transcript').style.display = raw ? 'none' : '';
+      };
 
       // Owner event stream (cycle 54): fetch-based SSE consumer of GET
       // /rc/events (cycle 49). EventSource can't set Authorization, so this
