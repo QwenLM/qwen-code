@@ -318,7 +318,6 @@ export function TextSelectionController(
       }
 
       if (event.name === 'left-release') {
-        // Word/line click-selects are not drags; leave them intact.
         if (!selection.dragging) {
           return;
         }
@@ -333,7 +332,12 @@ export function TextSelectionController(
           }
         }
         selection.finish();
-        if (selection.isCollapsed || selection.isEmpty) {
+        // A collapsed range is a real single-cell span in word/line mode,
+        // but only a bare click in char mode.
+        if (
+          selection.isEmpty ||
+          (selection.isCollapsed && selection.mode === 'char')
+        ) {
           clearSelection();
           return;
         }

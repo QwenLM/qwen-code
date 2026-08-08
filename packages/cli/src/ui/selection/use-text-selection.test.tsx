@@ -254,6 +254,26 @@ describe('TextSelectionController', () => {
     expect(copyToClipboard).toHaveBeenCalledWith('hello\nworld!');
   });
 
+  it('copies a single-character word on a no-drag double-click', () => {
+    frame = makeFrame('a b');
+    viewportRect = { x: 0, y: 0, width: 3, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1));
+    handler(makeEvent('left-press', 1)); // double-click -> selects "a"
+    handler(makeEvent('left-release', 1));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 0,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('a');
+  });
+
   it('snaps a wide-character spacer to the leading cell', () => {
     frame = makeWideFrame();
     const handler = mount();

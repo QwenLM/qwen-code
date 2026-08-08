@@ -46,17 +46,6 @@ export class SelectionState {
     }
   }
 
-  /** Select a resolved word/line span from a multi-click (not a drag). */
-  selectSpan(
-    span: { sx: number; sy: number; ex: number; ey: number },
-    mode: SelectionMode,
-  ): void {
-    this.anchor = { x: span.sx, y: span.sy };
-    this.focus = { x: span.ex, y: span.ey };
-    this.dragging = false;
-    this.mode = mode;
-  }
-
   finish(): void {
     this.dragging = false;
   }
