@@ -261,15 +261,13 @@ export function createDaemonWorkspaceActions({
         );
       },
 
-      async revoke(name, senderId) {
+      async revoke(name, request) {
         const workspace = requireWorkspaceClient(
           getClient,
           getWorkspaceCwd,
           'Revoke channel pairing approval failed',
         );
-        return workspace.revokeWorkspaceChannelPairingApproval(name, {
-          senderId,
-        });
+        return workspace.revokeWorkspaceChannelPairingApproval(name, request);
       },
     },
 

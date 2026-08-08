@@ -399,7 +399,10 @@ describe('workspace actions', () => {
       pairingApprovals,
     );
     await expect(
-      actions.channelPairing.revoke('bot', 'sender-1'),
+      actions.channelPairing.revoke('bot', { senderId: 'sender-1' }),
+    ).resolves.toBe(pairingRevocation);
+    await expect(
+      actions.channelPairing.revoke('bot', { groupId: 'group-1' }),
     ).resolves.toBe(pairingRevocation);
 
     expect(workspaceByCwd).toHaveBeenNthCalledWith(1, '/workspace-a');
@@ -428,6 +431,9 @@ describe('workspace actions', () => {
     expect(
       workspace.revokeWorkspaceChannelPairingApproval,
     ).toHaveBeenCalledWith('bot', { senderId: 'sender-1' });
+    expect(
+      workspace.revokeWorkspaceChannelPairingApproval,
+    ).toHaveBeenCalledWith('bot', { groupId: 'group-1' });
   });
 
   it('rejects Channel management without a selected workspace', async () => {

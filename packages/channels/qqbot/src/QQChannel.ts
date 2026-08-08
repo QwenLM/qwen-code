@@ -2294,14 +2294,14 @@ export class QQChannel extends ChannelBase {
     text: string;
     senderName: string;
   } | null {
-    const senderName =
-      event.author?.username ||
-      event.author?.id ||
-      event.author?.member_openid ||
-      'QQ User';
+    // Keep identity values out of the display-name position. In particular,
+    // falling back to member_openid would expose a full mentionable OPENID
+    // even when allowMention is disabled and duplicate it when enabled.
+    const senderName = event.author?.username || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const senderOpenId =
       event.author?.member_openid || event.author?.user_openid || '';
+    const senderIdentity = senderOpenId || event.author?.id || '';
 
     const content = (event.content || '').trim();
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
@@ -2369,10 +2369,9 @@ export class QQChannel extends ChannelBase {
       this.qqConfig.allowMention !== false &&
       senderOpenId
     ) {
-      // member_openid is remote-controlled; cap the dedup key so an
-      // unbounded senderOpenId can't balloon the Set (mirrors the k.length
-      // <= 256 cap in restoreQQState).
-      const dedupKey = `${chatId}:${senderOpenId}`.slice(0, 64);
+      // chatId is already validated and bounded. Cap only the remote-controlled
+      // sender component so different senders in a long chatId remain distinct.
+      const dedupKey = `${chatId}:${truncateCodePoints(senderOpenId, 64)}`;
       if (!this.warnedSenderOpenIds.has(dedupKey)) {
         this.warnedSenderOpenIds.add(dedupKey);
         if (this.warnedSenderOpenIds.size > 500) {
@@ -2384,15 +2383,16 @@ export class QQChannel extends ChannelBase {
       }
     }
     // Unified fallback: whenever the full OPENID can't be shown (mention
-    // support off, or the value failing the 32-hex shape), surface a short
-    // 8-code-point disambiguation fragment + ellipsis so same-nickname senders
-    // stay distinguishable without exposing a constructible full <@OPENID>.
+    // support off, the value failing the 32-hex shape, or only a legacy author
+    // ID being available), surface a short 8-code-point identity fragment +
+    // ellipsis so same-nickname senders stay distinguishable without exposing
+    // a constructible full <@OPENID>.
     // Truncation is code-point aware (truncateCodePoints), so an emoji-laden
     // malformed id can't be split mid-surrogate-pair into a lone surrogate.
     const senderTag = showSenderOpenId
       ? `(${senderOpenId})`
-      : senderOpenId
-        ? `(${truncateCodePoints(sanitizeSenderName(senderOpenId), 8)}…)`
+      : senderIdentity
+        ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
