@@ -2274,3 +2274,73 @@ describe('command shape matching', () => {
     expect(stripCr).toBeGreaterThan(firstLine);
   });
 });
+
+describe('bot comment markers', () => {
+  // A line that opens with `<!--` starts an HTML block, and that block runs to
+  // the line holding the closing delimiter INCLUSIVE — the rest of that line
+  // stays inside it and is never parsed as Markdown. The queued-ack comment
+  // glued its prose straight onto the marker and reached every PR as raw
+  // source with a dead link. Measured through GitHub's own renderer
+  // (POST /markdown, mode=gfm): marker+text -> 0 <a>/0 <em>; marker+"\n"+text
+  // and marker+"\n\n"+text -> 1 <a>/1 <em>.
+  //
+  // The rule keys off ONE thing: a marker that opens a string literal, and
+  // what remains inside that literal after it. That is what distinguishes
+  // BUILDING a comment body from merely REFERENCING a marker — `jq
+  // contains("<!-- m -->")` and `printf '<!-- m -->' "$VAR"` leave nothing
+  // after the marker and are fine, while `="<!-- m -->prose"` does not.
+  //
+  // Known gap, stated rather than papered over: a body split across printf
+  // arguments (`printf '%s%s' '<!-- m -->' 'prose'`) is NOT caught. Detecting
+  // it means modelling which literal is the format string, and every cheap
+  // approximation flagged the legitimate `printf '<!-- m -->' "$VAR"` form.
+  const dir = '.github/workflows';
+  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+
+  it('never glues prose onto a comment marker, in any workflow', () => {
+    expect(files.length).toBeGreaterThan(0);
+    const offenders = [];
+    for (const file of files) {
+      const text = readFileSync(join(dir, file), 'utf8');
+      // `[^>\n]` and not `[^>]`: a `<!--` inside a nearby comment would
+      // otherwise let one match span lines, swallow the real marker, and get
+      // discarded by the comment skip below — the guard would then pass with
+      // the very regression present.
+      const re = /<!--[^>\n]*-->/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const lineStart = text.lastIndexOf('\n', m.index) + 1;
+        const prefix = text.slice(lineStart, m.index);
+        // Prose in a YAML or shell comment never reaches a comment body.
+        if (/^\s*#/.test(prefix)) continue;
+        const quote = m.index === lineStart ? null : text[m.index - 1];
+        // Only a marker that OPENS a string literal can be building a body.
+        if (quote !== "'" && quote !== '"') continue;
+        const rest = text.slice(m.index + m[0].length);
+        const end = rest.indexOf(quote);
+        if (end === -1) continue;
+        let glued = rest.slice(0, end);
+        if (glued === '') {
+          // The literal ended at the marker — but an adjacent literal on the
+          // same line concatenates onto it at runtime.
+          const after = rest.slice(end + 1);
+          if (after[0] === "'" || after[0] === '"') {
+            const q2 = after[0];
+            const e2 = after.slice(1).indexOf(q2);
+            glued = e2 === -1 ? '' : after.slice(1, 1 + e2);
+          }
+        }
+        if (glued === '') continue;
+        // A real newline separates them — but ONLY where the shell expands
+        // `\n`: printf's format string, or ANSI-C `$'…'`. In a plain
+        // double-quoted assignment `\n` is a literal backslash-n, so the
+        // prose stays on the marker's physical line and still breaks.
+        if (glued.startsWith('\\n') && /printf\s+'|\$'/.test(prefix)) continue;
+        offenders.push(
+          `${file}: ${text.slice(m.index, m.index + 56).split('\n')[0]}`,
+        );
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
