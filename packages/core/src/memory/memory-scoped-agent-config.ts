@@ -13,7 +13,7 @@ import type {
   PermissionDecision,
 } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
@@ -250,8 +250,9 @@ async function evaluateScopedDecision(
       if (!opts.allowShell || !ctx.command) {
         return 'deny';
       }
-      const isReadOnly = await isShellCommandReadOnlyAST(
+      const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
         stripShellWrapper(ctx.command),
+        ctx.cwd ?? projectRoot,
       );
       return isReadOnly ? 'allow' : 'deny';
     }

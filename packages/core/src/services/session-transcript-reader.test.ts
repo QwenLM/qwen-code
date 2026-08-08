@@ -454,6 +454,7 @@ describe('SessionTranscriptReader', () => {
         activity: 'idle',
         goal: { objective: 'ship backward replay' },
       },
+      goalCause: 'create',
     });
   });
 
