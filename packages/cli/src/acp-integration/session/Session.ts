@@ -303,6 +303,7 @@ import {
 import {
   MessageRewriteMiddleware,
   loadRewriteConfig,
+  type MessageRewriteEmissionContext,
 } from './rewrite/index.js';
 import {
   DaemonTodoStopGuard,
@@ -786,8 +787,8 @@ type InFlightTurnRecording = {
   startedAt: number;
   promptText: string;
   promptTextTruncated: boolean;
-  resultText: string;
-  resultTruncated: boolean;
+  resultSegments: Map<string, { rawText: string; rewrittenText?: string }>;
+  nextDirectResultSegmentId: number;
 };
 
 function truncateTurnText(text: string): {
@@ -2484,7 +2485,8 @@ export class Session implements SessionContext {
       this.messageRewriter = new MessageRewriteMiddleware(
         this.config,
         rewriteConfig,
-        (update) => this.sendUpdate(update),
+        (update, context) => this.#deliverUpdate(update, context),
+        () => this.#turnRecording?.promptId,
       );
     }
   }
@@ -4871,7 +4873,14 @@ export class Session implements SessionContext {
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
-    this.#accumulateTurnResultText(update);
+    await this.#deliverUpdate(update);
+  }
+
+  async #deliverUpdate(
+    update: SessionUpdate,
+    rewriteContext?: MessageRewriteEmissionContext,
+  ): Promise<void> {
+    this.#accumulateTurnResultText(update, rewriteContext);
     const params: SessionNotification = {
       sessionId: this.sessionId,
       update: projectAcpToolResultUpdate(update),
@@ -4952,17 +4961,19 @@ export class Session implements SessionContext {
       startedAt: Date.now(),
       promptText: text,
       promptTextTruncated: truncated,
-      resultText: '',
-      resultTruncated: false,
+      resultSegments: new Map(),
+      nextDirectResultSegmentId: 0,
     };
   }
 
   /**
-   * Accumulate streamed agent text into the in-flight turn record. Only
-   * `agent_message_chunk` text counts — tool output and thought chunks are
-   * excluded by design (the result is the assistant's own words).
+   * Capture the top-level answer shown to the user. Rewrite emissions replace
+   * their raw segment; subagent and discrete output never consumes the cap.
    */
-  #accumulateTurnResultText(update: SessionUpdate): void {
+  #accumulateTurnResultText(
+    update: SessionUpdate,
+    rewriteContext?: MessageRewriteEmissionContext,
+  ): void {
     const recording = this.#turnRecording;
     if (!recording || update.sessionUpdate !== 'agent_message_chunk') {
       return;
@@ -4971,17 +4982,33 @@ export class Session implements SessionContext {
     if (content.type !== 'text' || content.text.length === 0) {
       return;
     }
-    if (recording.resultText.length >= TURN_RESULT_TEXT_MAX_CHARS) {
-      recording.resultTruncated = true;
+    const meta = update._meta;
+    if (
+      meta?.['parentToolCallId'] !== undefined ||
+      meta?.['qwenDiscreteMessage'] === true ||
+      meta?.['source'] === 'slash_command'
+    ) {
       return;
     }
-    const remaining = TURN_RESULT_TEXT_MAX_CHARS - recording.resultText.length;
-    if (content.text.length > remaining) {
-      recording.resultText += content.text.slice(0, remaining);
-      recording.resultTruncated = true;
-    } else {
-      recording.resultText += content.text;
+    if (
+      rewriteContext?.ownerPromptId !== undefined &&
+      rewriteContext.ownerPromptId !== recording.promptId
+    ) {
+      return;
     }
+
+    const segmentKey = rewriteContext
+      ? `rewrite:${rewriteContext.turnIndex}`
+      : `direct:${recording.nextDirectResultSegmentId++}`;
+    const segment = recording.resultSegments.get(segmentKey) ?? {
+      rawText: '',
+    };
+    if (rewriteContext?.rewritten) {
+      segment.rewrittenText = (segment.rewrittenText ?? '') + content.text;
+    } else {
+      segment.rawText += content.text;
+    }
+    recording.resultSegments.set(segmentKey, segment);
   }
 
   /**
@@ -5002,6 +5029,11 @@ export class Session implements SessionContext {
     if (recording === null) {
       return;
     }
+    const selectedResult = truncateTurnText(
+      [...recording.resultSegments.values()]
+        .map(({ rawText, rewrittenText }) => rewrittenText ?? rawText)
+        .join(''),
+    );
     const payload: TurnResultRecordPayload = {
       promptId: recording.promptId,
       state,
@@ -5013,10 +5045,10 @@ export class Session implements SessionContext {
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
-      ...(recording.resultText.length > 0
-        ? { resultText: recording.resultText }
+      ...(selectedResult.text.length > 0
+        ? { resultText: selectedResult.text }
         : {}),
-      ...(recording.resultTruncated ? { resultTruncated: true } : {}),
+      ...(selectedResult.truncated ? { resultTruncated: true } : {}),
       ...(recording.originatorClientId !== undefined
         ? { originatorClientId: recording.originatorClientId }
         : {}),

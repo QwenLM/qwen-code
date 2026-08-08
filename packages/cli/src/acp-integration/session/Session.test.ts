@@ -3911,6 +3911,257 @@ describe('Session', () => {
         );
       });
 
+      it('records only top-level main-answer text', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'subagent detail' },
+              _meta: { parentToolCallId: 'subagent-call' },
+            });
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'background status' },
+              _meta: { qwenDiscreteMessage: true },
+            });
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'slash output' },
+              _meta: { source: 'slash_command' },
+            });
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'main answer' }] } }],
+              },
+            };
+          })(),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            resultText: 'main answer',
+          }),
+        );
+      });
+
+      it('does not let oversized subagent text consume the main-answer cap', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'x'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 1),
+              },
+              _meta: { parentToolCallId: 'subagent-call' },
+            });
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'main answer' }] } }],
+              },
+            };
+          })(),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toBe('main answer');
+        expect(payload.resultTruncated).toBeUndefined();
+      });
+
+      it('stores rewritten main text instead of appending it to raw text', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('rewritten answer');
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'raw answer' }] } }],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'rewritten answer' }),
+        );
+      });
+
+      it.each([
+        ['empty output', () => Promise.resolve('')],
+        ['rewrite failure', () => Promise.reject(new Error('rewrite failed'))],
+      ])('falls back to raw main text on %s', async (_label, rewriteImpl) => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockImplementation(rewriteImpl);
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'raw answer' }] } }],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'raw answer' }),
+        );
+      });
+
+      it('does not attribute a delayed rewrite to another prompt', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('');
+        const middleware = session.messageRewriter as unknown as {
+          rewriter: { rewrite: typeof rewrite };
+          sendUpdate: (
+            update: SessionUpdate,
+            context: {
+              ownerPromptId: string;
+              turnIndex: number;
+              rewritten: boolean;
+            },
+          ) => Promise<void>;
+        };
+        middleware.rewriter.rewrite = rewrite;
+        let releaseStream!: () => void;
+        const streamGate = new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await streamGate;
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'prompt B answer' }] } },
+                ],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            };
+          })(),
+        );
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'prompt B' }],
+          },
+          { ...trustedContext, promptId: 'prompt-b' },
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+        );
+
+        await middleware.sendUpdate(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'late prompt A rewrite' },
+            _meta: { rewritten: true, turnIndex: 1 },
+          },
+          {
+            ownerPromptId: 'prompt-a',
+            turnIndex: 1,
+            rewritten: true,
+          },
+        );
+        releaseStream();
+        await prompt;
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'prompt-b',
+            resultText: 'prompt B answer',
+          }),
+        );
+      });
+
       it('caps resultText at TURN_RESULT_TEXT_MAX_CHARS and flags truncation', async () => {
         const longText = 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
