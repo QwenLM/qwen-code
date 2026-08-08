@@ -444,6 +444,40 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node --test ${{ env.HELPER_TESTS }}'
 
+      # capture-tui's real-tmux suite is describe.skipIf(!hasTmux)-gated: on a
+      # runner without tmux (the hosted ubuntu-latest image ships none) it
+      # silently skips every real-tmux behavior — holder survival, matching,
+      # server reaping, refusal contracts. The install-script packaging suite
+      # needs zip/unzip the same way — and throws on a CI host that ships
+      # neither, so a silent skip there is impossible. Install the tooling
+      # where apt exists so the Linux lane actually executes both
+      # (qwen-autofix.yml does the same for tmux).
+      - name: 'Install tmux and zip tooling'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        # Bounded AND advisory: a stalled mirror or dpkg lock must neither
+        # hang the job toward its 60-minute cap nor red the required check —
+        # continue-on-error absorbs the step-level timeout.
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
+            # Advisory here too: a broken-but-installed tmux (dangling
+            # symlink, missing lib) must not fail the required Test check
+            # before a single test has run.
+            tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
+          elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
+            # Advisory, not a gate: an apt hiccup must not red this step
+            # before a single test has run — the suites carry their own
+            # signal (the real-tmux suite skips; the zip suite throws on
+            # CI). ::warning:: (not a plain echo) so a lane where the
+            # install PERMANENTLY fails shows the loss in the check UI
+            # instead of hiding it in a multi-thousand-line log.
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          else
+            echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+          fi
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"

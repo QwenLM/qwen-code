@@ -44,6 +44,7 @@ describe('reviewCommand', () => {
       'match-remote',
       'fetch-pr',
       'capture-local',
+      'capture-tui',
       'plan-diff',
       'repo-context',
       'pr-context',
