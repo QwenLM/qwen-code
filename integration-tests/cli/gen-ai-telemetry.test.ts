@@ -118,7 +118,7 @@ describeLocal('GenAI telemetry fields', () => {
     );
 
     rig = new TestRig();
-    rig.setup('gen-ai-telemetry', {
+    await rig.setup('gen-ai-telemetry', {
       settings: {
         security: { auth: { selectedType: 'openai' } },
         model: {
@@ -407,7 +407,7 @@ describeLocal('GenAI telemetry fields', () => {
     }));
 
     rig = new TestRig();
-    rig.setup('gen-ai-telemetry-no-user', {
+    await rig.setup('gen-ai-telemetry-no-user', {
       settings: {
         security: { auth: { selectedType: 'openai' } },
         model: { name: 'request-model' },
@@ -483,7 +483,7 @@ describeLocal('GenAI telemetry fields', () => {
     );
 
     rig = new TestRig();
-    rig.setup('gen-ai-default-choice-count', {
+    await rig.setup('gen-ai-default-choice-count', {
       settings: {
         security: { auth: { selectedType: 'openai' } },
         model: {

@@ -895,6 +895,7 @@ export const useSlashCommandProcessor = (
           const combinedContent: PartListUnion[] = [];
           let firstModelOverride: string | undefined;
           const onCompleteCallbacks: Array<() => Promise<void>> = [];
+          let refreshContextFilesOnWrite = false;
 
           for (const skill of stackedResult.skills) {
             if (!skill.action) continue;
@@ -911,6 +912,9 @@ export const useSlashCommandProcessor = (
             if (skillResult?.type === 'submit_prompt') {
               combinedContent.push(skillResult.content);
               firstModelOverride ??= skillResult.modelOverride;
+              refreshContextFilesOnWrite ||= Boolean(
+                skillResult.refreshContextFilesOnWrite,
+              );
               if (skillResult.onComplete) {
                 onCompleteCallbacks.push(skillResult.onComplete);
               }
@@ -963,6 +967,9 @@ export const useSlashCommandProcessor = (
             content: mergedContent,
             ...(firstModelOverride
               ? { modelOverride: firstModelOverride }
+              : {}),
+            ...(refreshContextFilesOnWrite
+              ? { refreshContextFilesOnWrite: true }
               : {}),
             ...(onCompleteCallbacks.length
               ? {
@@ -1298,6 +1305,8 @@ export const useSlashCommandProcessor = (
                     content,
                     onComplete: result.onComplete,
                     modelOverride: result.modelOverride,
+                    refreshContextFilesOnWrite:
+                      result.refreshContextFilesOnWrite,
                   };
                 }
                 case 'confirm_shell_commands': {

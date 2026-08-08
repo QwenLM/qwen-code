@@ -462,6 +462,32 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('passes context-file refresh intent through submit_prompt results', async () => {
+    const mockCommand = {
+      name: 'remember',
+      description: 'Remember a fact',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Remember this fact' }],
+        refreshContextFilesOnWrite: true,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/remember fact',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.refreshContextFilesOnWrite).toBe(true);
+    }
+  });
+
   it('omits modelOverride when the command does not set one', async () => {
     const mockCommand = {
       name: 'custom',
@@ -1116,6 +1142,31 @@ describe('handleSlashCommand', () => {
         expect(texts).toContain('SKILL_BODY:feat-dev:feature workflow');
         expect(texts).toContain('SKILL_BODY:e2e-testing:e2e workflow');
         expect(texts).toContain('implement X');
+      }
+    });
+
+    it('preserves context-file refresh intent from stacked skills', async () => {
+      const skillA = {
+        ...createSkillCommand('remember-skill', 'remember workflow'),
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:remember-skill' }],
+          refreshContextFilesOnWrite: true,
+        }),
+      };
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/remember-skill /e2e-testing implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        expect(result.refreshContextFilesOnWrite).toBe(true);
       }
     });
 

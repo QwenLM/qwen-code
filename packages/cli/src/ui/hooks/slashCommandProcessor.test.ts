@@ -1148,6 +1148,35 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('should preserve context-file refresh intent from submit_prompt actions', async () => {
+      const fileCommand = createTestCommand(
+        {
+          name: 'rememberfile',
+          description: 'A command that writes project context',
+          action: async () => ({
+            type: 'submit_prompt',
+            content: [{ text: 'Remember this fact.' }],
+            refreshContextFilesOnWrite: true,
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/rememberfile');
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: 'Remember this fact.' }],
+        refreshContextFilesOnWrite: true,
+      });
+    });
+
     it('should append UserPromptExpansion additional context to submit_prompt actions', async () => {
       mockFireUserPromptExpansionEvent.mockResolvedValue({
         getBlockingError: () => ({ blocked: false }),
@@ -2814,6 +2843,41 @@ describe('useSlashCommandProcessor', () => {
           { text: 'SKILL_BODY:e2e-testing:e2e workflow' },
           { text: 'implement X' },
         ]),
+      });
+    });
+
+    it('preserves context-file refresh intent from stacked skills', async () => {
+      const skillA: SlashCommand = createTestCommand(
+        {
+          name: 'remember-skill',
+          description: 'Skill that writes project context',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'SKILL_BODY:remember-skill' }],
+            refreshContextFilesOnWrite: true,
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/remember-skill /e2e-testing implement X',
+        );
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: expect.arrayContaining([
+          { text: 'SKILL_BODY:remember-skill' },
+          { text: 'SKILL_BODY:e2e-testing:e2e workflow' },
+          { text: 'implement X' },
+        ]),
+        refreshContextFilesOnWrite: true,
       });
     });
 
