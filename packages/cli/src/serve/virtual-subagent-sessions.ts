@@ -204,8 +204,12 @@ function decodePart(value: string): string | undefined {
   }
 }
 
-function isValidVirtualSessionPart(value: string): boolean {
+function isValidVirtualParentSessionId(value: string): boolean {
   return /^[a-zA-Z0-9_-]{1,500}$/.test(value);
+}
+
+function isValidVirtualAgentId(value: string): boolean {
+  return value.length > 0 && value.length <= 500;
 }
 
 export function createVirtualSubagentSessionId(
@@ -213,8 +217,8 @@ export function createVirtualSubagentSessionId(
   agentId: string,
 ): string {
   if (
-    !isValidVirtualSessionPart(parentSessionId) ||
-    !isValidVirtualSessionPart(agentId)
+    !isValidVirtualParentSessionId(parentSessionId) ||
+    !isValidVirtualAgentId(agentId)
   ) {
     throw new Error('Virtual subagent session ids require valid id parts');
   }
@@ -234,8 +238,8 @@ export function parseVirtualSubagentSessionId(
   if (
     !parentSessionId ||
     !agentId ||
-    !isValidVirtualSessionPart(parentSessionId) ||
-    !isValidVirtualSessionPart(agentId)
+    !isValidVirtualParentSessionId(parentSessionId) ||
+    !isValidVirtualAgentId(agentId)
   ) {
     return undefined;
   }

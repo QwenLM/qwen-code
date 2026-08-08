@@ -8166,8 +8166,11 @@ describe('createServeApp', () => {
       const resolveSpy = vi
         .spyOn(VirtualSubagentSessions.prototype, 'resolve')
         .mockResolvedValue({
-          sessionId: createVirtualSubagentSessionId('s-1', 'agent-1'),
-          taskId: 'agent-1',
+          sessionId: createVirtualSubagentSessionId(
+            's-1',
+            'general-purpose-agent:8',
+          ),
+          taskId: 'general-purpose-agent:8',
           title: 'Investigate',
           status: 'running',
         });
@@ -8180,27 +8183,31 @@ describe('createServeApp', () => {
 
       try {
         const resolveRes = await request(app)
-          .get('/session/s-1/subagents/tool-1')
+          .get('/session/s-1/subagents/agent%3A8')
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret');
         const cancelRes = await request(app)
-          .post('/session/s-1/subagents/tool-1/cancel')
+          .post('/session/s-1/subagents/agent%3A8/cancel')
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret');
 
         expect(resolveRes.status).toBe(200);
         expect(resolveRes.headers['cache-control']).toBe('no-store');
         expect(resolveRes.body).toMatchObject({
-          taskId: 'agent-1',
+          taskId: 'general-purpose-agent:8',
           status: 'running',
         });
         expect(cancelRes.status).toBe(200);
         expect(cancelRes.body).toEqual({ cancelled: true });
         expect(resolveSpy).toHaveBeenCalledTimes(2);
-        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'tool-1']);
-        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'tool-1']);
+        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'agent:8']);
+        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'agent:8']);
         expect(bridge.cancelSessionTaskCalls).toEqual([
-          { sessionId: 's-1', taskId: 'agent-1', taskKind: 'agent' },
+          {
+            sessionId: 's-1',
+            taskId: 'general-purpose-agent:8',
+            taskKind: 'agent',
+          },
         ]);
       } finally {
         resolveSpy.mockRestore();
