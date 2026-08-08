@@ -171,51 +171,154 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
   const stripAt = (at: number) =>
     `${baseUrl.slice(0, authorityStart)}${baseUrl.slice(at + 1)}`;
   const authorityEnd = findAuthorityEnd(baseUrl, authorityStart);
-  const authorityAt = baseUrl
-    .slice(authorityStart, authorityEnd)
-    .lastIndexOf('@');
-  const authorityAtIndex =
-    authorityAt === -1 ? -1 : authorityStart + authorityAt;
-
-  try {
-    const parsed = new URL(baseUrl);
-    if (parsed.username || parsed.password) {
-      return authorityAtIndex >= authorityStart
-        ? stripAt(authorityAtIndex)
-        : baseUrl;
-    }
-    return baseUrl;
-  } catch {
-    if (authorityAtIndex >= authorityStart) {
-      return stripAt(authorityAtIndex);
-    }
-
-    const fallbackAt = findUnescapedUserInfoFallbackAt(
-      baseUrl,
-      authorityStart,
-      authorityEnd,
-    );
-    return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
-  }
+  const stripPoint = findUserInfoStripPoint(
+    baseUrl,
+    authorityStart,
+    authorityEnd,
+  );
+  return stripPoint === -1 ? baseUrl : stripAt(stripPoint);
 }
 
-function findUnescapedUserInfoFallbackAt(
+/**
+ * A URL whose authority has a dotted host + numeric port followed by prose
+ * containing '@' (e.g. `https://api.example:8443 - contact admin@example.com`)
+ * is misparsed by WHATWG as userinfo (username=`api.example`, password=
+ * `8443 - contact admin`). The prose '@' would become the strip point and
+ * corrupt the message. Veto when the segment between the first ':' and the
+ * next whitespace is all digits (a port) AND the host before the colon is
+ * dotted. #8136.
+ *
+ * The dotted-host check is the discriminator that lets a real digit-prefix
+ * password (`user:1234 secret@host`) through: its username is a single bare
+ * label, not a dotted host. #8136 R1-2.
+ */
+function isLikelyPortProseMisparse(
+  baseUrl: string,
+  authorityStart: number,
+  authorityEnd: number,
+): boolean {
+  const colon = baseUrl.indexOf(':', authorityStart);
+  if (colon === -1 || colon > authorityEnd) {
+    return false;
+  }
+  // A real userinfo has its '@' before the colon (`user@host:99999`); an '@'
+  // before the colon means userinfo, not a host:port prose shape.
+  const at = baseUrl.indexOf('@', authorityStart);
+  if (at !== -1 && at < colon) {
+    return false;
+  }
+  const beforeColon = baseUrl.slice(authorityStart, colon);
+  if (!/\./.test(beforeColon)) {
+    return false;
+  }
+  const afterColon = baseUrl.slice(colon + 1, authorityEnd);
+  const wsInAfter = afterColon.search(/\s/);
+  const portCandidate =
+    wsInAfter === -1 ? afterColon : afterColon.slice(0, wsInAfter);
+  return /^\d+$/.test(portCandidate);
+}
+
+/** A clean hostname (with optional numeric port) to the end of the authority. */
+const CLEAN_HOST_AFTER = /^[A-Za-z0-9.-]+(:\d+)?$/;
+
+/**
+ * Locate the userinfo terminator '@' to strip, or -1 when stripping would be
+ * unsafe. Scans the authority's structure rather than trusting `new URL()`'s
+ * userinfo report, because WHATWG misparses prose shapes (host:port + trailing
+ * email) as userinfo and misses Windows-domain (`DOMAIN\user:pass@`) ones.
+ *
+ * - The terminator is the LAST '@' whose following text is a clean hostname to
+ *   the end of the authority - so a password containing '@', whitespace, tab,
+ *   or Unicode space (`user:p@ss@host`, `user:pass word@host`, or an nbsp
+ *   inside the password) still strips at the real terminator.
+ * - Prose shapes are vetoed: a host + trailing email whose first '@' is after
+ *   whitespace with no ':' before it (`api.example - contact admin@example.com`),
+ *   and a dotted host + numeric port + prose email (`api.example:8443 - contact
+ *   admin@example.com`).
+ * - Whitespace-less prose with an embedded email (`u:p@h,see(admin@example.com)`)
+ *   and real credentials with a trailing prose email fall back to the FIRST '@'.
+ * - A password containing `/ ? #` pushes the '@' past `authorityEnd` (the parser
+ *   throws); fall back to the full-string last '@' when the authority has a ':'
+ *   and the run between the last '/' and the candidate has no whitespace.
+ */
+function findUserInfoStripPoint(
   baseUrl: string,
   authorityStart: number,
   authorityEnd: number,
 ): number {
-  const at = baseUrl.lastIndexOf('@');
-  if (at < authorityStart || authorityEnd >= at) {
+  const authority = baseUrl.slice(authorityStart, authorityEnd);
+  const firstWs = authority.search(/\s/);
+  const firstAt = authority.indexOf('@');
+
+  if (firstAt === -1) {
+    // No '@' in the authority. A password containing / ? # pushes the '@' past
+    // authorityEnd (new URL() throws). Fall back to the full-string last '@'
+    // only when the authority has a ':' that is a real userinfo delimiter
+    // (not an all-digit port, e.g. `host:99999/path@domain`) and the run
+    // between the last '/' and the candidate has no whitespace (prose guard).
+    const fullAt = baseUrl.lastIndexOf('@');
+    if (fullAt >= authorityStart) {
+      const colon = baseUrl.indexOf(':', authorityStart);
+      if (colon !== -1 && colon < authorityEnd) {
+        const afterColon = baseUrl.slice(colon + 1, authorityEnd);
+        const afterWs = afterColon.search(/\s/);
+        const colonCandidate =
+          afterWs === -1 ? afterColon : afterColon.slice(0, afterWs);
+        if (/^\d+$/.test(colonCandidate)) {
+          return -1; // all-digit port, not userinfo
+        }
+        const lastSlash = baseUrl.lastIndexOf('/', fullAt);
+        const between =
+          lastSlash >= authorityStart
+            ? baseUrl.slice(lastSlash, fullAt)
+            : baseUrl.slice(authorityStart, fullAt);
+        if (!/\s/.test(between)) {
+          return fullAt;
+        }
+      }
+    }
     return -1;
   }
 
-  const colon = baseUrl.indexOf(':', authorityStart);
-  if (colon === -1 || colon > authorityEnd) {
+  // Prose veto: a host + trailing email (`api.example - contact
+  // admin@example.com`) has its first '@' AFTER the first whitespace and no ':'
+  // before it (no userinfo). A real credential's '@' either precedes whitespace
+  // (`user@host`) or has a ':' before it (`user name:pass@host`). #8136 R3-6.
+  const atBeforeWs = firstWs === -1 || firstAt < firstWs;
+  const colonBeforeAt = authority.slice(0, firstAt).includes(':');
+  if (!atBeforeWs && !colonBeforeAt) {
+    return -1;
+  }
+  // Prose veto: a dotted host + numeric port + prose email. #8136 R2-1.
+  if (isLikelyPortProseMisparse(baseUrl, authorityStart, authorityEnd)) {
     return -1;
   }
 
-  const portCandidate = baseUrl.slice(colon + 1, authorityEnd);
-  return /^\d+$/.test(portCandidate) ? -1 : at;
+  // Real terminator. If the text right after the FIRST '@' starts with a DOTTED
+  // hostname (optionally a port) then whitespace/end, the password has no '@'
+  // and the first '@' is the terminator (`user:pass@host.example - contact
+  // admin@example.com`). Otherwise the first '@' is inside a password that
+  // contains '@' (`user:p@ss word@host`), and the LAST '@' with a clean
+  // hostname after it is the terminator. #8136 R3-5.
+  const afterFirstAt = authority.slice(firstAt + 1);
+  const firstHost = afterFirstAt.match(/^([A-Za-z0-9.-]+)(?::\d+)?(?:\s|$)/);
+  if (firstHost !== null && firstHost[1]!.includes('.')) {
+    return authorityStart + firstAt;
+  }
+  for (
+    let i = authority.lastIndexOf('@');
+    i !== -1;
+    i = authority.lastIndexOf('@', i - 1)
+  ) {
+    if (CLEAN_HOST_AFTER.test(authority.slice(i + 1))) {
+      return authorityStart + i;
+    }
+  }
+  // No '@' is followed by a clean hostname: whitespace-less prose with an
+  // embedded email (`u:p@h,see(admin@example.com)`) or real credentials with a
+  // trailing prose email. Strip up to the FIRST '@' to drop the userinfo while
+  // keeping host + prose. #8136 R4-3.
+  return authorityStart + firstAt;
 }
 
 function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
@@ -226,6 +329,23 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
   if (slash !== -1) end = Math.min(end, slash);
   if (query !== -1) end = Math.min(end, query);
   if (hash !== -1) end = Math.min(end, hash);
+  // WHATWG treats '\' as a path separator on special schemes (http/https/ws/
+  // wss/ftp/file), so it terminates the authority too - UNLESS it introduces a
+  // Windows `domain\user:pass@` credential shape, which is a single userinfo
+  // run. #8136 R4-5.
+  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//)?.[0] ?? '';
+  if (/^(https?|wss?|ftp|file):\/\//.test(scheme)) {
+    const backslash = baseUrl.indexOf('\\', authorityStart);
+    if (backslash !== -1) {
+      const colonAfter = baseUrl.indexOf(':', backslash + 1);
+      const atAfter = baseUrl.indexOf('@', backslash + 1);
+      const windowsCred =
+        colonAfter !== -1 && atAfter !== -1 && colonAfter < atAfter;
+      if (!windowsCred) {
+        end = Math.min(end, backslash);
+      }
+    }
+  }
   return end;
 }
 

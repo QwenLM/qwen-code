@@ -249,6 +249,97 @@ describe('acpModelUtils', () => {
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
+    // #8136: pathless URL + prose email shapes. WHATWG misparses these as
+    // userinfo; the veto (all-digit port before first whitespace) protects the
+    // with-port shape, and the pathless-prose guard protects the no-colon shape.
+    [
+      'https://api.example:8443 - contact admin@example.com',
+      'https://api.example:8443 - contact admin@example.com',
+    ],
+    [
+      'https://api.example - contact admin@example.com',
+      'https://api.example - contact admin@example.com',
+    ],
+    [
+      'https://ollama.local - contact admin@example.com',
+      'https://ollama.local - contact admin@example.com',
+    ],
+    // Credentials + pathless + email: strip the credential, keep host + prose.
+    [
+      'https://user:pass@host.example:8443 - contact admin@example.com',
+      'https://host.example:8443 - contact admin@example.com',
+    ],
+    // Space-in-password: the last '@' within the bounded authority is the real
+    // userinfo terminator (the password's '@' precedes it). #8136 R1-1/R1-3.
+    [
+      'https://user:sec ret@host.example/v1 - contact admin@example.com',
+      'https://host.example/v1 - contact admin@example.com',
+    ],
+    ['https://user:p@ss word@host.example/v1', 'https://host.example/v1'],
+    // R1-2: a digit-prefix + space password is stripped (the dotted-host
+    // discriminator in the port-prose veto lets a bare-label username through).
+    ['https://user:1234 secret@host', 'https://host'],
+    // #8136 R3: passwords/hostnames the previous host-shaped-char heuristic
+    // mishandled. The structural terminator scan resolves these.
+    // Password containing '@' (pathless): strip at the LAST '@', not the first.
+    ['https://user:p@ss@host', 'https://host'],
+    // Underscore-leading host (previously outside HOST_SHAPED_CHAR): strip.
+    ['https://user:pass@_host', 'https://_host'],
+    // Tab immediately after '@' (WHATWG strips it as userinfo terminator): strip.
+    [`https://user:pass@\thost`, 'https://\thost'],
+    // Password containing '@' AND whitespace (bounded authority): the last '@'
+    // within the bounded authority is the terminator.
+    ['https://user:p@ss word@host.example/v1', 'https://host.example/v1'],
+    // Whitespace in the password (pathless): the '@' whose following text is a
+    // clean hostname is the terminator, so the password's whitespace does not
+    // end the scan. #8136 R3-5.
+    ['https://user:pass word@host', 'https://host'],
+    ['https://user:p@ss word@host', 'https://host'],
+    // Unicode whitespace in the password (WHATWG percent-encodes it): strip.
+    ['https://user:pa ss@host', 'https://host'],
+    // #8136 R3-6: prose with a path - the prose email's '@' must not destroy the
+    // host. The pathless prose veto fires regardless of a later delimiter.
+    [
+      'https://ollama.local - email admin@example.com or check /var/log/qwen',
+      'https://ollama.local - email admin@example.com or check /var/log/qwen',
+    ],
+    // #8136 R4-1: catch-branch (new URL throws) prose '@' after whitespace must
+    // not become the strip point - strip the credential, keep host + prose.
+    ['https://user:pass@host - ping admin@', 'https://host - ping admin@'],
+    [
+      'https://user@host - contact admin@exam%zz.com',
+      'https://host - contact admin@exam%zz.com',
+    ],
+    // #8136 R4-3: whitespace-less multi-'@' prose - the FIRST '@' ends the
+    // userinfo; the prose email's '@' is not a terminator.
+    [
+      'https://u:p@h,see(admin@example.com)',
+      'https://h,see(admin@example.com)',
+    ],
+    [
+      'https://u:p@h,see(admin@example.com)/x',
+      'https://h,see(admin@example.com)/x',
+    ],
+    // #8136 R4-4/R4-5: backslash - a Windows domain\user:pass@ credential strips
+    // as a single userinfo run, while '\' terminates the authority for prose.
+    ['https://DOMAIN\\user:pass@proxy', 'https://proxy'],
+    ['https://user:pass@host\\path', 'https://host\\path'],
+    // #8136 repro-1 (with-path port + prose email): must stay unchanged - the
+    // path bounds the authority, so the prose '@' is never the strip point.
+    [
+      'https://api.example:8443/v1 - contact admin@example.com',
+      'https://api.example:8443/v1 - contact admin@example.com',
+    ],
+    // URL-throwing shapes (invalid %, space in host) + prose email: do not
+    // strip the prose '@'. #8136 R2-2.
+    [
+      'https://api.example%/v1, contact admin@example.com',
+      'https://api.example%/v1, contact admin@example.com',
+    ],
+    [
+      'https://my service/v1 - contact admin@example.com',
+      'https://my service/v1 - contact admin@example.com',
+    ],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });
