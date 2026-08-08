@@ -3197,6 +3197,9 @@ export class Session implements SessionContext {
             const inputText = firstTextBlock?.text || '';
             const isSlashInput = !isContinue && isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
+            const shouldRecordSlashCommand =
+              !isSlashInput ||
+              !SLASH_COMMANDS_SKIP_RECORDING.has(slashCommandName);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -3245,10 +3248,7 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
-            } else if (
-              !isSlashInput ||
-              !SLASH_COMMANDS_SKIP_RECORDING.has(slashCommandName)
-            ) {
+            } else if (shouldRecordSlashCommand) {
               // record user message for session management
               this.config
                 .getChatRecordingService()
@@ -3285,8 +3285,18 @@ export class Session implements SessionContext {
                 this.settings,
               );
 
-              if (pendingSend.signal.aborted) {
+              if (
+                pendingSend.signal.aborted &&
+                slashCommandResult.type === 'message'
+              ) {
                 this.todoStopGuard.suspend();
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
                 return { stopReason: 'cancelled' };
               }
 
@@ -3295,6 +3305,7 @@ export class Session implements SessionContext {
                 modelPromptBlocks,
                 pendingSend.signal,
                 onFullTurnModel,
+                shouldRecordSlashCommand,
               );
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
@@ -9667,11 +9678,15 @@ export class Session implements SessionContext {
     originalPrompt: ContentBlock[],
     abortSignal: AbortSignal,
     onFullTurnModel: (model: string) => boolean,
+    shouldRecordResult: boolean,
   ): Promise<Part[] | null> {
     this.#emitGoalStatusItems(result);
     this.refreshContextFilesOnWrite =
       result.type === 'submit_prompt' &&
       Boolean(result.refreshContextFilesOnWrite);
+    const recorder = shouldRecordResult
+      ? this.config.getChatRecordingService()
+      : undefined;
 
     switch (result.type) {
       case 'submit_prompt':
@@ -9698,7 +9713,7 @@ export class Session implements SessionContext {
         // Write a system/slash_command record so history replay on restart can
         // re-emit this message. system records are skipped by
         // buildApiHistoryFromConversation, so this won't pollute model context.
-        this.config.getChatRecordingService()?.recordSlashCommand({
+        recorder?.recordSlashCommand({
           phase: 'result',
           rawCommand: originalPrompt
             .filter((b) => b.type === 'text')
@@ -9727,7 +9742,7 @@ export class Session implements SessionContext {
         // Write a system/slash_command record for history replay (same reason as
         // 'message' case — system records are invisible to model history).
         if (chunks.length > 0) {
-          this.config.getChatRecordingService()?.recordSlashCommand({
+          recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt
               .filter((b) => b.type === 'text')
