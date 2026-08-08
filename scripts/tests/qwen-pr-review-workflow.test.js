@@ -2161,3 +2161,49 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
     );
   });
 });
+
+describe('workflow expression length', () => {
+  // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
+  // and GitHub caps a single expression at 21000 characters. Blowing that cap
+  // does not fail a job — it makes the whole workflow file *invalid*, so no
+  // event triggers it at all and no run is even created for the ones that
+  // matter. That is how every automatic review and every `@qwen-code /review`
+  // in this repository silently stopped for ~12h on 2026-08-07: #8648 pushed
+  // the "Run review" body from 17705 to 22282 characters, and from that merge
+  // onward the only runs left were startup failures reading
+  // `Invalid workflow file: … (Line: 751, Col: 14): Exceeded max expression
+  // length 21000` (e.g. run 31239579253). CI stayed green the whole time — no
+  // test covered this, which is why it is covered here.
+  const LIMIT = 21000;
+  const dir = '.github/workflows';
+  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+
+  it('keeps every templated run block under the limit', () => {
+    expect(files.length).toBeGreaterThan(0);
+    const over = [];
+    for (const file of files) {
+      const doc = parse(readFileSync(join(dir, file), 'utf8'));
+      for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
+        for (const step of job?.steps ?? []) {
+          const body = step?.run;
+          if (typeof body !== 'string' || !body.includes('${{')) continue;
+          if (body.length > LIMIT) {
+            over.push(
+              `${file} › ${jobId} › ${step.name}: ${body.length} chars`,
+            );
+          }
+        }
+      }
+    }
+    expect(over).toEqual([]);
+  });
+
+  it('keeps the review script free of ${{ }} so its length cannot break it', () => {
+    // This one body is ~24000 characters — already past the limit — so it stays
+    // valid only while nothing templates it. Every context value it needs is
+    // passed through the step's `env:` instead. A single `${{ }}` added back
+    // here takes the entire workflow down, which the test above would also
+    // catch; this asserts the actual invariant a contributor has to preserve.
+    expect(runReviewStep()).not.toContain('${{');
+  });
+});
