@@ -15,12 +15,11 @@ import type {
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
   HistoryGap,
-  UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
   parseGoalStateRecordPayloadV2,
-  stripTrailingUserPromptSubmitContextPart,
+  projectUserTranscriptForDisplay,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -43,31 +42,9 @@ import {
 } from './inline-image-parts.js';
 
 /**
- * Projects a plain user record to its display text.
- *
- * Prefers the `displayText` recorded when a UserPromptSubmit hook augmented
- * the model-bound parts. For records that carry the reserved tag but no
- * payload (written by other/newer writers), drops a trailing part that is
- * entirely a tagged hook-context block. Legacy records with bare injected
- * text fall back to the raw part concatenation.
- */
-function extractUserRecordDisplayText(
-  record: ConversationRecord['messages'][number],
-): string {
-  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
-  if (payload?.displayText) {
-    return payload.displayText;
-  }
-  const parts = (record.message?.parts as Part[] | undefined) ?? [];
-  return extractTextFromParts([
-    ...stripTrailingUserPromptSubmitContextPart(parts),
-  ]);
-}
-
-/**
  * Extracts text content from a Content object's parts (excluding thought parts).
  */
-function extractTextFromParts(parts: Part[] | undefined): string {
+function extractTextFromParts(parts: readonly Part[] | undefined): string {
   if (!parts) return '';
 
   const textParts: string[] = [];
@@ -407,7 +384,10 @@ function convertToHistoryItems(
           }
 
           const payload = pendingAtCommands.shift()!;
-          const text = payload.userText || extractUserRecordDisplayText(record);
+          const projection = projectUserTranscriptForDisplay(record);
+          const text =
+            payload.userText ||
+            (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -430,7 +410,9 @@ function convertToHistoryItems(
           currentToolGroup = [];
         }
 
-        const text = extractUserRecordDisplayText(record);
+        const projection = projectUserTranscriptForDisplay(record);
+        const text =
+          projection.displayText ?? extractTextFromParts(projection.parts);
         if (text) {
           items.push({ type: 'user', text });
         }

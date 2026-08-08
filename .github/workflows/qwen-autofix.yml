@@ -83,6 +83,10 @@ on:
         required: false
         type: 'boolean'
         default: false
+      source:
+        description: 'Dispatch-origin marker (fork-bridge = the fork-review bridge); routing metadata only — never changes what may be touched, and its one behavioral effect (staying quiet at the round cap) is honored only after the scan verifies a matching fork-bridge run'
+        required: false
+        type: 'string'
 
 defaults:
   run:
@@ -160,14 +164,27 @@ env:
   INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
-  MAX_TARGETS_PER_SCAN: '10'
+  # TUNABLE WITHOUT A CODE CHANGE: set the repository variable to re-size the
+  # loop as the takeover pool grows — Settings → Variables, no PR, no deploy.
+  # The literal here is only the fallback when the variable is unset.
+  # Why 30: 37 PRs carried autofix/takeover on 2026-08-08, so the previous
+  # budget of 10 emitted at most 27% of the eligible set per tick and pushed
+  # the rest a scan further out every time. It must also stay strictly above
+  # the address matrix's max-parallel or the matrix can never fill, and the
+  # same-repo candidate pool was 51, so 30 still bounds a pathological
+  # backlog. RAISE BOTH TOGETHER: this must stay above QWEN_AUTOFIX_MAX_PARALLEL.
+  MAX_TARGETS_PER_SCAN: '${{ vars.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN || 30 }}'
   # Upper bound on candidates INSPECTED per scan: idle candidates consume
   # serial API calls even when they emit nothing, and takeover widens the
   # candidate pool. Candidates are inspected NEWEST-first; past the budget
   # the oldest tail defers — old quiet PRs are the least likely to hold new
   # feedback, and a deferred PR with a live conflict is still picked up by
   # the shepherd's conflict lever.
-  MAX_CANDIDATE_INSPECTIONS: '60'
+  # TUNABLE WITHOUT A CODE CHANGE, for the same reason as the two above: this
+  # one gates whether a PR is even LOOKED AT, so it has to grow ahead of the
+  # candidate pool or the oldest PRs starve. The pool was 51 same-repo open
+  # PRs on 2026-08-08, still under the 60 fallback.
+  MAX_CANDIDATE_INSPECTIONS: '${{ vars.QWEN_AUTOFIX_MAX_CANDIDATE_INSPECTIONS || 60 }}'
   # Maintainer-facing engagement labels (applying labels requires GitHub
   # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
   # including a human-authored one — into the loop; SKIP opts any PR out
@@ -237,7 +254,12 @@ jobs:
       #     apart route once — the old shared group's one useful side effect,
       #     kept, without letting events on OTHER PRs cancel this one)
       #   • issue events coalesce PER issue
-      #   • dispatches are unique per run and are never cancelled
+      #   • dispatches are unique per run and are never cancelled —
+      #     fork-bridge dispatches included: `source` is a public
+      #     workflow_dispatch input, so no dispatch may claim a trusted
+      #     per-PR coalescing group by asserting an origin; fork-review
+      #     bursts coalesce upstream instead (the signal per PR, the bridge
+      #     per conclusion+head)
       # The old single shared cancel-in-progress group let ANY newer event kill
       # pending full scans while route jobs sat queued behind runner backlog —
       # observed as hours of scan starvation during review-event storms.
@@ -261,7 +283,10 @@ jobs:
       # a burst of trusted command comments coalesces to at most two runs
       # with latest-intent semantics, never touching review routes;
       # issues → per-issue; anything else (dispatch) → unique per run_id,
-      # never cancelled.
+      # never cancelled. A fork-bridge dispatch is still a dispatch here:
+      # `source` is a public input any manual dispatch can set, so keying a
+      # cancellable per-PR group on it would let a manual dispatch cancel a
+      # queued one (and vice versa).
       group: >-
         ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-label-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
       cancel-in-progress: |-
@@ -893,12 +918,29 @@ jobs:
             echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
             exit 1
           fi
+          # 'Set up Node.js' assumes this pool keeps ~/.npm across jobs;
+          # log its size so a move to per-job containers is visible.
+          du -sh "${HOME}/.npm" 2>/dev/null || echo '~/.npm is absent on this runner.'
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
+          # No remote npm cache on the persistent pool: one measured
+          # review-address leg spent 339s in `Set up Node.js` restoring
+          # 2,654,052,865 bytes (~10 MB/s) to protect an `npm ci` that took
+          # 29s in the very next step, and those runners keep ~/.npm across
+          # jobs anyway, so every leg paid the download again — up to ten
+          # review-address legs per scan. The hosted fallback is ephemeral
+          # and keeps the cache; the choice keys on the runner fact directly.
+          # Keep the truthy literal in the MIDDLE of the ternary — GHA's
+          # &&/|| return operand values and '' is falsy, so
+          # `== 'self-hosted' && '' || 'npm'` yields 'npm' on BOTH pools
+          # (the contract tests evaluate the expression for both runner
+          # facts). package-manager-cache stops a future `packageManager`
+          # field in package.json from silently re-enabling the cache here.
+          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          package-manager-cache: false
           cache-dependency-path: 'package-lock.json'
 
       - name: 'Install tmux'
@@ -1902,6 +1944,7 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
+          DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
           # Every lane that reaches this scan is supposed to hold the PAT:
           # route now declines the one event GitHub is known to run without
@@ -2707,8 +2750,36 @@ jobs:
               # #7836, so review submissions stay covered by the
               # once-per-window pause notice below. No dedup on the dispatch
               # itself: the shepherd sends at most one per head, and a human
-              # asking twice deserves two answers.
-              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
+              # asking twice deserves two answers. fork-bridge dispatches are
+              # the one dispatch-shaped exception: they are fork-PR reviews
+              # laundered into dispatch form (a fork's review event carries no
+              # secrets), not an explicit human/shepherd dispatch — answering
+              # each one loudly would post one refusal per review on a capped
+              # fork PR, the exact #7836 spam this gate exists to prevent.
+              # But `source` is a public workflow_dispatch input any manual
+              # dispatch can set, so the silence is honored ONLY on positive
+              # proof of origin: a recent SUCCESSFUL fork-bridge run whose
+              # title names this exact PR (the bridge propagates the signal's
+              # run-name into its own title — both base-branch files, not
+              # fork-forgeable). The window is generous because route backlog
+              # can queue a dispatch for hours; the PR match, not the window,
+              # is what proves origin. Unverified → answered like any
+              # explicit dispatch.
+              FORK_BRIDGE_VERIFIED=false
+              if [[ "${DISPATCH_SOURCE}" == 'fork-bridge' ]]; then
+                BRIDGE_CUTOFF="$(date -u -d '360 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+                if BRIDGE_RUNS="$(gh run list --repo "${REPO}" --workflow qwen-autofix-fork-bridge.yml --limit 20 --json conclusion,createdAt,displayTitle 2> /dev/null)" \
+                  && jq -e --arg pr "${PR}" --arg cutoff "${BRIDGE_CUTOFF}" '
+                    [ .[]
+                      | select(.conclusion == "success" and ((.createdAt // "") >= $cutoff))
+                      | select((.displayTitle // "") | startswith("fork-bridge: fork-signal: PR \($pr) reviewed by ")) ]
+                    | length > 0' <<< "${BRIDGE_RUNS}" > /dev/null; then
+                  FORK_BRIDGE_VERIFIED=true
+                else
+                  echo "::warning::fork-bridge provenance unverified for #${PR} — answering this dispatch like an explicit one"
+                fi
+              fi
+              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' && "${FORK_BRIDGE_VERIFIED}" != 'true' ]]; then
                 if [[ "${DRY_RUN}" == "true" ]]; then
                   echo "🧪 DRY-RUN: would post cap-refused notice on #${PR}"
                 else
@@ -2934,6 +3005,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.body // "") | test($bf) | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test($cf) | not) ] | length' \
               "${WORKDIR}/ic.json")"
 
@@ -3109,7 +3181,11 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
+          # No remote npm cache on the persistent pool — the rationale and
+          # the ternary's operand-order trap live in issue-autofix's 'Set up
+          # Node.js' step; the contract tests pin all three copies.
+          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          package-manager-cache: false
           cache-dependency-path: 'package-lock.json'
 
       # The npm-ci retry recipe and the 'Prepare Qwen Code CLI' shim below
@@ -3214,14 +3290,29 @@ jobs:
       # Measured at 3, on the scan that selected 7 PRs: the legs started
       # 3-at-a-time and each new one began 3-4s after a slot freed, so the
       # 7th PR waited 81 minutes for a slot it could have had immediately.
-      # 5 halves that tail while staying a real bound — the point of the cap
-      # is that a backlog cannot open an unbounded number of agent runs at
-      # once, not the specific number. The 300-minute job cap raises the
-      # worst-case hold to 5 runner-hours per slot (25 across the fleet) and
-      # holds the per-PR head-write concurrency group for the same window.
-      # The cap itself does not lengthen the queueing tail above; the raised
-      # 120-minute budget does, for the PRs that exhaust it.
-      max-parallel: 5
+      # 5 halved that tail — the point of the cap is that a backlog cannot
+      # open an unbounded number of agent runs at once, not the specific
+      # number.
+      # TUNABLE WITHOUT A CODE CHANGE: set QWEN_AUTOFIX_MAX_PARALLEL in
+      # Settings → Variables to re-size the fleet as the takeover pool grows;
+      # the literal below is only the fallback when the variable is unset.
+      # Verified on a live runner that `max-parallel` accepts this expression
+      # and schedules by it — a 6-leg matrix at 3 started 3, then began the
+      # 4th only once a slot freed.
+      # Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
+      # ~14% of them at a time and the tail measured at 3 simply reappeared
+      # at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
+      # legs occupy under a quarter of it, and the executed legs sampled that
+      # day finished in 3-28 minutes.
+      # The 300-minute job cap puts the worst case at 5 runner-hours per slot
+      # (100 across the fleet at 20) and holds the per-PR head-write
+      # concurrency group for the same window. Different PRs never share that
+      # group, so raising this does not add push contention.
+      # RAISE BOTH TOGETHER: this must stay strictly below
+      # MAX_TARGETS_PER_SCAN, or the scan cannot emit enough legs to fill the
+      # matrix and the extra slots sit idle. A test pins that for the
+      # fallbacks; for the variables it is an operator invariant.
+      max-parallel: '${{ fromJSON(vars.QWEN_AUTOFIX_MAX_PARALLEL || 20) }}'
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
     # Serialises every writer of THIS PR's head branch, across workflows.
@@ -3454,12 +3545,19 @@ jobs:
             echo "::error::docker daemon is not reachable on this runner; the sandboxed agent cannot start."
             exit 1
           fi
+          # 'Set up Node.js' assumes this pool keeps ~/.npm across jobs;
+          # log its size so a move to per-job containers is visible.
+          du -sh "${HOME}/.npm" 2>/dev/null || echo '~/.npm is absent on this runner.'
 
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
+          # No remote npm cache on the persistent pool — the rationale and
+          # the ternary's operand-order trap live in issue-autofix's 'Set up
+          # Node.js' step; the contract tests pin all three copies.
+          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          package-manager-cache: false
           cache-dependency-path: 'package-lock.json'
 
       - name: 'Install tmux'
@@ -3706,6 +3804,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3791,6 +3890,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -3878,6 +3978,7 @@ jobs:
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
                  + [ ($ic | add)[]
                    | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                   | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                    | select((.body // "") | test("^\\s*@qwen-code /") | not)
                    | select(((.body // "") | contains("**[Critical]**")) | not)
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
@@ -3943,6 +4044,7 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
                 | select(((.body // "") | contains("**[Critical]**")) | not)
                 | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
@@ -4022,6 +4124,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))

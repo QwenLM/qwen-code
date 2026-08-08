@@ -44,9 +44,14 @@ describe('WorkflowTool', () => {
     expect(tool.name).toBe(ToolNames.WORKFLOW);
     expect(tool.displayName).toBe(ToolDisplayNames.WORKFLOW);
     const schema = tool.schema.parametersJsonSchema as {
-      properties: { run_in_background: { default?: boolean } };
+      properties: {
+        run_in_background: { default?: boolean; description?: string };
+      };
     };
     expect(schema.properties.run_in_background.default).toBe(false);
+    expect(schema.properties.run_in_background.description).toContain(
+      'cooperatively pause/resume',
+    );
   });
 
   it('rejects build() when script is missing', () => {
@@ -226,7 +231,7 @@ describe('WorkflowTool', () => {
       },
     ]);
     expect(result.returnDisplay).toBe(
-      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe or stop it.`,
+      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
     );
     expect(updateOutput).not.toHaveBeenCalled();
 

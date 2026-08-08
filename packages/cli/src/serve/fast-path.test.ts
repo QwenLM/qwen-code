@@ -1391,6 +1391,8 @@ describe('serve fast path environment bootstrap', () => {
     delete process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
     delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    delete process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_DESKTOP'];
     tempLaunchCwd = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-fake-home-')),
     );
@@ -1406,7 +1408,11 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempLaunchCwd, '.env'),
-      'QWEN_RUNTIME_DIR=from-home-env\n',
+      [
+        'QWEN_RUNTIME_DIR=from-home-env',
+        'QWEN_CODE_SERVE=1',
+        'QWEN_CODE_DESKTOP=1',
+      ].join('\n'),
     );
     writeFileSync(
       join(tempQwenHome, '.env'),
@@ -1426,6 +1432,8 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']).toBe(
       'from-discovered-trust',
     );
+    expect(process.env['QWEN_CODE_SERVE']).toBeUndefined();
+    expect(process.env['QWEN_CODE_DESKTOP']).toBeUndefined();
   });
 
   it('still pre-resolves missing home-scoped keys when QWEN_HOME and runtime are already set', () => {
