@@ -209,7 +209,10 @@ function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
     shell: true,
     cwd,
     encoding: 'utf8',
-    timeout: timeoutMs,
+    // build-test's coercion, deliberately: spawnSync validates `timeout` as
+    // an unsigned integer, and a fractional --timeout reaches it through
+    // the same budget arithmetic.
+    timeout: Math.max(1, Math.round(timeoutMs)),
     env: buildRunEnv(process.env),
     maxBuffer: 64 * 1024 * 1024,
     // build-test's, deliberately: "a build that asks a question is a build that
