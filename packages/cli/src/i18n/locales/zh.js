@@ -174,6 +174,7 @@ export default {
   'toolDisplayName.ReadFile': '读取文件',
   'toolDisplayName.ZoomImage': '缩放图像',
   'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.ZvecGrep': '语义搜索',
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': '运行命令',
   'toolDisplayName.Shell Command': 'Shell 命令',

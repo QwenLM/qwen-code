@@ -1258,6 +1258,10 @@ export class SubagentManager {
         continue;
       }
 
+      if (toolIdentifier === ToolNames.ZVEC_GREP) {
+        continue;
+      }
+
       // If no match found, preserve the original identifier as-is
       // This allows for tools that might not be registered yet or custom tools
       result.push(toolIdentifier);

@@ -964,6 +964,9 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  zvecGrepEnabled?: boolean;
+  /** Persists a workspace-scoped opt-out selected from zvec-grep setup. */
+  onDisableZvecGrepForWorkspace?: () => Promise<void>;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
@@ -1810,6 +1813,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly zvecGrepEnabled: boolean;
   private readonly terminalImageRenderSupportProvider:
     | (() => Promise<TerminalImageRenderSupport>)
     | null;
@@ -2019,6 +2023,7 @@ export class Config {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  private readonly onDisableZvecGrepForWorkspaceCallback?: () => Promise<void>;
   private initialized: boolean = false;
   private initializationPromise?: Promise<void>;
   private initializationSucceeded = false;
@@ -2129,6 +2134,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.zvecGrepEnabled = params.zvecGrepEnabled ?? false;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
@@ -2300,6 +2306,8 @@ export class Config {
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.allowPrivateNetworkHooks = params.allowPrivateNetworkHooks ?? false;
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
+    this.onDisableZvecGrepForWorkspaceCallback =
+      params.onDisableZvecGrepForWorkspace;
 
     // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
@@ -5138,6 +5146,18 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  isZvecGrepEnabled(): boolean {
+    return this.zvecGrepEnabled;
+  }
+
+  canDisableZvecGrepForWorkspace(): boolean {
+    return this.onDisableZvecGrepForWorkspaceCallback !== undefined;
+  }
+
+  async disableZvecGrepForWorkspace(): Promise<void> {
+    await this.onDisableZvecGrepForWorkspaceCallback?.();
   }
 
   /**
@@ -8004,6 +8024,13 @@ export class Config {
       const { ZoomImageTool } = await import('../tools/zoom-image.js');
       return new ZoomImageTool(this);
     });
+
+    if (this.isZvecGrepEnabled()) {
+      await registerLazy(ToolNames.ZVEC_GREP, async () => {
+        const { ZvecGrepTool } = await import('../tools/zvec-grep.js');
+        return new ZvecGrepTool(this);
+      });
+    }
 
     // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {
