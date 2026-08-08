@@ -30,61 +30,38 @@ import { homedir } from 'node:os';
 type ComputerUseParams = Record<string, unknown>;
 
 const INSTALL_REASON =
-  'This downloads the Computer Use driver (~20MB, signed + notarized) into ~/.qwen/computer-use/ the first time. ' +
+  'This downloads the pinned Qwen CUA driver into ~/.qwen/computer-use/ the first time (the macOS bundle is signed + notarized). ' +
   'Computer Use can click, type, and read your desktop apps in the background. ' +
   "On macOS you'll be guided through Accessibility / Screen Recording permissions next.";
 
-/**
- * Tools / params that perform irreversible or sensitive actions and must NOT be
- * silently auto-approved in AUTO_EDIT mode. They surface a confirmation in
- * AUTO_EDIT; AUTO still routes them through its classifier (getDefaultPermission
- * stays 'ask'); YOLO still auto-approves everything.
- *   - kill_app          force-kills a PID
- *   - launch_app        launches arbitrary apps (incl. with CDP debug ports)
- *   - start_recording   captures the screen to disk
- *   - set_config        mutates driver configuration
- *   - replay_trajectory re-invokes every recorded tool call in a dir via the
- *     same dispatch path — it replays arbitrary actions (kill_app, launch_app,
- *     page execute_javascript, …). Gating the wrapper is the only chokepoint we
- *     have; the replayed sub-actions run inside cua-driver. (review round 2)
- *   - page action 'execute_javascript'           — arbitrary JS in the user's
- *     logged-in browser (cookie / credential exfiltration)
- *   - page action 'enable_javascript_apple_events' — permanently patches the
- *     browser's prefs + quits/relaunches it (more persistent than the one-shot
- *     execute_javascript). (review round 2)
- */
-const HIGH_RISK_TOOLS = new Set<ComputerUseToolName>([
-  'kill_app',
-  'launch_app',
-  'start_recording',
-  'set_config',
-  'replay_trajectory',
-]);
-
-const HIGH_RISK_PAGE_ACTIONS = new Set([
-  'execute_javascript',
-  'enable_javascript_apple_events',
-]);
-
-// Fail fast at module load if a high-risk entry isn't a real tool name. The
-// Set<ComputerUseToolName> typing already rejects typos at compile time; this
-// also catches the name union drifting from the schema set at runtime. A typo
-// would otherwise silently disable the gate for that tool. (review round 3)
-for (const t of HIGH_RISK_TOOLS) {
-  if (!(t in COMPUTER_USE_SCHEMAS)) {
-    throw new Error(`HIGH_RISK_TOOLS contains unknown tool: ${t}`);
-  }
-}
+const READ_ONLY_PAGE_ACTIONS = new Set(['get_text', 'query_dom']);
 
 export function isHighRiskCall(
   upstreamName: string,
   params: Record<string, unknown>,
 ): boolean {
-  if (HIGH_RISK_TOOLS.has(upstreamName as ComputerUseToolName)) return true;
-  return (
-    upstreamName === 'page' &&
-    HIGH_RISK_PAGE_ACTIONS.has(params['action'] as string)
-  );
+  if (upstreamName === 'clipboard_read') {
+    return params['include_text'] === true;
+  }
+  if (upstreamName === 'check_permissions') {
+    return params['prompt'] === true;
+  }
+  if (upstreamName === 'page') {
+    return !READ_ONLY_PAGE_ACTIONS.has(params['action'] as string);
+  }
+  // screenshot_out_file turns these read-only snapshots into a file write at
+  // a model-chosen ~-expanded path — same family the driver classifies as
+  // file_transfer_and_output, so gate it like other mutating calls.
+  if (
+    (upstreamName === 'get_window_state' ||
+      upstreamName === 'get_desktop_state') &&
+    typeof params['screenshot_out_file'] === 'string' &&
+    params['screenshot_out_file'].length > 0
+  ) {
+    return true;
+  }
+  const schema = COMPUTER_USE_SCHEMAS[upstreamName as ComputerUseToolName];
+  return schema?.annotations.readOnlyHint !== true;
 }
 
 class ComputerUseInvocation extends BaseToolInvocation<
@@ -111,7 +88,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
    *
    * Earlier this returned 'allow' once the install-state file existed,
    * which conflated install approval with per-action approval and
-   * effectively granted blanket permission for all 9 computer_use__*
+   * effectively granted blanket permission for all computer_use__*
    * tools (including mutating actions like click / type_text / drag)
    * after the first install confirmation. See PR #4590 review for the
    * full discussion.
@@ -168,10 +145,8 @@ class ComputerUseInvocation extends BaseToolInvocation<
       }
     };
 
-    // High-risk calls (review round 1) surface as 'mcp' type so AUTO_EDIT does
-    // NOT silently auto-approve them — isAutoEditApproved() only auto-approves
-    // 'edit'/'info'. AUTO still routes them through its classifier (this tool's
-    // getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
+    // Mutating or sensitive calls surface as 'mcp' so AUTO_EDIT does not
+    // silently approve them and PLAN mode's read-only boundary blocks them.
     if (isHighRiskCall(this.upstreamName, this.params)) {
       // NOTE: args are deliberately NOT folded into `title` — no mcp
       // confirmation surface (TUI / non-interactive / ACP) renders the mcp
@@ -183,7 +158,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
         title: installApproved
           ? `Allow high-risk Computer Use (${this.upstreamName})`
           : `Allow high-risk Computer Use (${this.upstreamName}) — first use also downloads the driver`,
-        serverName: 'cua-driver',
+        serverName: 'qwen-cua-driver',
         toolName: this.upstreamName,
         toolDisplayName: `computer_use__${this.upstreamName}`,
         permissionRules,
@@ -223,25 +198,10 @@ class ComputerUseInvocation extends BaseToolInvocation<
     );
     client.setIdleTimeoutMs(this.config?.getComputerUseIdleTimeoutMs());
 
-    // If the user confirmed through the pre-execution dialog, the install state
-    // was already written by onConfirm — runBootstrap will skip promptInstallApproval.
-    // But several approval modes auto-approve the tool call and bypass that
-    // dialog entirely (so onConfirm never runs and install state is never
-    // written): YOLO (needsConfirmation() returns false), AUTO_EDIT
-    // (isAutoEditApproved() auto-approves info-type tools — all computer_use__*
-    // tools are info), and AUTO (classifier-approved calls). In those modes
-    // pass autoApproveInstall so the bootstrap honors the already-granted call
-    // approval instead of refusing with "install declined by user". DEFAULT
-    // still shows the dialog; PLAN blocks. Headless / SDK contexts (no config)
-    // fall back to the env-var path in bootstrap's default promptInstallApproval.
-    // Reaching execute() means the scheduler already approved THIS call — via
-    // the confirmation dialog, a persisted always-allow rule, or an auto-approve
-    // mode (YOLO / AUTO_EDIT / AUTO). Treat any of those as install consent. The
-    // subtle case is a saved always-allow rule: it SUPPRESSES the dialog, so
-    // onConfirm never writes install-state, and in DEFAULT mode bootstrap would
-    // then fall into the headless refuse path and dead-end ("install declined")
-    // on every retry. Headless / SDK contexts (no config) keep the env-var
-    // fallback in bootstrap's default promptInstallApproval. (review round 1)
+    // Reaching execute() means the scheduler approved this call. A saved rule or
+    // auto-approval mode can bypass onConfirm, so pass install consent whenever a
+    // Config-backed scheduler is present. Headless contexts keep bootstrap's
+    // explicit environment-controlled fallback.
     const autoApproveInstall = !!this.config;
     await runBootstrap(client, { signal, updateOutput, autoApproveInstall });
 
@@ -363,12 +323,17 @@ export function coerceTypes(
   schema: Record<string, unknown>,
 ): Record<string, unknown> {
   const properties = (
-    schema as { properties?: Record<string, { type?: string }> }
+    schema as { properties?: Record<string, { type?: string | string[] }> }
   ).properties;
   if (!properties) return params;
   const result: Record<string, unknown> = { ...params };
   for (const [key, value] of Object.entries(result)) {
-    const fieldType = properties[key]?.type;
+    let fieldType = properties[key]?.type;
+    // Nullable fields regenerate as ['number', 'null'] — unwrap to the
+    // concrete type so the comparisons below still match.
+    if (Array.isArray(fieldType)) {
+      fieldType = fieldType.find((t) => t !== 'null');
+    }
     // Direction 1: string value, schema wants integer/number → parse
     if (
       (fieldType === 'integer' || fieldType === 'number') &&

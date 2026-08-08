@@ -57,8 +57,8 @@ fn def() -> &'static ToolDef {
              - **All other elements**: writes AXValue directly (sliders, steppers, \
              date pickers, native text fields that expose settable AXValue).\n\
              \n\
-             For free-form text entry into web inputs, prefer `type_text_chars` \
-             which synthesises key events — AXValue writes are ignored by WebKit."
+             For free-form text entry into web inputs, prefer `type_text`, which \
+             falls back to synthesized key events when AXValue writes are ignored."
             .into(),
         input_schema: serde_json::json!({
             "type": "object",

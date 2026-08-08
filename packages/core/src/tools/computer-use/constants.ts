@@ -5,20 +5,19 @@
  */
 
 /**
- * Computer Use is backed by `cua-driver` (the Rust implementation,
- * `cua-driver-rs`) from trycua/cua — a background, no-focus-stealing
- * native automation driver that speaks MCP over stdio (`cua-driver mcp`).
+ * Computer Use is backed by Qwen CUA Driver (the vendored Rust implementation
+ * under `packages/cua-driver`) — a background, no-focus-stealing native
+ * automation driver that speaks MCP over stdio (`qwen-cua-driver mcp`).
  *
  * Unlike the previous open-computer-use backend, cua-driver is NOT on npm.
- * It ships as per-platform, Developer-ID-signed + Apple-notarized binaries
- * attached to GitHub releases (tag `cua-driver-rs-v<version>`). We download
+ * It ships as per-platform release bundles (the macOS app is Developer-ID
+ * signed + Apple-notarized) under tag `cua-driver-rs-v<version>`. We download
  * the pinned asset once into `~/.qwen/computer-use/`, preferring a
  * qwen-code-owned OSS mirror (reliable in CN where GitHub release downloads
  * are slow/blocked) and falling back to GitHub.
  *
- * Source: https://github.com/trycua/cua/tree/main/libs/cua-driver
- * License: MIT (the driver pulls no AGPL deps — AGPL only affects the
- * separate `cua-agent[omni]` layer, which we do not consume).
+ * Source: https://github.com/QwenLM/qwen-code/tree/main/packages/cua-driver
+ * License: MIT
  */
 
 import { join } from 'node:path';
@@ -33,22 +32,18 @@ import { homedir } from 'node:os';
  * means users get the exact surface we tested; a new upstream release
  * can't silently drift our hardcoded schemas or break the download.
  *
- * To bump: update this and re-run `scripts/sync-computer-use-schemas.ts`
- * against the new binary, then sync the new assets to OSS via
- * `scripts/sync-cua-driver-to-oss.ts`, then smoke-test on macOS.
+ * To bump: update this, re-run `scripts/sync-computer-use-schemas.ts`
+ * against the new binary, publish through `cd-cua-driver.yml` (which mirrors
+ * the consumer assets to OSS), then smoke-test the published asset on macOS.
  */
-export const CUA_DRIVER_VERSION = '0.5.2';
+export const CUA_DRIVER_VERSION = '0.17.0';
 
 /**
  * qwen-code-owned OSS mirror base (primary download source — reliable in CN
  * where GitHub release downloads are slow/blocked). Assets live under
- * `<base>/cua-driver-rs/v<version>/<asset>`, mirrored from the upstream
- * trycua/cua release by the "Sync cua-driver to Aliyun OSS" workflow
- * (.github/workflows/sync-cua-driver-to-oss.yml), which auto-triggers on pushes
- * to main that touch this file — a CUA_DRIVER_VERSION bump auto-mirrors the new
- * release (a checksums.txt guard no-ops when already mirrored); manual
- * workflow_dispatch covers first-time / forced re-mirror. Until a version is
- * mirrored there, the GitHub fallback (GITHUB_RELEASE_BASE) serves it
+ * `<base>/cua-driver-rs/v<version>/<asset>`. The Qwen CUA release workflow
+ * mirrors the consumer assets after publishing the matching GitHub Release.
+ * Until a version is mirrored there, the Qwen GitHub fallback serves it
  * transparently.
  *
  * Hosted on the shared `qwen-code-assets` bucket (same one the CLI's own
@@ -59,7 +54,7 @@ export const OSS_MIRROR_BASE =
 
 /** GitHub release download base for the pinned tag (fallback source). */
 export const GITHUB_RELEASE_BASE =
-  'https://github.com/trycua/cua/releases/download';
+  'https://github.com/QwenLM/qwen-code/releases/download';
 
 export interface AssetTarget {
   /** Release asset filename. */
@@ -68,7 +63,7 @@ export interface AssetTarget {
   extractDir: string;
   /** Path to the spawnable driver binary, relative to the extract dir. */
   binaryRelPath: string;
-  /** Whether this asset bundles `CuaDriver.app` (macOS TCC onboarding). */
+  /** Whether this asset bundles `QwenCuaDriver.app` (macOS TCC onboarding). */
   hasApp: boolean;
 }
 
@@ -89,49 +84,46 @@ export function resolveAssetTarget(
     return {
       asset: `${extractDir}.tar.gz`,
       extractDir,
-      // Spawn the binary INSIDE CuaDriver.app, not the bare one beside it.
-      // cua-driver only triggers its TCC auto-relaunch (`open -a CuaDriver
+      // Spawn the binary INSIDE QwenCuaDriver.app, not the bare one beside it.
+      // qwen-cua-driver only triggers its TCC auto-relaunch (`open -a QwenCuaDriver
       // serve`, which attributes Accessibility/Screen-Recording grants to
-      // com.trycua.driver rather than the launching terminal) when its
-      // running image resolves into `/CuaDriver.app/Contents/MacOS/`
-      // (see bundle.rs `is_executable_inside_cuadriver_app`). Pointing at
-      // the bare `cua-driver` made TCC attribute to the parent terminal
+      // com.qwencode.cua-driver rather than the launching terminal) when its
+      // running image resolves into `/QwenCuaDriver.app/Contents/MacOS/`.
+      // Pointing at the bare binary makes TCC attribute to the parent terminal
       // (e.g. iTerm) — wrong identity, per-terminal, oversized privacy.
-      binaryRelPath: 'CuaDriver.app/Contents/MacOS/cua-driver',
+      binaryRelPath: 'QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver',
       hasApp: true,
     };
   }
   if (platform === 'linux') {
-    if (arch !== 'x64') {
+    if (arch !== 'x64' && arch !== 'arm64') {
       throw new Error(
-        `Computer Use: unsupported Linux arch '${arch}' (only x64).`,
+        `Computer Use: unsupported Linux arch '${arch}' (x64 and arm64 only).`,
       );
     }
-    // Linux ships a BARE-BINARY tarball whose single `cua-driver` file sits at
-    // the archive ROOT — no bundle, no wrapper dir. Upstream _install-rust.sh
-    // picks `darwin-universal.tar.gz` (a dir tarball carrying CuaDriver.app)
-    // for macOS but `${label}-binary.tar.gz` for every other target, which
-    // expands to a lone `cua-driver`. So there is NO extractDir layer here:
-    // extractDir '.' keeps binaryPath at <versionDir>/cua-driver.
+    const slug = arch === 'arm64' ? 'linux-arm64' : 'linux-x86_64';
+    // Linux's binary tarball expands its runtime payload at the archive root.
     return {
-      asset: `cua-driver-rs-${v}-linux-x86_64-binary.tar.gz`,
+      asset: `cua-driver-rs-${v}-${slug}-binary.tar.gz`,
       extractDir: '.',
-      binaryRelPath: 'cua-driver',
+      binaryRelPath: 'qwen-cua-driver',
       hasApp: false,
     };
   }
   if (platform === 'win32') {
-    // Windows uses the NON-binary `.zip` (verified against upstream
-    // install.ps1: `$zipName = "cua-driver-rs-$version-$archLabel.zip"`), which
-    // expands to `cua-driver-rs-<v>-<slug>/cua-driver.exe (+ LICENSE)` — a
-    // wrapper dir, UNLIKE Linux. This asset mapping is correct; the only gap is
-    // zip extraction in downloader.ts (node `tar` reads .tar.gz only).
+    if (arch !== 'x64' && arch !== 'arm64') {
+      throw new Error(
+        `Computer Use: unsupported Windows arch '${arch}' (x64 and arm64 only).`,
+      );
+    }
+    // Windows uses the full wrapper zip because qwen-cua-driver requires its
+    // UIA helper and native runtime sidecars beside the main executable.
     const slug = arch === 'arm64' ? 'windows-arm64' : 'windows-x86_64';
     const extractDir = `cua-driver-rs-${v}-${slug}`;
     return {
       asset: `${extractDir}.zip`,
       extractDir,
-      binaryRelPath: 'cua-driver.exe',
+      binaryRelPath: 'qwen-cua-driver.exe',
       hasApp: false,
     };
   }

@@ -71,6 +71,7 @@ fn def() -> &'static ToolDef {
                 },
                 "x": { "type": "number", "description": "Screenshot-pixel X — the element px action form: pixel-click there to focus, then send the combo (so e.g. Cmd+V pastes into that field). Pass with y. Use for Chromium/Electron surfaces the background combo can't reach." },
                 "y": { "type": "number", "description": "Screenshot-pixel Y (see x)." },
+                "from_zoom": { "type": "boolean", "description": "Set true after zoom to translate x,y from the latest zoom image back to full-window coordinates." },
                 "window_id": {
                     "type": "integer",
                     "description": "Target window. Required for delivery_mode:\"foreground\" (the NSMenu activation needs a window). Does NOT itself raise the window — raising is gated on delivery_mode."

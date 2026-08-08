@@ -25,9 +25,9 @@ import {
   binaryPath,
 } from '../packages/core/src/tools/computer-use/constants.js';
 
-// cua-driver 0.5.2 advertises 35 tools. A drift here just means the upstream
+// Qwen CUA Driver 0.17.0 advertises 54 tools. A drift here means the pinned
 // surface changed — warn (so a bump is reviewed) but don't fail the sync.
-const EXPECTED_TOOL_COUNT = 35;
+const EXPECTED_TOOL_COUNT = 54;
 
 async function main(): Promise<void> {
   // Default to the pinned, locally-installed binary; allow an explicit override.
@@ -35,7 +35,10 @@ async function main(): Promise<void> {
 
   const transport = new StdioClientTransport({
     command: binary,
-    args: ['mcp'],
+    // Schema generation only calls tools/list. Direct mode avoids requiring a
+    // registered/TCC-authorized macOS app bundle in the developer checkout;
+    // the production client intentionally keeps the normal app/daemon path.
+    args: ['mcp', '--direct'],
   });
   const client = new Client(
     { name: 'qwen-code-schema-sync', version: '1.0.0' },
@@ -54,12 +57,34 @@ async function main(): Promise<void> {
 
   const schemas: Record<
     string,
-    { description: string; parameterSchema: unknown }
+    {
+      description: string;
+      parameterSchema: unknown;
+      annotations: unknown;
+    }
   > = {};
   for (const tool of result.tools) {
+    const parameterSchema = tool.inputSchema ?? {
+      type: 'object',
+      properties: {},
+    };
+    // Normalize to the contract the other tools already use: reject unknown
+    // parameters client-side instead of forwarding them to a driver that
+    // silently ignores them (hallucinated extra params must fail fast with a
+    // schema error, not diverge silently).
+    if (
+      typeof parameterSchema === 'object' &&
+      parameterSchema !== null &&
+      (parameterSchema as Record<string, unknown>)['additionalProperties'] ===
+        true
+    ) {
+      (parameterSchema as Record<string, unknown>)['additionalProperties'] =
+        false;
+    }
     schemas[tool.name] = {
       description: tool.description ?? '',
-      parameterSchema: tool.inputSchema ?? { type: 'object', properties: {} },
+      parameterSchema,
+      annotations: tool.annotations ?? {},
     };
   }
 
@@ -85,6 +110,12 @@ async function main(): Promise<void> {
 export interface ComputerUseToolSchema {
   description: string;
   parameterSchema: Record<string, unknown>;
+  annotations: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 export const COMPUTER_USE_TOOL_NAMES = ${JSON.stringify(

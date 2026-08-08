@@ -233,17 +233,15 @@ fn def() -> &'static ToolDef {
         // Matches Swift `CheckPermissionsTool.swift` description verbatim.
         name: "check_permissions".into(),
         description: "Report TCC permission status for Accessibility and Screen Recording. \
-            By default also raises the system permission dialogs for any missing grants — \
-            Apple's request APIs are no-ops when the grant is already active, so this is \
-            safe to call repeatedly. Pass {\"prompt\": false} for a purely read-only \
-            status check.\n\n\
+            The default is a purely read-only status check. A trusted host setup route may \
+            pass {\"prompt\": true} to raise system permission dialogs for missing grants.\n\n\
             Returns: `accessibility` + `screen_recording` (booleans from the TCC \
             preflight APIs), `screen_recording_capturable` (a live ScreenCaptureKit \
             probe when `prompt` is true; null on read-only calls), \
             `direct_capture_status` (`ready`, `unavailable`, `timed_out`, `probe_failed`, \
             `blocked_by_screen_recording`, or `not_checked`), `direct_capture_error` (a structured \
             timeout/probe failure when applicable), and `source` (which TCC identity the \
-            booleans reflect: the CuaDriver daemon vs the launching terminal/IDE). \
+            booleans reflect: the Qwen Cua Driver daemon vs the launching terminal/IDE). \
             macOS attributes grants to the responsible process, so a standalone call \
             from a terminal reports the terminal's grants, not the driver's. The \
             prompt-capable ScreenCaptureKit probe never runs when `prompt` is false. \

@@ -593,3 +593,98 @@ jobs:
           fi
 
           gh pr merge "$PR_URL" --squash --auto --subject "chore(cua-driver): bake v${VERSION} into installers [skip ci]"
+
+  mirror-oss:
+    name: 'Mirror release assets to Aliyun OSS'
+    needs: ['release']
+    runs-on: 'ubuntu-latest'
+    if: "github.repository == 'QwenLM/qwen-code'"
+    environment:
+      name: 'production-release'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+      - name: 'Download downloader-consumed release assets'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          VERSION: '${{ needs.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          mkdir -p dist/cua-driver
+          gh release download "cua-driver-rs-v${VERSION}" \
+            --repo QwenLM/qwen-code \
+            --dir dist/cua-driver \
+            --pattern "cua-driver-rs-${VERSION}-darwin-arm64.tar.gz" \
+            --pattern "cua-driver-rs-${VERSION}-darwin-x86_64.tar.gz" \
+            --pattern "cua-driver-rs-${VERSION}-linux-x86_64-binary.tar.gz" \
+            --pattern "cua-driver-rs-${VERSION}-linux-arm64-binary.tar.gz" \
+            --pattern "cua-driver-rs-${VERSION}-windows-x86_64.zip" \
+            --pattern "cua-driver-rs-${VERSION}-windows-arm64.zip" \
+            --pattern 'checksums.txt'
+          test "$(find dist/cua-driver -type f | wc -l | tr -d ' ')" = '7'
+          (cd dist/cua-driver && sha256sum -c --ignore-missing checksums.txt)
+      - name: 'Install ossutil'
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${tmp_dir}"' EXIT
+          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
+          echo "${OSSUTIL_SHA256}  ${tmp_dir}/ossutil.zip" | sha256sum -c -
+          unzip -q "${tmp_dir}/ossutil.zip" -d "${tmp_dir}"
+          ossutil_path="$(find "${tmp_dir}" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          test -n "${ossutil_path}"
+          chmod +x "${ossutil_path}"
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${ossutil_path}" "${HOME}/.local/bin/ossutil"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+      - name: 'Configure Aliyun OSS credentials'
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |
+          set -euo pipefail
+          if [[ -z "${ALIYUN_OSS_ACCESS_KEY_ID}" || -z "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]; then
+            echo '::error::Missing Aliyun OSS credentials in the production-release environment.'
+            exit 1
+          fi
+          ossutil config \
+            -e "${ALIYUN_OSS_ENDPOINT}" \
+            -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \
+            -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" \
+            -L EN \
+            -c "${RUNNER_TEMP}/.ossutilconfig"
+      - name: 'Upload release assets to Aliyun OSS'
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          VERSION: '${{ needs.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "computer-use/cua-driver-rs/v${VERSION}" \
+            dist/cua-driver/*
+      - name: 'Verify mirrored assets'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          VERSION: '${{ needs.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          base="${ALIYUN_OSS_PUBLIC_BASE_URL}/computer-use/cua-driver-rs/v${VERSION}"
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${tmp_dir}"' EXIT
+          for path in dist/cua-driver/*; do
+            file="$(basename "${path}")"
+            curl -fsSL --connect-timeout 15 --max-time 300 "${base}/${file}" -o "${tmp_dir}/${file}"
+          done
+          cmp dist/cua-driver/checksums.txt "${tmp_dir}/checksums.txt"
+          (cd "${tmp_dir}" && sha256sum -c --ignore-missing "${GITHUB_WORKSPACE}/dist/cua-driver/checksums.txt")
+      - name: 'Cleanup Aliyun OSS credentials'
+        if: '${{ always() }}'
+        run: 'rm -f "${RUNNER_TEMP}/.ossutilconfig"'

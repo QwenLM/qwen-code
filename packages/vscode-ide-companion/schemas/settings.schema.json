@@ -1298,23 +1298,23 @@
           "default": 200000
         },
         "computerUse": {
-          "description": "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
+          "description": "Cross-platform desktop automation via the vendored Qwen CUA driver. On first invocation a pinned platform bundle is downloaded into ~/.qwen/computer-use/ (signed + notarized on macOS), and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Qwen Code uses absolute screenshot-pixel coordinates. Exposes the driver's full tool surface (click, type_text, scroll, browser automation, clipboard, recording, sessions, and more).",
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.",
+              "description": "When enabled (default), the Qwen CUA computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.",
               "type": "boolean",
               "default": true
             },
             "idleTimeoutMs": {
-              "description": "Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.",
+              "description": "Milliseconds to keep the Qwen CUA driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Active trajectory recording suspends idle shutdown. Set to 0 to keep it running until qwen-code exits.",
               "type": "number",
               "default": 300000,
               "minimum": 0,
               "maximum": 2147483647
             },
             "maxImageDimension": {
-              "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
+              "description": "Best-effort longest-edge pixel cap applied to Qwen CUA screenshots (via set_config's max_image_dimension). -1 (default) keeps the driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. If standard authorization refuses the runtime config change, startup continues with the driver default. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
               "type": "number",
               "default": -1
             }

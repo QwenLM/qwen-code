@@ -16,6 +16,7 @@ import { approvalKey } from './constants.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import type { Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
+import { isPlanModeBlocked } from '../../core/permissionFlow.js';
 
 function makeFakeClient(
   callToolImpl: (name: string, args: unknown) => Promise<unknown>,
@@ -206,6 +207,24 @@ describe('coerceTypes', () => {
     expect(result['x']).toBe(100);
     expect(result['y']).toBe(200);
   });
+
+  it('coerces numeric strings for nullable fields (type: [number, null])', () => {
+    // The regenerated 0.17 schemas express nullable numerics as
+    // ['number', 'null']; coercion must still recover a numeric string.
+    const nullableSchema = {
+      type: 'object',
+      properties: {
+        spring: { type: ['number', 'null'] },
+        idle_hide_ms: { type: ['integer', 'null'] },
+      },
+    } as Record<string, unknown>;
+    const result = coerceTypes(
+      { spring: '0.8', idle_hide_ms: '500' },
+      nullableSchema,
+    );
+    expect(result['spring']).toBe(0.8);
+    expect(result['idle_hide_ms']).toBe(500);
+  });
 });
 
 describe('ComputerUseTool.build() coercion integration', () => {
@@ -342,39 +361,30 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     if (details.type === 'info') {
       expect(details.title).toContain('list_apps');
       expect(details.prompt).toContain('computer_use__list_apps');
-      // Install variant mentions the ~50MB download
-      expect(details.prompt).toContain('20MB');
+      expect(details.prompt).toContain('Qwen CUA driver');
       expect(details.permissionRules).toContain('computer_use__list_apps');
     }
   });
 
-  it('getConfirmationDetails returns per-action info once install is approved', async () => {
-    // After install approval, the dialog should switch from install-info
-    // to a compact per-action prompt naming THIS specific action — so the
-    // user can decide on each mutating call (click / type_text / drag /
-    // set_value / press_key / scroll / perform_secondary_action).
+  it('getConfirmationDetails keeps mutating actions strongly gated once install is approved', async () => {
     const packageSpec = approvalKey();
     await saveInstallState(tmpHome, {
       approvedPackageSpec: packageSpec,
       approvedAtIso: new Date().toISOString(),
     });
 
-    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    const invocation = tool.build({ pid: 4567 });
+    const tool = new ComputerUseTool('scroll', COMPUTER_USE_SCHEMAS.scroll);
+    const invocation = tool.build({ direction: 'down' });
     const details = await invocation.getConfirmationDetails(
       new AbortController().signal,
     );
 
-    expect(details.type).toBe('info');
-    if (details.type === 'info') {
-      expect(details.title).toContain('click');
-      expect(details.prompt).toContain('computer_use__click');
-      // Per-action variant shows args and does NOT mention the install size
-      expect(details.prompt).toContain('4567');
-      expect(details.prompt).not.toContain('20MB');
-      // Same per-tool permission rule — user can ProceedAlwaysTool to skip
-      // future confirmations for THIS tool only (not all 9).
-      expect(details.permissionRules).toContain('computer_use__click');
+    expect(details.type).toBe('mcp');
+    if (details.type === 'mcp') {
+      expect(details.title).toContain('scroll');
+      expect(details.toolDisplayName).toBe('computer_use__scroll');
+      expect(invocation.getDescription()).toContain('down');
+      expect(details.permissionRules).toContain('computer_use__scroll');
     }
   });
 
@@ -454,6 +464,17 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       'start_recording',
       'set_config',
       'replay_trajectory',
+      'click',
+      'type_text',
+      'scroll',
+      'drag',
+      'press_key',
+      'hotkey',
+      'set_value',
+      'browser_click',
+      'browser_type',
+      'browser_download',
+      'install_ffmpeg',
     ]) {
       expect(isHighRiskCall(name, {})).toBe(true);
     }
@@ -461,19 +482,96 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     expect(
       isHighRiskCall('page', { action: 'enable_javascript_apple_events' }),
     ).toBe(true);
+    expect(isHighRiskCall('page', { action: 'click_element' })).toBe(true);
+    expect(isHighRiskCall('page', { action: 'insert_text' })).toBe(true);
+    expect(isHighRiskCall('page', { action: 'type_keystrokes' })).toBe(true);
+    expect(isHighRiskCall('check_permissions', { prompt: true })).toBe(true);
   });
 
-  it('does NOT flag ordinary tools (or page with a non-JS action)', () => {
-    for (const name of [
+  it('pins the high-risk classification for EVERY tool name independently of the checked-in annotations', () => {
+    // Hardcoded oracle: a future annotation flip in a sync-script
+    // regeneration must fail loudly here, not silently reclassify a
+    // mutating tool as read-only ('info' → AUTO_EDIT auto-approval).
+    const expectedHighRisk = new Set([
+      'launch_app',
+      'kill_app',
+      'bring_to_front',
+      'set_window_frame',
+      'invoke_menu',
       'click',
+      'double_click',
+      'right_click',
+      'drag',
       'type_text',
+      'press_key',
+      'hotkey',
+      'set_value',
+      'scroll',
+      'clipboard_write',
+      'move_cursor',
+      'set_agent_cursor_enabled',
+      'set_agent_cursor_motion',
+      'set_agent_cursor_theme',
+      'set_config',
+      'page',
+      'browser_prepare',
+      'browser_navigate',
+      'browser_click',
+      'browser_type',
+      'browser_dialog',
+      'browser_set_input_files',
+      'browser_download',
+      'browser_pointer',
+      'start_recording',
+      'stop_recording',
+      'replay_trajectory',
+      'install_ffmpeg',
+      'start_session',
+      'escalate_session',
+      'end_session',
+    ]);
+    const mismatches = Object.keys(COMPUTER_USE_SCHEMAS).filter(
+      (name) => isHighRiskCall(name, {}) !== expectedHighRisk.has(name),
+    );
+    expect(mismatches).toEqual([]);
+    expect(expectedHighRisk.size).toBe(36);
+  });
+
+  it('flags snapshot calls that write a file via screenshot_out_file', () => {
+    // get_window_state / get_desktop_state are readOnlyHint, but with
+    // screenshot_out_file the driver writes a PNG to a model-chosen path —
+    // must surface the strong ('mcp') confirmation, not 'info'.
+    expect(
+      isHighRiskCall('get_window_state', {
+        pid: 1,
+        window_id: 2,
+        screenshot_out_file: '~/.zshrc',
+      }),
+    ).toBe(true);
+    expect(
+      isHighRiskCall('get_desktop_state', {
+        screenshot_out_file: '/tmp/shot.png',
+      }),
+    ).toBe(true);
+    expect(
+      isHighRiskCall('get_window_state', { screenshot_out_file: '' }),
+    ).toBe(false);
+  });
+
+  it('does NOT flag read-only tools (or page with a non-mutating action)', () => {
+    for (const name of [
       'list_apps',
       'get_window_state',
-      'page',
+      'list_windows',
+      'get_config',
     ]) {
       expect(isHighRiskCall(name, {})).toBe(false);
     }
     expect(isHighRiskCall('page', { action: 'get_text' })).toBe(false);
+    expect(isHighRiskCall('page', { action: 'query_dom' })).toBe(false);
+    expect(isHighRiskCall('clipboard_read', {})).toBe(false);
+    expect(isHighRiskCall('clipboard_read', { include_text: true })).toBe(true);
+    expect(isHighRiskCall('check_permissions', {})).toBe(false);
   });
 
   it('high-risk tools surface as mcp type so AUTO_EDIT cannot auto-approve them', async () => {
@@ -481,19 +579,30 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     // AUTO_EDIT shows the dialog instead of silently approving. Args are NOT in
     // the mcp title (no confirmation surface renders it — review round 3); they
     // reach the user via the tool-header line, i.e. getDescription().
-    const tool = new ComputerUseTool('kill_app', COMPUTER_USE_SCHEMAS.kill_app);
-    const invocation = tool.build({ pid: 123 });
+    const tool = new ComputerUseTool(
+      'browser_click',
+      COMPUTER_USE_SCHEMAS.browser_click,
+    );
+    const invocation = tool.build({
+      target_id: 'target-1',
+      tab_id: 'tab-1',
+      ref: 'p1:2',
+    });
     const details = await invocation.getConfirmationDetails(
       new AbortController().signal,
     );
     expect(details.type).toBe('mcp');
-    expect(invocation.getDescription()).toContain('123'); // args via tool-header
+    expect(invocation.getDescription()).toContain('target-1'); // args via tool-header
+    expect(isPlanModeBlocked(true, false, false, details)).toBe(true);
   });
 
-  it('ordinary tools keep info type (auto-approved in AUTO_EDIT as before)', async () => {
-    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+  it('read-only tools keep the info confirmation type', async () => {
+    const tool = new ComputerUseTool(
+      'list_apps',
+      COMPUTER_USE_SCHEMAS.list_apps,
+    );
     const details = await tool
-      .build({ pid: 123 })
+      .build({})
       .getConfirmationDetails(new AbortController().signal);
     expect(details.type).toBe('info');
   });

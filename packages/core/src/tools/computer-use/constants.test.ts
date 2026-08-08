@@ -31,8 +31,9 @@ describe('resolveAssetTarget', () => {
     expect(t.asset).toBe(
       `cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-arm64.tar.gz`,
     );
-    // In-bundle binary so cua-driver's TCC auto-relaunch fires (com.trycua.driver).
-    expect(t.binaryRelPath).toBe('CuaDriver.app/Contents/MacOS/cua-driver');
+    expect(t.binaryRelPath).toBe(
+      'QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver',
+    );
     expect(t.hasApp).toBe(true);
   });
 
@@ -42,16 +43,22 @@ describe('resolveAssetTarget', () => {
     );
   });
 
-  it('maps linux/x64 to the -binary tarball whose lone cua-driver sits at the archive root', () => {
+  it('maps linux/x64 to the root-layout binary tarball', () => {
     const t = resolveAssetTarget('linux', 'x64');
-    // Upstream ships the bare-binary tarball for Linux; it expands to a lone
-    // `cua-driver` at the root, so there is no wrapper dir (extractDir '.').
     expect(t.asset).toBe(
       `cua-driver-rs-${CUA_DRIVER_VERSION}-linux-x86_64-binary.tar.gz`,
     );
     expect(t.extractDir).toBe('.');
-    expect(t.binaryRelPath).toBe('cua-driver');
+    expect(t.binaryRelPath).toBe('qwen-cua-driver');
     expect(t.hasApp).toBe(false);
+  });
+
+  it('maps linux/arm64 to the arm64 root-layout binary tarball', () => {
+    const t = resolveAssetTarget('linux', 'arm64');
+    expect(t.asset).toBe(
+      `cua-driver-rs-${CUA_DRIVER_VERSION}-linux-arm64-binary.tar.gz`,
+    );
+    expect(t.binaryRelPath).toBe('qwen-cua-driver');
   });
 
   it('maps win32/x64 to the .zip with .exe binary', () => {
@@ -59,11 +66,20 @@ describe('resolveAssetTarget', () => {
     expect(t.asset).toBe(
       `cua-driver-rs-${CUA_DRIVER_VERSION}-windows-x86_64.zip`,
     );
-    expect(t.binaryRelPath).toBe('cua-driver.exe');
+    expect(t.binaryRelPath).toBe('qwen-cua-driver.exe');
+  });
+
+  it('maps win32/arm64 to the arm64 wrapper zip', () => {
+    const t = resolveAssetTarget('win32', 'arm64');
+    expect(t.asset).toBe(
+      `cua-driver-rs-${CUA_DRIVER_VERSION}-windows-arm64.zip`,
+    );
+    expect(t.binaryRelPath).toBe('qwen-cua-driver.exe');
   });
 
   it('throws on unsupported platforms / arches', () => {
-    expect(() => resolveAssetTarget('linux', 'arm64')).toThrow(/unsupported/i);
+    expect(() => resolveAssetTarget('linux', 'ia32')).toThrow(/unsupported/i);
+    expect(() => resolveAssetTarget('win32', 'ia32')).toThrow(/unsupported/i);
     expect(() => resolveAssetTarget('aix' as never, 'x64')).toThrow(
       /unsupported/i,
     );
@@ -78,7 +94,7 @@ describe('resolveAssetUrls', () => {
       'qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/computer-use',
     );
     expect(urls[0]).toContain(`/cua-driver-rs/v${CUA_DRIVER_VERSION}/a.tar.gz`);
-    expect(urls[1]).toContain('github.com/trycua/cua/releases/download');
+    expect(urls[1]).toContain('github.com/QwenLM/qwen-code/releases/download');
   });
 
   it('prepends QWEN_COMPUTER_USE_DOWNLOAD_HOST as the first source', () => {
@@ -108,10 +124,10 @@ describe('binaryPath', () => {
         'computer-use',
         `cua-driver-rs-${CUA_DRIVER_VERSION}`,
         `cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-arm64`,
-        'CuaDriver.app',
+        'QwenCuaDriver.app',
         'Contents',
         'MacOS',
-        'cua-driver',
+        'qwen-cua-driver',
       ),
     );
   });
@@ -124,7 +140,7 @@ describe('binaryPath', () => {
         '.qwen',
         'computer-use',
         `cua-driver-rs-${CUA_DRIVER_VERSION}`,
-        'cua-driver',
+        'qwen-cua-driver',
       ),
     );
   });

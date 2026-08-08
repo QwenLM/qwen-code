@@ -16,6 +16,20 @@ import { binaryPath } from './constants.js';
 export const DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_COMPUTER_USE_IDLE_TIMEOUT_MS = 2_147_483_647;
 
+export function computerUseMcpEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const childEnv = Object.fromEntries(
+    Object.entries(env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  delete childEnv['CUA_DRIVER_RS_COORDINATE_SPACE'];
+  delete childEnv['CUA_DRIVER_RS_COORDINATE_SCALE'];
+  childEnv['MCP_MODEL_PAYLOAD_FILTER'] = '1';
+  return childEnv;
+}
+
 /**
  * Singleton stdio MCP client for the cua-driver binary.
  *
@@ -58,6 +72,7 @@ export class ComputerUseClient {
   private client: Client | undefined;
   private startPromise: Promise<void> | undefined;
   private activeCalls = 0;
+  private recordingActive = false;
   private idleStopTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: ComputerUseClientOptions) {
@@ -145,8 +160,9 @@ export class ComputerUseClient {
     const transport = new StdioClientTransport({
       command: this.binary,
       args: ['mcp'],
-      // Inherit env so HTTPS_PROXY / cua-driver config env flow through.
-      env: { ...process.env } as Record<string, string>,
+      // The checked-in Qwen schemas use absolute pixels. Strip coordinate-mode
+      // overrides so the runtime contract cannot drift from those schemas.
+      env: computerUseMcpEnv(),
     });
     const client = new Client(
       { name: 'qwen-code-computer-use', version: '1.0.0' },
@@ -175,10 +191,18 @@ export class ComputerUseClient {
   ): Promise<void> {
     if (this.maxImageDimension === undefined) return;
     try {
-      await client.callTool({
+      const result = (await client.callTool({
         name: 'set_config',
         arguments: { max_image_dimension: this.maxImageDimension },
-      });
+      })) as CallToolResult;
+      if (result.isError) {
+        throw new Error(
+          result.content
+            .map((block) => (block.type === 'text' ? block.text : ''))
+            .filter(Boolean)
+            .join('\n') || 'set_config returned isError=true',
+        );
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       progress(
@@ -215,16 +239,18 @@ export class ComputerUseClient {
     this.clearIdleStopTimer();
     try {
       try {
-        return (await this.client.callTool({
+        const result = (await this.client.callTool({
           name,
           arguments: args,
         })) as CallToolResult;
+        this.trackRecordingLifecycle(name, result);
+        return result;
       } catch (err) {
         if (!isTransportClosedError(err)) throw err;
         // The connection died. Two recoverable causes, both fixed by respawning
         // the proxy (which relaunches the cua-driver daemon):
         //   1. stdio "Connection closed" — the `cua-driver mcp` child was killed.
-        //   2. "daemon transport error … Connection refused" — the CuaDriver
+        //   2. "daemon transport error … Connection refused" — the QwenCuaDriver
         //      DAEMON behind the proxy restarted. macOS forces a restart right
         //      after the Screen Recording grant, so the proxy's Unix socket to
         //      the daemon goes dead and every subsequent tool fails. This is the
@@ -242,10 +268,12 @@ export class ComputerUseClient {
             throw new Error('ComputerUseClient reconnect failed');
           }
           try {
-            return (await this.client.callTool({
+            const result = (await this.client.callTool({
               name,
               arguments: args,
             })) as CallToolResult;
+            this.trackRecordingLifecycle(name, result);
+            return result;
           } catch (retryErr) {
             if (!isTransportClosedError(retryErr)) throw retryErr;
             lastErr = retryErr;
@@ -264,6 +292,7 @@ export class ComputerUseClient {
   /** Tear down the child process. Safe to call multiple times. */
   async stop(): Promise<void> {
     this.clearIdleStopTimer();
+    this.recordingActive = false;
     const client = this.client;
     this.client = undefined;
     if (client) {
@@ -277,7 +306,12 @@ export class ComputerUseClient {
 
   private scheduleIdleStop(): void {
     this.clearIdleStopTimer();
-    if (!this.client || this.activeCalls > 0 || this.idleTimeoutMs <= 0) {
+    if (
+      !this.client ||
+      this.activeCalls > 0 ||
+      this.recordingActive ||
+      this.idleTimeoutMs <= 0
+    ) {
       return;
     }
 
@@ -294,6 +328,20 @@ export class ComputerUseClient {
     clearTimeout(this.idleStopTimer);
     this.idleStopTimer = undefined;
   }
+
+  private trackRecordingLifecycle(name: string, result: CallToolResult): void {
+    if (name === 'stop_recording') {
+      // The driver disables recording before surfacing video-finalization
+      // errors, so clear the flag even on isError — otherwise the idle
+      // timer never re-arms.
+      this.recordingActive = false;
+      return;
+    }
+    if (result.isError) return;
+    if (name === 'start_recording') {
+      this.recordingActive = true;
+    }
+  }
 }
 
 function normalizeIdleTimeoutMs(value: number | undefined): number {
@@ -309,7 +357,7 @@ function normalizeIdleTimeoutMs(value: number | undefined): number {
 /**
  * Returns true when `err` indicates a recoverable connection failure — either
  * the stdio transport to the `cua-driver mcp` proxy closed, OR the proxy's
- * Unix-socket link to the CuaDriver daemon died (daemon restart). Both are
+ * Unix-socket link to the QwenCuaDriver daemon died (daemon restart). Both are
  * fixed by respawning the proxy. Observed SDK / cua-driver messages:
  *
  *   "Connection closed"            – StdioClientTransport stream closed

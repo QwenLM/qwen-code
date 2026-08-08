@@ -26,35 +26,35 @@ describe('install-state', () => {
 
   it('round-trips state', async () => {
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'cua-driver-rs@0.5.2',
+      approvedPackageSpec: 'cua-driver-rs@0.17.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
     const loaded = await loadInstallState(tmpHome);
     expect(loaded).toEqual({
-      approvedPackageSpec: 'cua-driver-rs@0.5.2',
+      approvedPackageSpec: 'cua-driver-rs@0.17.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
   });
 
   it('isPackageSpecApproved returns false when no state', async () => {
-    expect(await isPackageSpecApproved(tmpHome, 'cua-driver-rs@0.5.2')).toBe(
+    expect(await isPackageSpecApproved(tmpHome, 'cua-driver-rs@0.17.0')).toBe(
       false,
     );
   });
 
   it('isPackageSpecApproved returns true on exact match', async () => {
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'cua-driver-rs@0.5.2',
+      approvedPackageSpec: 'cua-driver-rs@0.17.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
-    expect(await isPackageSpecApproved(tmpHome, 'cua-driver-rs@0.5.2')).toBe(
+    expect(await isPackageSpecApproved(tmpHome, 'cua-driver-rs@0.17.0')).toBe(
       true,
     );
   });
 
   it('isPackageSpecApproved returns false when version differs', async () => {
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'cua-driver-rs@0.5.2',
+      approvedPackageSpec: 'cua-driver-rs@0.17.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
     expect(await isPackageSpecApproved(tmpHome, 'cua-driver-rs@0.6.0')).toBe(

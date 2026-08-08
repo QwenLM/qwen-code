@@ -27,9 +27,10 @@ fn def() -> &'static ToolDef {
             max_image_dimension take effect immediately. The \
             experimental_pip keys are persisted to ~/.cua-driver/config.json and \
             take effect on the next daemon restart (the PiP backend is \
-            initialised once at startup).\n\nNote: capture_mode is a per-call \
-            param (on get_window_state / click), not a stored setting. Capture \
-            scope is selected by start_session, not set_config.".into(),
+            initialised once at startup).\n\nNote: capture_mode is no longer a \
+            setting; get_window_state accepts it only as a deprecated, ignored \
+            parameter. Capture scope is selected by start_session, not \
+            set_config.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

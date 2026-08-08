@@ -1,11 +1,37 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   ComputerUseClient,
+  computerUseMcpEnv,
   DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS,
   isTransportClosedError,
   MAX_COMPUTER_USE_IDLE_TIMEOUT_MS,
 } from './client.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+
+const sdkMocks = vi.hoisted(() => ({
+  transportOptions: vi.fn(),
+  connect: vi.fn().mockResolvedValue(undefined),
+  close: vi.fn().mockResolvedValue(undefined),
+  callTool: vi.fn(),
+  listTools: vi.fn(),
+}));
+
+vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+  StdioClientTransport: class {
+    constructor(options: unknown) {
+      sdkMocks.transportOptions(options);
+    }
+  },
+}));
+
+vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
+  Client: class {
+    connect = sdkMocks.connect;
+    close = sdkMocks.close;
+    callTool = sdkMocks.callTool;
+    listTools = sdkMocks.listTools;
+  },
+}));
 
 describe('ComputerUseClient', () => {
   it('is constructible', () => {
@@ -28,6 +54,64 @@ describe('ComputerUseClient', () => {
     const a = ComputerUseClient.shared();
     const b = ComputerUseClient.shared();
     expect(a).toBe(b);
+  });
+
+  it('passes the filtered absolute-coordinate environment to the stdio transport', async () => {
+    const previousSpace = process.env['CUA_DRIVER_RS_COORDINATE_SPACE'];
+    const previousScale = process.env['CUA_DRIVER_RS_COORDINATE_SCALE'];
+    process.env['CUA_DRIVER_RS_COORDINATE_SPACE'] = '1';
+    process.env['CUA_DRIVER_RS_COORDINATE_SCALE'] = '1000';
+    sdkMocks.transportOptions.mockClear();
+    const client = new ComputerUseClient({ binary: '/fake/cua-driver' });
+    try {
+      await client.start();
+      expect(sdkMocks.transportOptions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          // ['mcp'] is the daemon/app path — macOS TCC attributes grants to
+          // com.qwencode.cua-driver. ['mcp', '--direct'] is reserved for the
+          // schema-sync script; flipping this silently breaks that design.
+          args: ['mcp'],
+          env: expect.objectContaining({ MCP_MODEL_PAYLOAD_FILTER: '1' }),
+        }),
+      );
+      const options = sdkMocks.transportOptions.mock.lastCall?.[0] as {
+        env: Record<string, string>;
+      };
+      expect(options.env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SPACE');
+      expect(options.env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SCALE');
+    } finally {
+      await client.stop();
+      if (previousSpace === undefined) {
+        delete process.env['CUA_DRIVER_RS_COORDINATE_SPACE'];
+      } else {
+        process.env['CUA_DRIVER_RS_COORDINATE_SPACE'] = previousSpace;
+      }
+      if (previousScale === undefined) {
+        delete process.env['CUA_DRIVER_RS_COORDINATE_SCALE'];
+      } else {
+        process.env['CUA_DRIVER_RS_COORDINATE_SCALE'] = previousScale;
+      }
+    }
+  });
+});
+
+describe('computerUseMcpEnv', () => {
+  it('enables model payload filtering while preserving unrelated environment', () => {
+    const env = computerUseMcpEnv({ HTTPS_PROXY: 'http://proxy.test' });
+    expect(env['MCP_MODEL_PAYLOAD_FILTER']).toBe('1');
+    expect(env['HTTPS_PROXY']).toBe('http://proxy.test');
+    expect(env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SPACE');
+  });
+
+  it('strips coordinate overrides so Qwen always uses the absolute-coordinate contract', () => {
+    const env = computerUseMcpEnv({
+      CUA_DRIVER_RS_COORDINATE_SPACE: '1',
+      CUA_DRIVER_RS_COORDINATE_SCALE: '1000',
+      OPTIONAL_VALUE: undefined,
+    });
+    expect(env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SPACE');
+    expect(env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SCALE');
+    expect(env).not.toHaveProperty('OPTIONAL_VALUE');
   });
 });
 
@@ -101,6 +185,24 @@ describe('applyRuntimeConfig (set_config on connect)', () => {
     await expect(invokeApply(c, inner, progress)).resolves.toBeUndefined();
     expect(progress).toHaveBeenCalledWith(
       expect.stringContaining('max_image_dimension=800'),
+    );
+  });
+
+  it('treats an MCP isError set_config result as a best-effort failure', async () => {
+    const inner: Inner = {
+      callTool: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'authorization required' }],
+        isError: true,
+      }),
+    };
+    const progress = vi.fn();
+    const c = new ComputerUseClient({
+      binary: '/fake/qwen-cua-driver',
+      maxImageDimension: 800,
+    });
+    await expect(invokeApply(c, inner, progress)).resolves.toBeUndefined();
+    expect(progress).toHaveBeenCalledWith(
+      expect.stringContaining('authorization required'),
     );
   });
 });
@@ -262,6 +364,54 @@ describe('idle shutdown', () => {
     expect(inner.close).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the driver alive while recording and resumes idle shutdown after stop_recording', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner = makeInner();
+    installInner(c, inner);
+
+    await c.callTool('start_recording', { output_dir: '/tmp/recording' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(inner.close).not.toHaveBeenCalled();
+
+    await c.callTool('stop_recording', {});
+    await vi.advanceTimersByTimeAsync(24);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-arms idle shutdown when stop_recording fails (driver disables before erroring)', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner: FakeInner = {
+      callTool: vi
+        .fn()
+        .mockResolvedValueOnce(successResult) // start_recording
+        .mockResolvedValueOnce({
+          // stop_recording: video finalization failed AFTER the driver
+          // already disabled recording (disabled-before-error guarantee).
+          content: [{ type: 'text', text: 'Failed to stop recording: ffmpeg' }],
+          isError: true,
+        }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    installInner(c, inner);
+
+    await c.callTool('start_recording', { output_dir: '/tmp/recording' });
+    await c.callTool('stop_recording', {});
+    await vi.advanceTimersByTimeAsync(24);
+    expect(inner.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
   it.each([NaN, Infinity, -Infinity])(
     'treats %p as invalid and falls back to the default',
     async (value) => {
@@ -320,11 +470,11 @@ describe('isTransportClosedError', () => {
 
   it('matches the daemon-restart error (Screen Recording grant → daemon restart)', () => {
     // The first-use failure mode: after granting Screen Recording, macOS
-    // restarts the CuaDriver daemon; the proxy → daemon Unix socket dies.
+    // restarts the QwenCuaDriver daemon; the proxy → daemon Unix socket dies.
     expect(
       isTransportClosedError(
         new Error(
-          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/cua-driver/cua-driver.sock: Connection refused (os error 61)',
+          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock: Connection refused (os error 61)',
         ),
       ),
     ).toBe(true);
@@ -495,7 +645,7 @@ describe('callTool reconnect path', () => {
     c.behaviors = [
       async () => {
         throw new Error(
-          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/cua-driver/cua-driver.sock: Connection refused (os error 61)',
+          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock: Connection refused (os error 61)',
         );
       },
       async () => successResult,

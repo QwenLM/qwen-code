@@ -3921,6 +3921,38 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
     let mut redacted = args.clone();
     if let Some(arguments) = redacted.as_object_mut() {
         match tool_name {
+            "browser_navigate" => {
+                if arguments.contains_key("url") {
+                    arguments.insert("url".to_owned(), Value::String("[redacted]".to_owned()));
+                }
+            }
+            "browser_type" => {
+                if arguments.contains_key("text") {
+                    arguments.insert("text".to_owned(), Value::String("[redacted]".to_owned()));
+                }
+            }
+            "page" => {
+                for field in ["text", "javascript", "target_url_contains"] {
+                    if arguments.contains_key(field) {
+                        arguments.insert(field.to_owned(), Value::String("[redacted]".to_owned()));
+                    }
+                }
+            }
+            "type_text" => {
+                if arguments.contains_key("text") {
+                    arguments.insert("text".to_owned(), Value::String("[redacted]".to_owned()));
+                }
+            }
+            "set_value" => {
+                if arguments.contains_key("value") {
+                    arguments.insert("value".to_owned(), Value::String("[redacted]".to_owned()));
+                }
+            }
+            "launch_app" => {
+                if arguments.contains_key("urls") {
+                    arguments.insert("urls".to_owned(), Value::String("[redacted]".to_owned()));
+                }
+            }
             "browser_prepare" => {
                 if arguments.contains_key("approval_token") {
                     arguments.insert(
@@ -4082,12 +4114,73 @@ mod capability_tests {
             .get("_cua_browser_download_mcp_host_approved")
             .is_none());
 
-        let serialized = serde_json::json!([dialog, upload, download]).to_string();
+        let navigate = recording_args_for(
+            "browser_navigate",
+            &serde_json::json!({"url": "https://private.example/account?token=secret"}),
+        );
+        assert_eq!(navigate["url"], "[redacted]");
+
+        let typed = recording_args_for(
+            "browser_type",
+            &serde_json::json!({"text": "private browser input"}),
+        );
+        assert_eq!(typed["text"], "[redacted]");
+
+        let page = recording_args_for(
+            "page",
+            &serde_json::json!({
+                "action": "execute_javascript",
+                "text": "private page input",
+                "javascript": "document.body.dataset.secret = 'value'",
+                "target_url_contains": "private.example/session"
+            }),
+        );
+        assert_eq!(page["text"], "[redacted]");
+        assert_eq!(page["javascript"], "[redacted]");
+        assert_eq!(page["target_url_contains"], "[redacted]");
+
+        let desktop_typed = recording_args_for(
+            "type_text",
+            &serde_json::json!({"pid": 42, "text": "private desktop input"}),
+        );
+        assert_eq!(desktop_typed["text"], "[redacted]");
+
+        let value_written = recording_args_for(
+            "set_value",
+            &serde_json::json!({"pid": 42, "element_index": 3, "value": "private field value"}),
+        );
+        assert_eq!(value_written["value"], "[redacted]");
+
+        let launched = recording_args_for(
+            "launch_app",
+            &serde_json::json!({"bundle_id": "com.apple.Finder", "urls": ["/private/folder"]}),
+        );
+        assert_eq!(launched["urls"], "[redacted]");
+
+        let serialized = serde_json::json!([
+            dialog,
+            upload,
+            download,
+            navigate,
+            typed,
+            page,
+            desktop_typed,
+            value_written,
+            launched
+        ])
+        .to_string();
         for forbidden in [
             "private reply",
             "/private/one",
             "/private/two",
             "/private/destination",
+            "private.example",
+            "private browser input",
+            "private page input",
+            "dataset.secret",
+            "private desktop input",
+            "private field value",
+            "/private/folder",
         ] {
             assert!(
                 !serialized.contains(forbidden),

@@ -59,7 +59,7 @@ export const ToolNames = {
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
   // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
-  // Their full 35-tool surface is generated into computer-use/schemas.ts and
+  // Their full 54-tool surface is generated into computer-use/schemas.ts and
   // registered via computer-use/index.ts (cast to ToolName). Duplicating a
   // subset here only goes stale on every cua-driver version bump — review
   // round 1 removed the old ocu-era 9-name list, which still carried

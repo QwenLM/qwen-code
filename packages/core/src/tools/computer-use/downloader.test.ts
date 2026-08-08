@@ -25,13 +25,13 @@ import { binaryPath, CUA_DRIVER_VERSION } from './constants.js';
 describe('parseChecksums', () => {
   it('parses sha256sum lines into a filename -> hash map', () => {
     const body = [
-      'a'.repeat(64) + '  cua-driver-rs-0.5.2-darwin-arm64.tar.gz',
-      'b'.repeat(64) + '  cua-driver-rs-0.5.2-linux-x86_64.tar.gz',
+      'a'.repeat(64) + '  cua-driver-rs-0.17.0-darwin-arm64.tar.gz',
+      'b'.repeat(64) + '  cua-driver-rs-0.17.0-linux-x86_64.tar.gz',
       '# a comment line',
       '',
     ].join('\n');
     const map = parseChecksums(body);
-    expect(map.get('cua-driver-rs-0.5.2-darwin-arm64.tar.gz')).toBe(
+    expect(map.get('cua-driver-rs-0.17.0-darwin-arm64.tar.gz')).toBe(
       'a'.repeat(64),
     );
     expect(map.size).toBe(2);
@@ -94,7 +94,7 @@ describe('ensureInstalled on Windows (.zip extraction)', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('downloads + verifies + unzips, resolving cua-driver.exe under the wrapper dir', async () => {
+  it('downloads + verifies + unzips, resolving qwen-cua-driver.exe under the wrapper dir', async () => {
     const asset = `cua-driver-rs-${CUA_DRIVER_VERSION}-windows-x86_64.zip`;
     const zipBytes = Buffer.from('PK fake-zip-payload');
     const sha = createHash('sha256').update(zipBytes).digest('hex');
@@ -116,7 +116,7 @@ describe('ensureInstalled on Windows (.zip extraction)', () => {
         `cua-driver-rs-${CUA_DRIVER_VERSION}-windows-x86_64`,
       );
       mkdirSync(wrapper, { recursive: true });
-      writeFileSync(join(wrapper, 'cua-driver.exe'), 'MZ');
+      writeFileSync(join(wrapper, 'qwen-cua-driver.exe'), 'MZ');
     };
 
     const result = await ensureInstalled({

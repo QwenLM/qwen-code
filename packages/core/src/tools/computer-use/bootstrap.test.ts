@@ -9,13 +9,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  daemonCleanupTargets,
   runBootstrap,
   parsePermissionsStatus,
+  startStatusDaemonProcess,
   type BootstrapDeps,
   type StatusDaemon,
 } from './bootstrap.js';
+import { approvalKey } from './constants.js';
 
-const KEY = 'cua-driver-rs@0.5.2';
+const KEY = approvalKey();
 
 function makeFakeClient() {
   const start = vi.fn(async () => {});
@@ -41,7 +44,7 @@ describe('runBootstrap', () => {
       approvalKey: KEY,
       platform: 'darwin',
       promptInstallApproval: vi.fn(async () => true),
-      install: vi.fn(async () => '/fake/cua-driver'),
+      install: vi.fn(async () => '/fake/qwen-cua-driver'),
       startStatusDaemon: vi.fn(() => daemon),
       probePermissions: vi.fn(async () => 'ok' as const),
       openPermissionPane: vi.fn(),
@@ -234,8 +237,59 @@ describe('runBootstrap', () => {
     expect(deps.startStatusDaemon).not.toHaveBeenCalled();
     // The warm-client short-circuit must precede the install step: a started
     // client implies the binary is present, so the downloader must NOT run
-    // (otherwise unit tests trigger a real ~20MB download). (review round 1)
+    // (otherwise unit tests trigger a real platform-bundle download).
     expect(deps.install).not.toHaveBeenCalled();
+  });
+});
+
+describe('daemonCleanupTargets', () => {
+  // Exact patterns (incl. the trailing ` serve` that keeps `pkill -f` from
+  // matching the `qwen-cua-driver mcp` stdio proxy) and join()-built socket
+  // fragments (path separators are platform-specific on Windows).
+  it('covers current and legacy daemon identities without touching installed apps', () => {
+    const targets = daemonCleanupTargets('/Users/tester');
+    expect(targets.processPatterns).toEqual(
+      expect.arrayContaining([
+        'QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver serve',
+        'CuaDriver.app/Contents/MacOS/cua-driver serve',
+      ]),
+    );
+    expect(targets.socketPaths).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          join('qwen-cua-driver', 'qwen-cua-driver.sock'),
+        ),
+        expect.stringContaining(join('cua-driver', 'cua-driver.sock')),
+      ]),
+    );
+  });
+});
+
+// Mock child_process for the real process-launch helpers (the runBootstrap
+// tests above inject fakes via BootstrapDeps and never reach these).
+vi.mock('node:child_process', () => ({
+  spawnSync: vi.fn(),
+  execFile: vi.fn(),
+}));
+
+describe('startStatusDaemonProcess', () => {
+  it('launches the status daemon through the QwenCuaDriver app identity', async () => {
+    const { spawnSync } = await import('node:child_process');
+    startStatusDaemonProcess();
+
+    const openCall = vi
+      .mocked(spawnSync)
+      .mock.calls.find((call) => call[0] === 'open');
+    expect(openCall).toBeDefined();
+    expect(openCall?.[1]).toEqual([
+      '-n',
+      '-g',
+      '-a',
+      'QwenCuaDriver',
+      '--args',
+      'serve',
+      '--no-permissions-gate',
+    ]);
   });
 });
 

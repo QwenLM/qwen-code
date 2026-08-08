@@ -45,9 +45,12 @@ impl Tool for StartRecordingTool {
     fn def(&self) -> &ToolDef {
         START_REC_DEF.get_or_init(|| ToolDef {
             name: "start_recording".into(),
-            description: "Start trajectory recording. Every subsequent action-tool \
-                invocation (click, right_click, scroll, type_text, press_key, hotkey, \
-                set_value) writes a turn folder under `output_dir`:\n\n\
+            description: "Start trajectory recording. Every subsequent non-read-only tool \
+                invocation, except recording controls and replay_trajectory, writes a turn \
+                folder under `output_dir`. Sensitive browser URLs, typed text, page scripts, \
+                clipboard content, file paths, and approval tokens are redacted from \
+                action.json (turns carrying redacted values are lossy: replay re-dispatches \
+                the literal `[redacted]` placeholder, not the original value):\n\n\
                 - `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI \
                   state immediately before and after the action.\n\
                 - `before.png` / `after.png` — target-window screenshots immediately \
@@ -56,7 +59,7 @@ impl Tool for StartRecordingTool {
                   expected artifact could not be captured.\n\
                 - `app_state.json` — post-action AX/UIA snapshot for the target pid.\n\
                 - `screenshot.png` — compatibility alias of `after.png`.\n\
-                - `action.json` — tool name, full input arguments, result summary, \
+                - `action.json` — tool name, redacted input arguments, result summary, \
                   result-error flag, pid, click point (when applicable), ISO-8601 \
                   timestamp.\n\
                 - `click.png` — for dispatched click-family actions only, `before.png` \
@@ -66,8 +69,7 @@ impl Tool for StartRecordingTool {
                 numbering restarts at 1 each time recording is (re-)started.\n\n\
                 **Video is off by default.** Pass `record_video: true` to also \
                 capture the main display to `<output_dir>/recording.mp4` (H.264 / \
-                30 fps) for the lifetime of the session. The recording is torn \
-                down automatically when the MCP client disconnects.\n\n\
+                30 fps) for the lifetime of the session.\n\n\
                 **macOS uses native ScreenCaptureKit** (daemon-owned SCStream + \
                 SCRecordingOutput) so video inherits the daemon's Screen \
                 Recording grant — no extra TCC prompt, no ffmpeg subprocess. \
@@ -78,9 +80,11 @@ impl Tool for StartRecordingTool {
                 fails on startup the per-turn capture (screenshots + \
                 action.json) still runs and the session's `last_error` field \
                 carries the diagnostic.\n\n\
-                State persists for the life of the daemon; a restart \
-                resets to disabled with no on-disk state. Call `stop_recording` to \
-                disable + finalize the mp4."
+                Recording remains active until its owning MCP client disconnects, \
+                `stop_recording` or `end_session` for its owning session ends it, or the \
+                daemon restarts. A \
+                daemon restart resets recording to disabled without deleting files \
+                already written."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -309,6 +313,14 @@ impl Tool for ReplayTrajectoryTool {
                   `stop_on_error` is true.\n\
                 - `get_window_state` and other read-only tools are NOT currently recorded, \
                   so replays do not re-populate the per-(pid, window_id) element cache.\n\
+                - Turns whose recorded arguments carry `[redacted]` values (browser URLs, \
+                  typed text, file paths, approval tokens) replay the placeholder literally \
+                  — e.g. `browser_type` types the string `[redacted]` — and cannot reproduce \
+                  the original action.\n\
+                - Browser actions bound via `get_browser_state` target/tab ids do not replay \
+                  in a new session: the binding call is read-only and not recorded, and stale \
+                  ids refuse with `browser_binding_stale`. Re-run `get_browser_state` and \
+                  remap ids first.\n\
                 - If recording is ENABLED while replay runs, the replay itself is recorded \
                   into the currently configured output directory.  That's deliberate: \
                   recording a replay against a new build and diffing the two trajectories \
