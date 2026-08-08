@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import process from 'node:process';
-import { useCallback, useContext, useMemo, useState } from 'react';
+import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   AuthType,
@@ -17,6 +17,7 @@ import {
   parseVisionModelSetting,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
+  type Config,
   type ContentGeneratorConfig,
   type InputModalities,
 } from '@qwen-code/qwen-code-core';
@@ -33,6 +34,7 @@ import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
 } from '../voice/voice-model.js';
+import type { HistoryItemWithoutId } from '../types.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -204,6 +206,7 @@ function hydrateApiKeyEnvFromSettings(
 }
 
 interface HandleModelSwitchSuccessParams {
+  config: Config;
   settings: ReturnType<typeof useSettings>;
   uiState: UIState | null;
   after: ContentGeneratorConfig | undefined;
@@ -215,6 +218,7 @@ interface HandleModelSwitchSuccessParams {
 }
 
 function handleModelSwitchSuccess({
+  config,
   settings,
   uiState,
   after,
@@ -242,20 +246,23 @@ function handleModelSwitchSuccess({
       : persistScope === 'user'
         ? t(' (global)')
         : '';
-  uiState?.historyManager.addItem(
-    {
-      type: 'info',
-      text:
-        `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-        `\n` +
-        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-        `\n` +
-        `Base URL: ${baseUrl}` +
-        `\n` +
-        `API key: ${maskedKey}`,
-    },
-    Date.now(),
-  );
+  const feedbackItem = {
+    type: 'info' as const,
+    text:
+      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+      `\n` +
+      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+      `\n` +
+      `Base URL: ${baseUrl}` +
+      `\n` +
+      `API key: ${maskedKey}`,
+  };
+  uiState?.historyManager.addItem(feedbackItem, Date.now());
+  config.getChatRecordingService?.()?.recordSlashCommand({
+    phase: 'result',
+    rawCommand: '/model',
+    outputHistoryItems: [feedbackItem],
+  });
 }
 
 function formatContextWindow(size?: number): string {
@@ -520,16 +527,17 @@ export function ModelDialog({
         : isImageModelMode && parsedImageModelSetting
           ? parsedImageModelSetting.modelId
           : config?.getModel() || MAINLINE_CODER_MODEL;
-  // Check if current model is a runtime model
-  // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
-  const activeRuntimeSnapshot =
+  const isAuxiliaryModelMode =
     isFastModelMode ||
     isVoiceModelMode ||
     isVisionModelMode ||
     isCompactionModelMode ||
-    isImageModelMode
-      ? undefined
-      : config?.getActiveRuntimeModelSnapshot?.();
+    isImageModelMode;
+  // Check if current model is a runtime model
+  // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
+  const activeRuntimeSnapshot = isAuxiliaryModelMode
+    ? undefined
+    : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()
     .getGenerationConfig()?.baseUrl;
@@ -656,18 +664,55 @@ export function ModelDialog({
                   )
                 : '';
 
+  // Escape can arrive twice in one stdin chunk before the parent unmounts
+  // the dialog; latch so the close feedback and onClose fire only once.
+  const closeLatchRef = useRef(false);
+  const selectionInFlightRef = useRef(false);
+  const reportAuxiliaryModelSelection = useCallback(
+    (feedbackItem: HistoryItemWithoutId & Record<string, unknown>) => {
+      uiState?.historyManager.addItem(feedbackItem, Date.now());
+      config?.getChatRecordingService?.()?.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [feedbackItem],
+      });
+    },
+    [config, uiState],
+  );
+  const closeWithoutSelection = useCallback(() => {
+    if (closeLatchRef.current || selectionInFlightRef.current) return;
+    closeLatchRef.current = true;
+    if (!isAuxiliaryModelMode) {
+      const feedbackItem = {
+        type: 'info' as const,
+        text: t('Kept model as {{model}}', {
+          model: activeRuntimeSnapshot?.modelId ?? preferredModelId,
+        }),
+      };
+      uiState?.historyManager.addItem(feedbackItem, Date.now());
+      config?.getChatRecordingService?.()?.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [feedbackItem],
+      });
+    }
+    onClose();
+  }, [
+    activeRuntimeSnapshot,
+    config,
+    isAuxiliaryModelMode,
+    onClose,
+    preferredModelId,
+    uiState,
+  ]);
+
   useKeypress(
     (key) => {
       if (
         key.name === 'escape' ||
-        (key.name === 'left' &&
-          (isFastModelMode ||
-            isVoiceModelMode ||
-            isVisionModelMode ||
-            isCompactionModelMode ||
-            isImageModelMode))
+        (key.name === 'left' && isAuxiliaryModelMode)
       ) {
-        onClose();
+        closeWithoutSelection();
       }
     },
     { isActive: true },
@@ -699,6 +744,7 @@ export function ModelDialog({
 
   const handleSelect = useCallback(
     async (selected: string) => {
+      if (selectionInFlightRef.current) return;
       setErrorMessage(null);
       const selectedEntry = availableModelEntries.find(
         ({ authType: t2, model, isRuntime, snapshotId }) => {
@@ -743,13 +789,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -770,13 +813,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -817,13 +857,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Vision Model')}: ${visionModelDisplay}${scopeSuffix}${visionWarning}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Vision Model')}: ${visionModelDisplay}${scopeSuffix}${visionWarning}`,
+        });
         onClose();
         return;
       }
@@ -845,13 +882,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -882,13 +916,10 @@ export function ModelDialog({
             : persistScope === 'user'
               ? t(' (global)')
               : '';
-        uiState?.historyManager.addItem(
-          {
-            type: 'success',
-            text: `${t('Image Model')}: ${imageModelDisplay}${scopeSuffix}`,
-          },
-          Date.now(),
-        );
+        reportAuxiliaryModelSelection({
+          type: 'success',
+          text: `${t('Image Model')}: ${imageModelDisplay}${scopeSuffix}`,
+        });
         onClose();
         return;
       }
@@ -948,13 +979,18 @@ export function ModelDialog({
           selectedBaseUrl = parsed.baseUrl;
         }
 
-        await config.switchModel(selectedAuthType, modelId, {
-          ...(selectedAuthType !== authType &&
-          selectedAuthType === AuthType.QWEN_OAUTH
-            ? { requireCachedCredentials: true }
-            : {}),
-          baseUrl: selectedBaseUrl,
-        });
+        selectionInFlightRef.current = true;
+        try {
+          await config.switchModel(selectedAuthType, modelId, {
+            ...(selectedAuthType !== authType &&
+            selectedAuthType === AuthType.QWEN_OAUTH
+              ? { requireCachedCredentials: true }
+              : {}),
+            baseUrl: selectedBaseUrl,
+          });
+        } finally {
+          selectionInFlightRef.current = false;
+        }
 
         if (!isRuntime) {
           const event = new ModelSlashCommandEvent(modelId);
@@ -981,6 +1017,7 @@ export function ModelDialog({
       }
 
       handleModelSwitchSuccess({
+        config,
         settings,
         uiState,
         after,
@@ -998,6 +1035,7 @@ export function ModelDialog({
         isRuntime,
         persistScope,
       });
+      closeLatchRef.current = true;
       onClose();
     },
     [
@@ -1014,6 +1052,7 @@ export function ModelDialog({
       isImageModelMode,
       availableModelEntries,
       persistScope,
+      reportAuxiliaryModelSelection,
     ],
   );
 

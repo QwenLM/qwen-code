@@ -60,6 +60,8 @@ const renderComponent = (
     ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
+  const recordSlashCommand = vi.fn();
+
   const mockConfig = {
     // --- Functions used by ModelDialog ---
     getModel: vi.fn(() => DEFAULT_QWEN_MODEL),
@@ -78,6 +80,7 @@ const renderComponent = (
       getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
     })),
     getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+    getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
 
     // --- Functions used by ClearcutLogger ---
     getUsageStatisticsEnabled: vi.fn(() => true),
@@ -118,6 +121,7 @@ const renderComponent = (
     mockConfig,
     mockSettings,
     mockHistoryManager,
+    recordSlashCommand,
   };
 };
 
@@ -688,27 +692,30 @@ describe('<ModelDialog />', () => {
 
   it('stores authType-qualified selectors in fast model mode', async () => {
     const setFastModel = vi.fn();
-    const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {
-      getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
-      getModel: vi.fn(() => 'claude-opus-4-7'),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'deepseek-v4-flash',
-          label: 'deepseek-v4-flash',
-          authType: AuthType.USE_OPENAI,
-        },
-        {
-          id: 'claude-opus-4-7',
-          label: 'claude-opus-4-7',
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
+      { isFastModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+        getModel: vi.fn(() => 'claude-opus-4-7'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'deepseek-v4-flash',
+            label: 'deepseek-v4-flash',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4-7',
+            label: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
           authType: AuthType.USE_ANTHROPIC,
-        },
-      ]),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.USE_ANTHROPIC,
-        model: 'claude-opus-4-7',
-      })),
-      setFastModel,
-    } as unknown as Partial<Config>);
+          model: 'claude-opus-4-7',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     await childOnSelect(`${AuthType.USE_OPENAI}::deepseek-v4-flash`);
@@ -719,13 +726,20 @@ describe('<ModelDialog />', () => {
       'openai:deepseek-v4-flash',
     );
     expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Fast Model: openai:deepseek-v4-flash' },
+      ],
+    });
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
   it('stores authType-qualified selectors in vision model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isVisionModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
@@ -762,6 +776,13 @@ describe('<ModelDialog />', () => {
       'openai:qwen-vl-max',
     );
     expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Vision Model: openai:qwen-vl-max' },
+      ],
+    });
     expect(switchModel).not.toHaveBeenCalled();
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
       SettingScope.User,
@@ -774,7 +795,7 @@ describe('<ModelDialog />', () => {
   it('stores compaction model selector without switching models', async () => {
     const switchModel = vi.fn();
     const setCompactionModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isCompactionModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
@@ -811,6 +832,16 @@ describe('<ModelDialog />', () => {
       'openai:compaction-model',
     );
     expect(setCompactionModel).toHaveBeenCalledWith('openai:compaction-model');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        {
+          type: 'success',
+          text: 'Compaction Model: openai:compaction-model',
+        },
+      ],
+    });
     expect(switchModel).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
@@ -819,9 +850,8 @@ describe('<ModelDialog />', () => {
     const setImageModel = vi.fn().mockResolvedValue(undefined);
     const baseUrl = 'https://images.example.com/api/v1';
     const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
-    const { props, mockSettings, getByText } = renderComponent(
-      { isImageModelMode: true },
-      {
+    const { props, mockSettings, getByText, recordSlashCommand } =
+      renderComponent({ isImageModelMode: true }, {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
         getAllConfiguredModels: vi.fn(() => [
           {
@@ -855,8 +885,7 @@ describe('<ModelDialog />', () => {
             : undefined,
         ),
         setImageModel,
-      } as unknown as Partial<Config>,
-    );
+      } as unknown as Partial<Config>);
 
     expect(getByText('Select Image Model')).toBeDefined();
     const selectProps = mockedSelect.mock.calls[0][0];
@@ -871,6 +900,13 @@ describe('<ModelDialog />', () => {
       persisted,
     );
     expect(setImageModel).toHaveBeenCalledWith(persisted);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Image Model: openai:qwen-image-2.0' },
+      ],
+    });
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -968,7 +1004,7 @@ describe('<ModelDialog />', () => {
   it('stores the plain model id in voice model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setFastModel = vi.fn();
-    const { props, mockSettings } = renderComponent(
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
       { isVoiceModelMode: true },
       {
         getAuthType: vi.fn(() => AuthType.USE_OPENAI),
@@ -1005,6 +1041,13 @@ describe('<ModelDialog />', () => {
     );
     expect(switchModel).not.toHaveBeenCalled();
     expect(setFastModel).not.toHaveBeenCalled();
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Voice Model: qwen3-asr-flash' },
+      ],
+    });
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
@@ -1254,8 +1297,8 @@ describe('<ModelDialog />', () => {
     expect(typeof childOnHighlight).toBe('function');
   });
 
-  it('calls onClose prop when "escape" key is pressed', () => {
-    const { props } = renderComponent();
+  it('reports the unchanged model when "escape" closes the primary picker', () => {
+    const { props, mockHistoryManager } = renderComponent();
 
     expect(mockedUseKeypress).toHaveBeenCalled();
 
@@ -1272,6 +1315,25 @@ describe('<ModelDialog />', () => {
       paste: false,
       sequence: '',
     });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: `Kept model as ${DEFAULT_QWEN_MODEL}`,
+      },
+      expect.any(Number),
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+
+    // A second Escape byte in the same stdin chunk must not double-report.
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
     expect(props.onClose).toHaveBeenCalledTimes(1);
 
     keyPressHandler({
@@ -1282,7 +1344,319 @@ describe('<ModelDialog />', () => {
       paste: false,
       sequence: '',
     });
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('records dismissal feedback for resumed history', () => {
+    const recordSlashCommand = vi.fn();
+    const { mockHistoryManager } = renderComponent({}, {
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'info', text: `Kept model as ${DEFAULT_QWEN_MODEL}` },
+      ],
+    });
+  });
+
+  it('does not close the primary picker on "left"', () => {
+    const { props, mockHistoryManager } = renderComponent();
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'left',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ isFastModelMode: true }, 'escape'],
+    [{ isVoiceModelMode: true }, 'escape'],
+    [{ isVisionModelMode: true }, 'escape'],
+    [{ isCompactionModelMode: true }, 'escape'],
+    [{ isImageModelMode: true }, 'escape'],
+    [{ isFastModelMode: true }, 'left'],
+    [{ isVoiceModelMode: true }, 'left'],
+    [{ isVisionModelMode: true }, 'left'],
+    [{ isCompactionModelMode: true }, 'left'],
+    [{ isImageModelMode: true }, 'left'],
+  ])(
+    'does not report the primary model when closing an auxiliary picker (%j, %s)',
+    (modeProps, keyName) => {
+      const { props, mockHistoryManager } = renderComponent(modeProps);
+
+      const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+      keyPressHandler({
+        name: keyName,
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+      });
+
+      expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('reports the active runtime model when closing the primary picker', () => {
+    const { mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'configured-model'),
+      getActiveRuntimeModelSnapshot: vi.fn(() => ({
+        id: '$runtime|qwen-oauth|runtime-model',
+        authType: AuthType.QWEN_OAUTH,
+        modelId: 'runtime-model',
+      })),
+    } as unknown as Partial<Config>);
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      { type: 'info', text: 'Kept model as runtime-model' },
+      expect.any(Number),
+    );
+  });
+
+  it('does not report the unchanged model when a selection is made', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Kept model as'),
+      }),
+      expect.any(Number),
+    );
+
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('records successful model-switch feedback for resumed history', async () => {
+    const recordSlashCommand = vi.fn();
+    const { mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
+    } as unknown as Partial<Config>);
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect(
+        `${AuthType.USE_OPENAI}::gpt-4`,
+      );
+    });
+
+    const feedbackItem = vi.mocked(mockHistoryManager.addItem).mock.calls[0][0];
+    expect(feedbackItem.text).toContain('Using model: gpt-4');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [feedbackItem],
+    });
+  });
+
+  it('remains dismissible after a failed model switch', async () => {
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel: vi.fn().mockRejectedValue(new Error('network down')),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+    } as unknown as Partial<Config>);
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect(
+        `${AuthType.USE_OPENAI}::gpt-4`,
+      );
+    });
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    mockedUseKeypress.mock.calls[0][0]({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      { type: 'info', text: 'Kept model as gpt-4' },
+      expect.any(Number),
+    );
+  });
+
+  it('ignores escape while a model selection is in flight', async () => {
+    let resolveSwitch: (() => void) | undefined;
+    const switchModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const { props, mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const selection = mockedSelect.mock.calls[0][0].onSelect(
+      `${AuthType.USE_OPENAI}::gpt-4`,
+    );
+    const keyPressHandler = mockedUseKeypress.mock.calls[0][0];
+    keyPressHandler({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Kept model as'),
+      }),
+      expect.any(Number),
+    );
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    resolveSwitch?.();
+    await selection;
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a second selection while a model switch is in flight', async () => {
+    let resolveSwitch: (() => void) | undefined;
+    const switchModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const { props, mockHistoryManager, recordSlashCommand } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            description: 'GPT-4 model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+        })),
+      } as unknown as Partial<Config>,
+    );
+
+    const onSelect = mockedSelect.mock.calls[0][0].onSelect;
+    const firstSelection = onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+    await onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+
+    resolveSwitch?.();
+    await firstSelection;
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
   });
 
   it('updates initialIndex when config context changes', () => {
