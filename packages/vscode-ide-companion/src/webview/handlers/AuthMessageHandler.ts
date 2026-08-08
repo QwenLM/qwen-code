@@ -353,7 +353,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     // Step 3: Model selection (if needed)
     let modelIds: string[];
     if (shouldShowStep(provider, 'models')) {
-      const defaults = getDefaultModelIds(provider);
+      const defaults = getDefaultModelIds(provider, baseUrl);
       const modelInput = await this.input({
         title: `${flowTitle}: Models`,
         prompt: 'Enter model IDs (comma-separated)',
@@ -376,7 +376,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         return;
       }
     } else {
-      modelIds = getDefaultModelIds(provider);
+      modelIds = getDefaultModelIds(provider, baseUrl);
     }
 
     // Step 4: Advanced config (if needed)

@@ -153,17 +153,18 @@ function buildModelConfigs(
 ): ProviderModelConfig[] {
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
+  const providerModels = resolveProviderModels(config, inputs.baseUrl);
 
   let models: ProviderModelConfig[];
 
   // Fixed ModelSpec[] (not editable) — use specs directly
-  if (config.models && !config.modelsEditable) {
-    models = config.models.map((spec) =>
+  if (providerModels && !config.modelsEditable) {
+    models = providerModels.map((spec) =>
       specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
     );
-  } else if (config.models && config.modelsEditable) {
+  } else if (providerModels && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
-    const specMap = new Map(config.models.map((s) => [s.id, s]));
+    const specMap = new Map(providerModels.map((s) => [s.id, s]));
     models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id);
       if (spec) {
@@ -202,10 +203,15 @@ function buildModelConfigs(
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the provider's metadata key (same as `config.id`).
+ * Returns the provider's metadata key. Multi-endpoint providers that merge
+ * models by identity use a stable endpoint suffix so each installed endpoint
+ * can track its model-list version independently.
  * Only defined for providers with a static `models` list.
  */
-export function resolveMetadataKey(config: ProviderConfig): string | undefined {
+export function resolveMetadataKey(
+  config: ProviderConfig,
+  baseUrl?: string,
+): string | undefined {
   if (!config.models) return undefined;
   // setValue uses dotted-path traversal — a provider id containing '.' would
   // be split into multiple nested objects (`providerMetadata.foo.bar` →
@@ -216,6 +222,20 @@ export function resolveMetadataKey(config: ProviderConfig): string | undefined {
     throw new Error(
       `Provider id must not contain '.' (would corrupt providerMetadata.${config.id} dotted writes): ${config.id}`,
     );
+  }
+  if (
+    baseUrl &&
+    config.mergeModelsByIdentity &&
+    Array.isArray(config.baseUrl)
+  ) {
+    const normalizedBaseUrl = normalizeBaseUrlForMatching(baseUrl);
+    const option = config.baseUrl.find(
+      (candidate) =>
+        normalizeBaseUrlForMatching(candidate.url) === normalizedBaseUrl,
+    );
+    if (option) {
+      return `${config.id}--${option.id.replaceAll('.', '%2E')}`;
+    }
   }
   return config.id;
 }
@@ -231,7 +251,7 @@ function resolveProviderState(
   baseUrl: string,
   models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
-  const key = resolveMetadataKey(config);
+  const key = resolveMetadataKey(config, baseUrl);
   if (key) {
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
@@ -252,11 +272,23 @@ export function buildInstallPlan(
   inputs: ProviderSetupInputs,
 ): ProviderInstallPlan {
   const protocol = inputs.protocol ?? config.protocol;
-  const envKey = resolveEnvKey(config, inputs);
-  const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  // Canonicalize the endpoint once so models, modelSelection, and
+  // providerState all persist the provider's own URL. A variant (trailing
+  // slash) would poison the version hash and identity matching downstream.
+  const baseUrl = resolveBaseUrl(config, inputs.baseUrl);
+  const resolvedInputs = { ...inputs, baseUrl };
+  const envKey = resolveEnvKey(config, resolvedInputs);
+  const models =
+    inputs.prebuiltModels ?? buildModelConfigs(config, resolvedInputs);
+  const providerOwnsModel = resolveOwnsModel(config);
+  const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const ownsModel = config.mergeModelsByIdentity
-    ? undefined
-    : resolveOwnsModel(config);
+    ? Array.isArray(config.baseUrl) && providerOwnsModel
+      ? (model: ProviderModelConfig) =>
+          providerOwnsModel(model) &&
+          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint
+      : undefined
+    : providerOwnsModel;
   const firstModel = models[0];
   if (models.length === 0) {
     throw new Error(
@@ -287,7 +319,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState: resolveProviderState(config, baseUrl, models),
   };
 }
 
@@ -346,8 +378,11 @@ export function resolveBaseUrl(
   return selectedBaseUrl ?? '';
 }
 
-function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
-  if (baseUrl === undefined) return '';
+/** Strips trailing slashes so `.../v1` and `.../v1/` compare as one endpoint. */
+export function normalizeBaseUrlForMatching(
+  baseUrl: string | undefined,
+): string {
+  if (typeof baseUrl !== 'string') return '';
   let end = baseUrl.length;
   while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
     end--;
@@ -359,8 +394,27 @@ function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
 // Resolve model IDs from config
 // ---------------------------------------------------------------------------
 
-export function getDefaultModelIds(config: ProviderConfig): string[] {
-  return config.models?.map((s) => s.id) ?? [];
+export function resolveProviderModels(
+  config: ProviderConfig,
+  baseUrl?: string,
+): ModelSpec[] | undefined {
+  if (baseUrl !== undefined && Array.isArray(config.baseUrl)) {
+    const resolvedBaseUrl = resolveBaseUrl(config, baseUrl);
+    const option = config.baseUrl.find(
+      (candidate) =>
+        normalizeBaseUrlForMatching(candidate.url) ===
+        normalizeBaseUrlForMatching(resolvedBaseUrl),
+    );
+    if (option?.models) return option.models;
+  }
+  return config.models;
+}
+
+export function getDefaultModelIds(
+  config: ProviderConfig,
+  baseUrl?: string,
+): string[] {
+  return resolveProviderModels(config, baseUrl)?.map((s) => s.id) ?? [];
 }
 
 function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
@@ -514,6 +568,6 @@ export function buildProviderTemplate(
   return buildModelConfigs(config, {
     baseUrl: resolved,
     apiKey: '',
-    modelIds: getDefaultModelIds(config),
+    modelIds: getDefaultModelIds(config, resolved),
   });
 }

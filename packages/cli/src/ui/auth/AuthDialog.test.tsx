@@ -5,11 +5,19 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AuthDialog } from './AuthDialog.js';
+import {
+  AuthDialog,
+  getExistingProviderSetup,
+  getMaxItemsToShow,
+} from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  customProvider,
+  findProviderById,
+} from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
@@ -85,6 +93,8 @@ const renderAuthDialog = (
   uiActionsOverrides: UIActionsOverrides = {},
   configAuthType: AuthType | undefined = undefined,
   configApiKey: string | undefined = undefined,
+  availableTerminalHeight?: number,
+  initialViewLevel?: 'main' | 'alibaba-select' | 'thirdparty-select',
 ) => {
   const uiState = createMockUIState(uiStateOverrides);
   const uiActions = createMockUIActions(uiActionsOverrides);
@@ -97,12 +107,49 @@ const renderAuthDialog = (
   return renderWithProviders(
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
-        <AuthDialog />
+        <AuthDialog
+          availableTerminalHeight={availableTerminalHeight}
+          initialViewLevel={initialViewLevel}
+        />
       </UIActionsContext.Provider>
     </UIStateContext.Provider>,
     { settings, config: mockConfig },
   );
 };
+
+const createSettings = () =>
+  new LoadedSettings(
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    {
+      settings: {},
+      originalSettings: {},
+      path: '',
+    },
+    {
+      settings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      originalSettings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      path: '',
+    },
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    true,
+    new Set(),
+  );
 
 /**
  * Type text into the terminal one character at a time.
@@ -125,6 +172,18 @@ const escapeRegExp = (text: string) =>
   text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const WAIT_FOR_TIMEOUT = 5000;
+
+describe('getMaxItemsToShow', () => {
+  it('uses pagination only when the available height cannot fit every item', () => {
+    expect(getMaxItemsToShow(24, 4, 7)).toBe(4);
+    expect(getMaxItemsToShow(18, 6, 7)).toBe(2);
+  });
+
+  it('shows every item when the height fits and guards an empty list', () => {
+    expect(getMaxItemsToShow(100, 4, 7)).toBe(4);
+    expect(getMaxItemsToShow(24, 0, 7)).toBe(1);
+  });
+});
 
 const expectSelectedOption = (frame: string | undefined, label: string) => {
   expect(frame).toMatch(
@@ -149,6 +208,7 @@ const pressEnterAndWaitFor = async (
   lastFrame: () => string | undefined,
   expectedText: string,
 ) => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
   stdin.write('\r');
   await vi.waitFor(
     () => {
@@ -156,6 +216,7 @@ const pressEnterAndWaitFor = async (
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
+  await new Promise((resolve) => setTimeout(resolve, 50));
 };
 
 const moveDownAndWaitForSelection = async (
@@ -163,8 +224,10 @@ const moveDownAndWaitForSelection = async (
   lastFrame: () => string | undefined,
   label: string,
 ) => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
   stdin.write('\u001b[B');
   await waitForSelectedOption(lastFrame, label);
+  await new Promise((resolve) => setTimeout(resolve, 50));
 };
 
 const navigateToCustomProtocolSelect = async (
@@ -239,6 +302,149 @@ const isUnreliableTuiInputEnvironment =
 const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
 
 describe('AuthDialog', { timeout: 15000 }, () => {
+  it('restores the installed Kimi endpoint instead of the first option', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.moonshot.ai/v1',
+      customModelIds: [],
+      trimmedDefaultModelIds: [
+        'kimi-k2.7-code',
+        'kimi-k2.7-code-highspeed',
+        'kimi-k2.6',
+      ],
+    });
+  });
+
+  it('scopes restored custom models to the restored endpoint', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'custom-code-model',
+          name: '[Kimi Code] custom-code-model',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'custom-kimi-model',
+          name: '[Kimi API] custom-kimi-model',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.kimi.com/coding/v1',
+      customModelIds: ['custom-code-model'],
+      trimmedDefaultModelIds: [
+        'k3',
+        'kimi-for-coding',
+        'kimi-for-coding-highspeed',
+      ],
+    });
+  });
+
+  it('keeps restored models whose id collides with a sibling endpoint built-in', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'kimi-k3',
+          name: '[Kimi Code] kimi-k3',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.kimi.com/coding/v1',
+      // kimi-k3 is a built-in of the *API* endpoints, but this model was saved
+      // under the coding endpoint, so it is user data for the restored
+      // endpoint and must stay in the seed instead of being deleted on the
+      // next no-op resubmit.
+      customModelIds: ['kimi-k3'],
+      trimmedDefaultModelIds: [
+        'k3',
+        'kimi-for-coding',
+        'kimi-for-coding-highspeed',
+      ],
+    });
+  });
+
+  it('seeds only the restored custom-provider endpoint, ignoring trailing slashes', () => {
+    const setup = getExistingProviderSetup(customProvider, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'gpt-oss',
+          baseUrl: 'https://y.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'llama',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
+        },
+        {
+          id: 'x-shared-env',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'y-alias',
+          baseUrl: 'https://y.example/v1/',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://y.example/v1',
+      customModelIds: ['gpt-oss', 'y-alias'],
+      trimmedDefaultModelIds: [],
+    });
+  });
+
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   let originalEnv: NodeJS.ProcessEnv;
@@ -252,6 +458,81 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  it('should paginate the main menu when the dialog height is small', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      17,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(17);
+    expect(frame).toContain('Alibaba ModelStudio');
+    expect(frame).not.toContain('Third-party Providers');
+    expect(frame).not.toContain('Custom Provider');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
+  it('should paginate the provider sub-menu when the dialog height is small', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      17,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(17);
+    expect(frame).toContain('Third-party Providers · Provider');
+    expect(frame).toContain('DeepSeek API Key');
+    expect(frame).not.toContain('Z.AI API Key');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
+  it('keeps the main menu within the exact height when an error is shown', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      { authError: 'Authentication failed' },
+      {},
+      undefined,
+      undefined,
+      19,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(19);
+    expect(frame).toContain('Authentication failed');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
+  it('keeps a provider sub-menu within the exact height when an error is shown', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      { authError: `Authentication failed: ${'x'.repeat(200)}` },
+      {},
+      undefined,
+      undefined,
+      22,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame).toContain('Third-party Providers · Provider');
+    expect(frame?.split('\n')).toHaveLength(22);
+    expect(frame).toContain('Authentication failed');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
   });
 
   it('should show an error if the initial auth type is invalid', () => {
@@ -767,40 +1048,6 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   itWhenTuiInputReliable(
     'should preserve the selected main entry when returning from each top-level flow',
     async () => {
-      const createSettings = () =>
-        new LoadedSettings(
-          {
-            settings: { ui: { customThemes: {} }, mcpServers: {} },
-            originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-            path: '',
-          },
-          {
-            settings: {},
-            originalSettings: {},
-            path: '',
-          },
-          {
-            settings: {
-              security: { auth: { selectedType: undefined } },
-              ui: { customThemes: {} },
-              mcpServers: {},
-            },
-            originalSettings: {
-              security: { auth: { selectedType: undefined } },
-              ui: { customThemes: {} },
-              mcpServers: {},
-            },
-            path: '',
-          },
-          {
-            settings: { ui: { customThemes: {} }, mcpServers: {} },
-            originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-            path: '',
-          },
-          true,
-          new Set(),
-        );
-
       const cases = [
         {
           label: 'Alibaba ModelStudio',
@@ -975,7 +1222,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   );
 
   itWhenTuiInputReliable(
-    'should show preset providers in third-party provider options',
+    'should limit third-party providers to the available dialog height',
     async () => {
       const settings: LoadedSettings = new LoadedSettings(
         {
@@ -1010,26 +1257,43 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         new Set(),
       );
 
-      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      const { stdin, lastFrame, unmount } = renderAuthDialog(
+        settings,
+        { authError: `Authentication failed: ${'x'.repeat(200)}` },
+        {},
+        undefined,
+        undefined,
+        22,
+      );
 
       await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await wait();
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
         'Third-party Providers',
       );
+      await wait();
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
         'Third-party Providers · Provider',
       );
+      await wait();
 
       await vi.waitFor(
         () => {
           const frame = lastFrame();
+          expect(frame?.split('\n')).toHaveLength(22);
+          expect(frame).toContain('Authentication failed');
           expect(frame).toContain('DeepSeek API Key');
-          expect(frame).toContain('MiniMax API Key');
-          expect(frame).toContain('Z.AI API Key');
+          // 'Idealab API Key' is the real last visible row at this height;
+          // Kimi is off-screen and 'Kimi' matched only Idealab's description.
+          expect(frame).toContain('Idealab API Key');
+          expect(frame).not.toContain('MiniMax API Key');
+          expect(frame).not.toContain('Z.AI API Key');
+          expect(frame).toContain('▲');
+          expect(frame).toContain('▼');
           expect(frame).not.toContain('OpenAI API Key');
           expect(frame).not.toContain('HuggingFace API Key');
           expect(frame).not.toContain('Standard API Key');
@@ -1091,6 +1355,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'Third-party Providers · Provider',
       );
       await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+      await wait();
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -1103,21 +1368,109 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
-      await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
+      await wait();
+      for (const label of [
+        'Grok (xAI) API Key',
+        'Idealab API Key',
+        'Kimi',
+        'MiniMax API Key',
+        'ModelScope API Key',
+        'OpenRouter',
+        'Requesty',
+        'Xiaomi MiMo API Key',
+        'Z.AI API Key',
+      ]) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        await wait();
+      }
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'MiniMax API Key · Step 1/3 · Endpoint',
+        'Z.AI API Key · Step 1/3 · Endpoint',
       );
 
       await vi.waitFor(
         () => {
           const frame = lastFrame();
-          expect(frame).toContain('International');
-          expect(frame).toContain('China');
+          expect(frame).toContain('Standard API Key');
+          expect(frame).toContain('Coding Plan');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'opens the setup flow at the restored Kimi endpoint',
+    async () => {
+      const userSettings = {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'kimi-k3',
+              name: '[Kimi API] kimi-k3',
+              baseUrl: 'https://api.moonshot.ai/v1',
+              envKey: 'MOONSHOT_API_KEY',
+            },
+          ],
+        },
+      } as Settings;
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: userSettings,
+          originalSettings: userSettings,
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await moveDownAndWaitForSelection(
+        stdin,
+        lastFrame,
+        'Third-party Providers',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Third-party Providers · Provider',
+      );
+      await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+      for (const label of ['Grok (xAI) API Key', 'Idealab API Key', 'Kimi']) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        await wait();
+      }
+      // The setup flow must open at the endpoint step with the restored
+      // API Key (International) option highlighted, not the first option.
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Kimi · Step 1/3 · Access type',
+      );
+      await waitForSelectedOption(lastFrame, 'API Key (International)');
 
       unmount();
     },

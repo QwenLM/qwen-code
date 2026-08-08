@@ -9,9 +9,13 @@ import { AuthType } from '../../core/contentGenerator.js';
 import type { ModelProvidersConfig } from '../../models/types.js';
 import {
   applyProviderInstallPlan,
+  buildProviderTemplate,
   buildInstallPlan,
   customProvider,
   generateCustomEnvKey,
+  KIMI_CODE_BASE_URL,
+  KIMI_CODE_ENV_KEY,
+  kimiProvider,
   ProviderInstallError,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
@@ -308,6 +312,39 @@ describe('applyProviderInstallPlan', () => {
       { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
       { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
       { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
+    ]);
+  });
+
+  it('replaces only the selected Kimi endpoint when models are omitted', async () => {
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const apiModels = buildProviderTemplate(kimiProvider, apiUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [
+        ...buildProviderTemplate(kimiProvider, KIMI_CODE_BASE_URL),
+        {
+          id: 'coding-custom',
+          name: '[Kimi Code] coding-custom',
+          baseUrl: KIMI_CODE_BASE_URL,
+          envKey: KIMI_CODE_ENV_KEY,
+        },
+        ...apiModels,
+      ],
+    });
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: KIMI_CODE_BASE_URL,
+      apiKey: 'not-persisted-by-this-test',
+      modelIds: ['k3-256k'],
+    });
+    delete plan.env;
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      expect.objectContaining({
+        id: 'k3-256k',
+        baseUrl: KIMI_CODE_BASE_URL,
+      }),
+      ...apiModels,
     ]);
   });
 

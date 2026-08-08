@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   ArrowLeft,
@@ -30,6 +30,17 @@ import type {
   QwenProviderConnectResult,
   QwenProviderSummary,
 } from '../../../shared/types';
+import {
+  apiKeyAfterBaseUrlChange,
+  customModelIdsAfterEdit,
+  defaultBaseUrl,
+  defaultModelIds,
+  initialApiKey,
+  initialModelIds,
+  modelIdsAfterBaseUrlChange,
+  parseModelIds,
+  trimmedDefaultModelIds,
+} from './provider-state';
 
 type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
 
@@ -52,32 +63,8 @@ function isProviderGroup(value: string | undefined): value is ProviderGroup {
   return value === 'alibaba' || value === 'third-party' || value === 'custom';
 }
 
-function parseModelIds(value: string): string[] {
-  return Array.from(
-    new Set(
-      value
-        .split(/[\n,]/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
 function defaultProtocol(provider: QwenProviderSummary): string {
   return provider.protocolOptions[0] || provider.protocol;
-}
-
-function defaultBaseUrl(provider: QwenProviderSummary): string {
-  if (typeof provider.baseUrl === 'string') return provider.baseUrl;
-  if (Array.isArray(provider.baseUrl)) return provider.baseUrl[0]?.url ?? '';
-  return provider.baseUrlPlaceholder ?? '';
-}
-
-function initialModelIds(provider: QwenProviderSummary): string[] {
-  const existingModelIds = provider.existingConfig?.modelIds ?? [];
-  return existingModelIds.length > 0
-    ? existingModelIds
-    : provider.defaultModelIds;
 }
 
 function AnimatedSection({
@@ -133,6 +120,9 @@ export function ProviderConnectForm({
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const apiKeyDraftsRef = useRef(new Map<string, string>());
+  const customModelIdsRef = useRef<string[]>([]);
+  const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
 
   const groups = useMemo(
     () =>
@@ -194,11 +184,22 @@ export function ProviderConnectForm({
   const selectProvider = useCallback((provider: QwenProviderSummary) => {
     const existingConfig = provider.existingConfig;
     const contextWindowSize = existingConfig?.advancedConfig?.contextWindowSize;
+    const baseUrl = existingConfig?.baseUrl ?? defaultBaseUrl(provider);
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
-    setBaseUrl(existingConfig?.baseUrl ?? defaultBaseUrl(provider));
-    setApiKey(existingConfig?.apiKey ?? '');
-    setModelIdsText(initialModelIds(provider).join(', '));
+    setBaseUrl(baseUrl);
+    setApiKey(initialApiKey(apiKeyDraftsRef.current));
+    const seededModelIds = initialModelIds(provider, baseUrl);
+    const seededDefaults = new Set(defaultModelIds(provider, baseUrl));
+    customModelIdsRef.current = seededModelIds.filter(
+      (id) => !seededDefaults.has(id),
+    );
+    trimmedDefaultModelIdsRef.current.clear();
+    trimmedDefaultModelIdsRef.current.set(
+      baseUrl,
+      trimmedDefaultModelIds(provider, baseUrl, seededModelIds),
+    );
+    setModelIdsText(seededModelIds.join(', '));
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
@@ -437,7 +438,31 @@ export function ProviderConnectForm({
             {baseUrlOptions.length > 0 ? (
               <Select
                 value={baseUrl}
-                onValueChange={setBaseUrl}
+                onValueChange={(value) => {
+                  setBaseUrl(value);
+                  if (value !== baseUrl) {
+                    setFormError(null);
+                    setApiKey(
+                      apiKeyAfterBaseUrlChange(
+                        selectedProvider,
+                        baseUrl,
+                        value,
+                        apiKey,
+                        apiKeyDraftsRef.current,
+                      ),
+                    );
+                    const nextModelIds = modelIdsAfterBaseUrlChange(
+                      selectedProvider,
+                      baseUrl,
+                      value,
+                      modelIdsText,
+                      customModelIdsRef.current,
+                      trimmedDefaultModelIdsRef.current.get(value),
+                    );
+                    customModelIdsRef.current = nextModelIds.customModelIds;
+                    setModelIdsText(nextModelIds.modelIds.join(', '));
+                  }
+                }}
                 disabled={submitting}
               >
                 <SelectTrigger>
@@ -483,7 +508,23 @@ export function ProviderConnectForm({
           <Label>{t('providerConnect.models')}</Label>
           <Textarea
             value={modelIdsText}
-            onChange={(event) => setModelIdsText(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value;
+              setModelIdsText(value);
+              const ids = parseModelIds(value);
+              const defaults = new Set(
+                defaultModelIds(selectedProvider, baseUrl),
+              );
+              customModelIdsRef.current = customModelIdsAfterEdit(
+                [...defaults],
+                customModelIdsRef.current,
+                ids,
+              );
+              trimmedDefaultModelIdsRef.current.set(
+                baseUrl,
+                trimmedDefaultModelIds(selectedProvider, baseUrl, ids),
+              );
+            }}
             placeholder={t('providerConnect.modelsPlaceholder')}
             className="min-h-20"
             disabled={submitting || !selectedProvider.modelsEditable}

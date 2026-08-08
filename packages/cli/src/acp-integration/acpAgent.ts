@@ -23,6 +23,8 @@ import {
   getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
+  resolveProviderModels,
   getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
@@ -2058,7 +2060,20 @@ function readExistingProviderConfig(
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
-    ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
+    // Scope seeded IDs to the restored endpoint (the first saved model's);
+    // sibling-endpoint models would otherwise be rewritten under the restored
+    // baseUrl/envKey on submit.
+    ...(existing
+      ? {
+          modelIds: existing.models
+            .filter(
+              (model) =>
+                normalizeBaseUrlForMatching(model.baseUrl) ===
+                normalizeBaseUrlForMatching(firstModel?.baseUrl),
+            )
+            .map((model) => model.id),
+        }
+      : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
@@ -2086,6 +2101,12 @@ function serializeProviderConfig(
       ? getDefaultBaseUrlForProtocol(defaultProtocol)
       : resolveBaseUrl(config);
   const existingConfig = readExistingProviderConfig(config, settings);
+  const serializedBaseUrl = Array.isArray(config.baseUrl)
+    ? config.baseUrl.map((option) => ({
+        ...option,
+        envKey: resolveProviderEnvKey(config, defaultProtocol, option.url),
+      }))
+    : config.baseUrl;
 
   return {
     id: config.id,
@@ -2093,11 +2114,11 @@ function serializeProviderConfig(
     description: config.description,
     protocol: config.protocol,
     protocolOptions: config.protocolOptions ?? [],
-    baseUrl: config.baseUrl,
+    baseUrl: serializedBaseUrl,
     baseUrlPlaceholder:
       config.baseUrl === undefined ? defaultBaseUrl : undefined,
-    defaultModelIds: getDefaultModelIds(config),
-    models: config.models ?? [],
+    defaultModelIds: getDefaultModelIds(config, defaultBaseUrl),
+    models: resolveProviderModels(config, defaultBaseUrl) ?? [],
     modelsEditable: config.modelsEditable === true || !config.models,
     showAdvancedConfig: config.showAdvancedConfig === true,
     apiKeyPlaceholder: config.apiKeyPlaceholder,
@@ -2157,7 +2178,7 @@ function readProviderSetupInputs(
     throw RequestError.invalidParams(undefined, apiKeyError);
   }
 
-  const defaultModelIds = getDefaultModelIds(config);
+  const defaultModelIds = getDefaultModelIds(config, baseUrl);
   const modelIds = readStringArray(params['modelIds'], 'modelIds');
   const resolvedModelIds = modelIds.length > 0 ? modelIds : defaultModelIds;
   if (resolvedModelIds.length === 0) {

@@ -19,6 +19,7 @@ import {
   InvalidPolicyConfigError,
   createDisabledChannelWorkerSupervisor,
   createBoundChannelDeliveryHandler,
+  buildProviderSetupInputs,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
@@ -98,6 +99,63 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   permissionPolicy: 'first-responder',
   sessions: [],
 };
+
+describe('buildProviderSetupInputs', () => {
+  it('uses endpoint-specific Kimi defaults when model IDs are omitted', () => {
+    const getDefaultModelIds = vi.fn(qwenCore.getDefaultModelIds);
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        apiKey: 'sk-kimi',
+        baseUrl: qwenCore.KIMI_CODE_BASE_URL,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+      },
+    );
+
+    expect(getDefaultModelIds).toHaveBeenCalledWith(
+      qwenCore.kimiProvider,
+      qwenCore.KIMI_CODE_BASE_URL,
+    );
+    expect(inputs.modelIds).toEqual([
+      'k3-256k',
+      'k3',
+      'kimi-for-coding',
+      'kimi-for-coding-highspeed',
+    ]);
+  });
+
+  it('uses Kimi API defaults for the international API endpoint', () => {
+    const baseUrl = 'https://api.moonshot.ai/v1';
+    const getDefaultModelIds = vi.fn(qwenCore.getDefaultModelIds);
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        apiKey: 'sk-kimi',
+        baseUrl,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+      },
+    );
+
+    expect(getDefaultModelIds).toHaveBeenCalledWith(
+      qwenCore.kimiProvider,
+      baseUrl,
+    );
+    expect(inputs.modelIds).toEqual([
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'kimi-k2.7-code-highspeed',
+      'kimi-k2.6',
+    ]);
+  });
+});
 
 describe('createBoundChannelDeliveryHandler', () => {
   const info = {

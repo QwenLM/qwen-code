@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   AuthType,
   shouldShowStep,
@@ -46,6 +46,16 @@ function getVisibleSteps(config: ProviderConfig): SetupStep[] {
     if (step === 'review') return config.showAdvancedConfig === true;
     return shouldShowStep(config, step);
   });
+}
+
+function providerEnvKey(
+  config: ProviderConfig,
+  protocol: AuthType,
+  baseUrl: string,
+): string {
+  return typeof config.envKey === 'function'
+    ? config.envKey(protocol, baseUrl)
+    : config.envKey;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +120,20 @@ export function useProviderSetupFlow(
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+  const [existingProviderEnv, setExistingProviderEnv] = useState<
+    Record<string, string>
+  >({});
+  const apiKeyDraftsRef = useRef(new Map<string, string>());
+  // Protocol changes must restore the endpoint and key together. Keying only
+  // by env var loses custom-provider drafts because their env key includes
+  // the user-entered endpoint.
+  const protocolDraftsRef = useRef(
+    new Map<AuthType, { baseUrl: string; apiKey: string }>(),
+  );
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
+  const customModelIdsRef = useRef<string[]>([]);
+  const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -131,7 +153,11 @@ export function useProviderSetupFlow(
       initialProtocol?: AuthType,
       existingEnv?: Record<string, string>,
       existingModelIds?: string[],
+      initialBaseUrl?: string,
+      initialTrimmedDefaultModelIds?: string[],
     ) => {
+      apiKeyDraftsRef.current.clear();
+      protocolDraftsRef.current.clear();
       setProvider(config);
       const steps = getVisibleSteps(config);
       setVisibleSteps(steps);
@@ -142,31 +168,45 @@ export function useProviderSetupFlow(
       // For presets the baseUrl is fixed (string) or selected from options;
       // for the custom provider it's empty and the placeholder hints at the
       // default endpoint for the chosen protocol.
-      const resolved = resolveBaseUrl(config);
+      const resolved = resolveBaseUrl(config, initialBaseUrl);
       setBaseUrl(resolved);
       setBaseUrlPlaceholder(
         resolved ? '' : getDefaultBaseUrlForProtocol(proto),
       );
-      setBaseUrlOptionIndex(0);
+      const initialOptionIndex = Array.isArray(config.baseUrl)
+        ? config.baseUrl.findIndex((option) => option.url === resolved)
+        : 0;
+      setBaseUrlOptionIndex(initialOptionIndex >= 0 ? initialOptionIndex : 0);
       setBaseUrlError(null);
 
       let prefillKey = '';
       if (existingEnv) {
-        const envKeyName =
-          typeof config.envKey === 'function'
-            ? config.envKey(proto, resolved)
-            : config.envKey;
+        const envKeyName = providerEnvKey(config, proto, resolved);
         prefillKey = existingEnv[envKeyName] ?? '';
       }
       setApiKey(prefillKey);
+      setExistingProviderEnv(existingEnv ?? {});
+      protocolDraftsRef.current.set(proto, {
+        baseUrl: resolved,
+        apiKey: prefillKey,
+      });
 
       setApiKeyError(null);
       // Built-in defaults go to the recommended list (checked), user-added
       // custom IDs go to the input box. The ModelIdsStep component splits
-      // flow.state.modelIds automatically based on config.models.
-      const defaultIds = getDefaultModelIds(config);
+      // flow.state.modelIds automatically based on the selected endpoint.
+      const defaultIds = getDefaultModelIds(config, resolved);
       const customIds = existingModelIds ?? [];
-      setModelIds([...defaultIds, ...customIds].join(', '));
+      const trimmedDefaultIds = new Set(initialTrimmedDefaultModelIds ?? []);
+      customModelIdsRef.current = customIds;
+      trimmedDefaultModelIdsRef.current.clear();
+      trimmedDefaultModelIdsRef.current.set(resolved, [...trimmedDefaultIds]);
+      setModelIds(
+        [
+          ...defaultIds.filter((id) => !trimmedDefaultIds.has(id)),
+          ...customIds,
+        ].join(', '),
+      );
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -181,6 +221,9 @@ export function useProviderSetupFlow(
   );
 
   const reset = useCallback(() => {
+    apiKeyDraftsRef.current.clear();
+    protocolDraftsRef.current.clear();
+    trimmedDefaultModelIdsRef.current.clear();
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
@@ -204,24 +247,88 @@ export function useProviderSetupFlow(
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
       setProtocol(selectedProtocol);
-      // Clear baseUrl so the user types fresh; show the protocol's default
-      // endpoint as a placeholder (used if they submit blank).
-      setBaseUrl('');
-      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
-      setApiKey('');
-      setApiKeyError(null);
+      if (selectedProtocol !== protocol) {
+        protocolDraftsRef.current.set(protocol, { baseUrl, apiKey });
+        const draft = protocolDraftsRef.current.get(selectedProtocol);
+        if (draft) {
+          setBaseUrl(draft.baseUrl);
+          setBaseUrlPlaceholder(
+            draft.baseUrl ? '' : getDefaultBaseUrlForProtocol(selectedProtocol),
+          );
+          setApiKey(draft.apiKey);
+        } else {
+          // Clear baseUrl so the user types fresh; show the protocol's
+          // default endpoint as a placeholder (used if they submit blank).
+          setBaseUrl('');
+          setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
+          setApiKey('');
+        }
+        setApiKeyError(null);
+      }
       goNext();
     },
-    [goNext],
+    [apiKey, baseUrl, goNext, protocol],
   );
 
   const selectBaseUrl = useCallback(
     (selectedUrl: string) => {
       setBaseUrl(selectedUrl);
       setBaseUrlError(null);
+      if (provider && selectedUrl !== baseUrl) {
+        setApiKeyError(null);
+        setModelIdsError(null);
+        const currentIds = normalizeModelIds(modelIds);
+        const previousDefaults = getDefaultModelIds(provider, baseUrl);
+        // Only the source and destination endpoints' defaults are
+        // replaceable: a typed id colliding with some other sibling
+        // endpoint's built-in is user input for the current endpoint and
+        // must survive the switch. Custom provenance plus per-endpoint trim
+        // state fully represents edits, so rebuilding is safe even after the
+        // user touched the field.
+        const previousDefaultSet = new Set(previousDefaults);
+        const trimmedNextDefaults = new Set(
+          trimmedDefaultModelIdsRef.current.get(selectedUrl) ?? [],
+        );
+        const fieldSet = new Set(currentIds);
+        const customIds = [
+          ...new Set([
+            ...customModelIdsRef.current.filter((id) => fieldSet.has(id)),
+            ...currentIds.filter((id) => !previousDefaultSet.has(id)),
+          ]),
+        ];
+        customModelIdsRef.current = customIds;
+        setModelIds(
+          [
+            ...new Set([
+              ...getDefaultModelIds(provider, selectedUrl).filter(
+                (id) => !trimmedNextDefaults.has(id),
+              ),
+              ...customIds,
+            ]),
+          ].join(', '),
+        );
+        const previousEnvKey = providerEnvKey(provider, protocol, baseUrl);
+        const nextEnvKey = providerEnvKey(provider, protocol, selectedUrl);
+        if (nextEnvKey !== previousEnvKey) {
+          apiKeyDraftsRef.current.set(previousEnvKey, apiKey);
+          setApiKey(
+            apiKeyDraftsRef.current.get(nextEnvKey) ??
+              existingProviderEnv[nextEnvKey] ??
+              '',
+          );
+        }
+      }
       goNext();
     },
-    [goNext],
+    [
+      apiKey,
+      baseUrl,
+      existingProviderEnv,
+      goNext,
+      modelIds,
+      protocol,
+      provider,
+    ],
   );
 
   const submitBaseUrl = useCallback((): boolean => {
@@ -309,10 +416,27 @@ export function useProviderSetupFlow(
     [provider],
   );
 
-  const changeModelIds = useCallback((value: string) => {
-    setModelIds(value);
-    setModelIdsError(null);
-  }, []);
+  const changeModelIds = useCallback(
+    (value: string) => {
+      setModelIds(value);
+      setModelIdsError(null);
+      const normalized = normalizeModelIds(value);
+      const defaults = provider ? getDefaultModelIds(provider, baseUrl) : [];
+      const defaultSet = new Set(defaults);
+      const fieldSet = new Set(normalized);
+      customModelIdsRef.current = [
+        ...new Set([
+          ...customModelIdsRef.current.filter((id) => fieldSet.has(id)),
+          ...normalized.filter((id) => !defaultSet.has(id)),
+        ]),
+      ];
+      trimmedDefaultModelIdsRef.current.set(
+        baseUrl,
+        defaults.filter((id) => !fieldSet.has(id)),
+      );
+    },
+    [baseUrl, provider],
+  );
 
   const submitModelIds = useCallback(
     (overrides?: Partial<ProviderSetupInputs>): boolean => {
@@ -414,10 +538,7 @@ export function useProviderSetupFlow(
 
   const getPreviewJson = useCallback((): string => {
     if (!provider) return '';
-    const envKey =
-      typeof provider.envKey === 'function'
-        ? provider.envKey(protocol, baseUrl.trim())
-        : provider.envKey;
+    const envKey = providerEnvKey(provider, protocol, baseUrl.trim());
     const normalizedIds = normalizeModelIds(modelIds);
     const masked = maskApiKey(apiKey);
 

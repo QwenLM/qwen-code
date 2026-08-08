@@ -25,7 +25,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-import { AuthType, type ProviderInstallPlan } from '@qwen-code/qwen-code-core';
+import {
+  ALL_PROVIDERS,
+  AuthType,
+  type ProviderConfig,
+  type ProviderInstallPlan,
+} from '@qwen-code/qwen-code-core';
 import { CODING_PLAN_ENV_KEY } from './subscriptionPlanDefinitions.js';
 import {
   applyProviderInstallPlanToFile,
@@ -367,6 +372,9 @@ describe('settingsWriter', () => {
           IDEALAB_API_KEY: 'sk-idealab',
           MODELSCOPE_API_KEY: 'sk-modelscope',
           OPENROUTER_API_KEY: 'sk-openrouter',
+          KIMI_CODE_API_KEY: 'sk-kimi-code',
+          MIMO_API_KEY: 'sk-mimo',
+          MOONSHOT_API_KEY: 'sk-kimi-api',
           BAILIAN_CODING_PLAN_API_KEY: 'sk-coding',
           BAILIAN_TOKEN_PLAN_API_KEY: 'sk-token',
           QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_FOO_COM_ABC123DEF456:
@@ -380,6 +388,9 @@ describe('settingsWriter', () => {
           'coding-plan': { version: '1' },
           deepseek: { version: '1' },
           openrouter: { version: '2' },
+          'kimi--coding-plan': { version: '3' },
+          'kimi--api-international': { version: '4' },
+          unrelated: { version: '5' },
         },
       };
       fs.writeFileSync(settingsPath, JSON.stringify(initial, null, 2), 'utf-8');
@@ -396,6 +407,46 @@ describe('settingsWriter', () => {
       expect(after.providerMetadata['coding-plan']).toBeUndefined();
       expect(after.providerMetadata['deepseek']).toBeUndefined();
       expect(after.providerMetadata['openrouter']).toBeUndefined();
+      expect(after.providerMetadata['kimi--coding-plan']).toBeUndefined();
+      expect(after.providerMetadata['kimi--api-international']).toBeUndefined();
+      expect(after.providerMetadata.unrelated).toEqual({ version: '5' });
+    });
+
+    it('continues clearing credentials when one derived env key throws', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({
+          env: {
+            DEEPSEEK_API_KEY: 'sk-deepseek',
+            QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_FOO_COM_ABC123DEF456:
+              'sk-custom',
+            NODE_OPTIONS: '--trace-warnings',
+          },
+        }),
+      );
+      const throwingProvider: ProviderConfig = {
+        id: 'throwing-provider',
+        label: 'Throwing Provider',
+        description: 'Throws while deriving an environment key',
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: 'https://throwing.example/v1',
+        envKey: () => {
+          throw new Error('broken env key');
+        },
+        modelNamePrefix: 'Throwing',
+      };
+      const mutableProviders = ALL_PROVIDERS as ProviderConfig[];
+      mutableProviders.unshift(throwingProvider);
+
+      try {
+        clearPersistedAuth();
+      } finally {
+        expect(mutableProviders.shift()).toBe(throwingProvider);
+      }
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(after.env).toEqual({ NODE_OPTIONS: '--trace-warnings' });
     });
 
     it('is a no-op when no settings file exists', () => {

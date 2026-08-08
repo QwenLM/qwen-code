@@ -171,6 +171,48 @@ describe('AuthMessageHandler', () => {
     );
   });
 
+  it('uses endpoint-specific defaults for a multi-endpoint provider', async () => {
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'kimi' })
+      .mockResolvedValueOnce({ value: 'https://api.moonshot.ai/v1' });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-kimi')
+      .mockResolvedValueOnce(
+        'kimi-k3,kimi-k2.7-code,kimi-k2.7-code-highspeed,kimi-k2.6',
+      );
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        value: 'kimi-k3,kimi-k2.7-code,kimi-k2.7-code-highspeed,kimi-k2.6',
+      }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-kimi',
+        modelIds: [
+          'kimi-k3',
+          'kimi-k2.7-code',
+          'kimi-k2.7-code-highspeed',
+          'kimi-k2.6',
+        ],
+      }),
+    );
+  });
+
   // -- Custom provider flow ------------------------------------------------
   // The custom provider exercises every step in runProviderSetupFlow:
   // protocol pick, free-form URL input + scheme validation, API key,

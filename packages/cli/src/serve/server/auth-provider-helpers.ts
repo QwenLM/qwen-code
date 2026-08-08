@@ -5,11 +5,18 @@
  */
 
 import * as net from 'node:net';
-import { ALL_PROVIDERS, shouldShowStep } from '@qwen-code/qwen-code-core';
+import {
+  ALL_PROVIDERS,
+  resolveBaseUrl,
+  resolveProviderModels,
+  shouldShowStep,
+} from '@qwen-code/qwen-code-core';
+import type { ModelSpec } from '@qwen-code/qwen-code-core';
 import type {
   ServeAuthProviderCatalog,
   ServeAuthProviderDescriptor,
   ServeAuthProviderInstallRequest,
+  ServeAuthProviderModel,
 } from '../types.js';
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
@@ -20,12 +27,79 @@ const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
   'advancedConfig',
 ];
 
+function serializeProviderModel(model: ModelSpec): ServeAuthProviderModel {
+  return {
+    id: model.id,
+    ...(model.contextWindowSize !== undefined
+      ? { contextWindowSize: model.contextWindowSize }
+      : {}),
+    ...(model.enableThinking !== undefined
+      ? { enableThinking: model.enableThinking }
+      : {}),
+    ...(model.modalities ? { modalities: model.modalities } : {}),
+    ...(model.description ? { description: model.description } : {}),
+  };
+}
+
+// A throwing function-form derivation must only cost the broken provider its
+// derived field; an uncaught throw fails the whole catalog map and removes
+// every provider from the serve/Web Shell /auth list. Mirrors
+// resolveProviderEnvKey/resolveProviderDocumentationUrl in acpAgent.ts.
+function resolveDescriptorDocumentationUrl(
+  provider: (typeof ALL_PROVIDERS)[number],
+  baseUrl: string,
+): string | undefined {
+  if (typeof provider.documentationUrl !== 'function') {
+    return provider.documentationUrl;
+  }
+  try {
+    return provider.documentationUrl(baseUrl);
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveDescriptorEnvKey(
+  provider: (typeof ALL_PROVIDERS)[number],
+  baseUrl: string,
+): string | undefined {
+  if (typeof provider.envKey !== 'function') return provider.envKey;
+  try {
+    return provider.envKey(provider.protocol, baseUrl);
+  } catch {
+    return undefined;
+  }
+}
+
 function buildAuthProviderDescriptor(
   provider: (typeof ALL_PROVIDERS)[number],
 ): ServeAuthProviderDescriptor {
   const steps = AUTH_PROVIDER_STEPS.filter((step) =>
     shouldShowStep(provider, step),
   );
+  const defaultBaseUrl = resolveBaseUrl(provider);
+  const models = resolveProviderModels(provider, defaultBaseUrl);
+  const documentationUrl = resolveDescriptorDocumentationUrl(
+    provider,
+    defaultBaseUrl,
+  );
+  const envKey =
+    typeof provider.envKey === 'string'
+      ? provider.envKey
+      : provider.baseUrl !== undefined
+        ? resolveDescriptorEnvKey(provider, defaultBaseUrl)
+        : undefined;
+  const baseUrl = Array.isArray(provider.baseUrl)
+    ? provider.baseUrl.map((option) => ({
+        ...option,
+        ...(typeof provider.envKey === 'function'
+          ? { envKey: resolveDescriptorEnvKey(provider, option.url) }
+          : { envKey: provider.envKey }),
+        ...(option.models
+          ? { models: option.models.map(serializeProviderModel) }
+          : {}),
+      }))
+    : provider.baseUrl;
   return {
     id: provider.id,
     label: provider.label,
@@ -35,21 +109,11 @@ function buildAuthProviderDescriptor(
     ...(provider.protocolOptions
       ? { protocolOptions: [...provider.protocolOptions] }
       : {}),
-    ...(provider.baseUrl !== undefined ? { baseUrl: provider.baseUrl } : {}),
-    ...(typeof provider.envKey === 'string' ? { envKey: provider.envKey } : {}),
-    ...(provider.models
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
+    ...(envKey ? { envKey } : {}),
+    ...(models
       ? {
-          models: provider.models.map((model) => ({
-            id: model.id,
-            ...(model.contextWindowSize !== undefined
-              ? { contextWindowSize: model.contextWindowSize }
-              : {}),
-            ...(model.enableThinking !== undefined
-              ? { enableThinking: model.enableThinking }
-              : {}),
-            ...(model.modalities ? { modalities: model.modalities } : {}),
-            ...(model.description ? { description: model.description } : {}),
-          })),
+          models: models.map(serializeProviderModel),
         }
       : {}),
     ...(provider.modelsEditable !== undefined
@@ -58,9 +122,7 @@ function buildAuthProviderDescriptor(
     ...(provider.apiKeyPlaceholder
       ? { apiKeyPlaceholder: provider.apiKeyPlaceholder }
       : {}),
-    ...(typeof provider.documentationUrl === 'string'
-      ? { documentationUrl: provider.documentationUrl }
-      : {}),
+    ...(documentationUrl ? { documentationUrl } : {}),
     ...(provider.showAdvancedConfig !== undefined
       ? { showAdvancedConfig: provider.showAdvancedConfig }
       : {}),

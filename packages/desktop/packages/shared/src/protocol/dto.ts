@@ -776,6 +776,8 @@ export interface QwenProviderBaseUrlOption {
   id: string
   label: string
   url: string
+  envKey?: string
+  models?: QwenProviderModelSpec[]
   documentationUrl?: string
   apiKeyUrl?: string
 }
@@ -809,7 +811,8 @@ export interface QwenProviderSummary {
   existingConfig?: {
     protocol?: string
     baseUrl?: string
-    apiKey?: string
+    /** The ACP catalog never serializes the stored key, only its presence. */
+    hasApiKey?: boolean
     modelIds?: string[]
     advancedConfig?: QwenProviderAdvancedConfig
   }

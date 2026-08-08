@@ -311,6 +311,33 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         uiGroup: 'third-party',
       };
     }
+    if (id === 'kimi') {
+      return {
+        id: 'kimi',
+        label: 'Kimi',
+        description: 'Kimi access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'coding-plan',
+            label: 'Coding Plan',
+            url: 'https://api.kimi.com/coding/v1',
+            models: [{ id: 'k3-256k' }],
+          },
+          {
+            id: 'api-international',
+            label: 'API Key (International)',
+            url: 'https://api.moonshot.ai/v1',
+            models: [{ id: 'kimi-k3' }],
+          },
+        ],
+        envKey: 'KIMI_CODE_API_KEY',
+        models: [{ id: 'k3-256k' }, { id: 'kimi-k3' }],
+        modelsEditable: true,
+        modelNamePrefix: 'Kimi',
+        uiGroup: 'third-party',
+      };
+    }
     if (id === 'custom-openai-compatible') {
       return {
         id: 'custom-openai-compatible',
@@ -336,9 +363,45 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return undefined;
   }),
   getDefaultBaseUrlForProtocol: vi.fn(() => 'https://api.openai.com/v1'),
+  normalizeBaseUrlForMatching: vi.fn((baseUrl: string | undefined) => {
+    if (baseUrl === undefined) return '';
+    let end = baseUrl.length;
+    while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
+      end--;
+    }
+    return baseUrl.slice(0, end);
+  }),
   getDefaultModelIds: vi.fn(
-    (provider: { models?: Array<{ id: string }> }) =>
-      provider.models?.map((model) => model.id) ?? [],
+    (
+      provider: {
+        baseUrl?:
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
+        models?: Array<{ id: string }>;
+      },
+      baseUrl?: string,
+    ) =>
+      (Array.isArray(provider.baseUrl)
+        ? provider.baseUrl
+            .find((option) => option.url === baseUrl)
+            ?.models?.map((model) => model.id)
+        : undefined) ??
+      provider.models?.map((model) => model.id) ??
+      [],
+  ),
+  resolveProviderModels: vi.fn(
+    (
+      provider: {
+        baseUrl?:
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
+        models?: Array<{ id: string }>;
+      },
+      baseUrl?: string,
+    ) =>
+      (Array.isArray(provider.baseUrl)
+        ? provider.baseUrl.find((option) => option.url === baseUrl)?.models
+        : undefined) ?? provider.models,
   ),
   resolveBaseUrl: vi.fn(
     (
@@ -348,7 +411,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       typeof provider.baseUrl === 'string'
         ? provider.baseUrl
         : Array.isArray(provider.baseUrl)
-          ? (provider.baseUrl[0]?.url ?? selectedBaseUrl ?? '')
+          ? (provider.baseUrl.find((option) => option.url === selectedBaseUrl)
+              ?.url ??
+            provider.baseUrl[0]?.url ??
+            selectedBaseUrl ??
+            '')
           : (selectedBaseUrl ?? ''),
   ),
   resolveOwnsModel: vi.fn(
@@ -831,6 +898,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
+  ALL_PROVIDERS,
   AuthType,
   SessionEndReason,
   MCPServerConfig,
@@ -10982,6 +11050,116 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/list includes endpoint-specific model lists', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'kimi',
+        label: 'Kimi',
+        description: 'Kimi access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'coding-plan',
+            label: 'Coding Plan',
+            url: 'https://api.kimi.com/coding/v1',
+            models: [{ id: 'k3-256k' }],
+          },
+          {
+            id: 'api-international',
+            label: 'API Key (International)',
+            url: 'https://api.moonshot.ai/v1',
+            models: [{ id: 'kimi-k3' }],
+          },
+        ],
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://api.kimi.com/coding/v1'
+            ? 'KIMI_CODE_API_KEY'
+            : 'MOONSHOT_API_KEY',
+        models: [{ id: 'kimi-fallback' }],
+        modelsEditable: true,
+        modelNamePrefix: 'Kimi',
+        uiGroup: 'third-party',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'kimi',
+              defaultModelIds: ['k3-256k'],
+              models: [{ id: 'k3-256k' }],
+              baseUrl: [
+                expect.objectContaining({
+                  id: 'coding-plan',
+                  envKey: 'KIMI_CODE_API_KEY',
+                  models: [{ id: 'k3-256k' }],
+                }),
+                expect.objectContaining({
+                  id: 'api-international',
+                  envKey: 'MOONSHOT_API_KEY',
+                  models: [{ id: 'kimi-k3' }],
+                }),
+              ],
+            }),
+          ]),
+        },
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('qwen/providers/connect resolves endpoint-specific default models when modelIds is omitted', async () => {
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'kimi',
+      modelId: 'kimi-k3',
+    });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: 'https://api.moonshot.ai/v1',
+        modelIds: ['kimi-k3'],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers/connect returns preserved model when adapter getValue returns a non-empty string', async () => {
     vi.mocked(createLoadedSettingsAdapter).mockImplementationOnce(
       (settings: unknown) => {
@@ -11070,6 +11248,106 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('qwen/providers/list scopes existing model IDs to the restored endpoint', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { FIRST_API_KEY: 'sk-first' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'first-model',
+              baseUrl: 'https://first.example/v1',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
+              id: 'custom-first',
+              baseUrl: 'https://first.example/v1/',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
+              id: 'custom-second',
+              baseUrl: 'https://second.example/v1',
+              envKey: 'SECOND_API_KEY',
+            },
+            {
+              id: 'wrong-url-shared-env',
+              baseUrl: 'https://second.example/v1',
+              envKey: 'FIRST_API_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'multi-endpoint',
+        label: 'Multi Endpoint',
+        description: 'Multi endpoint access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'first',
+            label: 'First',
+            url: 'https://first.example/v1',
+            models: [{ id: 'first-model' }],
+          },
+          {
+            id: 'second',
+            label: 'Second',
+            url: 'https://second.example/v1',
+            models: [{ id: 'second-model' }],
+          },
+        ],
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://first.example/v1'
+            ? 'FIRST_API_KEY'
+            : 'SECOND_API_KEY',
+        models: [{ id: 'first-model' }, { id: 'second-model' }],
+        modelsEditable: true,
+        modelNamePrefix: 'Multi',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'FIRST_API_KEY' || model.envKey === 'SECOND_API_KEY',
+        uiGroup: 'third-party',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: [
+            expect.objectContaining({ id: 'deepseek' }),
+            expect.objectContaining({
+              id: 'multi-endpoint',
+              existingConfig: {
+                protocol: 'openai',
+                baseUrl: 'https://first.example/v1',
+                hasApiKey: true,
+                modelIds: ['first-model', 'custom-first'],
+              },
+            }),
+          ],
+        },
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('qwen/skills/install rejects http and non-GitHub source URLs', async () => {

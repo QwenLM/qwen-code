@@ -26,10 +26,12 @@ const PROVIDER_BY_ENV_KEY: Readonly<Record<string, string>> = {
   DASHSCOPE_API_KEY: 'dashscope',
   DEEPSEEK_API_KEY: 'deepseek',
   IDEALAB_API_KEY: 'dashscope',
+  KIMI_CODE_API_KEY: 'kimi',
   MINIMAX_API_KEY: 'minimax',
   MIMO_API_KEY: 'mimo',
   MISTRAL_API_KEY: 'mistral_ai',
   MODELSCOPE_API_KEY: 'modelscope',
+  MOONSHOT_API_KEY: 'kimi',
   OPENAI_API_KEY: 'openai',
   OPENROUTER_API_KEY: 'openrouter',
   REQUESTY_API_KEY: 'requesty',
@@ -76,6 +78,13 @@ function providerFromHostname(hostname: string): string | undefined {
     return 'z_ai';
   }
   if (isHostOrSubdomain(hostname, 'modelscope.cn')) return 'modelscope';
+  if (
+    isHostOrSubdomain(hostname, 'kimi.com') ||
+    isHostOrSubdomain(hostname, 'moonshot.ai') ||
+    isHostOrSubdomain(hostname, 'moonshot.cn')
+  ) {
+    return 'kimi';
+  }
   if (isHostOrSubdomain(hostname, 'xiaomimimo.com')) return 'mimo';
   if (isHostOrSubdomain(hostname, 'openrouter.ai')) return 'openrouter';
   if (isHostOrSubdomain(hostname, 'requesty.ai')) return 'requesty';

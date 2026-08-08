@@ -922,6 +922,7 @@ function channelServiceStartingConflictError(): Error {
 function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
+  baseUrl: string,
   getDefaultModelIds: CoreRuntime['getDefaultModelIds'],
 ): string[] {
   const fromRequest = req.modelIds
@@ -930,11 +931,11 @@ function normalizeInstallModelIds(
   const modelIds =
     fromRequest && fromRequest.length > 0
       ? fromRequest
-      : getDefaultModelIds(provider);
+      : getDefaultModelIds(provider, baseUrl);
   return [...new Set(modelIds)];
 }
 
-function buildProviderSetupInputs(
+export function buildProviderSetupInputs(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
   helpers: {
@@ -951,6 +952,7 @@ function buildProviderSetupInputs(
     modelIds: normalizeInstallModelIds(
       req,
       provider,
+      baseUrl,
       helpers.getDefaultModelIds,
     ),
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),

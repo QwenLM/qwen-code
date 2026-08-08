@@ -30,6 +30,8 @@ export interface BaseUrlOption {
   id: string;
   label: string;
   url: string;
+  /** Override the provider's model list when this endpoint is selected. */
+  models?: ModelSpec[];
   documentationUrl?: string;
   apiKeyUrl?: string;
 }

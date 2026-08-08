@@ -21,6 +21,7 @@ import {
   findProviderByCredentials,
   findExistingProviderModels,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -81,7 +82,11 @@ function providerToItem(config: ProviderConfig) {
     key: config.id,
     title: t(config.label),
     label: t(config.label),
-    description: t(config.description),
+    description: (
+      <Text color={theme.text.secondary} wrap="truncate">
+        {t(config.description)}
+      </Text>
+    ),
     value: config.id,
   };
 }
@@ -113,11 +118,83 @@ const VIEW_TITLES: Record<string, string> = {
   'thirdparty-select': t('Third-party Providers · Provider'),
 };
 
+const DEFAULT_DIALOG_HEIGHT = 24;
+const MAIN_LIST_FIXED_ROWS = 10;
+const SUB_MENU_LIST_FIXED_ROWS = 7;
+const LIST_ITEM_ROWS = 3;
+// Two arrow rows plus the two extra gaps itemGap adds around them.
+const SCROLL_AFFORDANCE_ROWS = 4;
+
+interface AuthDialogProps {
+  availableTerminalHeight?: number;
+  initialViewLevel?: Exclude<ViewLevel, 'provider-setup'>;
+}
+
+export function getMaxItemsToShow(
+  dialogHeight: number,
+  itemCount: number,
+  fixedRows: number,
+): number {
+  if (itemCount === 0) return 1;
+  if (fixedRows + itemCount * LIST_ITEM_ROWS <= dialogHeight) {
+    return itemCount;
+  }
+  return Math.max(
+    1,
+    Math.floor(
+      (dialogHeight - fixedRows - SCROLL_AFFORDANCE_ROWS) / LIST_ITEM_ROWS,
+    ),
+  );
+}
+
+export function getExistingProviderSetup(
+  providerConfig: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+): {
+  initialProtocol: ProviderConfig['protocol'] | undefined;
+  initialBaseUrl: string | undefined;
+  customModelIds: string[];
+  trimmedDefaultModelIds: string[];
+} {
+  const saved = findExistingProviderModels(providerConfig, modelProviders);
+  const initialBaseUrl = saved?.models[0]?.baseUrl;
+  // Scope built-ins to the restored endpoint: a saved model whose id collides
+  // with a *sibling* endpoint's built-in is user data for this endpoint, and
+  // dropping it here lets the prepend-and-remove-owned merge delete it on the
+  // next no-op resubmit.
+  const builtinIds = new Set(
+    getDefaultModelIds(providerConfig, initialBaseUrl),
+  );
+  const restoredModelIds =
+    saved?.models
+      .filter(
+        (model) =>
+          normalizeBaseUrlForMatching(model.baseUrl) ===
+          normalizeBaseUrlForMatching(initialBaseUrl),
+      )
+      .map((model) => model.id) ?? [];
+  const restoredModelIdSet = new Set(restoredModelIds);
+  return {
+    initialProtocol: saved?.protocol,
+    initialBaseUrl,
+    // The form restores the first saved model's endpoint, so seed only that
+    // endpoint's custom models; siblings belong to their own endpoints and
+    // would be reinstalled under the restored baseUrl/envKey on submit.
+    customModelIds: restoredModelIds.filter((id) => !builtinIds.has(id)),
+    trimmedDefaultModelIds: saved
+      ? [...builtinIds].filter((id) => !restoredModelIdSet.has(id))
+      : [],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // AuthDialog
 // ---------------------------------------------------------------------------
 
-export function AuthDialog(): React.JSX.Element {
+export function AuthDialog({
+  availableTerminalHeight,
+  initialViewLevel = 'main',
+}: AuthDialogProps = {}): React.JSX.Element {
   const {
     auth: { authError },
   } = useUIState();
@@ -128,7 +205,7 @@ export function AuthDialog(): React.JSX.Element {
   const settings = useSettings();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
+  const [viewLevel, setViewLevel] = useState<ViewLevel>(initialViewLevel);
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
   const [mainIndex, setMainIndex] = useState<number | null>(null);
@@ -173,25 +250,21 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
-      providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
-    );
-    if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
-  };
-
   const handleProviderSelect = (providerId: string) => {
     clearErrors();
     const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
+    const existingSetup = getExistingProviderSetup(
+      providerConfig,
+      settings.merged.modelProviders as Record<string, unknown> | undefined,
+    );
     setupFlow.start(
       providerConfig,
-      undefined,
+      existingSetup.initialProtocol,
       existingEnv,
-      getExistingModelIds(providerConfig),
+      existingSetup.customModelIds,
+      existingSetup.initialBaseUrl,
+      existingSetup.trimmedDefaultModelIds,
     );
     pushView('provider-setup');
   };
@@ -214,6 +287,18 @@ export function AuthDialog(): React.JSX.Element {
   };
 
   const activeSubMenu = subMenus[viewLevel];
+  const dialogHeight = availableTerminalHeight ?? DEFAULT_DIALOG_HEIGHT;
+  const listHeight = dialogHeight - (authError || errorMessage ? 2 : 0);
+  const maxMainItems = getMaxItemsToShow(
+    listHeight,
+    MAIN_ITEMS.length,
+    MAIN_LIST_FIXED_ROWS,
+  );
+  const maxSubMenuItems = getMaxItemsToShow(
+    listHeight,
+    activeSubMenu?.items.length ?? 0,
+    SUB_MENU_LIST_FIXED_ROWS,
+  );
 
   // -- Default main index from current auth state ---------------------------
 
@@ -244,15 +329,22 @@ export function AuthDialog(): React.JSX.Element {
       case 'THIRD_PARTY_PROVIDERS':
         pushView('thirdparty-select');
         break;
-      case 'CUSTOM_PROVIDER':
+      case 'CUSTOM_PROVIDER': {
+        const existingSetup = getExistingProviderSetup(
+          customProvider,
+          settings.merged.modelProviders as Record<string, unknown> | undefined,
+        );
         setupFlow.start(
           customProvider,
-          undefined,
+          existingSetup.initialProtocol,
           existingEnv,
-          getExistingModelIds(customProvider),
+          existingSetup.customModelIds,
+          existingSetup.initialBaseUrl,
+          existingSetup.trimmedDefaultModelIds,
         );
         pushView('provider-setup');
         break;
+      }
       default:
         break;
     }
@@ -324,6 +416,8 @@ export function AuthDialog(): React.JSX.Element {
               );
             }}
             itemGap={1}
+            maxItemsToShow={maxMainItems}
+            showScrollArrows={MAIN_ITEMS.length > maxMainItems}
           />
         </Box>
       )}
@@ -344,10 +438,12 @@ export function AuthDialog(): React.JSX.Element {
                 }));
               }}
               itemGap={1}
+              maxItemsToShow={maxSubMenuItems}
+              showScrollArrows={activeSubMenu.items.length > maxSubMenuItems}
             />
           </Box>
           <Box marginTop={1}>
-            <Text color={theme?.text?.secondary}>
+            <Text color={theme?.text?.secondary} wrap="truncate">
               {t('Enter to select, ↑↓ to navigate, Esc to go back')}
             </Text>
           </Box>
@@ -360,17 +456,21 @@ export function AuthDialog(): React.JSX.Element {
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{authError || errorMessage}</Text>
+          <Text color={theme.status.error} wrap="truncate">
+            {authError || errorMessage}
+          </Text>
         </Box>
       )}
 
       {viewLevel === 'main' && (
         <>
           <Box marginY={1}>
-            <Text color={theme.border.default}>{'─'.repeat(80)}</Text>
+            <Text color={theme.border.default} wrap="truncate">
+              {'─'.repeat(80)}
+            </Text>
           </Box>
           <Box>
-            <Text color={theme.text.primary}>
+            <Text color={theme.text.primary} wrap="truncate">
               {t('Terms of Services and Privacy Notice')}:
             </Text>
           </Box>
@@ -379,7 +479,7 @@ export function AuthDialog(): React.JSX.Element {
               url="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
               fallback={false}
             >
-              <Text color={theme.text.secondary} underline>
+              <Text color={theme.text.secondary} underline wrap="truncate">
                 https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
               </Text>
             </Link>
