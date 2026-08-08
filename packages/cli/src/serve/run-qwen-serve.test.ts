@@ -833,12 +833,10 @@ describe('workspace skill settings persistence', () => {
       'setValues',
     );
 
-    const generationGuard = vi.fn();
     const result = await persistDisabledSkillsBatch!(
       workspace,
       ['review', 'alpha', 'locked-skill'],
       false,
-      generationGuard,
     );
 
     expect(result.outcomes).toHaveLength(3);
@@ -861,12 +859,17 @@ describe('workspace skill settings persistence', () => {
       },
     ]);
     expect(setValues).toHaveBeenCalledOnce();
-    expect(
-      generationGuard.mock.invocationCallOrder.filter(
-        (order) => order < setValues.mock.invocationCallOrder[0]!,
-      ),
-    ).toHaveLength(2);
-    expect(setValues.mock.calls[0]?.[2]).toBe(generationGuard);
+
+    const noopResult = await persistDisabledSkillsBatch!(
+      workspace,
+      ['review'],
+      false,
+    );
+    expect(noopResult.outcomes).toEqual([
+      { skillName: 'review', changed: false },
+    ]);
+    expect(noopResult.settingsChanges).toEqual([]);
+    expect(setValues).toHaveBeenCalledOnce();
 
     const savedAfterDisable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
@@ -910,16 +913,24 @@ describe('workspace skill settings persistence', () => {
     ]);
     expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
 
-    const unchanged = await persistDisabledSkillsBatch!(
-      workspace,
-      ['review'],
-      false,
-    );
-    expect(unchanged).toEqual({
-      outcomes: [{ skillName: 'review', changed: false }],
-      settingsChanges: [],
+    const guard = vi.fn();
+    await persistDisabledSkillsBatch!(workspace, ['guarded'], false, guard);
+    expect(setValues.mock.calls.at(-1)?.[2]).toBe(guard);
+    expect(guard).toHaveBeenCalled();
+
+    const blockingGuard = vi.fn(() => {
+      throw new Error('generation closed');
     });
-    expect(setValues).toHaveBeenCalledTimes(2);
+    const writesBefore = setValues.mock.calls.length;
+    await expect(
+      persistDisabledSkillsBatch!(
+        workspace,
+        ['guarded-too'],
+        false,
+        blockingGuard,
+      ),
+    ).rejects.toThrow('generation closed');
+    expect(setValues.mock.calls).toHaveLength(writesBefore);
   });
 });
 
