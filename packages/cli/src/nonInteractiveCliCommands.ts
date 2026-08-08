@@ -16,6 +16,7 @@ import {
   type GoalStateResponse,
   createDebugLogger,
   recordSkillInvocation,
+  type ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
@@ -72,6 +73,8 @@ export type NonInteractiveSlashCommandResult =
       outputHistoryItems?: HistoryItemWithoutId[];
       /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
       modelOverride?: string;
+      /** Execution-time guard scoped to this submitted turn. */
+      toolInvocationGuard?: ToolInvocationGuard;
       refreshContextFilesOnWrite?: boolean;
     }
   | {
@@ -127,6 +130,9 @@ function handleCommandResult(
         content: result.content,
         ...(result.modelOverride
           ? { modelOverride: result.modelOverride }
+          : {}),
+        ...(result.toolInvocationGuard
+          ? { toolInvocationGuard: result.toolInvocationGuard }
           : {}),
         ...(result.refreshContextFilesOnWrite
           ? { refreshContextFilesOnWrite: true }

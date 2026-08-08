@@ -194,7 +194,10 @@ import {
   getInvocationContext,
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
-import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
+import {
+  evaluateToolInvocationGuards,
+  type ToolInvocationGuard,
+} from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
@@ -1374,10 +1377,16 @@ export class CoreToolScheduler {
     string,
     RuntimeContentGeneratorView
   >();
+  /** Per-schedule guards keyed by the stable request objects they protect. */
+  private readonly requestToolInvocationGuards = new WeakMap<
+    ToolCallRequestInfo,
+    ToolInvocationGuard
+  >();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
     runtimeView?: RuntimeContentGeneratorView;
+    toolInvocationGuard?: ToolInvocationGuard;
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
@@ -2140,6 +2149,7 @@ export class CoreToolScheduler {
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
     runtimeView?: RuntimeContentGeneratorView,
+    toolInvocationGuard?: ToolInvocationGuard,
   ): Promise<void> {
     if (this.isRunning() || this.isScheduling) {
       return new Promise((resolve, reject) => {
@@ -2160,6 +2170,7 @@ export class CoreToolScheduler {
           request,
           signal,
           runtimeView,
+          toolInvocationGuard,
           resolve: () => {
             signal.removeEventListener('abort', abortHandler);
             resolve();
@@ -2171,7 +2182,7 @@ export class CoreToolScheduler {
         });
       });
     }
-    return this._schedule(request, signal, runtimeView);
+    return this._schedule(request, signal, runtimeView, toolInvocationGuard);
   }
 
   private drainRequestQueueIfIdle(): void {
@@ -2183,7 +2194,12 @@ export class CoreToolScheduler {
       return;
     }
     const next = this.requestQueue.shift()!;
-    this._schedule(next.request, next.signal, next.runtimeView)
+    this._schedule(
+      next.request,
+      next.signal,
+      next.runtimeView,
+      next.toolInvocationGuard,
+    )
       .then(next.resolve)
       .catch(next.reject);
   }
@@ -2228,6 +2244,7 @@ export class CoreToolScheduler {
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
     runtimeView?: RuntimeContentGeneratorView,
+    toolInvocationGuard?: ToolInvocationGuard,
   ): Promise<void> {
     if (runtimeView) {
       const items = Array.isArray(request) ? request : [request];
@@ -2236,13 +2253,22 @@ export class CoreToolScheduler {
       }
       try {
         return await runWithRuntimeContentGenerator(runtimeView, () =>
-          this._schedule(request, signal),
+          this._schedule(request, signal, undefined, toolInvocationGuard),
         );
       } catch (error) {
         for (const item of items) {
           this.runtimeContentGeneratorViews.delete(item.callId);
         }
         throw error;
+      }
+    }
+    for (const item of Array.isArray(request) ? request : [request]) {
+      if (toolInvocationGuard) {
+        this.requestToolInvocationGuards.set(item, toolInvocationGuard);
+      } else {
+        // A caller may deliberately reuse a request object for a retry. Do not
+        // let a guard from its earlier scheduling leak into the new run.
+        this.requestToolInvocationGuards.delete(item);
       }
     }
     this.isScheduling = true;
@@ -4469,11 +4495,14 @@ export class CoreToolScheduler {
       }
     }
 
-    const toolInvocationGuard = this.config.getToolInvocationGuard?.();
-    if (toolInvocationGuard) {
+    const hostToolInvocationGuard = this.config.getToolInvocationGuard?.();
+    const requestToolInvocationGuard = this.requestToolInvocationGuards.get(
+      scheduledCall.request,
+    );
+    if (hostToolInvocationGuard || requestToolInvocationGuard) {
       const invocationContext = getInvocationContext();
-      const guardDecision = await evaluateToolInvocationGuard(
-        toolInvocationGuard,
+      const guardDecision = await evaluateToolInvocationGuards(
+        [hostToolInvocationGuard, requestToolInvocationGuard],
         {
           callId,
           toolName: canonicalName,

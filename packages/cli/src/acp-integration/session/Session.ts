@@ -45,6 +45,7 @@ import type {
   CronTaskDelivery,
   InvocationContextV1,
   WorkflowApproval,
+  ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -100,7 +101,7 @@ import {
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   buildPermissionCheckContext,
-  evaluateToolInvocationGuard,
+  evaluateToolInvocationGuards,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
@@ -3326,6 +3327,7 @@ export class Session implements SessionContext {
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
+            let fullTurnToolInvocationGuard: ToolInvocationGuard | undefined;
             const onFullTurnModel = (model: string) => {
               if (fullTurnModelOverride === model) {
                 return true;
@@ -3349,6 +3351,10 @@ export class Session implements SessionContext {
                 this.config,
                 this.settings,
               );
+              if (slashCommandResult.type === 'submit_prompt') {
+                fullTurnToolInvocationGuard =
+                  slashCommandResult.toolInvocationGuard;
+              }
 
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,
@@ -3769,6 +3775,7 @@ export class Session implements SessionContext {
                         functionCalls,
                         toolLoopState,
                         onFullTurnModel,
+                        fullTurnToolInvocationGuard,
                       ),
                   );
                   if (
@@ -3824,6 +3831,7 @@ export class Session implements SessionContext {
                 true,
                 fullTurnModelOverride,
                 channelDeliveryCapture,
+                fullTurnToolInvocationGuard,
               );
             } finally {
               logConversationFinishedEvent(
@@ -3863,6 +3871,7 @@ export class Session implements SessionContext {
     allowExternalHooks = true,
     modelOverride?: string,
     channelDeliveryCapture?: ChannelDeliveryCapture,
+    toolInvocationGuard?: ToolInvocationGuard,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -3928,6 +3937,7 @@ export class Session implements SessionContext {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
               channelDeliveryCapture,
+              toolInvocationGuard,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -4027,6 +4037,7 @@ export class Session implements SessionContext {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
                 channelDeliveryCapture,
+                toolInvocationGuard,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -4152,6 +4163,7 @@ export class Session implements SessionContext {
           onFullTurnModel,
           getModelOverride: () => modelOverride,
           channelDeliveryCapture,
+          toolInvocationGuard,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -4177,6 +4189,7 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
       channelDeliveryCapture?: ChannelDeliveryCapture;
+      toolInvocationGuard?: ToolInvocationGuard;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -4719,6 +4732,7 @@ export class Session implements SessionContext {
               functionCalls,
               toolLoopState,
               options.onFullTurnModel,
+              options.toolInvocationGuard,
             ),
         );
         if (
@@ -7199,6 +7213,7 @@ export class Session implements SessionContext {
     functionCalls: FunctionCall[],
     toolLoopState?: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
+    toolInvocationGuard?: ToolInvocationGuard,
   ): Promise<RunToolResult> {
     // The daemon executes tools directly rather than through
     // CoreToolScheduler, so the ALS bindings the scheduler would provide must
@@ -7594,6 +7609,7 @@ export class Session implements SessionContext {
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
           onFullTurnModel,
+          toolInvocationGuard,
         )
           .then((r) => {
             results[idx] = r;
@@ -7737,6 +7753,7 @@ export class Session implements SessionContext {
               queueToolResultRecord,
               executionCallIds.get(fc),
               onFullTurnModel,
+              toolInvocationGuard,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -7827,6 +7844,7 @@ export class Session implements SessionContext {
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
     onFullTurnModel?: (model: string) => boolean,
+    toolInvocationGuard?: ToolInvocationGuard,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -9050,11 +9068,12 @@ export class Session implements SessionContext {
             }
           }
 
-          const toolInvocationGuard = this.config.getToolInvocationGuard?.();
-          if (toolInvocationGuard) {
+          const hostToolInvocationGuard =
+            this.config.getToolInvocationGuard?.();
+          if (hostToolInvocationGuard || toolInvocationGuard) {
             const invocationContext = getInvocationContext();
-            const guardDecision = await evaluateToolInvocationGuard(
-              toolInvocationGuard,
+            const guardDecision = await evaluateToolInvocationGuards(
+              [hostToolInvocationGuard, toolInvocationGuard],
               {
                 callId,
                 toolName: policyToolName,

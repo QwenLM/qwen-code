@@ -18,10 +18,23 @@ import {
 } from './paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
-import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import {
+  createMemoryScopedAgentConfig,
+  createMemoryScopedToolInvocationGuard,
+} from './memory-scoped-agent-config.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
+
+const DREAM_TOOL_NAMES = [
+  ToolNames.READ_FILE,
+  ToolNames.GREP,
+  ToolNames.GLOB,
+  ToolNames.LS,
+  ToolNames.SHELL,
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+] as const;
 
 const DREAM_AGENT_SYSTEM_PROMPT = `You are performing a managed memory dream — a reflective pass over durable memory files.
 
@@ -99,6 +112,19 @@ export function buildConsolidationTaskPrompt(
   ].join('\n');
 }
 
+/**
+ * Apply the forked Dream worker's deterministic filesystem boundary to a
+ * visible /dream turn running on the main Agent.
+ */
+export function createManualDreamToolInvocationGuard(projectRoot: string) {
+  return createMemoryScopedToolInvocationGuard(projectRoot, {
+    allowShell: true,
+    includeUserMemory: false,
+    protectPinnedMemory: true,
+    allowedTools: DREAM_TOOL_NAMES,
+  });
+}
+
 export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
@@ -119,15 +145,7 @@ export async function planManagedAutoMemoryDreamByAgent(
     systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
     maxTurns: config.getMemoryAgentMaxTurns() ?? MAX_TURNS,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
-    tools: [
-      ToolNames.READ_FILE,
-      ToolNames.GREP,
-      ToolNames.GLOB,
-      ToolNames.LS,
-      ToolNames.SHELL,
-      ToolNames.WRITE_FILE,
-      ToolNames.EDIT,
-    ],
+    tools: [...DREAM_TOOL_NAMES],
     abortSignal,
     suppressChatRecording: options.suppressChatRecording,
   });

@@ -41,6 +41,15 @@ planners. This covers post-session extraction, scheduled Dream, and callers of
 the workspace-memory Dream endpoint. Explicit remember operations retain their
 current behavior.
 
+The visible `/dream` command carries an execution-time tool guard with its
+submitted prompt. Interactive, headless, and ACP consumers keep that guard for
+the full tool loop, including tool-result and Stop-hook continuations, without
+replacing the session-wide permission manager. The guard gives the main-Agent
+turn the same bounded tool surface as the forked Dream worker: writes stay
+inside project managed memory, pinned paths and symlink aliases are denied,
+shell is read-only, and unrelated tools (including sub-Agent delegation) are
+unavailable.
+
 ## Scope boundaries
 
 - No scanner or indexer production change: recursive discovery already handles
@@ -52,10 +61,6 @@ current behavior.
   pinned files. Automatic memory workers cannot create them with `write_file`
   or `edit`, and their read-only shell policy blocks `ln`; a stronger threat
   model would require a separate inode-based policy.
-- The visible `/dream` slash-command turn receives the shared skip prompt rule,
-  but does not gain a deterministic tool gate in this change. The slash command
-  executes on the main Agent, which has no existing per-turn permission
-  override; adding one would be a separate cross-surface permission design.
 - Forked Dream remains project-memory-only because its existing scoped
   configuration excludes the global user-memory root.
 - Automatic extraction continues to cover both project and global user-memory
@@ -67,12 +72,7 @@ current behavior.
 - `packages/core/src/memory/memory-scoped-agent-config.ts`
 - `packages/core/src/memory/dreamAgentPlanner.ts`
 - `packages/core/src/memory/extractionAgentPlanner.ts`
+- Core/CLI turn-scoped tool-guard plumbing for interactive, headless, and ACP
+  execution
 - Collocated memory permission, prompt, and index tests
 - `docs/users/features/memory.md`
-
-## Open question
-
-Whether the visible `/dream` slash command must receive the same deterministic
-gate remains a maintainer scope decision. If required, it should be implemented
-as a general per-turn permission override rather than by mutating the
-session-wide permission manager around one asynchronous tool loop.

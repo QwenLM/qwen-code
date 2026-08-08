@@ -13237,6 +13237,79 @@ describe('Session', () => {
         });
       });
 
+      it('applies a submit_prompt tool guard throughout an ACP slash turn', async () => {
+        const toolInvocationGuard = vi
+          .fn()
+          .mockResolvedValue({ allowed: false, reason: 'dream guard denied' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'dream prompt' }],
+          toolInvocationGuard,
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const execute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.WRITE_FILE,
+          kind: core.Kind.Edit,
+          displayName: 'write_file',
+          description: 'write_file',
+          build: vi.fn().mockReturnValue({
+            params: { file_path: '/memory/pinned/a.md', content: 'changed' },
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('write file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'dream-write',
+                      name: core.ToolNames.WRITE_FILE,
+                      args: {
+                        file_path: '/memory/pinned/a.md',
+                        content: 'changed',
+                      },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/dream' }],
+        });
+
+        expect(toolInvocationGuard).toHaveBeenCalledWith({
+          callId: 'dream-write',
+          toolName: core.ToolNames.WRITE_FILE,
+          args: { file_path: '/memory/pinned/a.md', content: 'changed' },
+          signal: expect.any(AbortSignal),
+        });
+        expect(execute).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.any(Array),
+          expect.objectContaining({
+            callId: 'dream-write',
+            status: 'error',
+            errorType: core.ToolErrorType.EXECUTION_DENIED,
+          }),
+        );
+      });
+
       it('marks streamed slash-command messages with their source', async () => {
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
@@ -18593,6 +18666,7 @@ describe('Session', () => {
         functionCalls: FunctionCall[],
         toolLoopState?: DaemonToolLoopState,
         onFullTurnModel?: (model: string) => boolean,
+        toolInvocationGuard?: core.ToolInvocationGuard,
       ) => Promise<{
         parts: Part[];
         stopAfterPermissionCancel: boolean;
@@ -18678,6 +18752,120 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    it('applies a turn-scoped guard to one ACP tool batch only', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
+      });
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: false, reason: 'turn policy denied' });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.READ_FILE, execute),
+      );
+
+      const first = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-guarded',
+        [
+          {
+            id: 'guarded-read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/workspace/a.md' },
+          },
+        ],
+        undefined,
+        undefined,
+        toolInvocationGuard,
+      );
+
+      expect(toolInvocationGuard).toHaveBeenCalledWith({
+        callId: 'guarded-read',
+        toolName: core.ToolNames.READ_FILE,
+        args: {},
+        signal: expect.any(AbortSignal),
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(first.parts[0].functionResponse?.response).toEqual({
+        error: 'turn policy denied',
+      });
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-unguarded',
+        [
+          {
+            id: 'unguarded-read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/workspace/a.md' },
+          },
+        ],
+      );
+
+      expect(toolInvocationGuard).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('composes ACP host and turn guards with the invocation context', async () => {
+      const execute = vi.fn();
+      const guardOrder: string[] = [];
+      const hostGuard = vi.fn(async () => {
+        guardOrder.push('host');
+        return { allowed: true } as const;
+      });
+      const turnGuard = vi.fn(async () => {
+        guardOrder.push('turn');
+        return { allowed: false, reason: 'turn policy denied' } as const;
+      });
+      const invocationContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'guard-session',
+        promptId: 'guard-prompt',
+      };
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(hostGuard);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.READ_FILE, execute),
+      );
+
+      const result = await core.runWithInvocationContext(
+        invocationContext,
+        () =>
+          (session as unknown as ToolCallInternals).runToolCalls(
+            new AbortController().signal,
+            'guard-prompt',
+            [
+              {
+                id: 'composed-guard-read',
+                name: core.ToolNames.READ_FILE,
+                args: { file_path: '/workspace/a.md' },
+              },
+            ],
+            undefined,
+            undefined,
+            turnGuard,
+          ),
+      );
+
+      const expectedInvocation = {
+        callId: 'composed-guard-read',
+        toolName: core.ToolNames.READ_FILE,
+        args: {},
+        signal: expect.any(AbortSignal),
+        invocationContext,
+      };
+      expect(hostGuard).toHaveBeenCalledWith(expectedInvocation);
+      expect(turnGuard).toHaveBeenCalledWith(expectedInvocation);
+      expect(guardOrder).toEqual(['host', 'turn']);
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'turn policy denied',
+      });
+    });
 
     it('records a missing tool name as a pre-execution failure', async () => {
       const logToolCallSpy = vi

@@ -1316,6 +1316,7 @@ export const useSlashCommandProcessor = (
                     content,
                     onComplete: result.onComplete,
                     modelOverride: result.modelOverride,
+                    toolInvocationGuard: result.toolInvocationGuard,
                     refreshContextFilesOnWrite:
                       result.refreshContextFilesOnWrite,
                   };

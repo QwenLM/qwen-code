@@ -18,6 +18,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
+  ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -1001,6 +1002,7 @@ export async function runNonInteractive(
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
+      let fullTurnToolInvocationGuard: ToolInvocationGuard | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1063,6 +1065,8 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              fullTurnToolInvocationGuard =
+                slashCommandResult.toolInvocationGuard;
               // Re-validate provider identity rather than trust the producer:
               // any slash command can set `modelOverride`, so the consumer
               // enforces that it names a model on the active provider before
@@ -1595,6 +1599,7 @@ export async function runNonInteractive(
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => boolean,
         runtimeView?: RuntimeContentGeneratorView,
+        toolInvocationGuard?: ToolInvocationGuard,
       ): Promise<ToolCallBatchResult> => {
         let terminateTurn = false;
         const responseByRequest = new Map<
@@ -1814,6 +1819,7 @@ export async function runNonInteractive(
                 }
               },
               runtimeView,
+              ...(toolInvocationGuard && { toolInvocationGuard }),
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
@@ -2301,6 +2307,7 @@ export async function runNonInteractive(
               return true;
             },
             fullTurnRuntimeView,
+            fullTurnToolInvocationGuard,
           );
 
           if (structuredSubmission !== undefined) {

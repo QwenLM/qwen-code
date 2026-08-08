@@ -26,6 +26,7 @@ import {
   type ThoughtSummary,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
+  type ToolInvocationGuard,
   type GeminiErrorEventValue,
   type GoalTurnPermit,
   type SteerInput,
@@ -769,6 +770,16 @@ export const useGeminiStream = (
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
+  const submitPromptToolInvocationGuardRef = useRef<
+    | {
+        promptId: string;
+        guard: ToolInvocationGuard;
+      }
+    | undefined
+  >(undefined);
+  const lastPromptToolInvocationGuardRef = useRef<
+    ToolInvocationGuard | undefined
+  >(undefined);
   const refreshContextFilesOnWriteRef = useRef(false);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   // True when the current turn's model override came from an explicit inline
@@ -1317,6 +1328,13 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              submitPromptToolInvocationGuardRef.current =
+                slashCommandResult.toolInvocationGuard
+                  ? {
+                      promptId: prompt_id,
+                      guard: slashCommandResult.toolInvocationGuard,
+                    }
+                  : undefined;
               refreshContextFilesOnWriteRef.current = Boolean(
                 slashCommandResult.refreshContextFilesOnWrite,
               );
@@ -2221,6 +2239,7 @@ export const useGeminiStream = (
       signal: AbortSignal,
       submitType: SendMessageType,
       turnAdmission?: GoalTurnAdmission,
+      toolInvocationGuard?: ToolInvocationGuard,
     ): Promise<StreamProcessingResult> => {
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
@@ -2784,11 +2803,20 @@ export const useGeminiStream = (
 
         if (executableToolCallRequests.length > 0) {
           scheduledToolContinuation = true;
-          scheduleToolCalls(
-            executableToolCallRequests,
-            signal,
-            modelOverrideRef.current,
-          );
+          if (toolInvocationGuard) {
+            scheduleToolCalls(
+              executableToolCallRequests,
+              signal,
+              modelOverrideRef.current,
+              toolInvocationGuard,
+            );
+          } else {
+            scheduleToolCalls(
+              executableToolCallRequests,
+              signal,
+              modelOverrideRef.current,
+            );
+          }
         }
       }
       return {
@@ -3186,6 +3214,17 @@ export const useGeminiStream = (
         }
       }
 
+      // A command-provided guard belongs to one real-user turn and its tool
+      // continuations. Automatic traffic neither clears nor consumes it; the
+      // next real user query replaces it before command preprocessing.
+      if (
+        submitType === SendMessageType.UserQuery &&
+        !allowConcurrentBtwDuringResponse
+      ) {
+        submitPromptToolInvocationGuardRef.current = undefined;
+        lastPromptToolInvocationGuardRef.current = undefined;
+      }
+
       const userMessageTimestamp = Date.now();
 
       // A thrown stream can leave partial assistant runs in the dynamic
@@ -3285,6 +3324,15 @@ export const useGeminiStream = (
 
       if (!prompt_id) {
         prompt_id = config.getSessionId() + '########' + getPromptCount();
+      }
+      if (
+        submitType === SendMessageType.Retry &&
+        lastPromptToolInvocationGuardRef.current
+      ) {
+        submitPromptToolInvocationGuardRef.current = {
+          promptId: prompt_id,
+          guard: lastPromptToolInvocationGuardRef.current,
+        };
       }
 
       return promptIdContext.run(prompt_id, async () => {
@@ -3432,6 +3480,10 @@ export const useGeminiStream = (
         if (submitType !== SendMessageType.Goal) {
           lastPromptRef.current = finalQueryToSend;
           lastPromptErroredRef.current = false;
+          lastPromptToolInvocationGuardRef.current =
+            submitPromptToolInvocationGuardRef.current?.promptId === prompt_id
+              ? submitPromptToolInvocationGuardRef.current.guard
+              : undefined;
         }
 
         if (
@@ -3543,6 +3595,9 @@ export const useGeminiStream = (
             processingSignal,
             submitType,
             turnAdmission,
+            submitPromptToolInvocationGuardRef.current?.promptId === prompt_id
+              ? submitPromptToolInvocationGuardRef.current.guard
+              : undefined,
           );
           if (
             !goalBinding &&
@@ -3560,6 +3615,12 @@ export const useGeminiStream = (
           ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
+            if (
+              submitPromptToolInvocationGuardRef.current?.promptId === prompt_id
+            ) {
+              submitPromptToolInvocationGuardRef.current = undefined;
+              lastPromptToolInvocationGuardRef.current = undefined;
+            }
             metadata?.onDeliveryFailed?.();
             return;
           }
@@ -3661,6 +3722,15 @@ export const useGeminiStream = (
             metadata?.onDeliveryFailed?.();
           } else {
             metadata?.onDelivered?.();
+          }
+
+          if (
+            !processingResult.scheduledToolContinuation &&
+            !lastPromptErroredRef.current &&
+            submitPromptToolInvocationGuardRef.current?.promptId === prompt_id
+          ) {
+            submitPromptToolInvocationGuardRef.current = undefined;
+            lastPromptToolInvocationGuardRef.current = undefined;
           }
 
           // If the turn was initiated by a submit_prompt with an onComplete

@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
+import {
+  evaluateToolInvocationGuard,
+  evaluateToolInvocationGuards,
+} from './tool-invocation-guard.js';
 
 const context = () => ({
   callId: 'call-1',
@@ -157,5 +160,33 @@ describe('evaluateToolInvocationGuard', () => {
     }, original);
 
     expect(original.args['nested'].value).toBe('original');
+  });
+});
+
+describe('evaluateToolInvocationGuards', () => {
+  it('requires every configured guard to allow the invocation', async () => {
+    const hostGuard = vi.fn().mockResolvedValue({ allowed: true });
+    const turnGuard = vi.fn().mockResolvedValue({ allowed: true });
+
+    await expect(
+      evaluateToolInvocationGuards(
+        [hostGuard, undefined, turnGuard],
+        context(),
+      ),
+    ).resolves.toEqual({ allowed: true });
+    expect(hostGuard).toHaveBeenCalledOnce();
+    expect(turnGuard).toHaveBeenCalledOnce();
+  });
+
+  it('stops at the first denial', async () => {
+    const hostGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, reason: 'host denied' });
+    const turnGuard = vi.fn().mockResolvedValue({ allowed: true });
+
+    await expect(
+      evaluateToolInvocationGuards([hostGuard, turnGuard], context()),
+    ).resolves.toEqual({ allowed: false, reason: 'host denied' });
+    expect(turnGuard).not.toHaveBeenCalled();
   });
 });

@@ -11,8 +11,12 @@ import { dreamCommand } from './dreamCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 describe('dreamCommand', () => {
-  it('declares acp in supportedModes', () => {
-    expect(dreamCommand.supportedModes).toEqual(['interactive', 'acp']);
+  it('supports interactive, headless, and ACP execution', () => {
+    expect(dreamCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+      'acp',
+    ]);
   });
 
   it('returns error when config is not loaded', async () => {
@@ -52,6 +56,7 @@ describe('dreamCommand', () => {
       type: 'submit_prompt',
       content: 'dream prompt',
       onComplete: expect.any(Function),
+      toolInvocationGuard: expect.any(Function),
     });
     expect(buildConsolidationPrompt).toHaveBeenCalledWith(
       expect.any(String),
@@ -81,7 +86,39 @@ describe('dreamCommand', () => {
 
     const result = await dreamCommand.action?.(context, '');
     expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
-    expect(result).toEqual({ type: 'submit_prompt', content: 'dream prompt' });
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'dream prompt',
+      toolInvocationGuard: expect.any(Function),
+    });
+    expect(result).not.toHaveProperty('onComplete');
+  });
+
+  it('calls writeDreamManualRun eagerly in headless mode without onComplete', async () => {
+    const projectRoot = path.join('tmp', 'dream-project');
+    const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
+    const writeDreamManualRun = vi.fn();
+    const context = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getProjectRoot: vi.fn().mockReturnValue(projectRoot),
+          getMemoryManager: vi.fn().mockReturnValue({
+            buildConsolidationPrompt,
+            writeDreamManualRun,
+          }),
+          getSessionId: vi.fn().mockReturnValue('session-1'),
+        },
+      },
+    });
+
+    const result = await dreamCommand.action?.(context, '');
+    expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'dream prompt',
+      toolInvocationGuard: expect.any(Function),
+    });
     expect(result).not.toHaveProperty('onComplete');
   });
 
@@ -106,6 +143,10 @@ describe('dreamCommand', () => {
     });
 
     const result = await dreamCommand.action?.(context, '');
-    expect(result).toEqual({ type: 'submit_prompt', content: 'dream prompt' });
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'dream prompt',
+      toolInvocationGuard: expect.any(Function),
+    });
   });
 });

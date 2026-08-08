@@ -9,6 +9,7 @@ import type {
   ToolCallResponseInfo,
   Config,
   RuntimeContentGeneratorView,
+  ToolInvocationGuard,
 } from '../index.js';
 import {
   CoreToolScheduler,
@@ -25,6 +26,8 @@ export interface ExecuteToolCallOptions {
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
   runtimeView?: RuntimeContentGeneratorView;
+  /** Optional execution-time guard scoped to this direct call. */
+  toolInvocationGuard?: ToolInvocationGuard;
 }
 
 /**
@@ -55,7 +58,12 @@ export async function executeToolCall(
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })
-      .schedule(toolCallRequest, abortSignal, options.runtimeView)
+      .schedule(
+        toolCallRequest,
+        abortSignal,
+        options.runtimeView,
+        options.toolInvocationGuard,
+      )
       .catch(reject);
   });
 }
