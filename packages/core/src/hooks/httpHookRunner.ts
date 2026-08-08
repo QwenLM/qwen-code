@@ -5,7 +5,11 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { interpolateHeaders, interpolateUrl } from './envInterpolator.js';
+import {
+  interpolateHeaders,
+  interpolateUrl,
+  sanitizeHeaderValue,
+} from './envInterpolator.js';
 import { UrlValidator } from './urlValidator.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
@@ -106,6 +110,7 @@ export class HttpHookRunner {
   private urlValidator: UrlValidator;
   private readonly allowPrivateNetworkHosts: boolean;
   private readonly executedOnceHooks: Set<string> = new Set();
+  private readonly redirectWarnedHooks: Set<string> = new Set();
   private statusMessageCallback?: StatusMessageCallback;
 
   constructor(
@@ -151,8 +156,8 @@ export class HttpHookRunner {
     }
 
     // Check once flag
+    const onceKey = `${hookConfig.url}:${eventName}`;
     if (hookConfig.once) {
-      const onceKey = `${hookConfig.url}:${eventName}`;
       if (this.executedOnceHooks.has(onceKey)) {
         debugLogger.debug(
           `Skipping once hook ${hookId} - already executed for ${eventName}`,
@@ -243,6 +248,11 @@ export class HttpHookRunner {
           },
           body,
           signal: combinedSignal,
+          // Never follow redirects: the whitelist and DNS-level SSRF
+          // checks above cover only this URL, and a 307/308 would re-send
+          // the hook payload to an unvalidated target. A 3xx response
+          // falls into the non-2xx branch below (non-blocking error).
+          redirect: 'manual',
         });
 
         cleanup();
@@ -252,6 +262,58 @@ export class HttpHookRunner {
         // Per Qwen Code spec: Non-2xx status is a non-blocking error
         // Execution continues, but we log a warning
         if (!response.ok) {
+          if (response.status >= 300 && response.status < 400) {
+            // A redirect delivers no payload, so it must not consume a
+            // once hook's single execution: drop the slot added above so
+            // the hook fires again instead of silently no-op-ing forever.
+            if (hookConfig.once) {
+              this.executedOnceHooks.delete(onceKey);
+            }
+            // With redirect: 'manual' a 3xx lands here; the endpoint is
+            // behind a redirecting LB and silently no-ops unless the user
+            // knows to repoint it, so name the target and the remedy.
+            // debugLogger.warn alone is invisible in default runs, so also
+            // surface it the way command-hook non-blocking errors do.
+            //
+            // The Location header is controlled by the (possibly
+            // compromised) endpoint: strip CR/LF/NUL and cap it like the
+            // other systemMessage producers before it can reach the
+            // conversation.
+            const location = this.truncateOutput(
+              sanitizeHeaderValue(
+                response.headers.get('location') ?? 'unknown',
+              ),
+            );
+            const message =
+              `HTTP hook ${hookId} returned a redirect (${response.status}) to ` +
+              `"${location}"; redirects ` +
+              `are never followed (SSRF protection). Point the hook at the ` +
+              `final URL (non-blocking).`;
+            debugLogger.warn(message);
+            // The remedy only needs saying once per hook URL and event
+            // (keyed like executedOnceHooks): a PreToolUse hook behind a
+            // redirecting LB would otherwise emit it on every tool call,
+            // and event-scoping keeps a debug-only PreToolUse 3xx from
+            // burning the slot a user-visible Stop emission needs.
+            const warnKey = `${hookConfig.url}:${eventName}`;
+            if (this.redirectWarnedHooks.has(warnKey)) {
+              return {
+                hookConfig,
+                eventName,
+                success: true,
+                output: { continue: true },
+                duration,
+              };
+            }
+            this.redirectWarnedHooks.add(warnKey);
+            return {
+              hookConfig,
+              eventName,
+              success: true,
+              output: { continue: true, systemMessage: `Warning: ${message}` },
+              duration,
+            };
+          }
           debugLogger.warn(
             `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
           );
@@ -442,6 +504,7 @@ export class HttpHookRunner {
    */
   resetOnceHooks(): void {
     this.executedOnceHooks.clear();
+    this.redirectWarnedHooks.clear();
   }
 
   /**

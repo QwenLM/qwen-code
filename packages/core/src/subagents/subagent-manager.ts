@@ -924,17 +924,39 @@ export class SubagentManager {
       const hookSystem = runtimeContext.getHookSystem();
       const hookRegistry = hookSystem?.getRegistry();
       if (config.hooks && Object.keys(config.hooks).length > 0) {
-        if (hookRegistry) {
+        // Fail closed: only levels that cannot originate from the
+        // repository skip the folder-trust gate. 'project' agents load
+        // from <repo>/.qwen/agents/ regardless of trust (read-only use is
+        // fine), but their hooks are repo-supplied code execution — the
+        // same gate Config.getProjectHooks() applies to settings-file
+        // hooks — and any future or unset level requires trust too.
+        // 'session' agents are supplied by the embedding host (SDK
+        // `agents` option or the control protocol), never loaded from
+        // repository files, so they sit on the same footing as 'user' —
+        // except when the project root IS the home directory: listing
+        // skips 'project' there, so repository-committed agent files
+        // surface at 'user' level and require trust too. Listing records
+        // that case as `homeRootShadow`; recomputing it here from
+        // `runtimeContext.getProjectRoot()` would read the per-agent
+        // override that worktree isolation / working_dir provisioning
+        // rebinds to the worktree path, opening the gate for exactly the
+        // repo-supplied agents the shadow surfaced.
+        const trustedAgentLevel =
+          (config.level === 'user' && config.homeRootShadow !== true) ||
+          config.level === 'builtin' ||
+          config.level === 'extension' ||
+          config.level === 'session';
+        if (!trustedAgentLevel && !runtimeContext.isTrustedFolder()) {
+          debugLogger.warn(
+            `Subagent "${config.name}" declares hooks but the folder is not trusted; ignoring per-agent hooks.`,
+          );
+        } else if (hookRegistry) {
           const agentScope = `agent:${config.name}:${randomUUID()}`;
           unregisterAgentHooks = hookRegistry.addAgentHooks(
             config.hooks as { [K in HookEventName]?: HookDefinition[] },
             agentScope,
           );
         } else {
-          // Single outer guard; nested branch on hookRegistry. The pre-fix
-          // structure repeated the `config.hooks && Object.keys(...).length`
-          // predicate across two `if`/`else if` arms, which made it easy to
-          // drift one side during future edits.
           debugLogger.warn(
             `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
           );
@@ -1368,6 +1390,18 @@ export class SubagentManager {
           // why their agent wasn't loading.
           warnInvalidSubagentFile(filePath, error);
           continue;
+        }
+      }
+
+      // Home-root shadow: when the project root IS the home directory the
+      // 'project' level was skipped above, so repository-committed agent
+      // files surface at this 'user' level. Tag them so the hooks trust
+      // gate at spawn time stays correct even when the spawn path rebinds
+      // getProjectRoot() on a per-agent override (worktree isolation,
+      // working_dir pins). Mirrors SkillManager.listSkillsAtLevel.
+      if (level === 'user' && isHomeDirectory) {
+        for (const subagent of subagents) {
+          subagent.homeRootShadow = true;
         }
       }
 

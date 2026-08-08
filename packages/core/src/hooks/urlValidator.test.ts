@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { UrlValidator, createUrlValidator } from './urlValidator.js';
+import {
+  UrlValidator,
+  createUrlValidator,
+  hookUrlPatternCovers,
+} from './urlValidator.js';
 
 describe('UrlValidator', () => {
   describe('isBlocked', () => {
@@ -196,5 +200,169 @@ describe('UrlValidator', () => {
       const validator = createUrlValidator(undefined);
       expect(validator.isAllowed('https://any.com/hook')).toBe(true);
     });
+  });
+});
+
+describe('hookUrlPatternCovers', () => {
+  it('treats identical patterns as covering', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/*'),
+    ).toBe(true);
+  });
+
+  it('lets a wildcard-suffix entry narrow its parent pattern', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/hooks/*'),
+    ).toBe(true);
+  });
+
+  it('lets an exact URL narrow a wildcard pattern', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/ci'),
+    ).toBe(true);
+  });
+
+  it('rejects entries outside the higher-scope pattern', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://evil.com/*'),
+    ).toBe(false);
+  });
+
+  it('rejects a lookalike host that extends a literal chunk', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com.evil.com/*'),
+    ).toBe(false);
+  });
+
+  it('rejects the catch-all "*" against a bounded pattern', () => {
+    expect(hookUrlPatternCovers('https://corp.com/*', '*')).toBe(false);
+  });
+
+  it('lets the catch-all "*" cover any entry', () => {
+    expect(hookUrlPatternCovers('*', 'https://corp.com/hooks/*')).toBe(true);
+  });
+
+  it('matches case-insensitively like the URL validator', () => {
+    expect(
+      hookUrlPatternCovers('https://CORP.com/*', 'https://corp.com/hooks/*'),
+    ).toBe(true);
+  });
+
+  it('fails closed on non-ASCII patterns whose case folding diverges at runtime', () => {
+    // toLowerCase() folds ẞ (U+1E9E) to ß (U+00DF), equating these
+    // hosts, but the runtime's non-Unicode /i regex never matches the two
+    // across — a "covers" verdict would let the inner entry survive the
+    // merge while its runtime regex admits a host the outer pattern
+    // rejects. Hook URLs are realistically ASCII, so anything else is
+    // unprovable and dropped.
+    expect(
+      hookUrlPatternCovers(
+        'https://fuß.example.com/*',
+        'https://fuẞ.example.com/*',
+      ),
+    ).toBe(false);
+    // Identical non-ASCII patterns fail closed too — the runtime matching
+    // relation is unprovable for them regardless of spelling.
+    expect(
+      hookUrlPatternCovers(
+        'https://bücher.example.com/*',
+        'https://bücher.example.com/*',
+      ),
+    ).toBe(false);
+    // Why this must fail closed: the runtime regex compiled from the
+    // outer pattern rejects the host that toLowerCase() calls equal.
+    const runtime = new UrlValidator(['https://fuß.example.com/*']);
+    expect(runtime.isAllowed('https://fuẞ.example.com/hook')).toBe(false);
+  });
+
+  it('treats pre-escaped and unescaped spellings as equivalent', () => {
+    expect(
+      hookUrlPatternCovers(
+        'https://api\\.example\\.com/*',
+        'https://api.example.com/hooks/*',
+      ),
+    ).toBe(true);
+    expect(
+      hookUrlPatternCovers(
+        'https://api.example.com/*',
+        'https://api\\.example\\.com/hooks/*',
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects entries that add a wildcard outside the higher-scope literals', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://*/corp.com/*'),
+    ).toBe(false);
+  });
+
+  it('does not let escapes other than \\. widen coverage (fails closed)', () => {
+    // `\*` is not the documented `\.` escape; normalizing it into a
+    // catch-all would widen the higher-scope policy.
+    expect(hookUrlPatternCovers('\\*', 'https://corp.com/*')).toBe(false);
+  });
+
+  it('fails closed on alternation inside a pre-escaped entry', () => {
+    // The literal reading covers, but the runtime compiles a pre-escaped
+    // pattern's non-* text as raw regex: the ungrouped alternation would
+    // match hosts outside the higher-scope pattern.
+    expect(
+      hookUrlPatternCovers('https://corp\\.com/*', 'https://corp\\.com/x|y/*'),
+    ).toBe(false);
+  });
+
+  it('fails closed when a pattern carries regex classes beyond \\.', () => {
+    // `\d` reads literally here, but the runtime treats it as the digit
+    // class, so the literal comparison cannot prove coverage.
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks\\.corp\\.com/status/\\d+/*',
+        'https://hooks.corp.com/status/1/exfil',
+      ),
+    ).toBe(false);
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/a+b'),
+    ).toBe(false);
+  });
+
+  it('fails closed when a pre-escaped entry keeps a bare dot', () => {
+    // `compilePattern` takes the pre-escaped branch once a pattern carries
+    // `\.`, reading every non-* character as raw regex: a surviving bare
+    // dot is a wildcard there, so the literal comparison cannot prove
+    // coverage — the runtime regex matches lookalike hosts the outer
+    // pattern excludes.
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks.corp.com/*',
+        'https://hooks\\.corp.com/*',
+      ),
+    ).toBe(false);
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks.example.co.uk/*',
+        'https://hooks\\.example.co.uk/*',
+      ),
+    ).toBe(false);
+    // Why this must fail closed: the pre-escaped runtime regex treats the
+    // bare dots as wildcards and matches a different public host.
+    const runtime = new UrlValidator(['https://hooks\\.example.co.uk/*']);
+    expect(runtime.isAllowed('https://hooks.example.co/uk/exfil')).toBe(true);
+  });
+
+  it('stays linear on long near-miss entries instead of backtracking', () => {
+    const start = Date.now();
+    // The input passes the startsWith/endsWith anchors, so the chunk-scan
+    // loop itself must walk the ~200 KB body before rejecting it: a
+    // quadratic rescan or regex-based containment would blow the bound.
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks.corp.com/*/*/*/done',
+        `https://hooks.corp.com/${'a'.repeat(200_000)}/done`,
+      ),
+    ).toBe(false);
+    // The regex this replaced measured seconds at ~1000 separators and
+    // scaled ~cubically; a linear scan finishes in milliseconds even on
+    // 200 KB entries. The generous bound only guards against regressions.
+    expect(Date.now() - start).toBeLessThan(2000);
   });
 });

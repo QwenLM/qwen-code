@@ -143,6 +143,7 @@ export * from './tools/modifiable-tool.js';
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  isTrustedSkillLevel,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
@@ -634,6 +635,7 @@ export {
   HookRegistry,
   createInstructionsLoadedCallback,
   hookEventSupportsMatcher,
+  hookUrlPatternCovers,
 } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export {

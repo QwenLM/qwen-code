@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   interpolateEnvVars,
   interpolateHeaders,
@@ -14,6 +14,17 @@ import {
   sanitizeHeaderValue,
 } from './envInterpolator.js';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => false),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 describe('envInterpolator', () => {
   const originalEnv = process.env;
 
@@ -22,6 +33,7 @@ describe('envInterpolator', () => {
     process.env['MY_TOKEN'] = 'secret-token';
     process.env['API_KEY'] = 'api-key-123';
     process.env['EMPTY_VAR'] = '';
+    mockDebugLogger.warn.mockClear();
   });
 
   afterEach(() => {
@@ -60,6 +72,40 @@ describe('envInterpolator', () => {
     it('should handle undefined environment variables', () => {
       const result = interpolateEnvVars('$UNDEFINED_VAR', ['UNDEFINED_VAR']);
       expect(result).toBe('');
+    });
+
+    it('should never interpolate Qwen-internal secrets, even when whitelisted', () => {
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      const result = interpolateEnvVars('token=$QWEN_SERVER_TOKEN', [
+        'QWEN_SERVER_TOKEN',
+      ]);
+      expect(result).toBe('token=');
+      expect(result).not.toContain('daemon-secret');
+    });
+
+    it('should warn in the debug log, naming the blocked internal-secret variable', () => {
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      interpolateEnvVars('token=$QWEN_SERVER_TOKEN', ['QWEN_SERVER_TOKEN']);
+      expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+      const message = String(mockDebugLogger.warn.mock.calls[0]?.[0]);
+      expect(message).toContain('QWEN_SERVER_TOKEN');
+      // The variable name is diagnostic; its value must never be logged.
+      expect(message).not.toContain('daemon-secret');
+    });
+
+    it('should not warn for variables that are merely outside the whitelist', () => {
+      interpolateEnvVars('token=$OTHER_VAR', ['MY_TOKEN']);
+      expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+    });
+
+    it('should block internal secrets regardless of casing', () => {
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      process.env['qwen_server_token'] = 'daemon-secret';
+      const result = interpolateEnvVars('token=$qwen_server_token', [
+        'qwen_server_token',
+      ]);
+      expect(result).toBe('token=');
+      expect(result).not.toContain('daemon-secret');
     });
 
     it('should handle empty whitelist', () => {

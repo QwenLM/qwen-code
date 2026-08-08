@@ -20,6 +20,7 @@ import {
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
+import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -38,6 +39,9 @@ type SkillToolWithProtectedMethods = SkillTool & {
 
 // Mock dependencies
 vi.mock('../skills/skill-manager.js');
+vi.mock('../hooks/registerSkillHooks.js', () => ({
+  registerSkillHooks: vi.fn().mockReturnValue(1),
+}));
 vi.mock('../skills/skill-curator.js', () => ({
   recordAutoSkillUsage: vi.fn().mockResolvedValue(false),
 }));
@@ -95,6 +99,8 @@ describe('SkillTool', () => {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
       getSkillManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
@@ -520,6 +526,452 @@ describe('SkillTool', () => {
 
       const result = gatedTool.validateToolParams({ skill: 'tsx-helper' });
       expect(result).toMatch(/gated by path-based activation/);
+    });
+  });
+
+  describe('skill hooks trust gating', () => {
+    const hookedSkill: SkillConfig = {
+      name: 'hooked',
+      description: 'Skill with hooks',
+      level: 'project',
+      filePath: '/project/.qwen/skills/hooked/SKILL.md',
+      body: 'Body.',
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: './check.sh' }],
+          },
+        ],
+      } as unknown as SkillConfig['hooks'],
+    };
+
+    beforeEach(() => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        hookedSkill,
+      );
+      vi.mocked(registerSkillHooks).mockClear();
+    });
+
+    it('does not register hooks for a project-level skill in an untrusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      const getSessionHooksManager = vi.fn();
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await invocation.execute();
+
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+      // The skill itself still loads — only the hooks are gated.
+      expect(partToString(result.llmContent)).toContain('Body.');
+    });
+
+    it('registers hooks for a project-level skill in a trusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('registers hooks for a user-level skill regardless of folder trust', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+      });
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('gates hooks for a home-root-shadowed user-level skill in an untrusted folder', async () => {
+      // SkillManager skips the 'project' level when the project root IS
+      // the home directory, so repository-committed skills surface at
+      // 'user' level there and are tagged `homeRootShadow`; the gate
+      // must treat them as repo-supplied.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+        homeRootShadow: true,
+      });
+      const getSessionHooksManager = vi.fn();
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await invocation.execute();
+
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+      // The skill itself still loads — only the hooks are gated.
+      expect(partToString(result.llmContent)).toContain('Body.');
+    });
+
+    it('registers hooks for a home-root-shadowed user-level skill once the folder is trusted', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+        homeRootShadow: true,
+      });
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps hooks gated when the subagent config rebinds getProjectRoot (worktree isolation)', async () => {
+      // Inside a worktree-isolated / working_dir-pinned subagent the
+      // SkillTool runs on a per-agent Config override whose
+      // getProjectRoot is rebound to the worktree path. The gate must
+      // consume the listing-time `homeRootShadow` flag instead of
+      // re-deriving the shadow from that rebound value — otherwise a
+      // home-rooted repo skill surfaced at 'user' level would register
+      // its hooks on the parent session despite the untrusted folder.
+      vi.mocked(config.getProjectRoot).mockReturnValue(
+        '/test/project/.qwen/worktrees/agent-x',
+      );
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+        homeRootShadow: true,
+      });
+      const getSessionHooksManager = vi.fn();
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+    });
+
+    it('registers hooks for an extension-level skill regardless of folder trust', async () => {
+      // Extensions load only from the user-scope extensions directory, so
+      // they are in the trusted allowlist and must not regress behind the
+      // fail-closed gate.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'extension',
+      });
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('registers deferred hooks once the folder becomes trusted mid-session', async () => {
+      // The gate is "gated UNTIL the folder is trusted": a skill first
+      // invoked while untrusted must pick up its hooks on re-invocation
+      // after trust is granted, without waiting for /clear.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await first.execute();
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await second.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+      // The body is not re-injected — only the side effects are applied.
+      expect(partToString(result.llmContent)).toContain('already loaded');
+
+      // Later invocations must not register the hooks a second time.
+      const third = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await third.execute();
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('registers hooks exactly once when a trusted skill is re-invoked', async () => {
+      // A trust-passing first load applies side effects immediately and must
+      // not enter the deferred set — otherwise re-invocation would hit the
+      // re-apply branch and register the hooks a second time (no dedup).
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await first.execute();
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await second.execute();
+      expect(partToString(result.llmContent)).toContain('already loaded');
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the deferral alive when re-invoked while still untrusted', async () => {
+      // A re-invocation before trust is granted must retain the deferred
+      // entry; dropping it would lose the hooks for the rest of the session
+      // even after the folder becomes trusted.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await first.execute();
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await second.execute();
+      expect(partToString(result.llmContent)).toContain('already loaded');
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const third = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await third.execute();
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears deferred side effects on clearLoadedSkills so a fresh load registers hooks once', async () => {
+      // /clear resets both tracking sets. A stale deferred entry would make
+      // the next re-invocation re-apply side effects on top of the fresh
+      // load's registration, and registerSkillHooks has no dedup.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await first.execute();
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      skillTool.clearLoadedSkills();
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result2 = await second.execute();
+      // After /clear the skill loads fresh (full body), not via the dedup path.
+      expect(partToString(result2.llmContent)).toContain('Body.');
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+
+      const third = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result3 = await third.execute();
+      expect(partToString(result3.llmContent)).toContain('already loaded');
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('allowedTools trust gating', () => {
+    const projectSkill: SkillConfig = {
+      name: 'build',
+      description: 'Project skill with allowedTools',
+      level: 'project',
+      filePath: '/project/.qwen/skills/build/SKILL.md',
+      body: 'Body.',
+      allowedTools: ['Edit', 'Bash(git push *)'],
+    };
+
+    beforeEach(() => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        projectSkill,
+      );
+    });
+
+    it('does not grant allowedTools for a project skill in an untrusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      const result = await invocation.execute();
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      // The skill itself still loads — only the permission grants are gated.
+      expect(partToString(result.llmContent)).toContain('Body.');
+    });
+
+    it('grants allowedTools for a project skill in a trusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Edit');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        2,
+        'Bash(git push *)',
+      );
+    });
+
+    it('grants allowedTools for a user-level skill regardless of folder trust', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...projectSkill,
+        level: 'user',
+      });
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('grants allowedTools for a bundled skill regardless of folder trust', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...projectSkill,
+        level: 'bundled',
+      });
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('grants deferred allowedTools once the folder becomes trusted mid-session', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await first.execute();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await second.execute();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+
+      // Later invocations must not grant the rules a second time.
+      const third = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await third.execute();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('grants allowedTools exactly once when a trusted skill is re-invoked', async () => {
+      // A trust-passing first load applies the grants immediately and must
+      // not enter the deferred set — otherwise re-invocation would hit the
+      // re-apply branch and duplicate the allow rules.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await first.execute();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await second.execute();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the deferral alive when re-invoked while still untrusted', async () => {
+      // Mirrors the hooks-side retention test: the shared deferred set must
+      // survive still-untrusted re-invocations.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await first.execute();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await second.execute();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const third = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await third.execute();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
     });
   });
 

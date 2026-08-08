@@ -135,6 +135,7 @@ export class HookAggregator {
    * Rules:
    * - Any "block" or "deny" decision results in blocking (most restrictive wins)
    * - Reasons are concatenated with newlines
+   * - System messages are concatenated with newlines
    * - continue=false takes precedence over continue=true
    * - Additional context is concatenated
    * - For PostToolUse, decision and reason are required fields
@@ -195,13 +196,13 @@ export class HookAggregator {
         }
       }
 
-      // Copy other fields (later values win for simple fields)
+      // Copy other fields (later values win for simple fields;
+      // systemMessage is concatenated like reason so a one-shot message
+      // from an earlier hook survives later hooks).
       if (output.suppressOutput !== undefined) {
         merged.suppressOutput = output.suppressOutput;
       }
-      if (output.systemMessage !== undefined) {
-        merged.systemMessage = output.systemMessage;
-      }
+      this.appendSystemMessage(merged, output);
     }
 
     // Concatenate terminal sequences from all outputs
@@ -251,6 +252,7 @@ export class HookAggregator {
    * Rules:
    * - behavior: deny wins over allow (security priority)
    * - message: concatenated with newlines
+   * - systemMessage: concatenated with newlines
    * - updatedInput: later values win
    * - updatedPermissions: concatenated
    * - interrupt: true wins over false
@@ -265,6 +267,9 @@ export class HookAggregator {
     const allUpdatedPermissions: Array<{ type: string; tool?: string }> = [];
 
     for (const output of outputs) {
+      // Top-level systemMessage (e.g. the one-shot redirect warning) must
+      // survive even when an output carries no permission decision.
+      this.appendSystemMessage(merged, output);
       const specific = output.hookSpecificOutput;
       if (!specific) continue;
 
@@ -366,10 +371,14 @@ export class HookAggregator {
     for (const output of outputs) {
       // Collect additionalContext for concatenation
       this.extractAdditionalContext(output, additionalContexts);
-      // Exclude terminalSequence from spread — it is concatenated below
-      const { terminalSequence: _ts, ...rest } = output;
+      // Exclude terminalSequence and systemMessage from the spread — both
+      // are concatenated below, so a one-shot message from an earlier hook
+      // survives later outputs instead of being overwritten.
+      const { terminalSequence: _ts, systemMessage: _sm, ...rest } = output;
       void _ts;
+      void _sm;
       merged = { ...merged, ...rest };
+      this.appendSystemMessage(merged, output);
     }
 
     // Merge additionalContext with concatenation
@@ -428,6 +437,20 @@ export class HookAggregator {
       merged.terminalSequence = sequences.join('');
     } else {
       delete merged.terminalSequence;
+    }
+  }
+
+  /**
+   * Append an output's systemMessage to merged, concatenating so a
+   * one-shot message from an earlier hook survives later outputs.
+   */
+  private appendSystemMessage(merged: HookOutput, output: HookOutput): void {
+    if (output.systemMessage !== undefined) {
+      merged.systemMessage = merged.systemMessage
+        ? [merged.systemMessage, output.systemMessage]
+            .filter(Boolean)
+            .join('\n')
+        : output.systemMessage;
     }
   }
 

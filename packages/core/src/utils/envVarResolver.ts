@@ -4,10 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isInternalSecretEnvVar } from './sanitize-child-env.js';
+
+// Exposed so CLI-side resolvers (e.g. channel config) apply the same
+// denylist through this leaf import instead of the full core bundle.
+export { isInternalSecretEnvVar };
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.
  * If the environment variable is not defined, the original placeholder is preserved.
+ *
+ * Qwen-internal secrets (INTERNAL_SECRET_ENV_VARS — daemon tokens, private
+ * capabilities) are never resolved from `process.env`: a resolved value is
+ * baked into hook commands, URLs, or MCP configs before child-env
+ * sanitization ever applies. Leaving the placeholder unresolved is safe —
+ * spawned children get a sanitized environment without those variables.
  *
  * @param value - The string that may contain environment variable placeholders
  * @returns The string with environment variables resolved
@@ -24,6 +36,11 @@ export function resolveEnvVarsInString(
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
     const varName = varName1 || varName2;
+    // Check the denylist before customEnv so no caller-supplied map can
+    // ever resolve an internal secret.
+    if (isInternalSecretEnvVar(varName)) {
+      return match;
+    }
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }

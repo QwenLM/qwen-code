@@ -256,6 +256,21 @@ ${escapeXml(entry.description)}
 }
 
 /**
+ * Skill levels that do not originate from the repository: 'user' lives in
+ * ~/.qwen, 'bundled' ships with the product, and extensions load only
+ * from the user-scope extensions directory. One topology breaks the
+ * 'user' premise: when the project root IS the home directory, listing
+ * skips the 'project' level and repository-committed skills surface at
+ * 'user' — callers re-gate that combination on folder trust. Side effects
+ * of skills at any other (or missing) level — allowedTools grants, hooks
+ * — are repo-controllable, so callers gate them on folder trust and this
+ * check fails closed.
+ */
+export function isTrustedSkillLevel(level: SkillLevel | undefined): boolean {
+  return level === 'user' || level === 'bundled' || level === 'extension';
+}
+
+/**
  * Grants a skill's `allowedTools` as session-scoped permission allow rules.
  *
  * Each entry is a permission rule string in the same syntax as `settings.json`

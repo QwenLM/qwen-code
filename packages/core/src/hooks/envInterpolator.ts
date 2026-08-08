@@ -9,6 +9,11 @@
  * Provides secure interpolation with whitelist-based access control.
  */
 
+import { isInternalSecretEnvVar } from '../utils/sanitize-child-env.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('ENV_INTERPOLATOR');
+
 /**
  * Strip CR, LF, and NUL bytes from a header value to prevent HTTP header
  * injection (CRLF injection) via env var values or hook-configured header
@@ -63,6 +68,19 @@ export function interpolateEnvVars(
     (match, varName: string) => {
       // Block dangerous variable names to prevent prototype pollution
       if (!isSafeVarName(varName)) {
+        return '';
+      }
+      // Qwen-internal secrets (daemon tokens, private capabilities) are
+      // never interpolated, even when a hook config names them in
+      // allowedEnvVars — the whitelist is repo-controlled, the values
+      // leave the process over the network. The warn names the variable
+      // (never its value): this path silently substitutes '', unlike the
+      // sibling resolvers that keep the placeholder or throw, so the
+      // debug log is the only way to diagnose the lost reference.
+      if (isInternalSecretEnvVar(varName)) {
+        debugLogger.warn(
+          `Hook value references Qwen-internal secret env var "${varName}"; it is never interpolated and was replaced with an empty string.`,
+        );
         return '';
       }
       if (allowedVars.includes(varName)) {
