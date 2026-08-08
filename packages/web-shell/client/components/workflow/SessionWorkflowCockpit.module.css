@@ -66,6 +66,7 @@
   width: 100%;
   height: 100%;
   min-height: 0;
+  container-type: inline-size;
   overflow: hidden;
 }
 
@@ -222,6 +223,37 @@
   content: '';
 }
 
+.titleLine > span[data-status='running'] {
+  color: var(--agent-blue-500);
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-500) var(--cockpit-tint-weak),
+    var(--card)
+  );
+}
+
+.titleLine > span[data-status='running']::before {
+  background: var(--agent-blue-500);
+}
+
+.titleLine > span[data-status='attention'] {
+  color: var(--warning-color);
+  background: var(--warning-bg);
+}
+
+.titleLine > span[data-status='attention']::before {
+  background: var(--warning-color);
+}
+
+.titleLine > span[data-status='waiting'] {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+.titleLine > span[data-status='waiting']::before {
+  background: var(--muted-foreground);
+}
+
 .taskMeta {
   display: flex;
   flex-wrap: wrap;
@@ -319,9 +351,9 @@
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(220px, 0.78fr) minmax(500px, 2fr) minmax(
-      260px,
-      0.9fr
+  grid-template-columns: minmax(200px, 0.75fr) minmax(420px, 1.7fr) minmax(
+      230px,
+      0.85fr
     );
   gap: 14px;
   margin-top: 14px;
@@ -455,17 +487,22 @@
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .phase > span strong {
+  display: -webkit-box;
   font-size: 12px;
+  line-height: 1.35;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .phase > span small {
   margin-top: 2px;
   color: var(--muted-foreground);
   font-size: 10px;
+  white-space: nowrap;
 }
 
 .phase > em {
@@ -639,6 +676,16 @@
   margin: 0;
   color: var(--muted-foreground);
   font-size: 11px;
+}
+
+.workIdentity > div,
+.agentCards button > div {
+  min-width: 0;
+}
+
+.workIdentity h2,
+.agentCards strong {
+  overflow-wrap: anywhere;
 }
 
 .runtime {
@@ -1267,6 +1314,7 @@ button.activityRow:hover {
 .reviewShell {
   width: 100%;
   height: 100%;
+  container-type: inline-size;
   overflow: auto;
 }
 
@@ -1396,24 +1444,28 @@ button.activityRow:hover {
 }
 
 .reviewHeading h2 {
+  display: -webkit-box;
   min-width: 0;
   margin: 9px 0 7px;
   overflow: hidden;
   font-size: clamp(24px, 3vw, 36px);
   letter-spacing: -0.04em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .reviewHeading p {
+  display: -webkit-box;
   max-width: 720px;
   margin: 0;
   overflow: hidden;
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.6;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .planFacts {
@@ -1483,8 +1535,11 @@ button.activityRow:hover {
 }
 
 .permissionCard > div:last-child {
-  max-height: 560px;
-  overflow: auto;
+  padding: 14px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .emptyCockpit {
@@ -1533,13 +1588,23 @@ button.activityRow:hover {
   line-height: 1.7;
 }
 
-@media (max-width: 1220px) {
+@container (max-width: 960px) {
   .workspace {
-    grid-template-columns: 220px minmax(480px, 1fr);
+    grid-template-columns: minmax(220px, 0.75fr) minmax(0, 2fr);
   }
 
   .workspace > aside:last-child {
     grid-column: 1 / -1;
+  }
+
+  .checkList {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .evidenceGrid,
+  .reviewActions {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   }
 
   .reviewGrid {
@@ -1552,7 +1617,7 @@ button.activityRow:hover {
   }
 }
 
-@media (max-width: 860px) {
+@container (max-width: 760px) {
   .environment {
     display: none;
   }
@@ -1602,7 +1667,7 @@ button.activityRow:hover {
   }
 }
 
-@media (max-width: 560px) {
+@container (max-width: 500px) {
   .cockpitTabs button span {
     display: none;
   }

@@ -287,7 +287,9 @@ function PlanReview({
               <h2 title={sessionName}>
                 {sessionName || t('workflow.planReview.defaultTask')}
               </h2>
-              <p>{goal || t('workflow.planReview.defaultGoal')}</p>
+              <p title={goal || t('workflow.planReview.defaultGoal')}>
+                {goal || t('workflow.planReview.defaultGoal')}
+              </p>
             </div>
             <div className={styles.planFacts}>
               <div>
@@ -325,6 +327,7 @@ function PlanReview({
                 variant="inline"
                 keyboardActive
                 planTodos={approval.todos}
+                showPlanPreview={false}
               />
             </aside>
           </div>
@@ -356,6 +359,7 @@ export function SessionWorkflowCockpit({
   const [selectedTodoId, setSelectedTodoId] = useState<string>();
   const [selectedDecision, setSelectedDecision] = useState(Boolean(decision));
   const stageRef = useRef<HTMLElement>(null);
+  const activityTabRef = useRef<HTMLButtonElement>(null);
   const allTools = useMemo(() => flattenTools(tools), [tools]);
   const toolsByCallId = useMemo(
     () => new Map(allTools.map((tool) => [tool.callId, tool])),
@@ -451,19 +455,30 @@ export function SessionWorkflowCockpit({
   const attentionTool = attentionTodo
     ? toolsByTodo.get(attentionTodo.id)?.[0]
     : undefined;
+  const hasActiveExecution =
+    activeAgents.length > 0 ||
+    todos.some((todo) => {
+      const status = states.get(todo.id)?.status;
+      return status === 'running' || status === 'in_progress';
+    });
   const taskStatusI18nKey =
-    progress === 100
-      ? 'workflow.task.completed'
-      : activeAgents.length > 0 ||
-          todos.some((todo) => {
-            const status = states.get(todo.id)?.status;
-            return status === 'running' || status === 'in_progress';
-          })
-        ? 'workflow.task.running'
-        : todos.length > 0
-          ? 'workflow.task.waitingExecution'
-          : 'workflow.task.waitingPlan';
+    attentionCount > 0
+      ? 'workflow.task.attention'
+      : progress === 100
+        ? 'workflow.task.completed'
+        : hasActiveExecution
+          ? 'workflow.task.running'
+          : todos.length > 0
+            ? 'workflow.task.waitingExecution'
+            : 'workflow.task.waitingPlan';
   const taskStatus = t(taskStatusI18nKey);
+  const taskStatusTone = attentionCount
+    ? 'attention'
+    : progress === 100
+      ? 'completed'
+      : hasActiveExecution
+        ? 'running'
+        : 'waiting';
   const activity = agents.slice().sort((a, b) => b.startTime - a.startTime);
   const replayableAgents = agents.filter(
     (task) => task.outputFile || task.toolUseId,
@@ -683,7 +698,7 @@ export function SessionWorkflowCockpit({
                   <h1 title={sessionName}>
                     {sessionName || t('workflow.session.defaultTitle')}
                   </h1>
-                  <span data-status={taskStatus}>{taskStatus}</span>
+                  <span data-status={taskStatusTone}>{taskStatus}</span>
                 </div>
                 <div className={styles.taskMeta}>
                   <code>{sessionId.slice(0, 8)}</code>
@@ -735,11 +750,7 @@ export function SessionWorkflowCockpit({
                 <span>{t('workflow.overview.agentRecords')}</span>
               </div>
               <div data-attention={attentionCount > 0 || undefined}>
-                <strong>
-                  {progress === 100 && attentionCount === 0
-                    ? t('workflow.overview.noAttention')
-                    : attentionCount}
-                </strong>
+                <strong>{attentionCount}</strong>
                 <span>{t('workflow.overview.attention')}</span>
               </div>
             </section>
@@ -775,7 +786,7 @@ export function SessionWorkflowCockpit({
                             : String(index + 1).padStart(2, '0')}
                         </i>
                         <span>
-                          <strong>{todo.content}</strong>
+                          <strong title={todo.content}>{todo.content}</strong>
                           <small>
                             {todoTools.length
                               ? t('workflow.plan.agentCount', {
@@ -803,11 +814,13 @@ export function SessionWorkflowCockpit({
                     ] as const
                   ).map(([value, label]) => (
                     <button
+                      aria-pressed={stageTab === value}
                       className={
                         stageTab === value ? styles.stageTabActive : ''
                       }
                       key={value}
                       onClick={() => setStageTab(value)}
+                      ref={value === 'activity' ? activityTabRef : undefined}
                       type="button"
                     >
                       {label}
@@ -1199,7 +1212,13 @@ export function SessionWorkflowCockpit({
                 <button
                   onClick={() => {
                     setStageTab('activity');
-                    stageRef.current?.scrollIntoView({ behavior: 'smooth' });
+                    requestAnimationFrame(() =>
+                      activityTabRef.current?.focus({ preventScroll: true }),
+                    );
+                    stageRef.current?.scrollIntoView({
+                      behavior: 'smooth',
+                      block: 'nearest',
+                    });
                   }}
                   type="button"
                 >
@@ -1242,13 +1261,13 @@ export function SessionWorkflowCockpit({
                 <div className={styles.deliverables}>
                   <div>
                     <strong>{t('workflow.deliverables.title')}</strong>
-                    <span>
-                      {deliverables.length > 0
-                        ? t('workflow.deliverables.count', {
-                            count: deliverables.length,
-                          })
-                        : t('workflow.deliverables.none')}
-                    </span>
+                    {deliverables.length > 0 && (
+                      <span>
+                        {t('workflow.deliverables.count', {
+                          count: deliverables.length,
+                        })}
+                      </span>
+                    )}
                   </div>
                   <section>
                     {deliverables.length ? (

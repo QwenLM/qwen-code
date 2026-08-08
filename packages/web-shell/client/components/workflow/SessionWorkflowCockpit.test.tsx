@@ -45,7 +45,7 @@ describe('SessionWorkflowCockpit', () => {
 
     render('zh-CN');
     expect(container.textContent).toContain('已完成');
-    expect(container.textContent).toContain('无需处理');
+    expect(container.textContent).toContain('需要人工处理');
     expect(container.textContent).not.toContain('Agent 正在工作');
     expect(container.textContent).not.toContain('HISTORY SESSION');
     expect(container.textContent).not.toContain('daemon connected');

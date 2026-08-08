@@ -31,6 +31,7 @@ interface ToolApprovalProps {
    */
   keyboardActive?: boolean;
   planTodos?: readonly TodoItem[];
+  showPlanPreview?: boolean;
 }
 
 export function parseTitle(title?: string): {
@@ -204,6 +205,7 @@ export function ToolApproval({
   variant = 'inline',
   keyboardActive = true,
   planTodos = [],
+  showPlanPreview = true,
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
@@ -459,7 +461,7 @@ export function ToolApproval({
         </pre>
       ) : null}
 
-      {showsPlanWorkflow && (
+      {showsPlanWorkflow && showPlanPreview && (
         <div className={styles.workflow}>
           <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
         </div>

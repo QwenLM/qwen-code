@@ -2666,6 +2666,7 @@ describe('App plan todos', () => {
     expect(
       container.querySelector('[data-testid="cockpit-plan-review"]'),
     ).not.toBeNull();
+    expect(container.querySelectorAll('[data-plan-workflow]')).toHaveLength(1);
     expect(
       container.querySelector('[data-plan-node-id="prepare"]'),
     ).not.toBeNull();

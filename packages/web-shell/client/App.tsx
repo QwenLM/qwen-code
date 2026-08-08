@@ -9578,7 +9578,7 @@ export function App({
                         size="sm"
                         spacing={0}
                         className="mr-3"
-                        aria-label="Session view"
+                        aria-label={t('workflow.viewSwitcherLabel')}
                         onValueChange={(view) => {
                           if (view === 'chat') closeCockpit();
                           if (view === 'cockpit') openCockpit();
@@ -9586,7 +9586,7 @@ export function App({
                         }}
                       >
                         <ToggleGroupItem value="chat" data-testid="open-chat">
-                          Chat
+                          {t('workflow.chatTitle')}
                         </ToggleGroupItem>
                         <ToggleGroupItem
                           value="cockpit"
@@ -10821,7 +10821,8 @@ export function App({
                 }}
               >
                 <DrawerContent
-                  className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]"
+                  className="shadow-2xl data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]"
+                  overlayProps={{ className: 'bg-black/35 backdrop-blur-[1px]' }}
                   onCloseAutoFocus={(event) => {
                     const trigger = artifactPanelTriggerRef.current;
                     artifactPanelTriggerRef.current = null;
