@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync, spawn } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { env } from 'node:process';
@@ -199,7 +200,7 @@ export class TestRig {
     return 15000; // 15s locally
   }
 
-  setup(
+  async setup(
     testName: string,
     options: { settings?: Record<string, unknown> } = {},
   ) {
@@ -210,7 +211,7 @@ export class TestRig {
     // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
     // sets. Reset it so a case never inherits the previous one's files; see the
     // SDK helper, where exactly that made a suite pass locally and fail in CI.
-    rmSync(this.testDir, { recursive: true, force: true });
+    await rm(this.testDir, { recursive: true, force: true });
     mkdirSync(this.testDir, { recursive: true });
 
     // Create a settings file to point the CLI to the local collector
@@ -482,7 +483,7 @@ export class TestRig {
     // Clean up test directory
     if (this.testDir && !env['KEEP_OUTPUT']) {
       try {
-        execSync(`rm -rf ${this.testDir}`);
+        await rm(this.testDir, { recursive: true, force: true });
       } catch (error) {
         // Ignore cleanup errors
         if (env['VERBOSE'] === 'true') {
@@ -495,8 +496,6 @@ export class TestRig {
   async waitForTelemetryReady() {
     // Telemetry is always written to the test directory
     const logFilePath = join(this.testDir!, 'telemetry.log');
-
-    if (!logFilePath) return;
 
     // Wait for telemetry file to exist and have content
     await this.poll(
