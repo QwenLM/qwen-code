@@ -2288,12 +2288,23 @@ describe('bot comment markers', () => {
   // what remains inside that literal after it. That is what distinguishes
   // BUILDING a comment body from merely REFERENCING a marker — `jq
   // contains("<!-- m -->")` and `printf '<!-- m -->' "$VAR"` leave nothing
-  // after the marker and are fine, while `="<!-- m -->prose"` does not.
+  // after the marker and are fine, while `="<!-- m -->prose"` does not. The
+  // scan is bounded to the marker's physical line: a glued body is by
+  // definition on that line, and searching past it would couple the guard to
+  // unrelated quotes elsewhere in the file — a doc example quoting an unclosed
+  // `--body "<!-- m -->` would break the moment any later line gained a `"`.
   //
-  // Known gap, stated rather than papered over: a body split across printf
-  // arguments (`printf '%s%s' '<!-- m -->' 'prose'`) is NOT caught. Detecting
-  // it means modelling which literal is the format string, and every cheap
-  // approximation flagged the legitimate `printf '<!-- m -->' "$VAR"` form.
+  // Known gaps, stated rather than papered over: bodies split across printf
+  // arguments (`printf '%s%s' '<!-- m -->' 'prose'`) — detecting them means
+  // modelling which literal is the format string, and every cheap
+  // approximation flagged the legitimate `printf '<!-- m -->' "$VAR"` form;
+  // bodies assembled across statements or files (one `echo` per line into a
+  // `--body-file`); markers at physical line start (heredocs, YAML block
+  // scalars); markers mid-literal that only land at a rendered line start
+  // after `\n` expansion (`printf 'x\n<!-- m -->prose'`); multi-line literals
+  // whose closing quote sits on a later line; and a line-wrapped printf whose
+  // format opens with the marker (the `\n` exemption reads one physical
+  // line). All are latent — no workflow uses these shapes today.
   const dir = '.github/workflows';
   const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
 
@@ -2317,30 +2328,57 @@ describe('bot comment markers', () => {
         // Only a marker that OPENS a string literal can be building a body.
         if (quote !== "'" && quote !== '"') continue;
         const rest = text.slice(m.index + m[0].length);
-        const end = rest.indexOf(quote);
+        const lineEnd = rest.indexOf('\n');
+        const line = lineEnd === -1 ? rest : rest.slice(0, lineEnd);
+        const end = line.indexOf(quote);
+        // No closing quote on this line means either the marker ends the line
+        // inside a multi-line literal (a real newline separates the body,
+        // which renders) or the quote is prose in a doc example — neither
+        // glues anything ON the marker's line.
         if (end === -1) continue;
-        let glued = rest.slice(0, end);
+        let glued = line.slice(0, end);
         if (glued === '') {
           // The literal ended at the marker — but an adjacent literal on the
-          // same line concatenates onto it at runtime.
-          const after = rest.slice(end + 1);
+          // same line concatenates onto it at runtime, and so does an
+          // unquoted `$(…)` (its output is invisible to this scan).
+          const after = line.slice(end + 1);
           if (after[0] === "'" || after[0] === '"') {
             const q2 = after[0];
             const e2 = after.slice(1).indexOf(q2);
             glued = e2 === -1 ? '' : after.slice(1, 1 + e2);
+          } else if (after[0] === '$' && after[1] === '(') {
+            glued = after;
           }
         }
         if (glued === '') continue;
-        // A real newline separates them — but ONLY where the shell expands
-        // `\n`: printf's format string, or ANSI-C `$'…'`. In a plain
-        // double-quoted assignment `\n` is a literal backslash-n, so the
-        // prose stays on the marker's physical line and still breaks.
-        if (glued.startsWith('\\n') && /printf\s+'|\$'/.test(prefix)) continue;
+        // The two-character `\n` escape separates only where the shell
+        // expands it: a printf format string or ANSI-C `$'…'` opened at the
+        // END of the prefix — an unrelated printf earlier on the same line
+        // must not bless a plain double-quoted assignment, where `\n` stays
+        // a literal backslash-n and the prose stays on the marker's line.
+        if (glued.startsWith('\\n') && /printf\s+['"]$|\$'$/.test(prefix)) {
+          continue;
+        }
         offenders.push(
           `${file}: ${text.slice(m.index, m.index + 56).split('\n')[0]}`,
         );
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('pins the workflow-run URL into the ack printf', () => {
+    // bash printf with a leftover argument and no conversion spec exits 0
+    // under `set -euo pipefail` and emits `[workflow run]()`, so nothing
+    // else catches a dropped `%s` or `"$RUN_URL"` on the ack line.
+    const text = readFileSync(join(dir, 'qwen-code-pr-review.yml'), 'utf8');
+    const ackLine = text
+      .split('\n')
+      .find(
+        (l) => l.includes('printf') && l.includes('<!-- qwen-review-ack -->'),
+      );
+    expect(ackLine).toBeDefined();
+    expect(ackLine).toContain('%s');
+    expect(ackLine).toContain('"$RUN_URL"');
   });
 });
