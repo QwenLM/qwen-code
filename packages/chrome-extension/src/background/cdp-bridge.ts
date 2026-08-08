@@ -100,7 +100,7 @@ let attaching = false;
  */
 let releaseRequestedDuringAttach = false;
 const directEventListeners = new Set<CdpEventListener>();
-let directOperationTail: Promise<void> = Promise.resolve();
+const detachingTabIds = new Set<number>();
 let directOperationActive = false;
 
 /**
@@ -248,31 +248,45 @@ async function attachTab(tabId: number): Promise<void> {
   startAttachKeepalive();
 }
 
+async function runDirectBrowserOperation<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (directOperationActive) {
+    throw new Error('WebBridge action is already in progress');
+  }
+  if (detachingTabIds.size > 0) {
+    throw new Error('CDP tunnel is releasing the browser');
+  }
+  if (activeSend || attaching) {
+    throw new Error('CDP tunnel is currently controlling the browser');
+  }
+  directOperationActive = true;
+  try {
+    return await operation();
+  } finally {
+    directOperationActive = false;
+  }
+}
+
+export function withDirectBrowserAction<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  return runDirectBrowserOperation(operation);
+}
+
 export function withCdpTab<T>(
   tabId: number,
   operation: (send: CdpCommand) => Promise<T>,
 ): Promise<T> {
-  const previous = directOperationTail;
-  let release!: () => void;
-  directOperationTail = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return previous
-    .then(async () => {
-      if (activeSend || attaching) {
-        throw new Error('CDP tunnel is currently controlling the browser');
-      }
-      directOperationActive = true;
-      await attachTab(tabId);
-      directTabIds.add(tabId);
-      return operation((method, params) =>
-        sendDebuggerCommand(tabId, method, params),
-      );
-    })
-    .finally(() => {
-      directOperationActive = false;
-      release();
-    });
+  const run = async () => {
+    await attachTab(tabId);
+    directTabIds.add(tabId);
+    return operation((method, params) =>
+      sendDebuggerCommand(tabId, method, params),
+    );
+  };
+  // Whole WebBridge actions already hold this reservation.
+  return directOperationActive ? run() : runDirectBrowserOperation(run);
 }
 
 export function subscribeCdpEvents(listener: CdpEventListener): () => void {
@@ -283,14 +297,19 @@ export function subscribeCdpEvents(listener: CdpEventListener): () => void {
 export async function releaseCdpTab(tabId: number): Promise<void> {
   directTabIds.delete(tabId);
   if (rawTabId === tabId || !attachedTabIds.has(tabId)) return;
-  await new Promise<void>((resolve) => {
-    chrome.debugger.detach({ tabId }, () => {
-      void chrome.runtime.lastError;
-      resolve();
+  detachingTabIds.add(tabId);
+  try {
+    await new Promise<void>((resolve) => {
+      chrome.debugger.detach({ tabId }, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
     });
-  });
-  attachedTabIds.delete(tabId);
-  if (attachedTabIds.size === 0) teardownAttachments();
+    attachedTabIds.delete(tabId);
+    if (attachedTabIds.size === 0) teardownAttachments();
+  } finally {
+    detachingTabIds.delete(tabId);
+  }
 }
 
 /** Handle a `cdp_attach` frame: attach the active tab and ack. */
@@ -298,6 +317,14 @@ async function handleAttach(
   frame: CdpAttachFrame,
   send: CdpSend,
 ): Promise<void> {
+  if (detachingTabIds.size > 0) {
+    send({
+      type: 'cdp_attached',
+      id: frame.id,
+      error: { message: 'CDP tunnel is releasing the browser' },
+    });
+    return;
+  }
   if (directOperationActive) {
     send({
       type: 'cdp_attached',
@@ -451,9 +478,15 @@ export function shutdownCdpBridge(): void {
   teardownAttachments();
   activeSend = null;
   for (const tabId of tabIds) {
+    if (detachingTabIds.has(tabId)) continue;
+    detachingTabIds.add(tabId);
     try {
-      chrome.debugger.detach({ tabId });
+      chrome.debugger.detach({ tabId }, () => {
+        void chrome.runtime.lastError;
+        detachingTabIds.delete(tabId);
+      });
     } catch {
+      detachingTabIds.delete(tabId);
       /* might already be detached */
     }
   }

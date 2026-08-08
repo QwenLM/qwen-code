@@ -73,6 +73,36 @@ describe('WebBridge protocol', () => {
     });
   });
 
+  it('chunks large nested results below the ACP WebSocket frame limit', async () => {
+    const data = { body: 'x'.repeat(8 * 1024 * 1024 + 1) };
+    actions.execute.mockResolvedValue(data);
+    const send = vi.fn();
+
+    handleWebBridgeFrame(
+      {
+        type: 'webbridge_call',
+        requestId: 'request-large-result',
+        payload: { name: 'network', args: {} },
+      } as never,
+      send,
+    );
+    await vi.waitFor(() => expect(send.mock.calls.length).toBeGreaterThan(1));
+
+    const frames = send.mock.calls.map(([frame]) => frame);
+    const chunks = frames
+      .filter((frame) => frame.type === 'webbridge_result_chunk')
+      .map((frame) => frame.payload.chunk);
+    expect(
+      frames.every((frame) => JSON.stringify(frame).length < 10_000_000),
+    ).toBe(true);
+    expect(JSON.parse(chunks.join(''))).toEqual(data);
+    expect(frames.at(-1)).toEqual({
+      type: 'webbridge_result',
+      responseToRequestId: 'request-large-result',
+      payload: { chunked: true, encoding: 'json' },
+    });
+  });
+
   it('marks an empty data field as chunked', async () => {
     actions.execute.mockResolvedValue({ data: '', eof: true });
     const send = vi.fn();

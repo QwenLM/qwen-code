@@ -29,13 +29,22 @@ Send JSON to `POST /command`:
     "newTab": true,
     "group_title": "Research"
   },
-  "session": "research"
+  "session": "research-a7f3c2"
 }
 ```
 
-Use one stable session name for the entire user task. The first `navigate` should normally use `newTab:true` and a human-readable `group_title`. Do not call `close_session` unless the user asks to close the task's tabs.
+Use one stable, task-unique session name for the entire user task. The first `navigate` should normally use `newTab:true` and a human-readable `group_title`. At the end, call `close_session` with `close_tabs:false` to release browser state while preserving tabs. Omit `close_tabs:false` only when the user asks to close the task's tabs.
 
-Prefer writing request JSON with `write_file`, posting it with `curl --data-binary @<file>`, then deleting that temporary request file. This preserves Unicode and avoids shell quoting errors.
+Prefer writing request JSON with `write_file`, posting it with an explicit JSON content type, then deleting that temporary request file. This preserves Unicode and avoids shell quoting errors:
+
+```bash
+WEBBRIDGE_BASE=${QWEN_WEBBRIDGE_URL:-http://127.0.0.1:4170}
+curl -sS -X POST "$WEBBRIDGE_BASE/command" \
+  -H 'Content-Type: application/json' \
+  --data-binary @/absolute/path/to/request.json
+```
+
+If `QWEN_SERVER_TOKEN` is set, also add `-H "Authorization: Bearer $QWEN_SERVER_TOKEN"`. On Windows, use `curl.exe`, a uniquely named JSON file under `$env:TEMP` (PowerShell) or `%TEMP%` (cmd.exe), and delete it after the request.
 
 ## Actions
 
@@ -45,7 +54,7 @@ Prefer writing request JSON with `write_file`, posting it with `curl --data-bina
 | `find_tab`      | `url`, optional `active`                                                  | Selects a session tab; `active:true` borrows the user's foreground matching tab |
 | `list_tabs`     | none                                                                      | Session-owned tabs                                                              |
 | `close_tab`     | none                                                                      | Closes the current session tab                                                  |
-| `close_session` | none                                                                      | Closes all session-owned tabs                                                   |
+| `close_session` | optional `close_tabs` (default `true`)                                    | Closes owned tabs, or releases state while preserving tabs when `false`         |
 | `snapshot`      | none                                                                      | Accessibility tree with `@e` element refs                                       |
 | `click`         | `selector` (`@e` or CSS)                                                  | DOM-level click                                                                 |
 | `fill`          | `selector`, `value`                                                       | Replaces input, textarea, or contenteditable text                               |

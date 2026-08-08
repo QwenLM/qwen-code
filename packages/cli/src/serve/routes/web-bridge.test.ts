@@ -43,4 +43,24 @@ describe('WebBridge routes', () => {
     expect(response.status).toBe(503);
     expect(response.body.error).toContain('not connected');
   });
+
+  it('returns 504 when the extension action times out', async () => {
+    const registry = new WebBridgeRegistry(1);
+    registry.register({ connectionId: 'extension', send() {} });
+    const app = express();
+    app.use(express.json());
+    registerWebBridgeRoutes(app, {
+      service: new WebBridgeService(registry, '1.2.3'),
+      mutate: () => (_req, _res, next) => next(),
+    });
+
+    const response = await request(app).post('/command').send({
+      action: 'snapshot',
+      args: {},
+      session: 'test',
+    });
+
+    expect(response.status).toBe(504);
+    expect(response.body.error).toContain('timed out');
+  });
 });

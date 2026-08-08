@@ -490,6 +490,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
+  'webbridge',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -547,7 +548,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
       f !== 'voice_transcribe' &&
-      f !== 'realtime_voice',
+      f !== 'realtime_voice' &&
+      f !== 'webbridge',
   ),
   'workspace_settings',
   'workspace_permissions',
@@ -607,6 +609,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'browser_automation_mcp',
   'voice_transcribe',
   'realtime_voice',
+  'webbridge',
 ] as const;
 
 interface FakeBridgeOpts {

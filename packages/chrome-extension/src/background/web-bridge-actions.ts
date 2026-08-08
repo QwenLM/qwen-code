@@ -8,6 +8,7 @@ import {
   releaseCdpTab,
   subscribeCdpEvents,
   withCdpTab,
+  withDirectBrowserAction,
   type CdpCommand,
 } from './cdp-bridge';
 
@@ -58,7 +59,7 @@ const groupBySession = new Map<string, number>();
 const tabsBySession = new Map<string, Set<number>>();
 const networkCaptures = new Map<string, NetworkCapture>();
 const MAX_NETWORK_REQUESTS = 2_000;
-let networkListenerInstalled = false;
+let removeNetworkListener: (() => void) | undefined;
 
 const ACTIONS: Record<string, (args: Args) => Promise<unknown>> = {
   navigate,
@@ -90,47 +91,170 @@ export function executeWebBridgeAction(
       `Unknown WebBridge action: ${name}. Available: ${Object.keys(ACTIONS).join(', ')}`,
     );
   }
-  return action(args);
+  return withDirectBrowserAction(async () => {
+    try {
+      return await action(args);
+    } finally {
+      if (name !== 'close_tab' && name !== 'close_session') {
+        await releaseIdleTabs(args);
+      }
+    }
+  });
 }
 
 async function navigate(args: Args): Promise<unknown> {
   const url = requiredString(args, 'url', 'navigate');
   const currentTabId = integer(args['_tabId']);
   if (args['newTab'] === true || currentTabId === undefined) {
-    const tab = await chrome.tabs.create({ url, active: false });
-    if (tab.id === undefined)
-      throw new Error('navigate: created tab has no id');
-    await groupTab(tab.id, args);
-    await waitForLoad(tab.id);
-    await withCdpTab(tab.id, async () => undefined);
-    rememberTab(args, tab.id);
-    return { success: true, url, tabId: tab.id };
+    return { success: true, ...(await createSessionTab(url, args)) };
   }
 
   const tab = await chrome.tabs.get(currentTabId);
   if (/^(chrome|edge):\/\//.test(tab.url ?? '')) {
-    const created = await chrome.tabs.create({ url, active: false });
-    if (created.id === undefined) {
-      throw new Error('navigate: created tab has no id');
-    }
-    await groupTab(created.id, args);
-    await waitForLoad(created.id);
-    rememberTab(args, created.id);
-    return { success: true, url, tabId: created.id };
+    return { success: true, ...(await createSessionTab(url, args)) };
   }
 
   const frameId = await withCdpTab(currentTabId, async (send) => {
-    if (tab.url === url || tab.url === `${url}/`) {
-      await send('Page.reload', { ignoreCache: true });
-      return undefined;
+    const loadedLifecycles = new Set<string>();
+    let expectedLifecycle: string | undefined;
+    let resolveLoaded!: () => void;
+    const loaded = new Promise<void>((resolve) => {
+      resolveLoaded = resolve;
+    });
+    let reloadFrom: { frameId: string; loaderId: string } | undefined;
+    let nextReloadLoader: { frameId: string; loaderId: string } | undefined;
+    let resolveNextReloadLoader!: (value: {
+      frameId: string;
+      loaderId: string;
+    }) => void;
+    const nextReloadLoaderPromise = new Promise<{
+      frameId: string;
+      loaderId: string;
+    }>((resolve) => {
+      resolveNextReloadLoader = resolve;
+    });
+    const unsubscribe = subscribeCdpEvents((method, params, eventTabId) => {
+      if (eventTabId !== currentTabId) return;
+      if (method === 'Page.lifecycleEvent' && params['name'] === 'load') {
+        const frameId = string(params['frameId']);
+        const loaderId = string(params['loaderId']);
+        if (frameId === undefined || loaderId === undefined) return;
+        const key = JSON.stringify([frameId, loaderId]);
+        loadedLifecycles.add(key);
+        if (key === expectedLifecycle) resolveLoaded();
+        return;
+      }
+      if (
+        method !== 'Page.frameNavigated' ||
+        reloadFrom === undefined ||
+        nextReloadLoader !== undefined
+      ) {
+        return;
+      }
+      const frame = record(params['frame']);
+      const frameId = string(frame['id']);
+      const loaderId = string(frame['loaderId']);
+      if (
+        frame['parentId'] !== undefined ||
+        frameId !== reloadFrom.frameId ||
+        loaderId === undefined ||
+        loaderId === reloadFrom.loaderId
+      ) {
+        return;
+      }
+      nextReloadLoader = { frameId, loaderId };
+      resolveNextReloadLoader(nextReloadLoader);
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timedOut: Promise<never> | undefined;
+    const pageLoadTimeout = () => {
+      timedOut ??= new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('navigate: page load timeout (30s)')),
+          30_000,
+        );
+      });
+      return timedOut;
+    };
+    try {
+      await send('Page.enable');
+      await send('Page.setLifecycleEventsEnabled', { enabled: true });
+      let frameId: string | undefined;
+      let target: { frameId: string; loaderId: string } | undefined;
+      if (tab.url === url || tab.url === `${url}/`) {
+        const tree = record(await send('Page.getFrameTree'));
+        const frame = record(record(tree['frameTree'])['frame']);
+        const currentFrameId = string(frame['id']);
+        const currentLoaderId = string(frame['loaderId']);
+        if (currentFrameId === undefined || currentLoaderId === undefined) {
+          throw new Error('navigate: current page has no loader');
+        }
+        reloadFrom = {
+          frameId: currentFrameId,
+          loaderId: currentLoaderId,
+        };
+        refsByTab.delete(currentTabId);
+        await send('Page.reload', {
+          ignoreCache: true,
+          loaderId: currentLoaderId,
+        });
+        target = await Promise.race([
+          nextReloadLoaderPromise,
+          pageLoadTimeout(),
+        ]);
+      } else {
+        refsByTab.delete(currentTabId);
+        const result = record(await send('Page.navigate', { url }));
+        const errorText = string(result['errorText']);
+        if (errorText) throw new Error(`navigate: ${errorText}`);
+        frameId = string(result['frameId']);
+        const loaderId = string(result['loaderId']);
+        if (loaderId === undefined) return frameId;
+        if (frameId === undefined) {
+          throw new Error('navigate: Page.navigate returned no frame');
+        }
+        target = { frameId, loaderId };
+      }
+      expectedLifecycle = JSON.stringify([target.frameId, target.loaderId]);
+      if (loadedLifecycles.has(expectedLifecycle)) resolveLoaded();
+      await Promise.race([loaded, pageLoadTimeout()]);
+      return frameId;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      unsubscribe();
     }
-    const result = record(await send('Page.navigate', { url }));
-    return string(result['frameId']);
   });
-  refsByTab.delete(currentTabId);
-  await waitForLoad(currentTabId);
+  const loaded = await chrome.tabs.get(currentTabId);
   rememberTab(args, currentTabId);
-  return { success: true, url, tabId: currentTabId, frameId };
+  return {
+    success: true,
+    url: loaded.url ?? url,
+    tabId: currentTabId,
+    frameId,
+  };
+}
+
+async function createSessionTab(
+  url: string,
+  args: Args,
+): Promise<{ url: string; tabId: number }> {
+  const tab = await chrome.tabs.create({ url, active: false });
+  if (tab.id === undefined) throw new Error('navigate: created tab has no id');
+  try {
+    await groupTab(tab.id, args);
+    const loaded = await waitForLoad(tab.id);
+    await withCdpTab(tab.id, async () => undefined);
+    rememberTab(args, tab.id);
+    return { url: loaded.url ?? url, tabId: tab.id };
+  } catch (error) {
+    forgetTab(tab.id);
+    try {
+      await chrome.tabs.remove(tab.id);
+    } catch {
+      // The user may have already closed it.
+    }
+    throw error;
+  }
 }
 
 async function findTab(args: Args): Promise<unknown> {
@@ -141,7 +265,8 @@ async function findTab(args: Args): Promise<unknown> {
       windowTypes: ['normal'],
     });
     const tab = window.tabs?.find(
-      (candidate) => candidate.active && matchesHost(candidate.url, url),
+      (candidate) =>
+        candidate.active && matchesRequestedUrl(candidate.url, url),
     );
     if (tab?.id === undefined) {
       throw new Error(
@@ -158,6 +283,7 @@ async function findTab(args: Args): Promise<unknown> {
     };
   }
 
+  const candidates: Array<{ tabId: number; tab: chrome.tabs.Tab }> = [];
   for (const tabId of tabIds(args)) {
     let tab: chrome.tabs.Tab;
     try {
@@ -165,17 +291,20 @@ async function findTab(args: Args): Promise<unknown> {
     } catch {
       continue;
     }
-    if (!matchesHost(tab.url, url)) continue;
-    await withCdpTab(tabId, async () => undefined);
-    rememberTab(args, tabId);
-    return {
-      success: true,
-      url: tab.url ?? url,
-      tabId,
-      borrowed: false,
-    };
+    candidates.push({ tabId, tab });
   }
-  throw new Error(`find_tab: no tab matching ${url} in this session`);
+  candidates.sort((left, right) => left.tab.index - right.tab.index);
+  const match = candidates.find(({ tab }) => matchesRequestedUrl(tab.url, url));
+  if (!match)
+    throw new Error(`find_tab: no tab matching ${url} in this session`);
+  await withCdpTab(match.tabId, async () => undefined);
+  rememberTab(args, match.tabId);
+  return {
+    success: true,
+    url: match.tab.url ?? url,
+    tabId: match.tabId,
+    borrowed: false,
+  };
 }
 
 async function evaluate(args: Args): Promise<unknown> {
@@ -186,6 +315,7 @@ async function evaluate(args: Args): Promise<unknown> {
         expression: code,
         returnByValue: true,
         awaitPromise: true,
+        replMode: true,
       }),
     );
     throwOnCdpException('evaluate', result);
@@ -378,7 +508,13 @@ async function network(args: Args): Promise<unknown> {
       requests: new Map(),
     });
     installNetworkListener();
-    await withCdpTab(tab.id, (send) => send('Network.enable'));
+    try {
+      await withCdpTab(tab.id, (send) => send('Network.enable'));
+    } catch (error) {
+      networkCaptures.delete(key);
+      stopNetworkListenerIfIdle();
+      throw error;
+    }
     return { success: true, message: 'network capture started' };
   }
   if (command === 'stop') {
@@ -397,6 +533,7 @@ async function network(args: Args): Promise<unknown> {
         }
       });
     }
+    stopNetworkListenerIfIdle();
     return { success: true, message: 'network capture stopped' };
   }
   const requests = networkCaptures.get(key)?.requests ?? new Map();
@@ -507,7 +644,7 @@ async function saveAsPdf(args: Args): Promise<unknown> {
         scale,
         paperWidth,
         paperHeight,
-        preferCSSPageSize: true,
+        preferCSSPageSize: false,
       }),
     );
     if (typeof result['data'] !== 'string') {
@@ -553,7 +690,7 @@ async function upload(args: Args): Promise<unknown> {
     const nodeId = integer(query['nodeId']);
     if (!nodeId) throw new Error(`upload: element not found: ${selector}`);
     await send('DOM.setFileInputFiles', { files, nodeId });
-    return { success: true, selector, fileCount: files.length, files };
+    return { success: true, fileCount: files.length };
   });
 }
 
@@ -565,7 +702,11 @@ async function closeTab(args: Args): Promise<unknown> {
   let closed = true;
   try {
     await chrome.tabs.remove(tabId);
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/no tab|tab not found|invalid tab id/i.test(message)) {
+      throw new Error(`close_tab: ${message}`);
+    }
     closed = false;
   }
   refsByTab.delete(tabId);
@@ -573,6 +714,8 @@ async function closeTab(args: Args): Promise<unknown> {
   for (const [key, capture] of networkCaptures) {
     if (capture.tabId === tabId) networkCaptures.delete(key);
   }
+  stopNetworkListenerIfIdle();
+  await releaseCdpTab(tabId);
   return closed
     ? { success: true, closed: true }
     : { success: true, closed: false, reason: 'tab already closed' };
@@ -613,26 +756,46 @@ async function closeSession(args: Args): Promise<unknown> {
   const touched = session
     ? new Set(tabsBySession.get(session) ?? [])
     : new Set<number>();
+  const currentTabId = integer(args['_tabId']);
+  if (currentTabId !== undefined) touched.add(currentTabId);
   if (session) {
     tabsBySession.delete(session);
     groupBySession.delete(session);
     for (const [key, capture] of networkCaptures) {
       if (capture.session === session) networkCaptures.delete(key);
     }
+    stopNetworkListenerIfIdle();
   }
   const owned = new Set(tabIds(args));
+  if (args['close_tabs'] === false) {
+    let released = 0;
+    for (const tabId of new Set([...touched, ...owned])) {
+      if (tabUsedByAnotherSession(tabId)) continue;
+      refsByTab.delete(tabId);
+      await releaseCdpTab(tabId);
+      released++;
+    }
+    return { success: true, closed: 0, released };
+  }
   let closed = 0;
   for (const tabId of owned) {
+    let removed = true;
     try {
       await chrome.tabs.remove(tabId);
       closed++;
     } catch {
-      // Tab already closed.
+      removed = false;
     }
-    refsByTab.delete(tabId);
-    forgetTab(tabId);
-    for (const [key, capture] of networkCaptures) {
-      if (capture.tabId === tabId) networkCaptures.delete(key);
+    const shared = tabUsedByAnotherSession(tabId);
+    if (removed || !shared) {
+      refsByTab.delete(tabId);
+      await releaseCdpTab(tabId);
+    }
+    if (removed) {
+      forgetTab(tabId);
+      for (const [key, capture] of networkCaptures) {
+        if (capture.tabId === tabId) networkCaptures.delete(key);
+      }
     }
   }
   for (const tabId of touched) {
@@ -665,12 +828,13 @@ async function onCurrentTab<T>(
   return withCdpTab(tab.id, (send) => operation(send, tab.id));
 }
 
-async function waitForLoad(tabId: number): Promise<void> {
+async function waitForLoad(tabId: number): Promise<chrome.tabs.Tab> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId);
-    if (tab.status === 'complete' && tab.url && tab.url !== 'about:blank')
-      return;
+    if (tab.status === 'complete' && tab.url && tab.url !== 'about:blank') {
+      return tab;
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('navigate: page load timeout (30s)');
@@ -686,6 +850,22 @@ async function groupTab(tabId: number, args: Args): Promise<void> {
       return;
     } catch {
       groupBySession.delete(session);
+    }
+  }
+  for (const existingTabId of tabIds(args)) {
+    try {
+      const existing = await chrome.tabs.get(existingTabId);
+      if (
+        existing.groupId === undefined ||
+        existing.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE
+      ) {
+        continue;
+      }
+      await chrome.tabs.group({ tabIds: tabId, groupId: existing.groupId });
+      groupBySession.set(session, existing.groupId);
+      return;
+    } catch {
+      // Try another owned tab before creating a replacement group.
     }
   }
   const title = string(args['group_title']) ?? `agent:${session}`;
@@ -790,13 +970,12 @@ async function objectIdFromRef(
 
 function fillFunction(value: unknown): string {
   const json = JSON.stringify(value);
-  return `const target = __TARGET__; target.focus(); if (target.isContentEditable) { const selection = window.getSelection(); if (selection) { const range = document.createRange(); range.selectNodeContents(target); selection.removeAllRanges(); selection.addRange(range); } let inserted = false; try { inserted = document.execCommand('insertText', false, ${json}); } catch {} if (!inserted) { target.textContent = ${json}; target.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ${json}, bubbles: true })); } return { success: true, tag: target.tagName, mode: 'contenteditable' }; } const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set; if (setter) setter.call(target, ${json}); else target.value = ${json}; target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true })); return { success: true, tag: target.tagName, mode: 'value' };`;
+  return `const target = __TARGET__; target.focus(); if (target.isContentEditable) { const selection = window.getSelection(); if (selection) { const range = document.createRange(); range.selectNodeContents(target); selection.removeAllRanges(); selection.addRange(range); } let inserted = false; try { inserted = document.execCommand('insertText', false, ${json}); } catch {} if (!inserted) { target.textContent = ${json}; target.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ${json}, bubbles: true })); } return { success: true, tag: target.tagName, mode: 'contenteditable' }; } const prototype = target instanceof window.HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype; const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set; if (setter) setter.call(target, ${json}); else target.value = ${json}; target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true })); return { success: true, tag: target.tagName, mode: 'value' };`;
 }
 
 function installNetworkListener(): void {
-  if (networkListenerInstalled) return;
-  networkListenerInstalled = true;
-  subscribeCdpEvents((method, params, tabId) => {
+  if (removeNetworkListener) return;
+  removeNetworkListener = subscribeCdpEvents((method, params, tabId) => {
     const requestId = string(params['requestId']);
     if (!requestId) return;
     for (const capture of networkCaptures.values()) {
@@ -826,6 +1005,28 @@ function installNetworkListener(): void {
       }
     }
   });
+}
+
+function stopNetworkListenerIfIdle(): void {
+  if ([...networkCaptures.values()].some((capture) => capture.active)) return;
+  removeNetworkListener?.();
+  removeNetworkListener = undefined;
+}
+
+async function releaseIdleTabs(args: Args): Promise<void> {
+  const ids = new Set(tabIds(args));
+  const currentTabId = integer(args['_tabId']);
+  if (currentTabId !== undefined) ids.add(currentTabId);
+  const session = string(args['_session']);
+  if (session) {
+    for (const tabId of tabsBySession.get(session) ?? []) ids.add(tabId);
+  }
+  for (const tabId of ids) {
+    const capturing = [...networkCaptures.values()].some(
+      (capture) => capture.tabId === tabId && capture.active,
+    );
+    if (!capturing) await releaseCdpTab(tabId);
+  }
 }
 
 function rememberTab(args: Args, tabId: number): void {
@@ -1042,6 +1243,29 @@ function matchesHost(actual: string | undefined, requested: string): boolean {
       : new URL(requested.includes('://') ? requested : `https://${requested}`)
           .hostname;
     return new URL(actual).hostname === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
+function matchesRequestedUrl(
+  actual: string | undefined,
+  requested: string,
+): boolean {
+  return requested.includes('://') && !requested.includes('*')
+    ? matchesExactUrl(actual, requested)
+    : matchesHost(actual, requested);
+}
+
+function matchesExactUrl(
+  actual: string | undefined,
+  requested: string,
+): boolean {
+  if (!actual || !requested.includes('://') || requested.includes('*')) {
+    return false;
+  }
+  try {
+    return new URL(actual).href === new URL(requested).href;
   } catch {
     return false;
   }

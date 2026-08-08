@@ -35,7 +35,6 @@ interface SessionState {
   currentTabId?: number;
   readonly ownedTabIds: Set<number>;
   borrowedTabId?: number;
-  groupTitle?: string;
 }
 
 interface ParsedCommand {
@@ -56,11 +55,14 @@ export class WebBridgeRequestError extends Error {
 
 const MAX_SCREENSHOT_BYTES = 64 * 1024 * 1024;
 const MAX_PDF_BYTES = 100 * 1024 * 1024;
+const MAX_PENDING_COMMANDS = 32;
+const MAX_QUEUE_WAIT_MS = 60_000;
 const STALE_TAB_ERROR = /no tab|tab not found|invalid tab id/i;
 
 export class WebBridgeService {
   private readonly sessions = new Map<string, SessionState>();
   private operationTail: Promise<void> = Promise.resolve();
+  private pendingCommands = 0;
   private readonly startedAt = Date.now();
 
   constructor(
@@ -75,14 +77,32 @@ export class WebBridgeService {
     } catch (error) {
       return Promise.reject(error);
     }
+    if (this.pendingCommands >= MAX_PENDING_COMMANDS) {
+      return Promise.reject(
+        new WebBridgeRequestError('Qwen WebBridge command queue is full', 503),
+      );
+    }
+    this.pendingCommands++;
+    const queuedAt = Date.now();
     const previous = this.operationTail;
     let release!: () => void;
     this.operationTail = new Promise<void>((resolve) => {
       release = resolve;
     });
     return previous
-      .then(() => this.executeNow(command))
-      .finally(() => release());
+      .then(() => {
+        if (Date.now() - queuedAt >= MAX_QUEUE_WAIT_MS) {
+          throw new WebBridgeRequestError(
+            'Qwen WebBridge command expired while queued',
+            503,
+          );
+        }
+        return this.executeNow(command);
+      })
+      .finally(() => {
+        this.pendingCommands--;
+        release();
+      });
   }
 
   status(): {
@@ -108,7 +128,6 @@ export class WebBridgeService {
     currentTabId?: number;
     ownedTabIds: number[];
     borrowedTabId?: number;
-    groupTitle?: string;
   } | null {
     const state = this.sessions.get(session);
     if (!state) return null;
@@ -116,7 +135,6 @@ export class WebBridgeService {
       currentTabId: state.currentTabId,
       ownedTabIds: [...state.ownedTabIds],
       borrowedTabId: state.borrowedTabId,
-      groupTitle: state.groupTitle,
     };
   }
 
@@ -149,8 +167,15 @@ export class WebBridgeService {
         throw error;
       }
     }
-    this.sessions.set(command.session, state);
     this.captureSessionResult(command, state, result);
+    if (
+      command.action !== 'close_session' &&
+      (state.currentTabId !== undefined || state.ownedTabIds.size > 0)
+    ) {
+      this.sessions.set(command.session, state);
+    } else {
+      this.sessions.delete(command.session);
+    }
     if (command.action === 'screenshot' || command.action === 'save_as_pdf') {
       return this.persistArtifact(command.action, command.args, result);
     }
@@ -178,22 +203,11 @@ export class WebBridgeService {
     if (command.action === 'navigate') {
       const tabId = integer(data['tabId']);
       if (tabId !== undefined) {
-        const previous = state.currentTabId;
-        if (
-          previous === undefined ||
-          command.args['newTab'] === true ||
-          tabId !== previous
-        ) {
-          state.ownedTabIds.add(tabId);
-        }
+        const remainsBorrowed =
+          state.borrowedTabId === tabId && command.args['newTab'] !== true;
+        if (!remainsBorrowed) state.ownedTabIds.add(tabId);
         state.currentTabId = tabId;
-        state.borrowedTabId = undefined;
-      }
-      if (
-        typeof command.args['group_title'] === 'string' &&
-        command.args['group_title'].length > 0
-      ) {
-        state.groupTitle = command.args['group_title'];
+        state.borrowedTabId = remainsBorrowed ? tabId : undefined;
       }
       return;
     }
@@ -214,6 +228,24 @@ export class WebBridgeService {
       if (closed !== undefined) state.ownedTabIds.delete(closed);
       if (state.borrowedTabId === closed) state.borrowedTabId = undefined;
       state.currentTabId = [...state.ownedTabIds].at(-1);
+      return;
+    }
+    if (command.action === 'list_tabs' && Array.isArray(data['tabs'])) {
+      const existing = new Set(
+        data['tabs']
+          .map((tab) => (isRecord(tab) ? integer(tab['tabId']) : undefined))
+          .filter((tabId): tabId is number => tabId !== undefined),
+      );
+      for (const tabId of state.ownedTabIds) {
+        if (!existing.has(tabId)) state.ownedTabIds.delete(tabId);
+      }
+      if (
+        state.currentTabId !== state.borrowedTabId &&
+        state.currentTabId !== undefined &&
+        !existing.has(state.currentTabId)
+      ) {
+        state.currentTabId = [...state.ownedTabIds].at(-1);
+      }
       return;
     }
     if (command.action === 'close_session') {

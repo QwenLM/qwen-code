@@ -59,6 +59,7 @@ const ACP_INIT_ID = 'browser-tools-acp-init';
  * module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+const WEB_BRIDGE_CAPABILITY = 'webbridge-v1';
 
 /** Reconnect backoff bounds (ms). */
 const RECONNECT_MIN_MS = 1_000;
@@ -210,6 +211,7 @@ async function connect(): Promise<void> {
           name: CDP_BRIDGE_CLIENT_NAME,
           version: chrome.runtime.getManifest().version,
           extensionId: chrome.runtime.id,
+          capabilities: [WEB_BRIDGE_CAPABILITY],
         },
       },
     });

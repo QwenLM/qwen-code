@@ -42,7 +42,7 @@ The documented request envelope is:
 {
   "action": "navigate",
   "args": { "url": "https://example.com", "newTab": true },
-  "session": "task-name"
+  "session": "task-name-unique-suffix"
 }
 ```
 
@@ -101,9 +101,10 @@ trusted in the same way as existing session mutation routes. With a configured
 token, the existing bearer middleware protects the endpoint.
 
 The extension connection is accepted only after ACP initialization with
-`clientInfo.name = qwen-cdp-bridge`. Normal Web Shell and IDE clients cannot
-claim the browser bridge. Reconnect is last-writer-wins; replacing or losing the
-active extension rejects every pending command.
+`clientInfo.name = qwen-cdp-bridge` and the `webbridge-v1` client capability.
+This keeps older CDP-only extension builds and normal Web Shell or IDE clients
+from claiming the browser bridge. Reconnect is last-writer-wins; replacing or
+losing the active extension rejects every pending command.
 
 `upload` passes local absolute paths to Chrome's `DOM.setFileInputFiles`.
 `screenshot` and `save_as_pdf` may write a caller-selected path. These are
@@ -131,11 +132,11 @@ The extension transport adds two frames:
 }
 ```
 
-Artifact data larger than one frame is sent as ordered
-`webbridge_result_chunk` frames followed by a `webbridge_result` carrying
-metadata and `chunked:true`. An error result carries `payload.error` instead of
-`payload.data`. Calls time out and pending calls fail immediately when the
-extension disconnects.
+Results larger than one frame are sent as ordered `webbridge_result_chunk`
+frames followed by a `webbridge_result`; artifact metadata uses `chunked:true`,
+while arbitrary results also carry `encoding:"json"`. An error result carries
+`payload.error` instead of `payload.data`. Calls time out and pending calls fail
+immediately when the extension disconnects.
 
 The daemon owns this task state:
 
@@ -143,8 +144,7 @@ The daemon owns this task state:
 session -> {
   currentTabId,
   ownedTabIds,
-  borrowedTabId?,
-  groupTitle?
+  borrowedTabId?
 }
 ```
 
@@ -152,13 +152,17 @@ Before forwarding an action it injects `_session`, `_tabId`, and `_tabIds`.
 The extension never receives daemon filesystem or workspace authority. The
 daemon updates ownership only after successful `navigate`, `find_tab`,
 `close_tab`, or `close_session` results. Borrowed tabs are never included in
-`close_session`.
+the default tab-closing behavior. Callers use a task-unique session name and
+may send `close_session` with `close_tabs:false` to release state without
+closing tabs.
 
-All WebBridge commands are serialized process-wide. The extension keeps direct
-attachments for tabs with active WebBridge state, so process-wide ordering
-prevents commands from different sessions targeting the wrong tab. The legacy
-raw tunnel and direct commands mutually exclude one another while a command is
-running.
+All WebBridge commands are serialized process-wide with a 32-command bound and
+a 60-second queue deadline. The extension retains debugger attachments only
+while network capture is active and rejects overlapping direct actions instead
+of growing a second queue. Process-wide ordering prevents commands from
+different sessions targeting the wrong tab. The legacy raw tunnel, its detach
+phase, and whole direct actions mutually exclude one another before browser
+state is changed.
 
 ## Extension behavior
 
@@ -172,7 +176,8 @@ of creating a second `chrome.debugger` owner.
 - `click` and `fill` use DOM-level synthetic interaction for compatibility with
   the documented behavior.
 - `mouse_click`, `key_type`, and `send_keys` use the CDP `Input` domain.
-- `evaluate` uses `Runtime.evaluate` with promise awaiting and by-value results.
+- `evaluate` uses `Runtime.evaluate` with REPL-mode top-level await and by-value
+  results.
 - `network` owns bounded, session-isolated request maps populated from
   `Network` events.
 - `cdp` is an unrestricted passthrough to the CDP domains Chrome exposes to
@@ -181,14 +186,16 @@ of creating a second `chrome.debugger` owner.
   filesystem writes and removes base64 from the HTTP response.
 
 The accessibility-ref map is per tab and is replaced by each new snapshot.
-Navigation or debugger detach invalidates it.
+Navigation or session cleanup invalidates it.
 
 ## Failure behavior
 
-- Invalid envelopes or arguments return HTTP 400.
+- Invalid request envelopes return HTTP 400; action argument and CDP errors
+  return HTTP 500.
 - No connected extension returns HTTP 503.
-- Command timeout, extension disconnect, protected page, missing/stale tab,
-  invalid ref, and CDP errors return HTTP 500 with a stable `{error}` body.
+- Command timeouts return HTTP 504. Extension disconnects return HTTP 503;
+  protected pages, missing/stale tabs, invalid refs, and CDP errors return HTTP
+  500 with a stable `{error}` body.
 - A stale current tab during `navigate` is removed from the session and retried
   once as a new owned tab.
 - Unknown actions are rejected by the extension and are never interpreted as
@@ -196,10 +203,11 @@ Navigation or debugger detach invalidates it.
 
 ## Agent integration
 
-A bundled `qwen-webbridge` Skill documents the command envelope, one-task/one-
-session rule, tab ownership, artifacts, and recovery. It calls the daemon with
-`curl`; `QWEN_WEBBRIDGE_URL` can override the default
-`http://127.0.0.1:4170`, and `QWEN_SERVER_TOKEN` supplies bearer auth when set.
+A bundled `qwen-webbridge` Skill documents the command envelope, a unique
+session per task, tab ownership, non-destructive cleanup, artifacts, and
+recovery. It calls the daemon with `curl`; `QWEN_WEBBRIDGE_URL` can override the
+default `http://127.0.0.1:4170`, and `QWEN_SERVER_TOKEN` supplies bearer auth
+when set.
 
 ## Verification
 

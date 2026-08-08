@@ -186,6 +186,7 @@ function pluralWorkspaceRawSelector(
  * packages can't share a module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+const WEB_BRIDGE_CAPABILITY = 'webbridge-v1';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
@@ -2202,14 +2203,19 @@ export function mountAcpHttp(
                         name?: string;
                         version?: string;
                         extensionId?: string;
+                        capabilities?: unknown;
                       }
                     | undefined)
                 : undefined;
             const clientName = clientInfo?.name;
+            const supportsWebBridge =
+              Array.isArray(clientInfo?.capabilities) &&
+              clientInfo.capabilities.includes(WEB_BRIDGE_CAPABILITY);
             if (
               activeMount.primary &&
               opts.webBridgeRegistry !== undefined &&
-              clientName === CDP_BRIDGE_CLIENT_NAME
+              clientName === CDP_BRIDGE_CLIENT_NAME &&
+              supportsWebBridge
             ) {
               webBridgeUnregister = opts.webBridgeRegistry.register({
                 connectionId: conn.connectionId,

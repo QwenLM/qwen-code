@@ -8669,16 +8669,34 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
-  function initializeCdpBridge(ws: WebSocket, id = 1): Promise<unknown> {
+  function initializeCdpBridge(
+    ws: WebSocket,
+    id = 1,
+    capabilities: string[] = ['webbridge-v1'],
+  ): Promise<unknown> {
     return sendRpc(ws, {
       jsonrpc: '2.0',
       id,
       method: 'initialize',
       params: {
-        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+        clientInfo: {
+          name: 'qwen-cdp-bridge',
+          version: '1.0.0',
+          capabilities,
+        },
       },
     });
   }
+
+  it('does not register an older CDP-only extension as WebBridge', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws, 1, []);
+    await yieldImmediate();
+
+    expect(webBridgeRegistry.status().extensionConnected).toBe(false);
+    ws.close();
+  });
 
   it('round-trips a WebBridge command over the initialized extension socket', async () => {
     await startServer();

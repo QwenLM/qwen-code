@@ -132,6 +132,62 @@ describe('side panel capability status assets', () => {
         ?.classList.contains('hidden'),
     ).toBe(true);
   });
+
+  it('uses live WebBridge connection status for its warning', async () => {
+    document.body.innerHTML = `
+      <iframe id="ui" class="hidden"></iframe>
+      <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
+      <code id="cmd"></code><button id="cmd-row"></button>
+      <button id="copy"></button><span id="copy-label"></span>
+      <div id="capability-warning" class="hidden"></div>
+    `;
+    vi.stubGlobal('chrome', {
+      runtime: { id: 'test-extension' },
+      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+    });
+    vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
+    let connected = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        return {
+          ok: true,
+          json: async () =>
+            url.endsWith('/capabilities')
+              ? { features: ['allow_origin', 'webbridge'] }
+              : url.endsWith('/status')
+                ? { extension_connected: connected }
+                : { status: 'ok' },
+        };
+      }),
+    );
+    let poll: (() => void | Promise<void>) | undefined;
+    vi.stubGlobal('setInterval', (handler: () => void | Promise<void>) => {
+      poll = handler;
+      return 1;
+    });
+
+    const script = readFileSync(
+      path.join(packageRoot, 'public/sidepanel.js'),
+      'utf8',
+    );
+    Function(script)();
+
+    await vi.waitFor(() =>
+      expect(document.getElementById('capability-warning')?.textContent).toBe(
+        'WebBridge extension is not connected.',
+      ),
+    );
+    connected = true;
+    await poll?.();
+    expect(
+      document
+        .getElementById('capability-warning')
+        ?.classList.contains('hidden'),
+    ).toBe(true);
+  });
+
   it('tolerates transient probe errors without tearing down the shell', async () => {
     document.body.innerHTML = `
       <iframe id="ui" class="hidden"></iframe>

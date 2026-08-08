@@ -27,6 +27,8 @@ export interface WebBridgeResultFrame {
   payload?: {
     data?: unknown;
     error?: string;
+    chunked?: boolean;
+    encoding?: 'json';
   };
 }
 
@@ -169,6 +171,12 @@ export class WebBridgeRegistry {
       const data = payload['data'];
       if (payload['chunked'] !== true) {
         pending.resolve(data);
+      } else if (payload['encoding'] === 'json') {
+        try {
+          pending.resolve(JSON.parse(pending.chunks.join('')));
+        } catch {
+          pending.reject(new Error('Malformed chunked WebBridge JSON result'));
+        }
       } else if (isRecord(data)) {
         pending.resolve({ ...data, data: pending.chunks.join('') });
       } else {

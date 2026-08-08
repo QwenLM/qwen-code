@@ -20,8 +20,10 @@ interface ChromeHarness {
 
 function installChromeHarness(options?: {
   deferAttach?: boolean;
-}): ChromeHarness & { finishAttach(): void } {
+  deferDetach?: boolean;
+}): ChromeHarness & { finishAttach(): void; finishDetach(): void } {
   let attachCallback: (() => void) | undefined;
+  let detachCallback: (() => void) | undefined;
   const debuggerEventListeners: ChromeHarness['debuggerEventListeners'] = [];
   const debuggerDetachListeners: ChromeHarness['debuggerDetachListeners'] = [];
   const attach = vi.fn(
@@ -35,7 +37,10 @@ function installChromeHarness(options?: {
     },
   );
   const detach = vi.fn(
-    (_target: chrome.debugger.Debuggee, callback?: () => void) => callback?.(),
+    (_target: chrome.debugger.Debuggee, callback?: () => void) => {
+      if (options?.deferDetach) detachCallback = callback;
+      else callback?.();
+    },
   );
   const sendCommand = vi.fn(
     (
@@ -84,6 +89,9 @@ function installChromeHarness(options?: {
     debuggerDetachListeners,
     finishAttach() {
       attachCallback?.();
+    },
+    finishDetach() {
+      detachCallback?.();
     },
   };
 }
@@ -195,8 +203,14 @@ describe('CDP bridge', () => {
     expect(chromeHarness.attach).toHaveBeenCalledTimes(2);
     expect(chromeHarness.detach).not.toHaveBeenCalled();
     bridge.shutdownCdpBridge();
-    expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 });
-    expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 8 });
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
+    );
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 8 },
+      expect.any(Function),
+    );
   });
 
   it('rejects a raw CDP attach while WebBridge is attaching', async () => {
@@ -215,6 +229,85 @@ describe('CDP bridge', () => {
     });
     chromeHarness.finishAttach();
     await direct;
+    bridge.shutdownCdpBridge();
+  });
+
+  it('rejects a whole WebBridge action while the raw tunnel owns Chrome', async () => {
+    installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+    const operation = vi.fn(async () => undefined);
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+    await expect(bridge.withDirectBrowserAction(operation)).rejects.toThrow(
+      'CDP tunnel is currently controlling the browser',
+    );
+    expect(operation).not.toHaveBeenCalled();
+    bridge.shutdownCdpBridge();
+  });
+
+  it('rejects overlapping direct actions instead of queueing them', async () => {
+    installChromeHarness();
+    const bridge = await loadBridge();
+    let release!: () => void;
+    const first = bridge.withDirectBrowserAction(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    await expect(
+      bridge.withDirectBrowserAction(async () => undefined),
+    ).rejects.toThrow('WebBridge action is already in progress');
+    release();
+    await first;
+  });
+
+  it('blocks WebBridge actions until raw CDP detach completes', async () => {
+    const chromeHarness = installChromeHarness({ deferDetach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    bridge.handleCdpFrame(frame({ type: 'cdp_release' }), send);
+
+    await expect(
+      bridge.withDirectBrowserAction(async () => undefined),
+    ).rejects.toThrow('CDP tunnel is releasing the browser');
+    chromeHarness.finishDetach();
+    await vi.waitFor(() =>
+      expect(
+        bridge.withDirectBrowserAction(async () => undefined),
+      ).resolves.toBeUndefined(),
+    );
+    bridge.shutdownCdpBridge();
+  });
+
+  it('rejects a raw reattach until the previous detach completes', async () => {
+    const chromeHarness = installChromeHarness({ deferDetach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    bridge.handleCdpFrame(frame({ type: 'cdp_release' }), send);
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 2 }), send);
+
+    expect(send).toHaveBeenCalledWith({
+      type: 'cdp_attached',
+      id: 2,
+      error: { message: 'CDP tunnel is releasing the browser' },
+    });
+    chromeHarness.finishDetach();
+    await vi.waitFor(() =>
+      expect(
+        bridge.withDirectBrowserAction(async () => undefined),
+      ).resolves.toBeUndefined(),
+    );
     bridge.shutdownCdpBridge();
   });
 
@@ -270,7 +363,10 @@ describe('CDP bridge', () => {
         error: { message: 'released during attach' },
       }),
     );
-    expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 });
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
+    );
   });
 
   it('forwards debugger events for the attached tab', async () => {

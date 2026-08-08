@@ -22,6 +22,7 @@ interface WebBridgeResultFrame {
     data?: unknown;
     error?: string;
     chunked?: boolean;
+    encoding?: 'json';
   };
 }
 
@@ -34,7 +35,9 @@ interface WebBridgeResultChunkFrame {
 type WebBridgeSend = (
   frame: WebBridgeResultFrame | WebBridgeResultChunkFrame,
 ) => void;
-const RESULT_CHUNK_LENGTH = 8 * 1024 * 1024;
+const ARTIFACT_CHUNK_LENGTH = 8 * 1024 * 1024;
+const JSON_CHUNK_LENGTH = 2 * 1024 * 1024;
+const MAX_RESULT_CHARS = 140 * 1024 * 1024;
 
 export function isWebBridgeFrame(type: unknown): boolean {
   return type === 'webbridge_call';
@@ -61,16 +64,19 @@ async function execute(
     const data = await executeWebBridgeAction(name, args);
     if (isRecord(data) && typeof data['data'] === 'string') {
       const { data: artifact, ...metadata } = data;
+      if (artifact.length > MAX_RESULT_CHARS) {
+        throw new Error('WebBridge result exceeds 140 MB');
+      }
       for (
         let offset = 0;
         offset < artifact.length;
-        offset += RESULT_CHUNK_LENGTH
+        offset += ARTIFACT_CHUNK_LENGTH
       ) {
         send({
           type: 'webbridge_result_chunk',
           responseToRequestId: requestId,
           payload: {
-            chunk: artifact.slice(offset, offset + RESULT_CHUNK_LENGTH),
+            chunk: artifact.slice(offset, offset + ARTIFACT_CHUNK_LENGTH),
           },
         });
       }
@@ -78,6 +84,31 @@ async function execute(
         type: 'webbridge_result',
         responseToRequestId: requestId,
         payload: { data: metadata, chunked: true },
+      });
+      return;
+    }
+    const serialized = JSON.stringify(data);
+    if (serialized !== undefined && serialized.length > JSON_CHUNK_LENGTH) {
+      if (serialized.length > MAX_RESULT_CHARS) {
+        throw new Error('WebBridge result exceeds 140 MB');
+      }
+      for (
+        let offset = 0;
+        offset < serialized.length;
+        offset += JSON_CHUNK_LENGTH
+      ) {
+        send({
+          type: 'webbridge_result_chunk',
+          responseToRequestId: requestId,
+          payload: {
+            chunk: serialized.slice(offset, offset + JSON_CHUNK_LENGTH),
+          },
+        });
+      }
+      send({
+        type: 'webbridge_result',
+        responseToRequestId: requestId,
+        payload: { chunked: true, encoding: 'json' },
       });
       return;
     }

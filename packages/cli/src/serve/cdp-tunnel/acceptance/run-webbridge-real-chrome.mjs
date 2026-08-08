@@ -152,7 +152,7 @@ try {
   daemonOutput = outputOf(daemon);
   await waitForJson(`${baseUrl}/health`, (value) => value.status === 'ok');
 
-  chromeProcess = spawnChild(chromeBinary, [
+  const chromeArgs = [
     `--user-data-dir=${chromeProfile}`,
     `--disable-extensions-except=${extension}`,
     `--load-extension=${extension}`,
@@ -165,12 +165,67 @@ try {
     '--enable-logging=stderr',
     `--remote-debugging-port=${debugPort}`,
     'about:blank',
-  ]);
+  ];
+  chromeProcess = spawnChild(chromeBinary, chromeArgs);
   chromeOutput = outputOf(chromeProcess);
-  const browser = await waitForJson(
+  let browser = await waitForJson(
     `http://127.0.0.1:${debugPort}/json/version`,
     (value) => typeof value.webSocketDebuggerUrl === 'string',
   );
+  if (port !== 4170) {
+    const configUrl = `chrome-extension://${extensionId}/sidepanel.html`;
+    const { targetId } = await cdpCall(
+      browser.webSocketDebuggerUrl,
+      'Target.createTarget',
+      { url: configUrl },
+    );
+    const targets = await waitForJson(
+      `http://127.0.0.1:${debugPort}/json/list`,
+      (value) =>
+        Array.isArray(value) &&
+        value.some(
+          (target) =>
+            target.id === targetId &&
+            target.url === configUrl &&
+            typeof target.webSocketDebuggerUrl === 'string',
+        ),
+    );
+    const configPage = targets.find((target) => target.id === targetId);
+    await waitFor(async () => {
+      const ready = await cdpCall(
+        configPage.webSocketDebuggerUrl,
+        'Runtime.evaluate',
+        {
+          expression: 'Boolean(globalThis.chrome?.storage?.local)',
+          returnByValue: true,
+        },
+      ).catch(() => undefined);
+      return ready?.result?.value === true;
+    });
+    const configured = await cdpCall(
+      configPage.webSocketDebuggerUrl,
+      'Runtime.evaluate',
+      {
+        expression: `chrome.storage.local.set({'qwen.daemon':{baseUrl:${JSON.stringify(baseUrl)}}}).then(() => chrome.storage.local.get('qwen.daemon'))`,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+    );
+    assert(
+      configured.result?.value?.['qwen.daemon']?.baseUrl === baseUrl,
+      `failed to configure extension daemon URL: ${JSON.stringify(configured)}`,
+    );
+    await cdpCall(browser.webSocketDebuggerUrl, 'Target.closeTarget', {
+      targetId,
+    });
+    await stopChild(chromeProcess);
+    chromeProcess = spawnChild(chromeBinary, chromeArgs);
+    chromeOutput = outputOf(chromeProcess);
+    browser = await waitForJson(
+      `http://127.0.0.1:${debugPort}/json/version`,
+      (value) => typeof value.webSocketDebuggerUrl === 'string',
+    );
+  }
   for (const name of [
     'local-network-access',
     'local-network',
@@ -210,8 +265,23 @@ try {
   assert(typeof opened.tabId === 'number', 'navigate returned no tabId');
   const tabs = await command('list_tabs', {});
   assert(tabs.tabs.length === 1, 'list_tabs did not return the opened tab');
+  await command('navigate', { url: `${fixtureUrl}/target`, newTab: true });
   const found = await command('find_tab', { url: fixtureUrl });
-  assert(found.tabId === opened.tabId, 'find_tab selected the wrong tab');
+  assert(
+    found.tabId === opened.tabId,
+    'find_tab selected the wrong same-host tab',
+  );
+  const reusedUrl = `${fixtureUrl}/?generation=2`;
+  const reused = await command('navigate', { url: reusedUrl });
+  assert(
+    reused.tabId === opened.tabId && reused.url === reusedUrl,
+    'navigate did not wait for the reused tab to load',
+  );
+  const reloaded = await command('navigate', { url: reusedUrl });
+  assert(
+    reloaded.tabId === opened.tabId && reloaded.url === reusedUrl,
+    'navigate did not wait for the same-URL reload',
+  );
 
   const firstSnapshot = await command('snapshot', {});
   const buttonRef = findRef(firstSnapshot.tree, 'button', 'Run fixture action');
@@ -238,22 +308,23 @@ try {
   await command('network', { cmd: 'stop' });
 
   await command('evaluate', {
-    code: "document.body.insertAdjacentHTML('beforeend','<input id=agent-input><input id=file-input type=file>')",
+    code: "document.body.insertAdjacentHTML('beforeend','<input id=agent-input><textarea id=agent-notes></textarea><input id=file-input type=file>')",
   });
   const secondSnapshot = await command('snapshot', {});
   const inputRef = findRef(secondSnapshot.tree, 'textbox');
   assert(inputRef, 'snapshot returned no textbox ref');
   await command('fill', { selector: inputRef, value: 'filled' });
+  await command('fill', { selector: '#agent-notes', value: 'notes' });
   await command('evaluate', {
     code: "document.querySelector('#agent-input').focus()",
   });
   const sentKeys = await command('send_keys', { keys: 'Mod+A' });
   await command('key_type', { text: 'typed' });
   const inputValue = await command('evaluate', {
-    code: "document.querySelector('#agent-input').value",
+    code: "await Promise.resolve({input: document.querySelector('#agent-input').value, notes: document.querySelector('#agent-notes').value})",
   });
   assert(
-    inputValue.value === 'typed',
+    inputValue.value.input === 'typed' && inputValue.value.notes === 'notes',
     `keyboard input did not update the field: ${JSON.stringify({ sentKeys, inputValue })}`,
   );
 
@@ -278,7 +349,6 @@ try {
   assert(image.path === imagePath && image.sizeBytes > 0, 'screenshot failed');
   assert(pdf.path === pdfPath && pdf.sizeBytes > 0, 'PDF failed');
 
-  await command('navigate', { url: `${fixtureUrl}/target`, newTab: true });
   const closedTab = await command('close_tab', {});
   assert(closedTab.closed === true, 'close_tab did not close the current tab');
   const closedSession = await command('close_session', {});
