@@ -8245,6 +8245,232 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps a completed turn pollable before its transcript record appears', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'answer before persistence' }],
+        },
+        undefined,
+        { promptId: 'prompt-complete-overlay' },
+      );
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-complete-overlay',
+        ),
+      ).resolves.toMatchObject({
+        sessionId: session.sessionId,
+        state: 'completed',
+        promptId: 'prompt-complete-overlay',
+        promptText: 'answer before persistence',
+        stopReason: 'end_turn',
+      });
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        promptId: 'prompt-complete-overlay',
+      });
+      await bridge.shutdown();
+    });
+
+    it('reports removed queued and running prompts as cancelled immediately', async () => {
+      let rejectRunning: ((err: Error) => void) | undefined;
+      const runningGate = new Promise<PromptResponse>((_resolve, reject) => {
+        rejectRunning = reject;
+      });
+      const handle = makeChannel({
+        promptImpl: (request) =>
+          (request.prompt[0] as { text?: string }).text === 'running'
+            ? runningGate
+            : { stopReason: 'end_turn' },
+        cancelImpl: () => {
+          rejectRunning?.(new Error('cancelled'));
+        },
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const running = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'running' }],
+        },
+        undefined,
+        { promptId: 'prompt-remove-running' },
+      );
+      const queued = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued' }],
+        },
+        undefined,
+        { promptId: 'prompt-remove-queued' },
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-remove-queued'),
+      ).toEqual({ removed: true });
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-remove-queued',
+        ),
+      ).resolves.toMatchObject({
+        state: 'cancelled',
+        stopReason: 'cancelled',
+      });
+
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-remove-running'),
+      ).toEqual({ removed: true });
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-remove-running',
+        ),
+      ).resolves.toMatchObject({
+        state: 'cancelled',
+        stopReason: 'cancelled',
+      });
+
+      await expect(running).rejects.toBeDefined();
+      await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+      await bridge.shutdown();
+    });
+
+    it('preserves a deadline error while enriching it from persistence', async () => {
+      let persistedResult: Record<string, unknown> | null = null;
+      const handle = makeChannel({
+        promptImpl: () => new Promise<PromptResponse>(() => {}),
+        cancelImpl: () => new Promise<void>(() => {}),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return {
+              v: 1,
+              sessionId: 'ignored',
+              turnResult: persistedResult,
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'times out' }],
+          },
+          undefined,
+          { promptId: 'prompt-deadline-overlay', deadlineMs: 20 },
+        ),
+      ).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+
+      persistedResult = {
+        promptId: 'prompt-deadline-overlay',
+        state: 'cancelled',
+        stopReason: 'cancelled',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'times out',
+        resultText: 'partial visible answer',
+      };
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-deadline-overlay',
+        ),
+      ).resolves.toMatchObject({
+        state: 'error',
+        error: { code: 'prompt_deadline_exceeded' },
+        resultText: 'partial visible answer',
+      });
+      await bridge.shutdown();
+    });
+
+    it('bounds transient terminal statuses by eventRingSize', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        eventRingSize: 2,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      for (const promptId of ['prompt-old', 'prompt-middle', 'prompt-new']) {
+        await bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: promptId }],
+          },
+          undefined,
+          { promptId },
+        );
+      }
+
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-old'),
+      ).resolves.toBeUndefined();
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-middle',
+        ),
+      ).resolves.toMatchObject({ state: 'completed' });
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-new'),
+      ).resolves.toMatchObject({ state: 'completed' });
+      await bridge.shutdown();
+    });
+
     it('throws SessionNotFoundError for unknown sessions', async () => {
       const bridge = makeBridge();
       await expect(bridge.getSessionTurnStatus('unknown')).rejects.toThrow(
@@ -8638,7 +8864,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('still publishes a terminal for a removed RUNNING prompt when the session closes before the agent cooperates', async () => {
+    it('keeps a removed RUNNING prompt cancelled when the session closes before the agent cooperates', async () => {
       const handle = wedgeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -8657,8 +8883,8 @@ describe('createAcpSessionBridge', () => {
       p1.catch(() => {});
       await new Promise((r) => setTimeout(r, 20));
 
-      // Remove the RUNNING prompt — the wedged agent ignores the cancel,
-      // so no terminal has been published yet.
+      // Remove the RUNNING prompt — the wedged agent ignores the cancel, but
+      // removal itself is already the authoritative cancelled outcome.
       expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
       ).toEqual({ removed: true });
@@ -8668,19 +8894,24 @@ describe('createAcpSessionBridge', () => {
       expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
       ).toEqual({ removed: false });
-      expect(terminalsFor(events, 'prompt-removed-running')).toHaveLength(0);
+      await vi.waitFor(() => {
+        const removedTerms = terminalsFor(events, 'prompt-removed-running');
+        expect(removedTerms).toHaveLength(1);
+        expect(removedTerms[0]?.type).toBe('turn_complete');
+        expect(
+          (removedTerms[0]?.data as { stopReason?: string }).stopReason,
+        ).toBe('cancelled');
+      });
 
-      // Session closes before the agent ever settles: the teardown flush
-      // must still see the removed-but-unsettled prompt and publish its
-      // terminal before the bus closes.
+      // Session close races the uncooperative agent but must not replace the
+      // already-published cancellation with a teardown error.
       await bridge.closeSession(session.sessionId);
 
       const closedIdx = events.findIndex((e) => e.type === 'session_closed');
       expect(closedIdx).toBeGreaterThan(-1);
       const terms = terminalsFor(events, 'prompt-removed-running');
       expect(terms).toHaveLength(1);
-      expect(terms[0]?.type).toBe('turn_error');
-      expect((terms[0]?.data as { code?: string }).code).toBe('session_closed');
+      expect(terms[0]?.type).toBe('turn_complete');
       expect(events.indexOf(terms[0]!)).toBeLessThan(closedIdx);
       await bridge.shutdown();
     });
