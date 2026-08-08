@@ -3192,6 +3192,11 @@ export function App({
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
+    // Reset fullscreen in the same commit: while it stays true the covered
+    // shells keep display:none, and deferring the reset to the management
+    // effect would paint one frame of an empty shell after the close.
+    setArtifactPanelFullscreen(false);
+    setSuppressArtifactDockOpenAnimation(false);
     setSideTaskCatalog((catalog) =>
       catalog.items.length === 0 ? { ...catalog, loaded: false } : catalog,
     );
@@ -3227,6 +3232,8 @@ export function App({
       const nextTabs = tabs.filter((tab) => tab.id !== tabId);
       if (nextTabs.length === 0) {
         setArtifactPanelOpen(false);
+        setArtifactPanelFullscreen(false);
+        setSuppressArtifactDockOpenAnimation(false);
         setActiveArtifactPanelTabId(null);
         setReviewChanges([]);
         setSelectedReviewPath(null);

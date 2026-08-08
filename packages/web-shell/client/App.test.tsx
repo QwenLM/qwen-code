@@ -3196,6 +3196,106 @@ describe('artifact panel fullscreen', () => {
       container.querySelector('[data-sidebar-shell][role="dialog"]'),
     ).not.toBeNull();
   });
+
+  it('reveals the covered shells in the commit that closes the fullscreen panel', async () => {
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+    const sidebarShell = container.querySelector('[data-sidebar-shell]');
+    const contextShell = container.querySelector('[class*="contextShell"]');
+    expect(sidebarShell?.className).toContain('chatViewHidden');
+    expect(contextShell?.className).toContain('chatViewHidden');
+
+    // Inside async act the click's commit flushes at the microtask boundary
+    // while the passive effects stay queued until act completes, so the DOM
+    // read here is exactly the committed frame the browser would paint next.
+    // A fullscreen reset deferred to the management effect would leave the
+    // shells display:none in this frame.
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          'aside button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+      expect(
+        document.querySelector('[class*="artifactPanelFullscreen"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      expect(sidebarShell?.className).not.toContain('chatViewHidden');
+      expect(contextShell?.className).not.toContain('chatViewHidden');
+      expect(contextShell?.getAttribute('aria-hidden')).toBeNull();
+    });
+    await flush();
+  });
+
+  it('keeps the floating drawer Escape-to-close intact while not fullscreen', async () => {
+    // No min-width query matches: the panel floats in a drawer instead of
+    // docking.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const portal = '[data-web-shell-portal-root]';
+    const drawerAside = document.querySelector(
+      `${portal} aside[aria-label="Right panel"]`,
+    );
+    expect(drawerAside).not.toBeNull();
+    expect(drawerAside?.className).not.toContain('panelFullscreen');
+
+    // The fullscreen handler's non-fullscreen branch must stay a pure
+    // pass-through: no preventDefault, so vaul's dismiss layer closes the
+    // drawer exactly as it did before fullscreen support landed.
+    await act(async () => {
+      drawerAside?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(`${portal} aside[aria-label="Right panel"]`),
+    ).toBeNull();
+  });
 });
 
 describe('environment agent tasks', () => {
