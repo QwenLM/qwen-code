@@ -19,7 +19,11 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -471,6 +475,19 @@ export const parseArgsCommand: CommandModule = {
     const rawStr = stdin
       ? readFileSync(0, 'utf8').replace(/\r?\n$/, '')
       : (raw ?? '');
+    // Before anything is parsed: every step after this one runs the BUILT
+    // bundle, so a review command edited since that build does not take effect
+    // and the run measures the old behaviour without saying so. This is the
+    // first command of a fresh review; `drive` repeats the check, because
+    // the verifier brief sends agents there without a step 1.
+    const bundleNotice = bundleStalenessNotices(process.argv[1]);
+    if (bundleNotice) {
+      // `…Safe`, the convention for diagnostics in this subsystem: stderr
+      // piped to `head` raises EPIPE, and a warning that kills the review it
+      // is warning about would be worse than the staleness it reports.
+      writeStderrLineSafe(bundleNotice);
+    }
+
     const parsed = parseReviewArgs(rawStr);
     const json = JSON.stringify(parsed, null, 2);
     if (out) {

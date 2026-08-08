@@ -38,6 +38,8 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as webShellResolver from './web-shell-resolver.js';
+import * as webShellStatic from './web-shell-static.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -460,6 +462,51 @@ function makeRuntimeBridge(): HttpAcpBridge {
     getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
     isChannelLive: vi.fn().mockReturnValue(true),
   } as unknown as HttpAcpBridge;
+}
+
+function writeWebShellFixture(workspaceDir: string): string {
+  const shellDir = path.join(workspaceDir, 'web-shell');
+  fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(shellDir, 'index.html'),
+    '<!doctype html><body><div id="root"></div></body>',
+  );
+  vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+  return shellDir;
+}
+
+async function startDeferredDaemon(
+  workspace: string,
+  overrides: {
+    serveOptions?: Partial<Parameters<typeof runQwenServe>[0]>;
+    createBridge?: () => HttpAcpBridge;
+  } = {},
+) {
+  const createBridge = vi
+    .spyOn(acpBridge, 'createAcpSessionBridge')
+    .mockImplementation(() => {
+      const bridge = overrides.createBridge
+        ? overrides.createBridge()
+        : makeRuntimeBridge();
+      return bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>;
+    });
+  const handle = await runQwenServe(
+    {
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace,
+      maxSessions: 1,
+      token: 'secret-token',
+      ...overrides.serveOptions,
+    },
+    {
+      resolveOnListen: true,
+      deferRuntimeUntilFirstHealth: true,
+      runtimeStartupTimeoutMs: 0,
+    },
+  );
+  return { handle, createBridge };
 }
 
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
@@ -1210,6 +1257,11 @@ describe('runQwenServe telemetry validation', () => {
       await closing;
     }
     expect(createBridge).toHaveBeenCalledTimes(2);
+    for (const [options] of createBridge.mock.calls) {
+      expect(options).toMatchObject({
+        delegateReadTextFileToClient: false,
+      });
+    }
     for (const result of createBridge.mock.results) {
       expect(result.value.shutdown).toHaveBeenCalledWith({
         reason: 'daemon_shutdown',
@@ -1438,6 +1490,11 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      for (const [options] of createBridge.mock.calls) {
+        expect(options).toMatchObject({
+          delegateReadTextFileToClient: false,
+        });
+      }
       let releaseRemoval!: (count: number) => void;
       removeByIds.mockImplementationOnce(
         () =>
@@ -1949,7 +2006,8 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
 });
 
 /**
- * The budget is resolved at boot and reported; it does not size any child yet.
+ * The budget is resolved at boot and reported. Whether it also sizes a child
+ * depends on `childHeapMode`, which defaults to `observe` and sizes nothing.
  * The only boot-time behavior is rejecting an out-of-range flag value.
  */
 describe('runQwenServe memory budget', () => {
@@ -1992,7 +2050,13 @@ describe('runQwenServe memory budget', () => {
       const body = (await res.json()) as {
         limits: {
           memory: {
-            enforced: false;
+            enforced: boolean;
+            childHeap: {
+              mode: string;
+              maxConcurrentChildren: number;
+              perChildCeilingMb: number | null;
+              refusals: number;
+            } | null;
             configuredBudgetMb: number;
             effectiveBudgetMb: number;
             budgetSource: string;
@@ -2012,9 +2076,29 @@ describe('runQwenServe memory budget', () => {
             registeredWorkspaces: number;
             activeAcpChildren: number;
             childRssCoverage: string;
+            children: {
+              rssBytes: number;
+              sampled: number;
+              oldestReadingAgeMs: number | null;
+            };
             modeled: {
               recommendedShareAtRegisteredMb: number;
               recommendedShareAtActiveMb: number | null;
+            };
+            // Restated rather than imported on purpose: this shape is the
+            // wire contract, and casting to the internal type would make the
+            // assertions below accept whatever that type happens to say.
+            pressure: {
+              mode: string;
+              level: string;
+              source: string;
+              ratio: number;
+              rssBytes: number;
+              rssRatio: number;
+              availableBytes: number;
+              heapUsedBytes: number;
+              heapRatio: number;
+              heapLimitBytes: number;
             };
           };
         };
@@ -2022,8 +2106,44 @@ describe('runQwenServe memory budget', () => {
 
       const memory = body.limits.memory;
       expect(memory).not.toBeNull();
-      // Nothing in this section is applied, and the wire says so.
+      // The child-heap policy reached status on a daemon that really booted.
+      // Default is `observe`, so it computed a share and applied nothing —
+      // `enforced` has to stay false or the field means "the feature exists"
+      // rather than "children are being sized by this".
       expect(memory?.enforced).toBe(false);
+      // Pin the key set rather than the values, so an unannounced field added
+      // to the wire still fails here. `toEqual` on the whole object was the
+      // other option and it does not survive this suite booting a real daemon:
+      // both derived figures follow the host's pool, and on a runner with
+      // under ~1 GB available the model correctly publishes no partition at
+      // all — so a matcher asserting `any(Number)` would fail on exactly the
+      // host where the code is doing the right thing.
+      expect(Object.keys(memory?.childHeap ?? {}).sort()).toEqual([
+        'maxConcurrentChildren',
+        'mode',
+        'perChildCeilingMb',
+        'refusals',
+      ]);
+      expect(memory?.childHeap?.mode).toBe('observe');
+      expect(memory?.childHeap?.refusals).toBe(0);
+      // Whichever branch this host took, the two figures agree with each
+      // other. The arithmetic itself is pinned exhaustively in
+      // `child-heap-policy.test.ts`; what this asserts is that a real daemon
+      // put a self-consistent pair on the wire.
+      if (memory?.childHeap?.perChildCeilingMb === null) {
+        expect(memory?.childHeap?.maxConcurrentChildren).toBe(0);
+      } else {
+        // A fixed grant handed to every admitted child must total no more than
+        // the pool it partitions. That product is the whole reason the
+        // partition is a bound rather than a per-spawn share.
+        expect(memory?.childHeap?.maxConcurrentChildren ?? 0).toBeGreaterThan(
+          0,
+        );
+        expect(
+          (memory?.childHeap?.maxConcurrentChildren ?? 0) *
+            (memory?.childHeap?.perChildCeilingMb ?? 0),
+        ).toBeLessThanOrEqual(memory?.modeled.childPoolMb ?? 0);
+      }
       expect(memory?.configuredBudgetMb).toBe(4096);
       expect(memory?.budgetSource).toBe('flag');
       // The invariant that motivates separating configured from effective:
@@ -2043,12 +2163,46 @@ describe('runQwenServe memory budget', () => {
 
       const runtimeMemory = body.runtime.memory;
       expect(runtimeMemory?.registeredWorkspaces).toBe(1);
-      // Sampling still covers only the primary child; say so rather than let
-      // the section imply process-tree observation.
-      expect(runtimeMemory?.childRssCoverage).toBe('primary_only');
+      // Sampling now covers every live child; it still is not process-tree
+      // observation, which `children`'s own docs spell out.
+      expect(runtimeMemory?.childRssCoverage).toBe('active_children');
       expect(
         runtimeMemory?.modeled.recommendedShareAtRegisteredMb,
       ).toBeGreaterThan(0);
+
+      // Pressure, from a daemon that actually booted. Every other test for it
+      // calls the status builder directly, so nothing else would notice the
+      // reading failing to reach a live response.
+      const pressure = runtimeMemory?.pressure;
+      expect(pressure?.mode).toBe('observe');
+      // A real process against a real denominator: assert the invariants
+      // rather than a level, which depends on the host running the test.
+      expect(pressure?.rssBytes).toBeGreaterThan(0);
+      expect(pressure?.heapLimitBytes).toBeGreaterThan(0);
+      expect(pressure?.availableBytes).toBe(
+        (memory?.availableMemoryMb ?? 0) * 1024 * 1024,
+      );
+      expect(pressure?.ratio).toBe(
+        Math.max(pressure?.rssRatio ?? 0, pressure?.heapRatio ?? 0),
+      );
+      expect(pressure?.source).not.toBe('unknown');
+
+      // Aggregate child RSS. This test opens no SSE/WS stream, so the
+      // sampler's watch gate never fires and nothing is polled — assert the
+      // invariants that hold regardless rather than a non-zero sum, which
+      // only a streaming client would produce.
+      const children = runtimeMemory?.children;
+      expect(children?.sampled).toBeLessThanOrEqual(
+        runtimeMemory?.activeAcpChildren ?? 0,
+      );
+      // Nothing sampled must read as nothing summed and no age — never as a
+      // measured zero.
+      if (children?.sampled === 0) {
+        expect(children.rssBytes).toBe(0);
+        expect(children.oldestReadingAgeMs).toBeNull();
+      } else {
+        expect(children?.rssBytes).toBeGreaterThan(0);
+      }
     } finally {
       await handle.close();
     }
@@ -5014,6 +5168,306 @@ describe('runQwenServe runtime startup failures', () => {
       expect(await authorizedRes.json()).toEqual({ sessionId: 'session-1' });
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves Web Shell document navigations during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // HEAD goes first so the cold deferred gate's pre-auth exemption is
+      // exercised for both methods the warm app serves pre-auth.
+      const headRes = await fetch(`${handle.url}/session/abc`, {
+        method: 'HEAD',
+        headers: { accept: 'text/html' },
+      });
+      expect(headRes.status).toBe(200);
+      expect(headRes.headers.get('content-type')).toContain('text/html');
+
+      // A browser refresh of a session deep link carries no bearer header and
+      // must load the shell (and start the runtime) instead of 401ing in the
+      // deferred gate.
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(200);
+      expect(navRes.headers.get('content-type')).toContain('text/html');
+      expect(await navRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves the Web Shell root during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon, so the `/` exemption is exercised at
+      // the deferred gate itself — there is no warm-app path it could take.
+      const rootRes = await fetch(`${handle.url}/`);
+      expect(rootRes.status).toBe(200);
+      expect(rootRes.headers.get('content-type')).toContain('text/html');
+      expect(await rootRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves the // root alias during the deferred window like the warm app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-alias-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // Express non-strict routing matches a raw `//` against `app.get('/')`,
+      // so the warm app serves it pre-auth; the cold gate must exempt it too
+      // instead of 401ing.
+      const aliasRes = await fetch(`${handle.url}//`);
+      expect(aliasRes.status).toBe(200);
+      expect(aliasRes.headers.get('content-type')).toContain('text/html');
+      expect(await aliasRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('degrades to the bearer gate when the pre-auth predicate rejects', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-predicate-fail-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    const predicateSpy = vi
+      .spyOn(webShellStatic, 'isPreAuthWebShellRequest')
+      .mockImplementation(() => {
+        throw new Error('predicate module glitch');
+      });
+
+    try {
+      // Without the fail-closed guard, a rejecting predicate 500s the whole
+      // deferred branch. A tokenless navigation must hit the bearer gate...
+      const anonRes = await fetch(`${handle.url}/`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(anonRes.status).toBe(401);
+
+      // ...and a correctly-tokened request must still get through.
+      const authedRes = await fetch(`${handle.url}/session/abc`, {
+        headers: {
+          accept: 'text/html',
+          authorization: 'Bearer secret-token',
+        },
+      });
+      expect(authedRes.status).toBe(200);
+      expect(authedRes.headers.get('content-type')).toContain('text/html');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      predicateSpy.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it('serves Web Shell assets during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-')),
+    );
+    const shellDir = writeWebShellFixture(tmpDir);
+    fs.writeFileSync(
+      path.join(shellDir, 'assets', 'fixture.js'),
+      'console.log("fixture");',
+    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon, so only the predicate's `/assets/`
+      // branch can exempt this from the bearer gate.
+      const assetRes = await fetch(`${handle.url}/assets/fixture.js`);
+      expect(assetRes.status).toBe(200);
+      expect(await assetRes.text()).toContain('console.log("fixture");');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers bare /assets during the deferred window like the warm app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-bare-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon. Express 5's `app.use('/assets', ...)`
+      // also matches the bare mount path pre-auth — the warm app answers 301
+      // to `/assets/` (then 404) — so the deferred gate must exempt it too
+      // instead of 401ing.
+      const bareRes = await fetch(`${handle.url}/assets`, {
+        redirect: 'manual',
+      });
+      expect(bareRes.status).toBe(301);
+      expect(bareRes.headers.get('location')).toBe('/assets/');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves trailing-slash and case-variant session deep links during the deferred window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-shapes-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // The warm app serves this shape pre-auth (Express matches routes
+      // case-insensitively and non-strictly by default), so the cold gate
+      // must exempt it too instead of 401ing the refresh.
+      const navRes = await fetch(`${handle.url}/Session/abc/`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(200);
+      expect(navRes.headers.get('content-type')).toContain('text/html');
+      expect(await navRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves query-carrying session deep links during the deferred window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-query-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon, with a query string (a real
+      // deep-link refresh shape). The predicate matches on `req.path`, which
+      // strips the query — pinning the gate against a mutation to `req.url`
+      // that would 401 the refresh.
+      const queryRes = await fetch(`${handle.url}/session/abc/?ref=1`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(queryRes.status).toBe(200);
+      expect(queryRes.headers.get('content-type')).toContain('text/html');
+      expect(await queryRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps JSON and API-subpath requests gated during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-gate-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      const jsonRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'application/json' },
+      });
+      expect(jsonRes.status).toBe(401);
+
+      const apiRes = await fetch(`${handle.url}/session/abc/status`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(apiRes.status).toBe(401);
+
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps session document navigations gated during the deferred window with --no-web', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-noweb-')),
+    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      serveOptions: { serveWebShell: false },
+    });
+
+    try {
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(401);
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers pre-auth Web Shell navigations with the failure envelope when the deferred runtime fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-fail-')),
+    );
+    writeWebShellFixture(tmpDir);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      createBridge: () => {
+        throw new Error('runtime boom');
+      },
+    });
+
+    try {
+      // These paths are declared pre-auth, so on a startup failure they must
+      // report the real fault instead of the bootstrap bearer gate's 401.
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(503);
+      expect(await navRes.json()).toEqual({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
+      });
+
+      const rootRes = await fetch(`${handle.url}/`);
+      expect(rootRes.status).toBe(503);
+      expect(await rootRes.json()).toEqual({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
+      });
+
+      // Non-exempted requests stay behind the bearer gate.
+      const jsonRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'application/json' },
+      });
+      expect(jsonRes.status).toBe(401);
+
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
     } finally {
       await handle.close();
     }

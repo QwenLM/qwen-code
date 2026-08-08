@@ -31,6 +31,10 @@ import {
   HOST_UPDATE_RELAUNCH_ENV_VAR,
   SKIP_UPDATE_CHECK_ENV_VAR,
 } from './processUtils.js';
+import {
+  QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_SERVE_ENV,
+} from '../config/acp-channel-fallback.js';
 
 const execAsync = promisify(exec);
 
@@ -75,6 +79,8 @@ export function getSandboxPassthroughEnvArgs(
     SKIP_UPDATE_CHECK_ENV_VAR,
     CUSTOM_SANDBOX_IMAGE_ENV_VAR,
     HOST_UPDATE_RELAUNCH_ENV_VAR,
+    QWEN_CODE_SERVE_ENV,
+    QWEN_CODE_DESKTOP_ENV,
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );

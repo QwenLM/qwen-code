@@ -260,6 +260,7 @@ export function ContextUsageMessage({
   const { t } = useI18n();
   const { usage } = status;
   const { breakdown, contextWindowSize } = usage;
+  const hasTokenCount = usage.totalTokens > 0;
   const percentage =
     contextWindowSize > 0 ? (usage.totalTokens / contextWindowSize) * 100 : 0;
   const isOverLimit = percentage > 100;
@@ -272,8 +273,14 @@ export function ContextUsageMessage({
     <div className={styles.panel}>
       <div className={styles.title}>{t('contextUsage.title')}</div>
 
-      {usage.isEstimated ? (
+      {!hasTokenCount ? (
         <>
+          <div className={styles.estimateHint}>
+            {t('contextUsage.noApiResponse')}
+          </div>
+          <div className={styles.sectionTitle}>
+            {t('contextUsage.estimatedOverhead')}
+          </div>
           <div className={styles.metaLine}>
             <span>
               {t('contextUsage.model')}: {usage.modelName}
@@ -295,45 +302,50 @@ export function ContextUsageMessage({
               {formatTokens(contextWindowSize)} {t('contextUsage.tokens')}
             </span>
           </div>
+          {usage.isEstimated && (
+            <div className={styles.estimateHint}>
+              {t('contextUsage.estimatedUntilProviderUsage')}
+            </div>
+          )}
           {isOverLimit && (
             <div className={styles.error}>{t('contextUsage.overLimit')}</div>
           )}
+
+          <ProgressBar
+            usedPercentage={Math.min(percentage, 100)}
+            bufferPercentage={bufferPercentage}
+          />
+          <div className={styles.spacer} />
+          <CategoryRow
+            symbol={FILLED}
+            label={t('contextUsage.used')}
+            tokens={usage.totalTokens}
+            tokenLabel={t('contextUsage.tokens')}
+            contextWindowSize={contextWindowSize}
+            symbolClassName={isOverLimit ? styles.error : styles.accent}
+            isOverLimit={isOverLimit}
+          />
+          <CategoryRow
+            symbol={EMPTY}
+            label={t('contextUsage.free')}
+            tokens={breakdown.freeSpace}
+            tokenLabel={t('contextUsage.tokens')}
+            contextWindowSize={contextWindowSize}
+          />
+          <CategoryRow
+            symbol={BUFFER}
+            label={t('contextUsage.autocompactBuffer')}
+            tokens={breakdown.autocompactBuffer}
+            tokenLabel={t('contextUsage.tokens')}
+            contextWindowSize={contextWindowSize}
+            symbolClassName={styles.warning}
+          />
+          <div className={styles.spacer} />
+          <div className={styles.sectionTitle}>
+            {t('contextUsage.usageByCategory')}
+          </div>
         </>
       )}
-
-      <ProgressBar
-        usedPercentage={Math.min(percentage, 100)}
-        bufferPercentage={bufferPercentage}
-      />
-      <div className={styles.spacer} />
-      <CategoryRow
-        symbol={FILLED}
-        label={t('contextUsage.used')}
-        tokens={usage.totalTokens}
-        tokenLabel={t('contextUsage.tokens')}
-        contextWindowSize={contextWindowSize}
-        symbolClassName={isOverLimit ? styles.error : styles.accent}
-        isOverLimit={isOverLimit}
-      />
-      <CategoryRow
-        symbol={EMPTY}
-        label={t('contextUsage.free')}
-        tokens={breakdown.freeSpace}
-        tokenLabel={t('contextUsage.tokens')}
-        contextWindowSize={contextWindowSize}
-      />
-      <CategoryRow
-        symbol={BUFFER}
-        label={t('contextUsage.autocompactBuffer')}
-        tokens={breakdown.autocompactBuffer}
-        tokenLabel={t('contextUsage.tokens')}
-        contextWindowSize={contextWindowSize}
-        symbolClassName={styles.warning}
-      />
-      <div className={styles.spacer} />
-      <div className={styles.sectionTitle}>
-        {t('contextUsage.usageByCategory')}
-      </div>
 
       <CategoryRow
         symbol={FILLED}
@@ -377,7 +389,7 @@ export function ContextUsageMessage({
         contextWindowSize={contextWindowSize}
         symbolClassName={styles.accent}
       />
-      {!usage.isEstimated && (
+      {hasTokenCount && (
         <CategoryRow
           symbol={FILLED}
           label={t('contextUsage.messages')}
