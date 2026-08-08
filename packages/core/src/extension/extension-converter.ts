@@ -16,6 +16,10 @@ import {
   convertClaudePluginStandalone,
   isClaudePluginConfig,
 } from './claude-converter.js';
+import {
+  convertQoderPlugin,
+  QODER_PLUGIN_MANIFEST,
+} from './qoder-converter.js';
 import type {
   ExtensionNetworkPolicy,
   ExtensionOriginSource,
@@ -26,14 +30,19 @@ export const SUPPORTED_EXTENSION_MANIFESTS = [
   'gemini-extension.json',
   '.claude-plugin/marketplace.json',
   '.claude-plugin/plugin.json',
+  QODER_PLUGIN_MANIFEST,
 ] as const;
 
-export async function convertGeminiOrClaudeExtension(
+export async function convertCompatibleExtension(
   extensionDir: string,
   pluginName?: string,
   networkPolicy?: ExtensionNetworkPolicy,
   signal?: AbortSignal,
-): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
+): Promise<{
+  extensionDir: string;
+  originSource: ExtensionOriginSource;
+  externalContent: boolean;
+}> {
   signal?.throwIfAborted();
   const configFilePath = path.join(
     extensionDir,
@@ -42,7 +51,7 @@ export async function convertGeminiOrClaudeExtension(
   // Native Qwen extension wins.
   if (fs.existsSync(configFilePath)) {
     signal?.throwIfAborted();
-    return { extensionDir, originSource: 'QwenCode' };
+    return { extensionDir, originSource: 'QwenCode', externalContent: false };
   }
   // Try Claude first; a defective manifest is recorded and we fall back.
   let claudeError: unknown;
@@ -50,16 +59,16 @@ export async function convertGeminiOrClaudeExtension(
     const kind = isClaudePluginConfig(extensionDir, pluginName);
     if (kind === 'marketplace') {
       signal?.throwIfAborted();
+      const converted = await convertClaudePluginPackage(
+        extensionDir,
+        pluginName as string,
+        networkPolicy,
+        signal,
+      );
       return {
-        extensionDir: (
-          await convertClaudePluginPackage(
-            extensionDir,
-            pluginName as string,
-            networkPolicy,
-            signal,
-          )
-        ).convertedDir,
+        extensionDir: converted.convertedDir,
         originSource: 'Claude',
+        externalContent: converted.externalContent,
       };
     }
     if (kind === 'standalone') {
@@ -68,10 +77,20 @@ export async function convertGeminiOrClaudeExtension(
         extensionDir: (await convertClaudePluginStandalone(extensionDir))
           .convertedDir,
         originSource: 'Claude',
+        externalContent: false,
       };
     }
   } catch (error) {
     claudeError = error;
+  }
+  // Fall back to Qoder.
+  if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
+    signal?.throwIfAborted();
+    return {
+      extensionDir: (await convertQoderPlugin(extensionDir)).convertedDir,
+      originSource: 'Qoder',
+      externalContent: false,
+    };
   }
   // Fall back to Gemini.
   if (isGeminiExtensionConfig(extensionDir)) {
@@ -80,10 +99,18 @@ export async function convertGeminiOrClaudeExtension(
       extensionDir: (await convertGeminiExtensionPackage(extensionDir))
         .convertedDir,
       originSource: 'Gemini',
+      externalContent: false,
     };
   }
   // Nothing matched: surface the Claude manifest error if one occurred.
   if (claudeError) throw claudeError;
   signal?.throwIfAborted();
-  return { extensionDir, originSource: 'QwenCode' };
+  return { extensionDir, originSource: 'QwenCode', externalContent: false };
 }
+
+/**
+ * @deprecated Renamed to `convertCompatibleExtension` when Qoder support
+ * landed on main; alias kept so this branch's tests keep importing the
+ * pre-rename name.
+ */
+export { convertCompatibleExtension as convertGeminiOrClaudeExtension };
