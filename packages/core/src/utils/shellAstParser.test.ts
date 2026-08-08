@@ -378,6 +378,16 @@ describe('isShellCommandReadOnlyAST', () => {
       );
     });
 
+    it('allows literal ${var@P} text in non-expanding contexts', async () => {
+      for (const command of [
+        "echo '${two@P}'",
+        ["cat <<'EOF'", '${two@P}', 'EOF'].join('\n'),
+      ]) {
+        expect(await isShellCommandReadOnlyAST(command)).toBe(true);
+        expect(await classifyShellCommandSafety(command)).toBe('read-only');
+      }
+    });
+
     it('rejects the full ${var@P} payload from issue #8582', async () => {
       expect(
         await isShellCommandReadOnlyAST(
@@ -439,6 +449,13 @@ describe('isShellCommandReadOnlyAST', () => {
       expect(await classifyShellCommandSafety('echo "${!prefix*}"')).toBe(
         'read-only',
       );
+      expect(await isShellCommandReadOnlyAST('echo "${!#}"')).toBe(true);
+      expect(await classifyShellCommandSafety('echo "${!#}"')).toBe(
+        'read-only',
+      );
+      expect(
+        await isShellCommandReadOnlyAST(['echo "${!\\', '#}"'].join('\n')),
+      ).toBe(true);
     });
 
     it('rejects indirect expansion that can evaluate an array subscript', async () => {
@@ -1202,10 +1219,10 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
   });
 
-  it('fails closed on @-transformations when parser is marked failed', async () => {
+  it('only blocks executing @P transformations when parser is marked failed', async () => {
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('echo "${two@P}"')).toBe(false);
-    expect(await isShellCommandReadOnlyAST('echo "${two@Q}"')).toBe(false);
+    expect(await isShellCommandReadOnlyAST('echo "${two@Q}"')).toBe(true);
     expect(await isShellCommandReadOnlyAST('echo "${arr[@]@P}"')).toBe(false);
   });
 
@@ -1217,18 +1234,16 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('echo "${two@\\\nP}"')).toBe(false);
     expect(await isShellCommandReadOnlyAST('echo "$\\\n{PWD@P}"')).toBe(false);
-    // Continuation-split non-@P transform: `@Q` passes the pre-gate, so this
-    // input actually exercises the fallback's continuation gaps (#8590
-    // review).
-    expect(await isShellCommandReadOnlyAST('echo "${two@\\\nQ}"')).toBe(false);
-    expect(await isShellCommandReadOnlyAST('echo "$\\\n{two@Q}"')).toBe(false);
+    // `@Q` only quotes the value and cannot execute code.
+    expect(await isShellCommandReadOnlyAST('echo "${two@\\\nQ}"')).toBe(true);
+    expect(await isShellCommandReadOnlyAST('echo "$\\\n{two@Q}"')).toBe(true);
   });
 
-  it('fails closed on special-parameter @ transformations when parser is marked failed', async () => {
+  it('does not block invalid special-parameter text in fallback mode', async () => {
     _setParserFailedForTesting();
-    expect(await isShellCommandReadOnlyAST('echo "${@P}"')).toBe(false);
-    expect(await isShellCommandReadOnlyAST('echo "${#@P}"')).toBe(false);
-    expect(await isShellCommandReadOnlyAST('echo "${#@Q}"')).toBe(false);
+    expect(await isShellCommandReadOnlyAST('echo "${@P}"')).toBe(true);
+    expect(await isShellCommandReadOnlyAST('echo "${#@P}"')).toBe(true);
+    expect(await isShellCommandReadOnlyAST('echo "${#@Q}"')).toBe(true);
   });
 
   it('fails closed on deep and quoted-] @P subscripts when parser is marked failed (#8590)', async () => {
@@ -1244,14 +1259,12 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     );
   });
 
-  it('fails closed on non-@P subscript transforms when the parser is marked failed', async () => {
+  it('allows non-executing subscript transforms when the parser is marked failed', async () => {
     _setParserFailedForTesting();
-    expect(await isShellCommandReadOnlyAST('echo "${qa["a]b"]@Q}"')).toBe(
-      false,
-    );
+    expect(await isShellCommandReadOnlyAST('echo "${qa["a]b"]@Q}"')).toBe(true);
     expect(
       await isShellCommandReadOnlyAST('echo "${x[${y[${z[0]}]}]@Q}"'),
-    ).toBe(false);
+    ).toBe(true);
     expect(await isShellCommandReadOnlyAST('echo "${qa["a]b"]}"')).toBe(true);
   });
 
@@ -1261,13 +1274,12 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     );
   });
 
-  it('fails closed on continuation-split non-@P transforms with the working parser', async () => {
-    // tree-sitter emits no expansion node for a `$\<newline>{...}` shape,
-    // so the shared transformation scan must downgrade it exactly like
-    // degraded mode (#8590 review).
-    expect(await isShellCommandReadOnlyAST('echo "$\\\n{two@Q}"')).toBe(false);
+  it('allows continuation-split non-executing transforms', async () => {
+    // tree-sitter emits no expansion node for a `$\<newline>{...}` shape;
+    // the quote-aware scanner still distinguishes safe `@Q` from `@P`.
+    expect(await isShellCommandReadOnlyAST('echo "$\\\n{two@Q}"')).toBe(true);
     expect(await classifyShellCommandSafety('echo "$\\\n{two@Q}"')).toBe(
-      'unknown',
+      'read-only',
     );
   });
 

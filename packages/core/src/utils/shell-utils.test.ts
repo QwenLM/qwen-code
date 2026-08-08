@@ -339,11 +339,15 @@ describe('checkCommandPermissions', () => {
       expect(result.disallowedCommands).toEqual(['rm -rf /tmp/x']);
     });
 
-    it('does not hard-deny safe @Q quoting or key enumeration (#8590)', async () => {
+    it('does not hard-deny safe @Q quoting or indirect enumeration (#8590)', async () => {
       // `@Q` quotes a value for reuse and `${!arr[@]}` enumerates keys;
       // neither executes code, so they must not hit the unoverridable
       // substitution hard-deny (#8590 review, finding 2).
-      for (const cmd of ['printf %s "${files[@]@Q}"', 'echo "${!arr[@]}"']) {
+      for (const cmd of [
+        'printf %s "${files[@]@Q}"',
+        'echo "${!arr[@]}"',
+        'echo "${!#}"',
+      ]) {
         const result = await checkCommandPermissions(cmd, config);
         expect(result.allAllowed).toBe(true);
         expect(result.isHardDenial).toBeUndefined();
@@ -1509,6 +1513,10 @@ describe('detectCommandSubstitution risky-expansion scope (#8590)', () => {
     'echo "${!arr[*]}"',
     'echo "${!prefix@}"',
     'echo "${!prefix*}"',
+    // `${!#}` expands the last positional parameter without evaluating it
+    // as an indirect variable name.
+    'echo "${!#}"',
+    ['echo "${!\\', '#}"'].join('\n'),
     // Bare `${!}` is the braced form of `$!` (last background job PID)
     // (#8590 review).
     'echo "${!}"',
@@ -1521,6 +1529,9 @@ describe('detectCommandSubstitution risky-expansion scope (#8590)', () => {
   it.each([
     'echo "${var@P}"',
     'echo "${!ref}"',
+    'echo "${!1}"',
+    'echo "${!@}"',
+    'echo "${!*}"',
     // `${!arr[0]}` indirection resolves through arr's value, and any
     // subscript in that value is evaluated — same vector as `${!ref}`.
     'echo "${!arr[0]}"',

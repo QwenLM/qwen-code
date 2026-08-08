@@ -1757,6 +1757,10 @@ export function detectCommandSubstitution(command: string): boolean {
       // (`ref='a[$(cmd)]'; echo "${!ref}"` runs `cmd`).
       i = skipLineContinuations(text, i + 1);
       if (text[i] === '}') return false;
+      if (text[i] === '#') {
+        const end = skipLineContinuations(text, i + 1);
+        if (text[end] === '}') return false;
+      }
       const nameEnd = consumeParameterName(text, i);
       if (nameEnd === i) return true;
       i = skipLineContinuations(text, nameEnd);

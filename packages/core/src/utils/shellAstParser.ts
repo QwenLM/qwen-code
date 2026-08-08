@@ -19,11 +19,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  hasShellSubstitution,
-  matchParameterExpansionHead,
-  skipLineContinuations,
-} from './shell-utils.js';
+import { hasShellSubstitution } from './shell-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -1163,35 +1159,6 @@ async function classifyInternal(command: string): Promise<Safety> {
   }
 }
 
-// True when `command` contains a parameter transformation (`@` operator
-// inside a brace expansion) or an unterminated subscript, including shapes
-// split by `\<newline>` (bash removes continuations before parsing).
-// Reuses the scanner's parameter-expansion grammar so the classifier
-// cannot drift from it (#8590 review).
-function hasParameterTransformationText(command: string): boolean {
-  let index = command.indexOf('$');
-  while (index !== -1) {
-    const braceIndex = skipLineContinuations(command, index + 1);
-    if (command[braceIndex] !== '{') {
-      index = command.indexOf('$', index + 1);
-      continue;
-    }
-
-    const headEnd = matchParameterExpansionHead(command, braceIndex);
-    // An unterminated subscript cannot be classified: fail closed.
-    if (headEnd === -2) return true;
-    const operatorIndex =
-      headEnd >= 0 && command[headEnd] === '@'
-        ? skipLineContinuations(command, headEnd + 1)
-        : headEnd;
-    if (operatorIndex >= 0 && /[A-Za-z]/.test(command[operatorIndex] ?? '')) {
-      return true;
-    }
-    index = command.indexOf('$', index + 1);
-  }
-  return false;
-}
-
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
@@ -1200,9 +1167,7 @@ export async function classifyShellCommandSafety(
     (): ShellCommandSafety => 'unknown',
   );
   // Preserve `write`: plan mode distinguishes it from `unknown`.
-  return classification === 'read-only' &&
-    (hasShellSubstitution(command) ||
-      (command.includes('@') && hasParameterTransformationText(command)))
+  return classification === 'read-only' && hasShellSubstitution(command)
     ? 'unknown'
     : classification;
 }
@@ -1225,12 +1190,6 @@ export async function isShellCommandReadOnlyAST(
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
   if (hasShellSubstitution(command)) return false;
-
-  // Parameter transformations fail closed in BOTH modes, so the verdict
-  // cannot depend on whether the WASM parser is available (#8590 review).
-  if (command.includes('@') && hasParameterTransformationText(command)) {
-    return false;
-  }
 
   // If the WASM parser is permanently unavailable (e.g. WASM file missing
   // after a symlinked install), fall back to the regex-based checker so the
