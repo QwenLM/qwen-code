@@ -442,6 +442,17 @@ function makeBridge(
     get activePromptCount() {
       return 0;
     },
+    get activeWork() {
+      return false;
+    },
+    get activeWorkCoverage() {
+      return {
+        total: 0,
+        covered: 0,
+        onNegotiatedChannel: 0,
+        oldestCoveredReportAt: null,
+      };
+    },
     get pendingPromptTotal() {
       return 0;
     },

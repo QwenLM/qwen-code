@@ -157,16 +157,19 @@ describe('qwen serve WebUI live journal recovery', () => {
       root = createRoot(container);
       await act(async () => {
         root?.render(
-          createElement(
-            DaemonSessionProvider,
-            {
-              autoConnect: true,
-              baseUrl: activeDaemon!.base,
-              token: activeDaemon!.token,
-              sessionId: created.sessionId,
-            },
-            createElement(Harness),
-          ),
+          // `children` is the one required prop on DaemonSessionProviderProps,
+          // and a trailing createElement argument does not satisfy it — the
+          // call only type checks with children in the props object. The lint
+          // rule guards JSX readability, which does not apply in this .ts file
+          // where createElement is already being called by hand.
+          // eslint-disable-next-line react/no-children-prop
+          createElement(DaemonSessionProvider, {
+            autoConnect: true,
+            baseUrl: activeDaemon!.base,
+            token: activeDaemon!.token,
+            sessionId: created.sessionId,
+            children: createElement(Harness),
+          }),
         );
       });
 

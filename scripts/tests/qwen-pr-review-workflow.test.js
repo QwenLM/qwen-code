@@ -2161,3 +2161,116 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
     );
   });
 });
+
+describe('workflow expression length', () => {
+  // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
+  // and GitHub caps a single expression at 21000 characters. Blowing that cap
+  // does not fail a job — it makes the whole workflow file *invalid*, so no
+  // event triggers it at all and no run is even created for the ones that
+  // matter. That is how every automatic review and every `@qwen-code /review`
+  // in this repository silently stopped for ~12h on 2026-08-07: #8648 pushed
+  // the "Run review" body from 17705 to 22282 characters, and from that merge
+  // onward the only runs left were startup failures reading
+  // `Invalid workflow file: … (Line: 751, Col: 14): Exceeded max expression
+  // length 21000` (e.g. run 31239579253). CI stayed green the whole time — no
+  // test covered this, which is why it is covered here.
+  const LIMIT = 21000;
+  const dir = '.github/workflows';
+  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+
+  it('keeps every templated run block under the limit', () => {
+    expect(files.length).toBeGreaterThan(0);
+    const over = [];
+    for (const file of files) {
+      const doc = parse(readFileSync(join(dir, file), 'utf8'));
+      for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
+        for (const step of job?.steps ?? []) {
+          const body = step?.run;
+          if (typeof body !== 'string' || !body.includes('${{')) continue;
+          if (body.length > LIMIT) {
+            over.push(
+              `${file} › ${jobId} › ${step.name}: ${body.length} chars`,
+            );
+          }
+        }
+      }
+    }
+    expect(over).toEqual([]);
+  });
+
+  it('keeps the review script free of ${{ }} so its length cannot break it', () => {
+    // This one body is ~24000 characters — already past the limit — so it stays
+    // valid only while nothing templates it. Every context value it needs is
+    // passed through the step's `env:` instead. A single `${{ }}` added back
+    // here takes the entire workflow down, which the test above would also
+    // catch; this asserts the actual invariant a contributor has to preserve.
+    expect(runReviewStep()).not.toContain('${{');
+  });
+});
+
+describe('command shape matching', () => {
+  // A comment may be `@qwen-code /review` followed by a newline and a body.
+  // The `if`s tried to accept that with format('…{0}', '\n'), but expression
+  // string literals are NOT escape-processed: that '\n' is a literal
+  // backslash + n, so the branch matched nothing and every multi-line command
+  // was silently ignored — no run, no feedback. Measured on a live runner:
+  //   startsWith(<LF body>, format('…{0}', '\n'))            => false
+  //   startsWith(<LF body>, format('…{0}', fromJSON('"\n"'))) => true
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\n"'))) => false
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\r"'))) => true
+  // Hence fromJSON (JSON *is* escape-processed) and both line endings: the
+  // REST API sends LF, the web UI sends CRLF.
+  const doc = parse(workflow);
+  const ifs = Object.entries(doc.jobs)
+    .filter(([, job]) => typeof job?.if === 'string')
+    .map(([id, job]) => [id, job.if]);
+
+  it('never matches a command shape with a non-escaped literal newline', () => {
+    const broken = ifs.filter(([, cond]) => /'\\[nr]'/.test(cond));
+    expect(broken.map(([id]) => id)).toEqual([]);
+  });
+
+  it('accepts both LF and CRLF after the command in every shape match', () => {
+    // `authorize` deliberately matches only a loose prefix — it is a filter to
+    // avoid spawning a job per comment, and delegates the exact shape to the
+    // downstream jobs. Jobs that do the shape match are the ones that use
+    // format('@qwen-code /<cmd>{0}', …), so key off that.
+    const withShape = ifs.filter(([, cond]) =>
+      cond.includes("format('@qwen-code /"),
+    );
+    expect(withShape.length).toBeGreaterThan(0);
+    const missing = [];
+    for (const [id, cond] of withShape) {
+      for (const cmd of ['review', 'resolve']) {
+        // Only check commands this job actually matches on.
+        if (!cond.includes(`format('@qwen-code /${cmd}{0}'`)) continue;
+        const lf = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\n"'))`,
+        );
+        const cr = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\r"'))`,
+        );
+        if (!lf || !cr) missing.push(`${id}/${cmd} (LF:${lf} CR:${cr})`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('strips a trailing CR before parsing command tokens', () => {
+    // Word splitting uses IFS, which has no CR, so a CRLF comment would carry
+    // `\r` into tokens like `--timeout=300` and fail the numeric check.
+    // The command is parsed in "Resolve PR context", not in "Run review".
+    const run = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.id === 'context',
+    ).run;
+    const firstLine = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_BODY%%$\'\\n\'*}"',
+    );
+    const stripCr = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_COMMAND%$\'\\r\'}"',
+    );
+    expect(firstLine).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(firstLine);
+  });
+});

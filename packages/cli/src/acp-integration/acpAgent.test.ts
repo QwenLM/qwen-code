@@ -766,13 +766,19 @@ vi.mock('../ui/commands/contextCommand.js', () => ({
     .fn()
     .mockReturnValue('## Context Usage\nformatted'),
 }));
-vi.mock('./session/Session.js', () => ({
-  Session: vi.fn(),
-  buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
-    availableCommands: [],
-    availableSkills: [],
-  }),
-}));
+vi.mock('./session/Session.js', () => {
+  const SessionMock = vi.fn();
+  // The agent's active-work reporter walks every live Session on a timer, so
+  // even tests that never look at reporting need this to exist on instances.
+  SessionMock.prototype.collectActiveWorkHolds = () => [];
+  return {
+    Session: SessionMock,
+    buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    }),
+  };
+});
 vi.mock('../utils/languageUtils.js', () => ({
   updateOutputLanguageFile: vi.fn(),
   writeOutputLanguageAndRegisterPath: vi.fn(
@@ -891,6 +897,10 @@ import {
 } from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
@@ -2494,6 +2504,55 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     });
     expect(JSON.stringify(response['_meta']).length).toBeLessThan(2048);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('merges active-work negotiation and enables Session reporting', async () => {
+    await setupSessionMocks('active-work-session');
+    initializeAcpStartupProfiler();
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+          v: CHANNEL_STARTUP_PROFILE_VERSION,
+        },
+        [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          // Absurd cadence: the child must answer with the clamped value it
+          // will actually use, not echo this back.
+          intervalMs: 1,
+        },
+      },
+    })) as { _meta?: Record<string, unknown> };
+
+    expect(response._meta).toMatchObject({
+      [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+        v: CHANNEL_STARTUP_PROFILE_VERSION,
+      },
+      [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+        v: ACTIVE_WORK_HEARTBEAT_VERSION,
+        intervalMs: ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
+        categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    // The Session gets a change callback, not a cadence: one reporter per
+    // channel owns the timing.
+    expect(typeof vi.mocked(Session).mock.calls.at(-1)?.[4]).toBe('function');
 
     mockConnectionState.resolve();
     await agentPromise;
