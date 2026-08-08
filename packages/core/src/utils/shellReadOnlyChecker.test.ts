@@ -588,6 +588,37 @@ describe('git config probe cd tracking (#8575)', () => {
     ).toBe(true);
   });
 
+  it('resolves fully quoted cd targets (parity with the AST path)', () => {
+    expect(
+      isShellCommandReadOnly("cd 'sub' && git status", { cwd: cleanRepo }),
+    ).toBe(true);
+    expect(
+      isShellCommandReadOnly('cd "sub" && git status', { cwd: cleanRepo }),
+    ).toBe(true);
+    // Expansions and escapes inside double quotes stay unresolvable.
+    expect(
+      isShellCommandReadOnly('cd "$TARGET" && git status', {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+    expect(
+      isShellCommandReadOnly('cd "su\\b" && git status', {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps the original cwd read-only after a backgrounded cd', () => {
+    // `cd sub &` runs in a background subshell; the following git command
+    // executes in the ORIGINAL cwd (parity with the AST path).
+    expect(
+      isShellCommandReadOnly('cd sub & git status', { cwd: cleanRepo }),
+    ).toBe(true);
+    expect(
+      isShellCommandReadOnly('cd sub & git status', { cwd: dirtyRepo }),
+    ).toBe(false);
+  });
+
   it('downgrades git after an unresolvable cd', () => {
     expect(
       isShellCommandReadOnly('cd $TARGET && git status', { cwd: cleanRepo }),
@@ -735,5 +766,16 @@ describe('git config probe cd tracking (#8575)', () => {
         cwd: dirtyRepo,
       }),
     ).toBe(false);
+  });
+
+  it('downgrades git after an unresolvable cd even without a cwd', () => {
+    // cd tracking is not gated on a supplied cwd: a target that cannot be
+    // resolved or probed leaves the effective repository unknown (#8575).
+    expect(isShellCommandReadOnly('cd $TARGET && git status')).toBe(false);
+    expect(isShellCommandReadOnly('(cd /nonexistent && git status)')).toBe(
+      false,
+    );
+    // Plain git commands without a cwd keep their pre-#8575 behavior.
+    expect(isShellCommandReadOnly('git status')).toBe(true);
   });
 });

@@ -398,8 +398,18 @@ function trackDirectoryChange(
   // No operand cds to $HOME; more than one is rejected by bash (`cd: too
   // many arguments`) or rewrites $PWD (`cd old new`) — neither resolvable.
   if (operands.length !== 1) return unknown;
-  const target = operands[0]!;
-  if (target.startsWith('~') || /[$`'"\\*?[\]{}()<>|;&]/.test(target)) {
+  let target = operands[0]!;
+  // Mirror the AST classifier: a fully quoted target resolves to its
+  // literal content — single quotes are fully literal, and double quotes
+  // are literal unless they hold an expansion or escape (#8575).
+  if (/^'[^']*'$/.test(target)) {
+    target = target.slice(1, -1);
+    if (target.startsWith('~')) return unknown;
+  } else if (/^"[^"]*"$/.test(target)) {
+    const inner = target.slice(1, -1);
+    if (/[\\"$`]/.test(inner) || inner.startsWith('~')) return unknown;
+    target = inner;
+  } else if (target.startsWith('~') || /[$`'"\\*?[\]{}()<>|;&]/.test(target)) {
     return unknown;
   }
   const resolved = path.isAbsolute(target)
@@ -473,6 +483,9 @@ export function isShellCommandReadOnly(
     // Every pipeline member runs in a subshell — a cd there never moves
     // the directory the following segments execute in (#8575).
     if (incoming === '|' || incoming === '|&') continue;
+    // A `&` backgrounds the segment the same way: a cd there runs in a
+    // subshell and leaves the tracked directory alone (#8575).
+    if (segments[index]!.separator === '&') continue;
     const tracked = trackDirectoryChange(segment, currentCwd);
     if (tracked.unknownDir) {
       unknownDir = true;

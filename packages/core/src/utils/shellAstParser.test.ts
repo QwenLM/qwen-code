@@ -1418,6 +1418,19 @@ describe('git config probe cd tracking (#8575)', () => {
     ).toBe('read-only');
   });
 
+  it('resolves fully quoted cd targets', async () => {
+    expect(
+      await isShellCommandReadOnlyAST("cd 'sub' && git status", {
+        cwd: cleanRepo,
+      }),
+    ).toBe(true);
+    expect(
+      await isShellCommandReadOnlyAST('cd "sub" && git status', {
+        cwd: cleanRepo,
+      }),
+    ).toBe(true);
+  });
+
   it('downgrades git after an unresolvable cd', async () => {
     for (const command of [
       'cd $TARGET && git status',
@@ -1651,6 +1664,19 @@ describe('git config probe cd tracking (#8575)', () => {
         { cwd: work },
       ),
     ).toBe(false);
+  });
+
+  it('downgrades git after an unresolvable cd even without a cwd', async () => {
+    // cd tracking is not gated on a supplied cwd: a target that cannot be
+    // resolved or probed leaves the effective repository unknown (#8575).
+    expect(await isShellCommandReadOnlyAST('cd $TARGET && git status')).toBe(
+      false,
+    );
+    expect(
+      await isShellCommandReadOnlyAST('(cd /nonexistent && git status)'),
+    ).toBe(false);
+    // Plain git commands without a cwd keep their pre-#8575 behavior.
+    expect(await isShellCommandReadOnlyAST('git status')).toBe(true);
   });
 
   it('does not propagate cd through negation', async () => {

@@ -279,6 +279,27 @@ describe('gitConfigMayExecutePrograms', () => {
     it('does not flag an empty override (git then runs no hooks at all)', () => {
       const repo = makeRepo('hookspath-empty', '[core]\n\thooksPath =\n');
       expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+      // An executable default hook changes nothing: an empty core.hooksPath
+      // disables hooks entirely, so git never consults `.git/hooks`.
+      writeExecutableHook(
+        path.join(repo, '.git', 'hooks'),
+        'post-index-change',
+      );
+      expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+    });
+
+    it('ignores the default hooks directory under a non-empty override', () => {
+      // core.hooksPath redirects hook lookup — the default hooks directory
+      // is never consulted, whatever it contains.
+      const repo = makeRepo(
+        'hookspath-defaults',
+        '[core]\n\thooksPath = .myhooks\n',
+      );
+      writeExecutableHook(
+        path.join(repo, '.git', 'hooks'),
+        'post-index-change',
+      );
+      expect(gitConfigMayExecutePrograms(repo)).toBe(false);
     });
 
     it('fails closed on undecodable override values', () => {

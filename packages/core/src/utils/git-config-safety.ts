@@ -49,7 +49,8 @@
  * moves the probe to the repository the following git segments actually run
  * in, and an unresolvable target (expansions, `~`, flag-only forms, a
  * `||`-diverged chain) downgrades later git segments the same way a dirty
- * config does.
+ * config does — including when the classifier was called without a cwd,
+ * since the effective repository is then unknown.
  */
 
 import fs from 'node:fs';
@@ -627,6 +628,19 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
       }
       const entries = parseGitConfig(content);
       if (entriesMayExecutePrograms(entries)) return true;
+      // A core.hooksPath entry redirects hook lookup away from this
+      // config's default hooks directory — or, when empty, disables hooks
+      // entirely, so git runs no hooks at all.
+      if (
+        entries.some(
+          (e) =>
+            e.section === 'core' &&
+            e.subsection === null &&
+            e.key === 'hookspath',
+        )
+      ) {
+        hooksDirs.delete(path.join(path.dirname(file), 'hooks'));
+      }
       const redirectedHooksDirs = hooksPathDirectories(entries, hooksPathRoot);
       if (redirectedHooksDirs === null) return true; // fail closed
       for (const dir of redirectedHooksDirs) hooksDirs.add(dir);
