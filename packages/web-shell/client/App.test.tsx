@@ -3141,6 +3141,82 @@ describe('artifact panel fullscreen', () => {
     expect(document.activeElement).toBe(last);
   });
 
+  it('pulls focus back into the docked fullscreen surface when it escapes', async () => {
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const surface = document.querySelector<HTMLElement>(
+      '[class*="artifactPanelFullscreen"]',
+    );
+    expect(surface).not.toBeNull();
+
+    // Focus inside the surface — including the sandboxed HTML preview
+    // iframe, whose document owns its keydowns — must be left alone.
+    const exitFullscreen = surface!.querySelector<HTMLElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+    expect(exitFullscreen).not.toBeNull();
+    exitFullscreen!.focus();
+    expect(document.activeElement).toBe(exitFullscreen);
+
+    // A Tab past the preview's last focusable lands focus natively outside
+    // the surface: the keydown that moved it never reached the surface's
+    // Tab-wrap handler. Pull the focus back so the keyboard stays the
+    // surface's escape route...
+    const outside = container.querySelector<HTMLElement>(
+      '[data-testid="submit"]',
+    );
+    expect(outside).not.toBeNull();
+    outside!.focus();
+    expect(document.activeElement).toBe(surface);
+
+    // ...while the elevated toast host stays actionable beside the surface.
+    const portalRoot = document.querySelector('[data-web-shell-portal-root]');
+    expect(portalRoot).not.toBeNull();
+    const toastHost = document.createElement('div');
+    toastHost.setAttribute('data-web-shell-toast-host', '');
+    const toastButton = document.createElement('button');
+    toastHost.appendChild(toastButton);
+    portalRoot!.appendChild(toastHost);
+    try {
+      toastButton.focus();
+      expect(document.activeElement).toBe(toastButton);
+    } finally {
+      toastHost.remove();
+    }
+
+    // The recovered focus re-arms the keyboard-only exit.
+    await act(async () => {
+      surface!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).toBeNull();
+  });
+
   it('shrinks fullscreen with one Escape while a forced session drawer is open', async () => {
     const shellRef = createRef<WebShellApi>();
     const { container } = renderApp({ sidebar: true, shellRef });
@@ -3249,6 +3325,78 @@ describe('artifact panel fullscreen', () => {
     await flush();
   });
 
+  it('reveals the covered shells in the commit that closes the last fullscreen tab', async () => {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+      toolUseId: 'monitor-call',
+    };
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [task],
+    });
+    mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      await testState.latestMonitorDetailsOnOpen?.({
+        callId: 'monitor-call',
+        toolName: 'monitor',
+        status: 'completed',
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Fullscreen"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[class*="artifactPanelFullscreen"]'),
+    ).not.toBeNull();
+    const sidebarShell = container.querySelector('[data-sidebar-shell]');
+    const contextShell = container.querySelector('[class*="contextShell"]');
+    expect(sidebarShell?.className).toContain('chatViewHidden');
+    expect(contextShell?.className).toContain('chatViewHidden');
+
+    // Closing the last tab closes the panel through closeArtifactPanelTab;
+    // its fullscreen reset must land in the same commit exactly like the
+    // panel-close path's, or the covered shells paint one hidden frame with
+    // the panel already gone.
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          'aside button[aria-label="Close watch server log"]',
+        )
+        ?.click();
+      await Promise.resolve();
+      expect(
+        document.querySelector('[class*="artifactPanelFullscreen"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      expect(sidebarShell?.className).not.toContain('chatViewHidden');
+      expect(contextShell?.className).not.toContain('chatViewHidden');
+      expect(contextShell?.getAttribute('aria-hidden')).toBeNull();
+    });
+    await flush();
+  });
+
   it('keeps the floating drawer Escape-to-close intact while not fullscreen', async () => {
     // No min-width query matches: the panel floats in a drawer instead of
     // docking.
@@ -3277,6 +3425,46 @@ describe('artifact panel fullscreen', () => {
     );
     expect(drawerAside).not.toBeNull();
     expect(drawerAside?.className).not.toContain('panelFullscreen');
+
+    // The preserveImeEscape mask runs whenever the drawer is open —
+    // fullscreen or not — so a composition-cancel Escape must pass through
+    // vaul's dismiss layer here too: no preventDefault, and the key is
+    // restored for the focused input.
+    const compositionEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    await act(async () => {
+      drawerAside?.dispatchEvent(compositionEscape);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(compositionEscape.defaultPrevented).toBe(false);
+    expect(compositionEscape.key).toBe('Escape');
+    expect(
+      document.querySelector(`${portal} aside[aria-label="Right panel"]`),
+    ).toBe(drawerAside);
+
+    // WebKit marks IME-owned keys with keyCode 229 while isComposing is
+    // still false; the fallback branch masks them identically.
+    const keyCodeEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(keyCodeEscape, 'keyCode', { value: 229 });
+    await act(async () => {
+      drawerAside?.dispatchEvent(keyCodeEscape);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(keyCodeEscape.defaultPrevented).toBe(false);
+    expect(keyCodeEscape.key).toBe('Escape');
+    expect(
+      document.querySelector(`${portal} aside[aria-label="Right panel"]`),
+    ).toBe(drawerAside);
 
     // The fullscreen handler's non-fullscreen branch must stay a pure
     // pass-through: no preventDefault, so vaul's dismiss layer closes the

@@ -3821,7 +3821,24 @@ export function App({
       node = parent;
     }
     if (!surface.contains(document.activeElement)) surface.focus();
+    // Keydowns inside the sandboxed HTML preview iframe never reach the
+    // surface's Tab-wrap handler or the window Escape handler, and a Tab
+    // past the preview's last focusable lands focus natively outside the
+    // surface. Pull stray focus back like the floating variant's Radix
+    // focus trap, so the keyboard stays the surface's escape route.
+    const pullStrayFocusIntoSurface = (event: FocusEvent) => {
+      const target = event.target as Element | null;
+      if (!target || surface.contains(target) || target.contains(surface)) {
+        return;
+      }
+      // The elevated toast host and any Radix layer opened from the panel
+      // share this portal root and stay actionable beside the surface.
+      if (portalRoot?.contains(target)) return;
+      surface.focus();
+    };
+    document.addEventListener('focusin', pullStrayFocusIntoSurface);
     return () => {
+      document.removeEventListener('focusin', pullStrayFocusIntoSurface);
       for (const { element, previous } of hidden) {
         const restore = () => {
           if (previous === null) element.removeAttribute('aria-hidden');
@@ -3846,7 +3863,7 @@ export function App({
         });
       }
     };
-  }, [dockedFullscreenActive]);
+  }, [dockedFullscreenActive, portalRoot]);
   const handleArtifactPanelSurfaceKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
       if (!artifactPanelFullscreen) return;
@@ -3867,7 +3884,10 @@ export function App({
       if (!event.shiftKey && focused === last) {
         event.preventDefault();
         first.focus();
-      } else if (event.shiftKey && focused === first) {
+      } else if (
+        event.shiftKey &&
+        (focused === first || focused === event.currentTarget)
+      ) {
         event.preventDefault();
         last.focus();
       }
