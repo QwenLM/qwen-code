@@ -916,7 +916,11 @@ interface FakeBridge extends AcpSessionBridge {
     NonNullable<AcpSessionBridge['setLiveSpeakToUserHandler']>
   >[0];
   calls: BridgeSpawnRequest[];
-  getSessionTurnStatusCalls: Array<{ sessionId: string; promptId?: string }>;
+  getSessionTurnStatusCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+    promptId?: string;
+  }>;
   loadCalls: BridgeRestoreSessionRequest[];
   resumeCalls: BridgeRestoreSessionRequest[];
   promptCalls: Array<{
@@ -1151,6 +1155,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.removePendingPromptImpl ?? (() => ({ removed: true }));
   const getSessionTurnStatusCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
     promptId?: string;
   }> = [];
   const getSessionTurnStatusImpl =
@@ -2140,6 +2145,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTurnStatus(sessionId, context, promptId) {
       getSessionTurnStatusCalls.push({
         sessionId,
+        ...(context !== undefined ? { context } : {}),
         ...(promptId !== undefined ? { promptId } : {}),
       });
       return getSessionTurnStatusImpl(sessionId, context, promptId);
@@ -9296,7 +9302,8 @@ describe('createServeApp', () => {
       const res = await request(turnsApp(bridge))
         .get('/session/s-1/turns/p-1')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('Authorization', 'Bearer secret');
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1');
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
         sessionId: 's-1',
@@ -9305,6 +9312,28 @@ describe('createServeApp', () => {
         stopReason: 'end_turn',
         resultText: 'done',
       });
+      expect(bridge.getSessionTurnStatusCalls).toEqual([
+        {
+          sessionId: 's-1',
+          context: { clientId: 'client-1' },
+          promptId: 'p-1',
+        },
+      ]);
+    });
+
+    it('200 idle when current has no live or settled turn', async () => {
+      const bridge = fakeBridge({
+        getSessionTurnStatusImpl: async (sessionId) => ({
+          sessionId,
+          state: 'idle',
+        }),
+      });
+      const res = await request(turnsApp(bridge))
+        .get('/session/s-1/turns/current')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ sessionId: 's-1', state: 'idle' });
     });
 
     it('404 prompt_not_found when the bridge resolves nothing', async () => {

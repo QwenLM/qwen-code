@@ -394,6 +394,7 @@ async function findSettledTurnResult(
         ? { cursor }
         : { direction: 'backward' as const }),
       limit: TURN_STATUS_SCAN_PAGE_LIMIT,
+      maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
     });
     // Backward pages hold the newest slice; walk from the tail so the most
     // recent settled turn wins.
