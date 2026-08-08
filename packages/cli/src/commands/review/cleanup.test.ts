@@ -200,12 +200,26 @@ describe('runCleanup', () => {
         expect(mocks.execFileSync).toHaveBeenCalledWith(
           'tmux',
           ['-L', orphan, 'kill-server'],
-          { stdio: 'pipe', timeout: 15_000, killSignal: 'SIGKILL' },
+          expect.objectContaining({
+            stdio: 'pipe',
+            timeout: 15_000,
+            killSignal: 'SIGKILL',
+            // The kill runs in the base the socket was found under; the
+            // dedicated env tests pin the value.
+            env: expect.objectContaining({ TMUX_TMPDIR: expect.any(String) }),
+          }),
         );
         expect(mocks.execFileSync).not.toHaveBeenCalledWith(
           'tmux',
           ['-L', live, 'kill-server'],
-          { stdio: 'pipe', timeout: 15_000, killSignal: 'SIGKILL' },
+          expect.objectContaining({
+            stdio: 'pipe',
+            timeout: 15_000,
+            killSignal: 'SIGKILL',
+            // The kill runs in the base the socket was found under; the
+            // dedicated env tests pin the value.
+            env: expect.objectContaining({ TMUX_TMPDIR: expect.any(String) }),
+          }),
         );
         expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
           force: true,
@@ -265,7 +279,14 @@ describe('runCleanup', () => {
         expect(mocks.execFileSync).toHaveBeenCalledWith(
           'tmux',
           ['-L', orphan2, 'kill-server'],
-          { stdio: 'pipe', timeout: 15_000, killSignal: 'SIGKILL' },
+          expect.objectContaining({
+            stdio: 'pipe',
+            timeout: 15_000,
+            killSignal: 'SIGKILL',
+            // The kill runs in the base the socket was found under; the
+            // dedicated env tests pin the value.
+            env: expect.objectContaining({ TMUX_TMPDIR: expect.any(String) }),
+          }),
         );
         expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
           `Reaped orphaned capture server: ${orphan2}`,
@@ -340,6 +361,21 @@ describe('runCleanup', () => {
         );
         runCleanup('local');
         expect(mocks.readdirSync).toHaveBeenCalledWith(tmpDir);
+        // And the KILL goes to the base the socket was FOUND under, not to
+        // this process's env: `-L` re-resolves the socket dir from the
+        // environment and tmux does NOT fall back when the env base exists
+        // (it creates it) — measured on 3.3a, the kill answered
+        // `error connecting to <env>/tmux-<uid>/<name>` and the orphan
+        // survived, while the same call under the found base reaped it.
+        // The mocked execFileSync cannot show that; the env it is called
+        // with can.
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          'tmux',
+          ['-L', orphan, 'kill-server'],
+          expect.objectContaining({
+            env: expect.objectContaining({ TMUX_TMPDIR: '/tmp' }),
+          }),
+        );
         expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
           `Reaped orphaned capture server: ${orphan}`,
         );
@@ -358,6 +394,15 @@ describe('runCleanup', () => {
         );
         runCleanup('local');
         expect(mocks.readdirSync).toHaveBeenCalledWith(paddedDir);
+        // The kill carries the padded base too — trimming EITHER side
+        // sends tmux to a directory it never used.
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          'tmux',
+          ['-L', orphan, 'kill-server'],
+          expect.objectContaining({
+            env: expect.objectContaining({ TMUX_TMPDIR: '/fake-tmp ' }),
+          }),
+        );
         expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
           `Reaped orphaned capture server: ${orphan}`,
         );

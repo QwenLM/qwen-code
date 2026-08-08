@@ -177,9 +177,9 @@ describe('capture-tui without tmux (probe seam)', () => {
     // the wrong-evidence failure this command exists to prevent. On POSIX
     // the fake tmux passes the version probe and fails every real command
     // (a MID-capture refusal); on win32 the shim is unreachable, the probe
-    // returns undefined, and the refusal is the no-tmux one — BOTH land
-    // after the up-front clear, so the assertions pin the clear on every
-    // platform.
+    // answers {status:'absent'}, and the refusal is the no-tmux one — BOTH
+    // land after the up-front clear, so the assertions pin the clear on
+    // every platform.
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-stale-'));
     try {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
@@ -476,6 +476,78 @@ describe('capture-tui without tmux (probe seam)', () => {
     },
   );
 
+  it('refuses an EMPTY --keys token — a keypress that never happens', async () => {
+    // `send-keys ''` types nothing, so the run reported success with the
+    // token in manifest.keys and keysSent true — a keypress a verdict can
+    // cite that never happened. A brief template expanding an empty
+    // variable produces exactly this token.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-emptykey-'));
+    try {
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: [''],
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('empty token');
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses a READ-ONLY file at an artifact path before the capture window',
+    async () => {
+      // The sibling write probe proves the DIRECTORY writable, not the
+      // artifact paths. A mode-0444 (or foreign-owned, the shape a shared
+      // CI stage leaves) .ans passed every gate and refused only at the
+      // final write — after the whole settle/timeout window and a render,
+      // with the pane text produced and thrown away. Skipped as root, who
+      // writes through the mode bits.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-roartifact-'));
+      try {
+        writeFileSync(join(dir, 'cap.ans'), 'not writable by us', {
+          mode: 0o444,
+        });
+        const started = performance.now();
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 5_000,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 30_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('not writable');
+        // BEFORE the window: the 5s settle never ran.
+        expect(performance.now() - started).toBeLessThan(3_000);
+        // And the file it could not write is still the user's, untouched.
+        expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
+          'not writable by us',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('SKIPS a directory squatting at an artifact path and clears the rest', async () => {
     // A capture writes files, so a DIRECTORY at an artifact path is someone
     // else's — the recursive EISDIR fallback deleted it and its contents on
@@ -496,14 +568,18 @@ describe('capture-tui without tmux (probe seam)', () => {
           cols: 80,
           rows: 24,
           settleMs: 0,
-          until: '[',
+          until: undefined,
           keys: undefined,
           out: join(dir, 'cap'),
           timeoutMs: 1000,
         } as never),
       );
       expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('not a valid regex');
+      // The undeletable path is also unwritable, so the artifact-path probe
+      // refuses UP FRONT naming it — not after a full capture window at the
+      // final write.
+      expect(stderr).toContain('not writable');
+      expect(stderr).toContain('cap.ans');
       expect(statSync(join(dir, 'cap.ans')).isDirectory()).toBe(true);
       expect(existsSync(join(dir, 'cap.ans', 'user-file'))).toBe(true);
       // The throw on the directory does not strand the other stale evidence.
@@ -514,49 +590,57 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
-  it('starts NO process before the marker gates refuse — pinned by call log', async () => {
-    // Location-invariant assertions could not see a mutant that moved the
-    // --until compile below plan.start: the refusal looked identical while
-    // a real private server ran the user's command. The call log can.
-    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-order-'));
-    try {
-      const binDir = join(dir, 'fakebin');
-      mkdirSync(binDir, { recursive: true });
-      const callLog = join(dir, 'tmux-calls');
-      writeFileSync(
-        join(binDir, 'tmux'),
-        `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      const realTmuxProbe = probes.tmux;
-      const realPath = process.env['PATH'];
-      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+  // skipIf(win32) like every shim-dependent sibling: an extensionless
+  // shebang script is not spawnable via CreateProcess and PATH joins with
+  // ';' there, so the real probe answers 'absent', the run refuses
+  // 'tmux is not installed' before either gate, and the call-log
+  // assertions pass VACUOUSLY — pinning nothing on the windows lane.
+  it.skipIf(process.platform === 'win32')(
+    'starts NO process before the marker gates refuse — pinned by call log',
+    async () => {
+      // Location-invariant assertions could not see a mutant that moved the
+      // --until compile below plan.start: the refusal looked identical while
+      // a real private server ran the user's command. The call log can.
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-order-'));
       try {
-        await withStdio(() =>
-          runCaptureTui({
-            command: 'printf hi',
-            cwd: undefined,
-            cols: 80,
-            rows: 24,
-            settleMs: 0,
-            until: '[',
-            keys: undefined,
-            out: join(dir, 'cap'),
-            timeoutMs: 1000,
-          } as never),
+        const binDir = join(dir, 'fakebin');
+        mkdirSync(binDir, { recursive: true });
+        const callLog = join(dir, 'tmux-calls');
+        writeFileSync(
+          join(binDir, 'tmux'),
+          `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
+          { mode: 0o755 },
         );
+        const realTmuxProbe = probes.tmux;
+        const realPath = process.env['PATH'];
+        process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+        try {
+          await withStdio(() =>
+            runCaptureTui({
+              command: 'printf hi',
+              cwd: undefined,
+              cols: 80,
+              rows: 24,
+              settleMs: 0,
+              until: '[',
+              keys: undefined,
+              out: join(dir, 'cap'),
+              timeoutMs: 1000,
+            } as never),
+          );
+        } finally {
+          probes.tmux = realTmuxProbe;
+          if (realPath === undefined) delete process.env['PATH'];
+          else process.env['PATH'] = realPath;
+        }
+        expect(process.exitCode).toBe(3);
+        const calls = existsSync(callLog) ? readFileSync(callLog, 'utf8') : '';
+        expect(calls).not.toContain('new-session');
       } finally {
-        probes.tmux = realTmuxProbe;
-        if (realPath === undefined) delete process.env['PATH'];
-        else process.env['PATH'] = realPath;
+        rmSync(dir, { recursive: true, force: true });
       }
-      expect(process.exitCode).toBe(3);
-      const calls = existsSync(callLog) ? readFileSync(callLog, 'utf8') : '';
-      expect(calls).not.toContain('new-session');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   it('refuses non-string argv shapes before anything else', async () => {
     // yargs parses duplicated options into arrays and --no-X into booleans;
@@ -1165,22 +1249,22 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const sinks = { stdout: '', stderr: '' };
     const realPath = process.env['PATH'];
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
-    const outSpy = vi
-      .spyOn(process.stdout, 'write')
-      .mockImplementation(((chunk: string | Uint8Array) => {
-        sinks.stdout += String(chunk);
-        return true;
-      }) as never);
-    const errSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(((chunk: string | Uint8Array) => {
-        const text = String(chunk);
-        if (text.includes('WARNING')) {
-          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
-        }
-        sinks.stderr += text;
-        return true;
-      }) as never);
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      sinks.stdout += String(chunk);
+      return true;
+    }) as never);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      const text = String(chunk);
+      if (text.includes('WARNING')) {
+        throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+      }
+      sinks.stderr += text;
+      return true;
+    }) as never);
     try {
       await run({ until: undefined, settleMs: 0 });
     } finally {
@@ -2356,6 +2440,17 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         const childPid = child.pid as number;
+        // Attached BEFORE the discovery loop, not after the kill: if the
+        // child dies on its own during discovery — precisely the crash
+        // regression this test polices — the sole `exit` event fires
+        // unobserved, the disposition promise never settles, and the test
+        // fails as a bare 15s timeout naming neither exit code nor signal
+        // (probe-verified 10/10 in the attach-after-kill shape: the
+        // surviving server still satisfies the loop and child.kill()
+        // returns false silently).
+        const disposition = new Promise<[number | null, NodeJS.Signals | null]>(
+          (resolve) => child.once('exit', (c, sig) => resolve([c, sig])),
+        );
         let seen = false;
         for (let i = 0; i < 200 && !seen; i++) {
           const r = spawnSync(
@@ -2374,9 +2469,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         // re-raise reads normal completion to a harness killing a wedged
         // capture (probe-verified: the exact mutant passed the
         // exit-event-only version of this wait).
-        const [code, exitSignal] = await new Promise<
-          [number | null, NodeJS.Signals | null]
-        >((resolve) => child.once('exit', (c, sig) => resolve([c, sig])));
+        const [code, exitSignal] = await disposition;
         expect(exitSignal).toBe(signal);
         expect(code).toBeNull();
         // The reap ran before the re-raise: no server named for the child.
@@ -2412,9 +2505,8 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       );
     }
     const slowFreeze = join(dir, 'slow-freeze');
-    writeFileSync(slowFreeze, '#!/bin/sh\n/bin/sleep 4\nprintf x > "$5"\n', {
-      mode: 0o755,
-    });
+    // The sentinel line is what the wait below keys on — one write, so the
+    // fixture a maintainer edits is the one the child runs.
     const renderStarted = join(dir, 'render-started');
     writeFileSync(
       slowFreeze,

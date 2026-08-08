@@ -15,7 +15,7 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { CAPTURE_SERVER_PREFIX } from './lib/tui-capture.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
@@ -447,6 +447,16 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       try {
         execFileSync('tmux', ['-L', name, 'kill-server'], {
           stdio: 'pipe',
+          // The scan finds sockets under BOTH bases, but `-L` re-resolves
+          // the socket directory from THIS process's environment — and tmux
+          // does not fall back when the env base exists (it creates it).
+          // The two sides then disagree: an orphan found under /tmp while a
+          // stale profile-exported TMUX_TMPDIR points elsewhere answered
+          // `error connecting to <env>/tmux-<uid>/<name>` and survived
+          // (measured on 3.3a, with the same call succeeding under the base
+          // it was found in). Kill it where it was FOUND — `dir` is
+          // `<base>/tmux-<uid>`, so its parent is the base tmux wants.
+          env: { ...process.env, TMUX_TMPDIR: dirname(dir) },
           // Same belt as capture-tui's own control calls: a wedged server
           // must not hang the whole cleanup behind one socket — SIGKILL,
           // because a TERM-immune child blocks the sync call past any belt.

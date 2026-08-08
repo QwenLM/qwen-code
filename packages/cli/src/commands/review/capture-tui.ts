@@ -76,10 +76,6 @@ interface CaptureTuiArgs {
   timeoutMs: number;
 }
 
-/** Probe the binary itself (`tmux -V` / `freeze --help`), not `which`: a
- * host without `which` would otherwise misdiagnose an installed binary as
- * missing, and the binary answering is the only fact that matters. A clean
- * answer returns its trimmed stdout; anything else returns undefined. */
 /** The availability-probe deadline, a seam like its two belt siblings: a
  * hanging `tmux -V`/`freeze --help` would otherwise block runCaptureTui
  * before the refusal contract or any signal handler exists — and without
@@ -100,6 +96,12 @@ type ProbeResult =
   // for the same reason).
   | { status: 'hung' };
 
+/** Probe the binary itself (`tmux -V` / `freeze --help`), not `which`: a
+ * host without `which` would otherwise misdiagnose an installed binary as
+ * missing, and the binary answering is the only fact that matters. Answers
+ * with a ProbeResult — `ok` carries the trimmed stdout, and a belt-killed
+ * binary is `hung`, NEVER `absent`: an operator told "not installed" for a
+ * wedged binary goes to fix an installation that exists. */
 function probeOutput(bin: string, flag: string): ProbeResult {
   const r = spawnSync(bin, [flag], {
     encoding: 'utf8',
@@ -364,6 +366,24 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     const fd = openSync(probePath, 'w');
     closeSync(fd);
     rmSync(probePath, { force: true });
+    // The sibling proves the DIRECTORY writable, not the artifact paths
+    // themselves. Whatever survived the clear still has to be overwritable
+    // at the end of the run, and the two shapes that are not — a directory
+    // (EISDIR) and a read-only or foreign-owned file (EACCES/EPERM, the
+    // shape a shared CI stage running as another user leaves) — refused
+    // only at the FINAL write: the full capture window burned (settle, or
+    // --timeout-ms up to the 1h ceiling, plus a freeze render), the pane
+    // text produced and then thrown away. Fail fast instead, naming the
+    // path. Append mode: `w` would truncate a file this run is not
+    // authorized to replace yet, and openSync creates nothing that is
+    // missing here — a nonexistent artifact path is the normal shape and
+    // the sibling probe already covered it. The PNG is deliberately not
+    // probed: a render that cannot write degrades to the ans-only rung,
+    // which is an outcome, not a refusal.
+    for (const path of [ansPath, manifestPath]) {
+      if (!existsSync(path)) continue;
+      closeSync(openSync(path, 'a'));
+    }
   } catch (e) {
     refuse(
       `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
@@ -413,6 +433,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       args.keys.some((k) => typeof k !== 'string')
     ) {
       refuse('--keys must be strings.');
+      return;
+    }
+    // An EXACTLY empty token types nothing (`send-keys ''` is a no-op), and
+    // the run then reports success with the token recorded in the manifest
+    // and keysSent true — a keypress a verdict can cite that never happened,
+    // the same evidence-corruption class as an unescaped trailing `;`. A
+    // brief template expanding an empty variable produces exactly this. A
+    // token of one SPACE is real input and stays legal (measured: it types).
+    if (args.keys.some((k) => k === '')) {
+      refuse('--keys must not contain an empty token.');
       return;
     }
   }

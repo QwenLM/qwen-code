@@ -215,11 +215,11 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `trap : INT QUIT\n: > '/ready'\nsh -c 'node cli.js'\ni=0; while [ $i -lt 3 ]; do sleep 3600; i=$((i+1)); done`,
+      `trap : INT QUIT\n: > '/ready'\nsh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 
-  it('quote-escapes the command through BOTH holder layers', () => {
+  it('quote-escapes the command inside the holder script', () => {
     const p = tmuxPlan({
       server: 'srv',
       session: 'cap',
@@ -229,18 +229,19 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       cwd: '/work',
       readyFile: '/ready',
     });
-    // A single quote in the command must not close either layer's quoting.
-    // The expectation is COMPOSED with the same POSIX escaping rule stated
-    // independently ('→'\'' at each layer): dropping esc() from either
-    // layer breaks the equality (measured: the inner-layer mutant produced
-    // a holder /bin/sh rejects with an unmatched quote, while the previous
-    // structural assertions all stayed green).
+    // ONE layer: the plan hands tmux the holder SCRIPT, whose single
+    // `sh -c '<command>'` line is the only place the command is quoted. A
+    // single quote in the command must not close that quoting. The
+    // expectation is COMPOSED with the same POSIX escaping rule stated
+    // independently ('→'\''): dropping esc() breaks the equality
+    // (measured: the mutant produced a holder /bin/sh rejects with an
+    // unmatched quote, while the structural assertions all stayed green).
     const esc = (v: string): string => v.replaceAll("'", "'\\''");
     const cmd = `printf '%s' "it's"`;
     const inner = `sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
     expect(held).toBe(
-      `trap : INT QUIT\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 3 ]; do sleep 3600; i=$((i+1)); done`,
+      `trap : INT QUIT\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 
@@ -267,7 +268,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // is pinned to /bin/sh in the same invocation), so the trap lives at
     // layer 0 — QUIT included — and only the sentinel path needs escaping.
     expect(held).toBe(
-      `trap : INT QUIT\n: > '${esc(readyFile)}'\n${inner}\ni=0; while [ $i -lt 3 ]; do sleep 3600; i=$((i+1)); done`,
+      `trap : INT QUIT\n: > '${esc(readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 
