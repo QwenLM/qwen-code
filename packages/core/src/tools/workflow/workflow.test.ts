@@ -14,6 +14,7 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
 import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
 import {
+  DEFAULT_MAX_AGENTS_PER_RUN,
   MAX_WORKFLOW_AGENTS_ENV,
   MAX_WORKFLOW_CONCURRENCY_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
@@ -93,11 +94,16 @@ describe('WorkflowTool', () => {
     expect(description).toMatch(/against everything already seen/);
     expect(description).toMatch(/log\(\)` what was dropped/);
     // Limits the model has to plan around rather than discover from a
-    // mid-run failure — the numbers themselves, not just the knob names,
-    // so raising a runtime constant without updating the description here
-    // turns this red instead of leaving the model sizing fan-outs against
-    // a stale cap.
-    expect(description).toMatch(/up to 1000 agents total/);
+    // mid-run failure — the numbers themselves, not just the knob names.
+    // Anchored *through* the exported constant rather than as a literal:
+    // the description interpolates `DEFAULT_MAX_AGENTS_PER_RUN`, so this
+    // tracks a raised cap automatically, and a regression that pastes the
+    // number back in as prose goes red the next time the constant moves.
+    expect(description).toContain(
+      `up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
+    // `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
+    // this one is still a hand-synced literal on both sides.
     expect(description).toMatch(/30-minute wall-clock cap/);
     expect(description).toMatch(/nests one level only/);
     expect(description).toMatch(/read `budget\.total`/);
@@ -107,6 +113,33 @@ describe('WorkflowTool', () => {
     // and the base merge conflicted exactly here. Nothing else asserts the
     // control set, so dropping one on the next merge would be silent.
     expect(description).toMatch(/cooperative pause\/resume/);
+    // #8690 asked the text to speak this project's own vocabulary. Without
+    // a location, "runs a saved workflow" leaves the model no way to reach
+    // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
+    // absolute path it cannot construct.
+    expect(description).toContain('.qwen/workflows');
+  });
+
+  // The tool description is not the only model-visible copy of the caps —
+  // the `script` parameter description states them a second time, and a
+  // model reading one tool call sees both. Anchoring only the tool
+  // description lets a maintainer raise a cap, watch the test above go
+  // green again, and stop while `script` still advertises the old number.
+  it('script parameter description states the same caps as the tool description', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: { script: { description: string } };
+    };
+    const scriptDescription = schema.properties.script.description;
+    expect(scriptDescription).toContain(
+      `At most ${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run`,
+    );
+    expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
+    expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
+    // Both halves must agree on the agent cap, whatever it is.
+    expect(tool.description).toContain(
+      `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
   });
 
   it('rejects build() when script is missing', () => {

@@ -26,6 +26,11 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
+import {
+  DEFAULT_MAX_AGENTS_PER_RUN,
+  MAX_WORKFLOW_AGENTS_ENV,
+  MAX_WORKFLOW_CONCURRENCY_ENV,
+} from '../../agents/runtime/workflow-orchestrator.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import {
   WorkflowRunner,
@@ -106,7 +111,7 @@ const WORKFLOW_PARAM_SCHEMA = {
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
         'through a shared per-run window (default ' +
         '`max(1, min(16, cpus-2))` agents in flight; override via ' +
-        '`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`) and resolves to a ' +
+        `\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`) and resolves to a ` +
         'position-aligned array — a thunk that throws, or resolves to a ' +
         'non-JSON-serializable value, becomes `null` at its index ' +
         '(errors-as-data); parallel() itself rejects only on invalid ' +
@@ -115,8 +120,9 @@ const WORKFLOW_PARAM_SCHEMA = {
         'that throws, returns `null`, or returns a non-JSON-serializable ' +
         'value drops that item to `null`. Pass ' +
         'THUNKS to parallel, not eager calls: `parallel([() => agent(...)])`, ' +
-        'not `parallel([agent(...)])`. At most 1000 agent() calls per run ' +
-        '(override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`). ' +
+        'not `parallel([agent(...)])`. At most ' +
+        `${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run ` +
+        `(override via \`${MAX_WORKFLOW_AGENTS_ENV}\`). ` +
         '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
         'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',
@@ -516,12 +522,16 @@ function safeStringifyDisplayPayload(payload: unknown): string {
  * shape — everything through one `parallel()` barrier, first answer taken at
  * face value. The prose below is therefore load-bearing, not documentation.
  * `script`'s own description carries the exact authoring contract (error
- * strings, serialization rules). The concurrency window, the agent cap, and
- * their two env knobs restate it — when one of those changes, change both.
- * The wall-clock cap, the output-token budget, and the one-level
- * `workflow()` nesting limit appear ONLY here, so this text is their
- * model-visible source of truth: keep it in sync with the runtime constants
- * (`DEFAULT_MAX_WALL_CLOCK_MS`, `DEFAULT_MAX_AGENTS_PER_RUN`) directly.
+ * strings, serialization rules). The agent cap and the two env knobs are
+ * interpolated from the orchestrator's exported constants
+ * (`DEFAULT_MAX_AGENTS_PER_RUN`, `MAX_WORKFLOW_AGENTS_ENV`,
+ * `MAX_WORKFLOW_CONCURRENCY_ENV`) in both halves, so raising a cap moves
+ * every model-visible copy at once — there is no prose to hand-sync.
+ * The wall-clock cap is the one exception: `DEFAULT_MAX_WALL_CLOCK_MS` is
+ * private to `workflow-sandbox.ts`, so "30-minute" is still a literal here
+ * and has to be edited alongside it. The output-token budget and the
+ * one-level `workflow()` nesting limit appear ONLY here, so this text is
+ * their model-visible source of truth.
  */
 const WORKFLOW_TOOL_DESCRIPTION = `Execute a workflow script that orchestrates subagents deterministically.
 
@@ -531,7 +541,7 @@ Reach for one to be comprehensive (decompose the work and cover every part in pa
 
 **Runtime** — see the \`script\` parameter for the detailed authoring contract.
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Default \`max(1, min(16, cpus-2))\` agents in flight per run (\`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY\`), up to 1000 agents total (\`QWEN_CODE_MAX_WORKFLOW_AGENTS\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree' })\` covers structured-output contracts, declarative-agent selection, model override, and git-worktree-isolated subagents. \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script anywhere. Default \`max(1, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree' })\` covers structured-output contracts, declarative-agent selection, model override, and git-worktree-isolated subagents. \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
 
 **Scout first, then orchestrate**
 
