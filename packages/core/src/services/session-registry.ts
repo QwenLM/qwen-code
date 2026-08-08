@@ -217,6 +217,19 @@ export async function patchSessionRecord(
   }
 }
 
+/**
+ * This process's own record, or null when it never registered.
+ *
+ * The sending side needs it: a message carries this session's reply
+ * address and display name, and both live here rather than being
+ * threaded down from the UI layer.
+ */
+export async function readOwnSessionRecord(
+  pid: number = process.pid,
+): Promise<SessionRegistryRecord | null> {
+  return readRecord(getSessionRecordPath(pid));
+}
+
 /** Remove this process's record. Safe to call when none was written. */
 export async function unregisterSession(
   pid: number = process.pid,

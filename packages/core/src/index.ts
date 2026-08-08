@@ -284,6 +284,8 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-directory.js';
+export * from './ipc/peer-send.js';
 export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/socket-path.js';

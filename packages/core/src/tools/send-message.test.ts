@@ -11,6 +11,18 @@ import { ToolErrorType } from './tool-error.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
+const sendToPeer = vi.fn();
+vi.mock('../ipc/peer-send.js', () => ({
+  sendToPeer: (...args: unknown[]) => sendToPeer(...args),
+}));
+
+// Default for every test that is not about peer routing: cross-session
+// messaging is off, so the tool behaves exactly as it did before it existed.
+beforeEach(() => {
+  sendToPeer.mockReset();
+  sendToPeer.mockResolvedValue({ kind: 'disabled' });
+});
+
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
 
@@ -19,6 +31,7 @@ function makeTeamConfig(opts?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<void>;
     requestShutdown?: (...args: unknown[]) => Promise<void>;
+    getTeamFile?: () => { members: Array<{ name: string }> };
   } | null;
   approvalMode?: ApprovalMode;
 }) {
@@ -42,6 +55,7 @@ describe('SendMessageTool — team mode', () => {
         teamManager: {
           sendMessage,
           broadcast: vi.fn(),
+          getTeamFile: () => ({ members: [{ name: 'alice' }] }),
         },
       }),
     );
@@ -61,13 +75,14 @@ describe('SendMessageTool — team mode', () => {
     );
   });
 
-  it('broadcasts with "*"', async () => {
-    const broadcast = vi.fn().mockResolvedValue(undefined);
+  it('rejects broadcast instead of fanning out', async () => {
+    const broadcast = vi.fn();
     const tool = new SendMessageTool(
       makeTeamConfig({
         teamManager: {
           sendMessage: vi.fn(),
           broadcast,
+          getTeamFile: () => ({ members: [{ name: 'alice' }] }),
         },
       }),
     );
@@ -77,9 +92,9 @@ describe('SendMessageTool — team mode', () => {
       message: 'hey all',
     });
     const result = await invocation.execute(new AbortController().signal);
-    expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('broadcast');
-    expect(broadcast).toHaveBeenCalledWith('hey all', 'leader');
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('no longer supported');
+    expect(broadcast).not.toHaveBeenCalled();
   });
 
   it('returns error when no team is active and no task_id given', async () => {
@@ -101,6 +116,7 @@ describe('SendMessageTool — team mode', () => {
           sendMessage: vi.fn(),
           broadcast: vi.fn(),
           requestShutdown,
+          getTeamFile: () => ({ members: [{ name: 'bob' }] }),
         },
       }),
     );
@@ -128,6 +144,7 @@ describe('SendMessageTool — team mode', () => {
           sendMessage: vi.fn(),
           broadcast: vi.fn(),
           requestShutdown,
+          getTeamFile: () => ({ members: [{ name: 'bob' }] }),
         },
       }),
     );
@@ -159,6 +176,7 @@ describe('SendMessageTool — team mode', () => {
         teamManager: {
           sendMessage,
           broadcast: vi.fn(),
+          getTeamFile: () => ({ members: [{ name: 'alice' }] }),
         },
       }),
     );
@@ -496,5 +514,124 @@ describe('SendMessageTool — background-task mode', () => {
     );
 
     expect(result.returnDisplay).toContain('Search for auth code');
+  });
+});
+
+describe('SendMessageTool — peer mode', () => {
+  beforeEach(() => {
+    sendToPeer.mockReset();
+    sendToPeer.mockResolvedValue({ kind: 'disabled' });
+  });
+
+  function toolWithoutTeam() {
+    return new SendMessageTool(makeTeamConfig());
+  }
+
+  it('routes an unknown name to a peer session', async () => {
+    sendToPeer.mockResolvedValue({
+      kind: 'sent',
+      address: 'docs-cd',
+      peer: { cwd: '/w/docs' },
+    });
+
+    const result = await toolWithoutTeam()
+      .build({ to: 'docs-cd', message: 'check the tests', summary: 'ping' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('docs-cd');
+    expect(result.llmContent).toContain('/w/docs');
+    // The model is told the message may not be acted on immediately.
+    expect(result.llmContent).toContain('held');
+    expect(sendToPeer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: 'docs-cd',
+        message: 'check the tests',
+      }),
+    );
+  });
+
+  it('prefers a teammate over a same-named peer session', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+          getTeamFile: () => ({ members: [{ name: 'alice' }] }),
+        },
+      }),
+    );
+
+    await tool
+      .build({ to: 'alice', message: 'hello' })
+      .execute(new AbortController().signal);
+
+    expect(sendMessage).toHaveBeenCalled();
+    expect(sendToPeer).not.toHaveBeenCalled();
+  });
+
+  it('never sends a structured control message across a session boundary', async () => {
+    const result = await toolWithoutTeam()
+      .build({ to: 'docs-cd', message: 'bye', type: 'shutdown_request' })
+      .execute(new AbortController().signal);
+
+    expect(sendToPeer).not.toHaveBeenCalled();
+    expect(result.error).toBeDefined();
+  });
+
+  it('surfaces an ambiguous name with the candidates', async () => {
+    sendToPeer.mockResolvedValue({
+      kind: 'ambiguous',
+      matches: ['app-ab [aaa111] in /w/one', 'app-ab [bbb222] in /w/two'],
+    });
+
+    const result = await toolWithoutTeam()
+      .build({ to: 'app-ab', message: 'hi' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('aaa111');
+    expect(result.llmContent).toContain('name [ref]');
+  });
+
+  it('suggests near-misses for an unknown name', async () => {
+    sendToPeer.mockResolvedValue({
+      kind: 'not-found',
+      suggestions: ['qwen-code-f7'],
+    });
+
+    const result = await toolWithoutTeam()
+      .build({ to: 'qwen-code', message: 'hi' })
+      .execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain('qwen-code-f7');
+  });
+
+  it('reports a delivery failure against the address it tried', async () => {
+    sendToPeer.mockResolvedValue({
+      kind: 'failed',
+      address: 'docs-cd',
+      peer: { cwd: '/w/docs' },
+      reason: 'that session just exited',
+    });
+
+    const result = await toolWithoutTeam()
+      .build({ to: 'docs-cd', message: 'hi' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('docs-cd');
+    expect(result.llmContent).toContain('just exited');
+  });
+
+  it('falls through to the team error when messaging is off', async () => {
+    sendToPeer.mockResolvedValue({ kind: 'disabled' });
+
+    const result = await toolWithoutTeam()
+      .build({ to: 'docs-cd', message: 'hi' })
+      .execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain('No active team');
   });
 });
