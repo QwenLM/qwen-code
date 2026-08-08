@@ -100,6 +100,10 @@ export function TextSelectionController(
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
   const baselineViewportRectRef = useRef<ViewportRect | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
+  const spanDragRef = useRef<{
+    mode: 'word' | 'line';
+    anchorSpan: { sx: number; sy: number; ex: number; ey: number };
+  } | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -113,6 +117,7 @@ export function TextSelectionController(
 
   const clearSelection = useCallback(() => {
     const selection = selectionRef.current;
+    spanDragRef.current = null;
     if (selection.isEmpty) {
       return;
     }
@@ -183,6 +188,42 @@ export function TextSelectionController(
     [getBuffer, stdout],
   );
 
+  // Extend an active word/line drag so the range spans from the original
+  // multi-click span to the word/line boundary at the current point (issue
+  // #8738). Falls back to a single cell when the cursor is over whitespace.
+  const extendSpanDrag = useCallback(
+    (point: { x: number; y: number }) => {
+      const spanDrag = spanDragRef.current;
+      if (!spanDrag) return;
+      const selection = selectionRef.current;
+      const frame = getBuffer()?.frame ?? null;
+      const current =
+        spanDrag.mode === 'word'
+          ? (wordSpanAt(frame, point.x, point.y) ?? {
+              sx: point.x,
+              sy: point.y,
+              ex: point.x,
+              ey: point.y,
+            })
+          : (lineSpanAt(frame, point.y) ?? {
+              sx: point.x,
+              sy: point.y,
+              ex: point.x,
+              ey: point.y,
+            });
+      const a = spanDrag.anchorSpan;
+      const cursorAfter =
+        point.y > a.ey || (point.y === a.ey && point.x >= a.ex);
+      selection.anchor = cursorAfter
+        ? { x: a.sx, y: a.sy }
+        : { x: a.ex, y: a.ey };
+      selection.focus = cursorAfter
+        ? { x: current.ex, y: current.ey }
+        : { x: current.sx, y: current.sy };
+    },
+    [getBuffer],
+  );
+
   const handleMouse = useCallback(
     (event: MouseEvent) => {
       const selection = selectionRef.current;
@@ -220,19 +261,29 @@ export function TextSelectionController(
 
         if (count >= 2) {
           const frame = getBuffer()?.frame ?? null;
+          const mode = count === 2 ? 'word' : 'line';
           const span =
             count === 2
               ? wordSpanAt(frame, point.x, point.y)
               : lineSpanAt(frame, point.y);
           if (span) {
-            selection.selectSpan(span, count === 2 ? 'word' : 'line');
+            // Enter a drag-capable word/line selection so a held double/triple
+            // click can extend by word/line on move (issue #8738). Copy happens
+            // on release, matching char drags.
+            selection.mode = mode;
+            selection.anchor = { x: span.sx, y: span.sy };
+            selection.focus = { x: span.ex, y: span.ey };
+            selection.dragging = true;
+            spanDragRef.current = { mode, anchorSpan: span };
+            dragScrollTopRef.current =
+              propsRef.current.getScrollState().scrollTop;
             recordBaseline();
             applyHighlight();
-            copySelection();
             return;
           }
         }
 
+        spanDragRef.current = null;
         selection.start(point);
         dragScrollTopRef.current = propsRef.current.getScrollState().scrollTop;
         recordBaseline();
@@ -257,7 +308,11 @@ export function TextSelectionController(
         if (!mapped) {
           return;
         }
-        selection.extend(clampToViewport(mapped.point, mapped.rect));
+        if (spanDragRef.current) {
+          extendSpanDrag(clampToViewport(mapped.point, mapped.rect));
+        } else {
+          selection.extend(clampToViewport(mapped.point, mapped.rect));
+        }
         applyHighlight();
         return;
       }
@@ -267,9 +322,15 @@ export function TextSelectionController(
         if (!selection.dragging) {
           return;
         }
+        const spanDrag = spanDragRef.current;
+        spanDragRef.current = null;
         const mapped = mapEvent(event);
         if (mapped) {
-          selection.extend(clampToViewport(mapped.point, mapped.rect));
+          if (spanDrag) {
+            extendSpanDrag(clampToViewport(mapped.point, mapped.rect));
+          } else {
+            selection.extend(clampToViewport(mapped.point, mapped.rect));
+          }
         }
         selection.finish();
         if (selection.isCollapsed || selection.isEmpty) {
@@ -288,6 +349,7 @@ export function TextSelectionController(
       recordBaseline,
       mapEvent,
       getBuffer,
+      extendSpanDrag,
     ],
   );
 
