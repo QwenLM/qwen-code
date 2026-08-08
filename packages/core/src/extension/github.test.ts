@@ -481,6 +481,47 @@ describe('git extension helpers', () => {
   });
 
   describe('checkForExtensionUpdate', () => {
+    it.skipIf(process.platform === 'win32')(
+      'does not try to extract uploaded archive metadata sources',
+      async () => {
+        const tempDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'uploaded-archive-update-test-'),
+        );
+        const source = `upload:v1:${randomBytes(8).toString('hex')}:extension.zip`;
+        const previousCwd = process.cwd();
+        process.chdir(tempDir);
+        try {
+          const archive = await createZipBuffer(tempDir, [
+            {
+              name: EXTENSIONS_CONFIG_FILENAME,
+              content: JSON.stringify({ name: 'uploaded', version: '2.0.0' }),
+            },
+          ]);
+          await fs.writeFile(source, archive);
+          const extension = {
+            name: 'uploaded',
+            version: '1.0.0',
+            installMetadata: { type: 'local' as const, source },
+          } as Extension;
+          const mockManager = {
+            loadExtensionConfig: vi.fn().mockReturnValue({
+              name: 'uploaded',
+              version: '2.0.0',
+            }),
+          } as unknown as ExtensionManager;
+
+          await expect(
+            checkForExtensionUpdate(extension, mockManager),
+          ).resolves.toBe(ExtensionUpdateState.NOT_UPDATABLE);
+          expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+        } finally {
+          await fs.rm(source, { force: true });
+          process.chdir(previousCwd);
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     const mockGit = {
       getRemotes: vi.fn(),
       listRemote: vi.fn(),

@@ -368,6 +368,62 @@ describe('Goal evidence catalog', () => {
     );
   });
 
+  it('treats only display metadata as real-user evidence', () => {
+    const user = record('user', 'user', {
+      provenance: 'real_user',
+      turnId: 'turn-3',
+      text: 'expanded model prompt',
+    });
+    user.message?.parts?.push({
+      text: [
+        '<qwen:user-prompt-submit-context>',
+        'hook-only context',
+        '</qwen:user-prompt-submit-context>',
+      ].join('\n'),
+    });
+    user.systemPayload = {
+      displayText: 'raw @file prompt',
+      hookContext: 'hook-only context',
+    };
+    const records = [record('cursor', 'system'), user];
+
+    const catalog = buildGoalEvidenceCatalog({
+      records,
+      goal: goal(),
+      permit: permit(),
+    });
+    const validated = validate(records, complete(['user']));
+
+    expect(catalog.entries[0]?.preview).toBe('raw @file prompt');
+    expect(validated.citedRecords[0]?.content).toBe('raw @file prompt');
+    expect(JSON.stringify({ catalog, validated })).not.toContain(
+      'hook-only context',
+    );
+  });
+
+  it('keeps mid-turn model text instead of its display label', () => {
+    const modelText =
+      '[User message received during tool execution]: save logs';
+    const user = record('user', 'user', {
+      provenance: 'real_user',
+      subtype: 'mid_turn_user_message',
+      turnId: 'turn-3',
+      text: `\n${modelText}`,
+    });
+    user.systemPayload = { displayText: 'save logs' };
+    const records = [record('cursor', 'system'), user];
+
+    const catalog = buildGoalEvidenceCatalog({
+      records,
+      goal: goal(),
+      permit: permit(),
+    });
+    const validated = validate(records, complete(['user']));
+
+    expect(catalog.entries[0]?.preview).toBe(modelText);
+    expect(validated.citedRecords[0]?.content).toBe(modelText);
+  });
+
   it.each([
     ['cursor_unset', null, [record('root', 'system')]],
     ['cursor_not_found', 'absent', [record('root', 'system')]],

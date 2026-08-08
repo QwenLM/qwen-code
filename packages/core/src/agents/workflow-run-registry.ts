@@ -10,11 +10,10 @@
  * `BackgroundShellRegistry` (shells), and `MonitorRegistry` (monitors).
  * Each entry holds the metadata that the footer pill, the `/workflows`
  * slash command, and the Background tasks dialog use to query, observe,
- * or cancel a running workflow.
+ * or cancel an active workflow.
  *
- * State machine: register → running → { completed | failed | cancelled }.
- * Transitions out of running are one-shot — complete / fail / cancel
- * become no-ops once the entry has settled.
+ * State machine: running → pausing → paused → running, with every active
+ * state able to settle as completed, failed, or cancelled.
  *
  * Foreground runs return through the normal tool-result channel. Background
  * runs additionally emit one terminal `<task-notification>` through a
@@ -41,6 +40,7 @@ import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { escapeXml } from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
+import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
 
@@ -52,7 +52,32 @@ const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
  */
 export const MAX_RETAINED_TERMINAL_WORKFLOWS = 10;
 
-export type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type WorkflowStatus =
+  | WorkflowDispatchState
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+export type WorkflowTerminalStatus = Extract<
+  WorkflowStatus,
+  'completed' | 'failed' | 'cancelled'
+>;
+
+export function isActiveWorkflowStatus(
+  status: WorkflowStatus,
+): status is WorkflowDispatchState {
+  return status === 'running' || status === 'pausing' || status === 'paused';
+}
+
+export function isTerminalWorkflowStatus(
+  status: WorkflowStatus,
+): status is WorkflowTerminalStatus {
+  // Explicit positive match rather than `!isActiveWorkflowStatus(status)`:
+  // a status later added to WorkflowStatus must not silently classify as
+  // terminal and flow into WorkflowSnapshot.status (typed to this union).
+  return (
+    status === 'completed' || status === 'failed' || status === 'cancelled'
+  );
+}
 
 export const MAX_PENDING_WORKFLOW_APPROVALS = 32;
 export const MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS = 64 * 1024;
@@ -75,7 +100,7 @@ export interface WorkflowApproval {
  * the sandbox's `getPhases()` snapshot; `currentPhase` is the head of
  * the most recent `phase()` call.
  */
-export interface WorkflowTask extends TaskBase {
+export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   kind: 'workflow';
   /** Run identifier (e.g. `wf_<8hex>`); aliased to `TaskBase.id`. */
   runId: string;
@@ -369,7 +394,7 @@ export class WorkflowRunRegistry {
   register(registration: WorkflowTaskRegistration): WorkflowTask {
     const existing = this.entries.get(registration.runId);
     if (
-      existing?.status === 'running' ||
+      (existing && isActiveWorkflowStatus(existing.status)) ||
       this.handles.has(registration.runId)
     ) {
       throw new Error(`Workflow run ${registration.runId} is already active.`);
@@ -417,9 +442,36 @@ export class WorkflowRunRegistry {
   }
 
   attachHandle(handle: WorkflowRunHandle): void {
-    if (this.entries.get(handle.runId)?.status === 'running') {
+    const status = this.entries.get(handle.runId)?.status;
+    if (status && isActiveWorkflowStatus(status)) {
       this.handles.set(handle.runId, handle);
     }
+  }
+
+  pause(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    const handle = this.handles.get(runId);
+    if (!entry?.isBackgrounded || entry.status !== 'running' || !handle) {
+      return false;
+    }
+    return handle.pause();
+  }
+
+  resume(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    const handle = this.handles.get(runId);
+    if (!entry || entry.status !== 'paused' || !handle) return false;
+    return handle.resume();
+  }
+
+  onDispatchStateChange(runId: string, state: WorkflowDispatchState): void {
+    const entry = this.entries.get(runId);
+    if (!entry || isTerminalWorkflowStatus(entry.status)) return;
+    if (state === 'pausing' && entry.status !== 'running') return;
+    if (state === 'paused' && entry.status !== 'pausing') return;
+    if (state === 'running' && entry.status !== 'paused') return;
+    entry.status = state;
+    this.emitStatusChange(entry);
   }
 
   getHandle(runId: string): WorkflowRunHandle | undefined {
@@ -538,11 +590,11 @@ export class WorkflowRunRegistry {
     const entry = this.entries.get(runId);
     if (
       !entry ||
-      entry.status !== 'running' ||
+      !isActiveWorkflowStatus(entry.status) ||
       (!this.approvalChangeCallback && !this.approvalRequestCallback)
     ) {
       debugLogger.warn(
-        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not running, or no host channel`,
+        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not active, or no host channel`,
       );
       return 'rejected';
     }
@@ -640,7 +692,7 @@ export class WorkflowRunRegistry {
    */
   onPhaseStarted(runId: string, title: string): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
     entry.currentPhase = title;
     const last = entry.phases[entry.phases.length - 1];
     if (last !== title) entry.phases.push(title);
@@ -650,7 +702,7 @@ export class WorkflowRunRegistry {
   /** Cumulative dispatch counter — incremented before each `agent()` call resolves. */
   onAgentDispatched(runId: string): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
     entry.agentsDispatched++;
     this.emitStatusChange(entry);
   }
@@ -658,7 +710,14 @@ export class WorkflowRunRegistry {
   /** Cumulative completion counter — incremented after each `agent()` call settles. */
   onAgentCompleted(runId: string): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    // No status gate: the runner's `finally` aborts the controller after
+    // EVERY settlement (completed / failed / cancelled alike), so
+    // dispatches in flight at settlement always drain after the terminal
+    // status is set — regardless of which terminal it is. Gating the
+    // drain to `cancelled` alone froze completed / failed counters
+    // mid-drain (e.g. a run that fire-and-forget'd 2 of 5 dispatches
+    // permanently showing 3/5 agents). The cap is the only guard needed.
+    if (!entry || entry.agentsCompleted >= entry.agentsDispatched) return;
     entry.agentsCompleted++;
     this.emitStatusChange(entry);
   }
@@ -675,7 +734,17 @@ export class WorkflowRunRegistry {
    */
   onBudgetUpdated(runId: string, spent: number, total: number | null): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    // Symmetric with `onAgentCompleted`: dispatches in flight at
+    // settlement still drain afterwards for EVERY terminal status (the
+    // runner's `finally` aborts the controller after every settlement,
+    // and the production dispatch reports tokens in a `finally`), and
+    // their burn keeps mirroring into `tokensSpent` so the live entry's
+    // completed-agent count and token total stay consistent. The
+    // persisted snapshot and telemetry event are a best-effort
+    // projection frozen at settlement — the runner captures both
+    // before its first await, ahead of the in-flight drain — so they
+    // may read lower than this entry.
+    if (!entry) return;
     const delta = spent - entry.tokensSpent;
     const totalChanged = entry.tokenBudgetTotal !== total;
     // P5 R1 (#8): skip the statusChange emit when nothing observable
@@ -715,7 +784,8 @@ export class WorkflowRunRegistry {
   setRecentLogs(runId: string, logs: readonly string[]): void {
     const entry = this.entries.get(runId);
     if (!entry) return;
-    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
+    if (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
+      return;
     const tail = logs.length > 100 ? logs.slice(-100) : Array.from(logs);
     entry.recentLogs = tail;
     this.emitStatusChange(entry);
@@ -723,7 +793,7 @@ export class WorkflowRunRegistry {
 
   complete(runId: string, result: unknown, endTime: number): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
     this.rejectPendingApprovals(runId);
     entry.status = 'completed';
     entry.endTime = endTime;
@@ -737,7 +807,7 @@ export class WorkflowRunRegistry {
 
   fail(runId: string, message: string, endTime: number): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
     this.rejectPendingApprovals(runId);
     entry.status = 'failed';
     entry.endTime = endTime;
@@ -750,13 +820,13 @@ export class WorkflowRunRegistry {
   }
 
   /**
-   * Mark a running entry as cancelled and abort its controller. No-op
+   * Mark an active entry as cancelled and abort its controller. No-op
    * if the entry has already settled — protects against an explicit
    * dialog cancel racing with the natural complete/fail path.
    */
   cancel(runId: string, endTime: number): void {
     const entry = this.entries.get(runId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
     this.rejectPendingApprovals(runId);
     entry.status = 'cancelled';
     entry.endTime = endTime;
@@ -774,22 +844,34 @@ export class WorkflowRunRegistry {
     return this.entries.get(runId);
   }
 
-  /** All entries (running + terminal, no filter). Iteration order = registration order. */
+  /** All entries (active + terminal, no filter). Iteration order = registration order. */
   list(): WorkflowTask[] {
     return Array.from(this.entries.values());
   }
 
   /**
-   * R7 (wenshao): true if any entry is still `'running'`. Mirrors the
-   * three sibling registries' `hasUnfinalizedTasks()` /
+   * R7 (wenshao): true if any entry is still actively executing.
+   * Mirrors the three sibling registries' `hasUnfinalizedTasks()` /
    * `hasRunningEntries()` / `getRunning().length > 0` so the unified
    * `hasBlockingBackgroundWork()` helper (the gate `/clear` and session-
    * resume both use to refuse a switch with live work) can count
    * workflow runs the same way.
+   *
+   * R12 (doudouOUC): `paused` deliberately does NOT count. A paused run
+   * has drained its dispatches and executes nothing, and its wall-clock
+   * watchdog is suspended — if it blocked the switch, a paused-and-
+   * forgotten run would block `/clear` and session switching forever
+   * with no backstop to release it. Mirrors the sibling
+   * `BackgroundTaskRegistry.hasRunningTasks()`, which also counts only
+   * `running` (a paused background agent does not block a switch).
+   * Session-switch teardown cancels paused runs via `abortAll()` before
+   * `reset()` so they settle terminal instead of leaking.
    */
   hasRunningEntries(): boolean {
     for (const entry of this.entries.values()) {
-      if (entry.status === 'running') return true;
+      if (entry.status === 'running' || entry.status === 'pausing') {
+        return true;
+      }
     }
     return false;
   }
@@ -798,7 +880,7 @@ export class WorkflowRunRegistry {
    * R7 (wenshao): drop every in-memory entry without touching
    * controllers. Mirrors `BackgroundShellRegistry.reset()` and the
    * other siblings' contract — callers (`/clear`, session-resume)
-   * MUST verify via `hasRunningEntries()` first that no still-running
+   * MUST verify via `hasRunningEntries()` first that no active
    * work exists before invoking. The companion path that aborts
    * controllers is `abortAll()`.
    */
@@ -825,7 +907,7 @@ export class WorkflowRunRegistry {
   }
 
   /**
-   * R7 (wenshao): cancel every still-running entry. Called on session/
+   * R7 (wenshao): cancel every active entry. Called on session/
    * Config shutdown so workflow runs don't outlive the CLI process and
    * leak orphaned dispatches. Symmetric with `BackgroundShellRegistry.
    * abortAll()` and `BackgroundTaskRegistry.abortAll()`.
@@ -833,13 +915,13 @@ export class WorkflowRunRegistry {
    * Settles each entry inline (status → 'cancelled', abort the
    * controller) and fires the status-change callback exactly once
    * after the loop — the per-entry `cancel()` path would have fired
-   * the callback for every running entry, wasteful on shutdown.
+   * the callback for every active entry, wasteful on shutdown.
    */
   abortAll(): void {
     const endTime = Date.now();
     let lastCancelled: WorkflowTask | undefined;
     for (const entry of Array.from(this.entries.values())) {
-      if (entry.status !== 'running') continue;
+      if (!isActiveWorkflowStatus(entry.status)) continue;
       this.rejectPendingApprovals(entry.runId);
       entry.status = 'cancelled';
       entry.endTime = endTime;
@@ -860,11 +942,13 @@ export class WorkflowRunRegistry {
 
   /**
    * Sweep terminal entries when they exceed `MAX_RETAINED_TERMINAL_WORKFLOWS`.
-   * Running entries are always retained. Oldest terminal entries
+   * Active entries are always retained. Oldest terminal entries
    * (by `endTime`) are evicted first.
    */
   private evictTerminal(): void {
-    const terminal = this.list().filter((e) => e.status !== 'running');
+    const terminal = this.list().filter((e) =>
+      isTerminalWorkflowStatus(e.status),
+    );
     if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return;
     terminal.sort((a, b) => (a.endTime ?? 0) - (b.endTime ?? 0));
     const toEvict = terminal.slice(
@@ -986,6 +1070,7 @@ function restrictWorkflowConfirmationDetails(
         type: 'info',
         title: details.title,
         prompt: details.prompt,
+        renderPromptAsPlainText: details.renderPromptAsPlainText,
         urls: details.urls ? [...details.urls] : undefined,
         hideAlwaysAllow: true,
       };

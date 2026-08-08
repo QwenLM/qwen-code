@@ -45,6 +45,7 @@ describe('useBranchCommand', () => {
   let workflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -115,6 +116,7 @@ describe('useBranchCommand', () => {
     workflowRunRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
       reset: vi.fn(),
+      abortAll: vi.fn(),
     };
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',

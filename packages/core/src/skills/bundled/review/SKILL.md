@@ -80,7 +80,15 @@ At every effort level, the mechanics of obtaining the diff — worktree flow, di
 
 The parser already classified the target, so there is nothing to disambiguate by hand. For a `pr-url` target, determine if the local repo can access this PR:
 
-1. Check if any git remote matches the URL's **host and owner/repo — by exact segment equality, never substring**: run `git remote -v` and parse each remote URL structurally (`git@<host>:<owner>/<repo>.git` and `https://<host>/<owner>/<repo>(.git)` are the two shapes). A remote matches only when its host equals the verdict's `host` AND its `<owner>/<repo>` (with any `.git` suffix stripped) equals the verdict's `owner/repo`, both compared case-insensitively as whole segments — `shao/qwen-code` does NOT match a `wenshao/qwen-code` remote, and a `github.com` PR does not match a same-named repo on another host. Substring "contains" matching once allowed exactly those, which is reviewing one repository and posting to another. This still handles forks — a local clone with an `upstream` remote pointing to the target repository matches that repository's PRs exactly.
+1. Run the remote matcher — it applies the exact host + owner/repo segment-equality rule in code, and you do not re-derive it (a substring comparison once matched `shao/qwen-code` against a `wenshao/qwen-code` remote — one review read one repository and posted to another; a `github.com` PR matching a same-named repo on another host is the same bug wearing a host):
+
+   ```bash
+   "${QWEN_CODE_CLI:-qwen}" review match-remote \
+     --owner <the verdict's owner> --repo <the verdict's repo> --host <the verdict's host>
+   ```
+
+   Exit 0 prints the matching remote's name — forks included: a clone whose `upstream` points to the target repository matches that repository's PRs exactly. Exit 6 means no remote matches — go to item 3. Exit 7 means several match; tell the user and stop rather than picking one. Any other exit is fail-closed like the other gates: report it and stop.
+
 2. If a matching remote is found, proceed with the **normal worktree flow** — use that remote name (instead of hardcoded `origin`) for `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>`. In Step 7, use the owner/repo from the URL for posting comments.
 
 For a `pr-url` whose `host` is not `github.com` (GitHub Enterprise), **pass `--host <host>` to every review subcommand that talks to GitHub — `fetch-pr`, `pr-context`, `comment-status`, `presubmit`, and `compose-review`** — which routes all of their `gh` calls via GH_HOST in code; a forgotten host cannot silently retarget them at github.com. The `gh` commands you run directly are still yours to route: prefix Agent 0's `gh pr view`/`gh issue view`, Step 6's residual body fetch, and the Step 7 submission with `GH_HOST=<host> ` (e.g. `GH_HOST=github.example.com gh api ...`). `gh` defaults to `github.com`, so a dropped host makes a call read from and post to the wrong site's `owner/repo`.
@@ -114,12 +122,21 @@ Based on the parsed `target.type`:
     **Where `<owner>/<repo>` and `<remote>` come from — do not guess either.** For a `pr-url` target both are already decided: the URL carries the owner/repo, and the remote is the one matched against it above. For a bare **`pr-number`** there is no URL, and a PR number alone says nothing about which repository it belongs to. Derive it:
 
     ```bash
-    gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'
+    gh repo view --json owner,name,url \
+      --jq '"\(.owner.login)/\(.name) \(.url | sub("^[a-z]+://"; "") | split("/")[0])"'
     ```
 
-    That is the same command Step 7 already uses to decide where to post, and it resolves through `gh`'s default-repo — which in a fork clone is the **upstream**, where the PR actually lives. Then pick the remote **whose URL is that owner/repo**, by the same exact-segment parse of `git remote -v` described above. Do not default to `origin`: in the standard fork layout `origin` is the _fork_, which has no `pull/<n>/head` ref for an upstream PR, and `fetch-pr` fails. In an upstream-as-`origin` clone the same rule lands on `origin` anyway, so one procedure is correct for both.
+    That is the same `gh repo view` resolution Step 7 already uses to decide where to post — it resolves through `gh`'s default-repo, which in a fork clone is the **upstream**, where the PR actually lives — and the second token is the host `gh` resolved that repo at (the URL's authority; an explicit port survives, and the matcher strips it). Pass that host to the matcher: `gh` also resolves a host through its own auth config (`gh auth login --hostname …`, no GH_HOST exported), which the matcher cannot see, so omitting `--host` would compare such a GHE repo against the github.com default and stop at exit 6 even though every later `gh` call routes at the GHE host. Then resolve the remote with the same matcher Step 1's pr-url path uses — same rule, same exit codes:
 
-    Guessing the owner/repo here is not a recoverable mistake — a guessed repo has already stopped a review before it read a line of code (measured; DESIGN.md — The guessed fork repo). If `gh repo view` and the remote scan disagree, or no remote matches, say so and stop rather than picking one.
+    ```bash
+    "${QWEN_CODE_CLI:-qwen}" review match-remote \
+      --owner <owner from gh repo view> --repo <repo from gh repo view> \
+      --host <host from gh repo view>
+    ```
+
+    Do not default to `origin`: in the standard fork layout `origin` is the _fork_, which has no `pull/<n>/head` ref for an upstream PR, and `fetch-pr` fails. In an upstream-as-`origin` clone the matcher lands on `origin` anyway, so one procedure is correct for both.
+
+    Guessing the owner/repo here is not a recoverable mistake — a guessed repo has already stopped a review before it read a line of code (measured; DESIGN.md — The guessed fork repo). If `gh repo view` fails, or the matcher exits 6 (no remote matches) or 7 (several do), say so and stop rather than picking one.
 
     Read `.qwen/tmp/qwen-review-pr-<n>-fetch.json` for: `worktreePath`, `baseRefName`, `headRefName`, `fetchedSha` (use as the **HEAD commit SHA** for Step 7), `isCrossRepository`, `diffStat` (files / additions / deletions), `emptyDiff` (**stop here**: the branch tree is byte-identical to its merge base — the work already landed or was superseded; tell the user and recommend close-as-superseded instead of fanning out agents over zero hunks), `collapsedFromUpstream` (disclose in the summary: overlapping merged PRs have collapsed this one to a residual — the review scope is the recomputed diff, and body claims about the rest are description-of-history, which Agent 0 should read accordingly), and `prDescriptionHasHan` (the PR description contains Chinese — every posted inline comment must then be bilingual; see Step 7). If the command fails (auth, network, PR not found), inform the user and stop.
 
