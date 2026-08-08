@@ -787,9 +787,24 @@ type InFlightTurnRecording = {
   startedAt: number;
   promptText: string;
   promptTextTruncated: boolean;
-  resultSegments: Map<string, { rawText: string; rewrittenText?: string }>;
+  resultSegments: Map<
+    string,
+    {
+      rawText: string;
+      rawTruncated?: boolean;
+      rewrittenText?: string;
+      rewrittenTruncated?: boolean;
+    }
+  >;
+  resultCapturedChars: number;
+  resultSegmentsTruncated: boolean;
   nextDirectResultSegmentId: number;
 };
+
+// Hold a raw candidate and its possible replacement without allowing a
+// tool-heavy turn to grow the recording accumulator without bound.
+const TURN_RESULT_CAPTURE_MAX_CHARS = TURN_RESULT_TEXT_MAX_CHARS * 2;
+const TURN_RESULT_CAPTURE_MAX_SEGMENTS = 256;
 
 function truncateTurnText(text: string): {
   text: string;
@@ -2923,6 +2938,7 @@ export class Session implements SessionContext {
     // admission would let an overlapping successor (DAEMON-003 deadline
     // overlap) redirect this turn's still-streaming chunks into the
     // successor's record.
+    if (turnRecording) turnRecording.startedAt = Date.now();
     this.#turnRecording = turnRecording;
 
     try {
@@ -4962,6 +4978,8 @@ export class Session implements SessionContext {
       promptText: text,
       promptTextTruncated: truncated,
       resultSegments: new Map(),
+      resultCapturedChars: 0,
+      resultSegmentsTruncated: false,
       nextDirectResultSegmentId: 0,
     };
   }
@@ -5000,15 +5018,35 @@ export class Session implements SessionContext {
     const segmentKey = rewriteContext
       ? `rewrite:${rewriteContext.turnIndex}`
       : `direct:${recording.nextDirectResultSegmentId++}`;
-    const segment = recording.resultSegments.get(segmentKey) ?? {
-      rawText: '',
-    };
-    if (rewriteContext?.rewritten) {
-      segment.rewrittenText = (segment.rewrittenText ?? '') + content.text;
-    } else {
-      segment.rawText += content.text;
+    let segment = recording.resultSegments.get(segmentKey);
+    if (!segment) {
+      if (recording.resultSegments.size >= TURN_RESULT_CAPTURE_MAX_SEGMENTS) {
+        recording.resultSegmentsTruncated = true;
+        return;
+      }
+      segment = { rawText: '' };
+      recording.resultSegments.set(segmentKey, segment);
     }
-    recording.resultSegments.set(segmentKey, segment);
+    if (rewriteContext?.rewritten) {
+      if (segment.rewrittenText === undefined) {
+        recording.resultCapturedChars -= segment.rawText.length;
+        segment.rawText = '';
+        delete segment.rawTruncated;
+        segment.rewrittenText = '';
+      }
+      const remaining =
+        TURN_RESULT_CAPTURE_MAX_CHARS - recording.resultCapturedChars;
+      segment.rewrittenText += content.text.slice(0, remaining);
+      recording.resultCapturedChars += Math.min(content.text.length, remaining);
+      if (content.text.length > remaining) segment.rewrittenTruncated = true;
+      return;
+    }
+    if (segment.rewrittenText !== undefined) return;
+    const remaining =
+      TURN_RESULT_CAPTURE_MAX_CHARS - recording.resultCapturedChars;
+    segment.rawText += content.text.slice(0, remaining);
+    recording.resultCapturedChars += Math.min(content.text.length, remaining);
+    if (content.text.length > remaining) segment.rawTruncated = true;
   }
 
   /**
@@ -5029,10 +5067,17 @@ export class Session implements SessionContext {
     if (recording === null) {
       return;
     }
+    const selectedSegments = [...recording.resultSegments.values()].map(
+      (segment) => ({
+        text: segment.rewrittenText ?? segment.rawText,
+        truncated:
+          segment.rewrittenText !== undefined
+            ? segment.rewrittenTruncated === true
+            : segment.rawTruncated === true,
+      }),
+    );
     const selectedResult = truncateTurnText(
-      [...recording.resultSegments.values()]
-        .map(({ rawText, rewrittenText }) => rewrittenText ?? rawText)
-        .join(''),
+      selectedSegments.map(({ text }) => text).join(''),
     );
     const payload: TurnResultRecordPayload = {
       promptId: recording.promptId,
@@ -5048,7 +5093,11 @@ export class Session implements SessionContext {
       ...(selectedResult.text.length > 0
         ? { resultText: selectedResult.text }
         : {}),
-      ...(selectedResult.truncated ? { resultTruncated: true } : {}),
+      ...(selectedResult.truncated ||
+      selectedSegments.some(({ truncated }) => truncated) ||
+      recording.resultSegmentsTruncated
+        ? { resultTruncated: true }
+        : {}),
       ...(recording.originatorClientId !== undefined
         ? { originatorClientId: recording.originatorClientId }
         : {}),

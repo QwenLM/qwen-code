@@ -766,8 +766,9 @@ export interface PendingPromptSummary {
 /**
  * Pollable snapshot of one admitted prompt's turn, returned by
  * `getSessionTurnStatus`. `queued` / `running` mirror the live
- * `pendingPromptList`; settled states mirror the `turn_result` record
- * persisted in the session transcript by the agent.
+ * `pendingPromptList`; settled states come from the bridge's bounded formal
+ * terminal overlay and are enriched or restored from persisted `turn_result`
+ * records.
  */
 export interface BridgeTurnStatus {
   sessionId: string;
@@ -1058,10 +1059,11 @@ export interface AcpSessionBridge {
   /**
    * Return the pollable status of a turn. With `promptId`, resolves that
    * exact prompt: live `pendingPromptList` first (queued / running), then
-   * the agent's persisted `turn_result` records (completed / cancelled /
-   * error); resolves `undefined` when neither knows it. Without
-   * `promptId`, returns the current turn: the running prompt, the queued
-   * FIFO head, the most recent persisted outcome, or `state: 'idle'`.
+   * the bridge's recent formal terminal overlay and the agent's persisted
+   * `turn_result` records (completed / cancelled / error); resolves
+   * `undefined` when none knows it. Without `promptId`, returns the current
+   * turn: the running prompt, the queued FIFO head, the most recent terminal
+   * or persisted outcome, or `state: 'idle'`.
    * Throws `SessionNotFoundError` for unknown ids.
    */
   getSessionTurnStatus(

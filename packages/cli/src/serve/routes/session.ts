@@ -4720,7 +4720,8 @@ export function registerSessionRoutes(
   // resolves the running turn (or queued FIFO head, latest settled outcome,
   // idle); `:promptId` resolves that exact prompt. Live queue state comes
   // from the bridge's pending list; settled outcomes (completed / cancelled
-  // / error) from the agent's persisted `turn_result` transcript records.
+  // / error) from the bridge terminal overlay and persisted `turn_result`
+  // transcript records.
   app.get('/session/:id/turns/current', (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;

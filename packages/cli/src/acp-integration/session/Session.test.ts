@@ -4009,7 +4009,17 @@ describe('Session', () => {
             {
               type: core.StreamEventType.CHUNK,
               value: {
-                candidates: [{ content: { parts: [{ text: 'raw answer' }] } }],
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          text: 'r'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS * 3),
+                        },
+                      ],
+                    },
+                  },
+                ],
                 usageMetadata: {
                   promptTokenCount: 1,
                   candidatesTokenCount: 1,
@@ -4028,9 +4038,10 @@ describe('Session', () => {
           trustedContext,
         );
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
-          expect.objectContaining({ resultText: 'rewritten answer' }),
-        );
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toBe('rewritten answer');
+        expect(payload.resultTruncated).toBeUndefined();
       });
 
       it.each([
@@ -4188,6 +4199,32 @@ describe('Session', () => {
         expect(payload.resultText).toHaveLength(
           core.TURN_RESULT_TEXT_MAX_CHARS,
         );
+        expect(payload.resultTruncated).toBe(true);
+      });
+
+      it('bounds the number of captured result segments', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks(
+            Array.from({ length: 257 }, () => ({
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'x' }] } }],
+              },
+            })),
+          ),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'many chunks' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toBe('x'.repeat(256));
         expect(payload.resultTruncated).toBe(true);
       });
 

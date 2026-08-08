@@ -66,6 +66,8 @@ particular `promptTextTruncated` / `resultTruncated` are only present when
   `TURN_RESULT_TEXT_MAX_CHARS` (32 KiB) with the paired `*Truncated` flag.
   The result cap is applied after rewritten-versus-raw selection, so excluded
   or replaced text does not consume the visible-answer budget.
+  In-flight raw/rewrite candidates are separately bounded to 64 KiB and 256
+  segments; loss of selected content at either bound sets `resultTruncated`.
   The cap applies to both projections: the live `queued` / `running`
   status caps `promptText` the same way the settled record does, so the
   same promptId reports a consistent shape before and after settlement.
