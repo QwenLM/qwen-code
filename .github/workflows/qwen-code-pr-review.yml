@@ -748,6 +748,16 @@ jobs:
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
           QWEN_HOME: '${{ runner.temp }}/qwen-home'
+          # KEEP THE `run` BODY BELOW FREE OF `${{ }}`. A run block containing
+          # one is evaluated as a single expression template, capped at 21000
+          # characters — and this script is far past that. Every value it needs
+          # from the workflow context is passed as an environment variable, so
+          # the body is plain bash the runner never templates. See the
+          # workflow-expression-length test in
+          # scripts/tests/qwen-pr-review-workflow.test.js.
+          EVENT_NAME: '${{ github.event_name }}'
+          EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
         run: |-
           set -euo pipefail
           fail() {
@@ -960,7 +970,7 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+          MAX_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
           if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then
             fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"
           fi
@@ -989,7 +999,7 @@ jobs:
               if [ "$PR_SIZE_LINES" -le 300 ]; then
                 EFFECTIVE_TIMEOUT_MINUTES=180
               else
-                EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+                EFFECTIVE_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
               fi
               echo "PR #${PR_NUMBER} changed ${PR_SIZE_LINES} lines; auto timeout ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
             else
@@ -1056,8 +1066,7 @@ jobs:
             exit 0
           fi
           EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
             if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then
               echo "Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current (current head ${CURRENT_HEAD_SHA})." | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
@@ -1133,6 +1142,23 @@ jobs:
             fi
             export QWEN_REVIEW_DEADLINE_RESERVE_SECONDS
             set +e
+            # The agent streams its ENTIRE transcript to stdout, and the runner
+            # scans every line for workflow commands. A tool result that quotes
+            # a file containing one is executed as a command: reviewing a PR
+            # that touches `actions/setup-node`, the agent read that action's
+            # own main.ts, which legitimately contains
+            # `core.info(\`##[add-matcher]${...}\`)`. The runner took the rest
+            # of the JSON line as a matcher path and errored. Observed on run
+            # 31167034020 (PR #8681): three `Unable to process command`, and
+            # 1h37m of review work discarded. Any PR whose review quotes a file
+            # containing `##[...]` or `::...::` breaks the same way — this
+            # repository's own workflows included.
+            # Turn command parsing off around the agent and nothing else. The
+            # token is random per attempt, so no output the agent produces can
+            # guess it and re-enable parsing early.
+            local stop_token
+            stop_token="qwen-review-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
+            echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
@@ -1142,6 +1168,18 @@ jobs:
               --output-format stream-json \
               | tee "$LOG_PATH"
             local ps=("${PIPESTATUS[@]}")
+            # Resume BEFORE anything else can exit: errexit is still off here,
+            # so this line is reached on every agent outcome — timeout, crash
+            # or success. Leaving it off would silently swallow this job's own
+            # ::error:: and the fallback comment's diagnostics for the rest of
+            # the run, turning one broken review into a silent one.
+            # Lead with a newline: the runner only recognises `::cmd::` at the
+            # start of a line, and `--kill-after` SIGKILLs the agent, which can
+            # leave a partial stream-json line with no trailing newline. An
+            # `echo` would append the resume to that fragment, where it is just
+            # text — parsing would stay off for the rest of the job, on exactly
+            # the path this guard exists to survive.
+            printf '\n::%s::\n' "$stop_token"
             set -e
             local qwen_status="${ps[0]}"
             local tee_status="${ps[1]}"

@@ -110,6 +110,108 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('suppresses checkpoint bookkeeping cards after a verifier rejection', () => {
+    const goal: NonNullable<GoalSnapshotV2['goal']> = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the feature',
+      status: 'active',
+      evidenceCursor: { recordId: 'goal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const goalRecord = (
+      uuid: string,
+      cause:
+        | 'create'
+        | 'turn_finished'
+        | 'verifier_reject'
+        | 'checkpoint'
+        | 'usage_limited',
+      snapshotGoal: GoalSnapshotV2['goal'],
+    ) => ({
+      uuid,
+      type: 'system' as const,
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause,
+        snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+      },
+    });
+    const turned = {
+      ...goal,
+      turnCount: 1,
+      activeTimeMs: 10,
+      updatedAt: 2,
+    };
+    const rejected = {
+      ...turned,
+      lastReason: 'More work remains',
+      activeTimeMs: 20,
+      updatedAt: 3,
+    };
+    const checkpointed = {
+      ...rejected,
+      evidenceCursor: { recordId: 'checkpoint-1' },
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 4,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'delivered_output' as const,
+            claim: 'The feature was delivered.',
+            sourceRefs: ['assistant-1'],
+          },
+        ],
+      },
+      activeTimeMs: 30,
+      updatedAt: 4,
+    };
+    const limited = {
+      ...checkpointed,
+      status: 'usage_limited' as const,
+      lastReason: 'provider failed',
+      activeTimeMs: 40,
+      updatedAt: 5,
+    };
+    const conversation = {
+      messages: [
+        goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-turn', 'turn_finished', turned),
+        goalRecord('goal-reject', 'verifier_reject', rejected),
+        goalRecord('goal-reject-checkpoint', 'verifier_reject', checkpointed),
+        goalRecord('goal-checkpoint', 'checkpoint', checkpointed),
+        goalRecord('goal-limited', 'usage_limited', limited),
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items).toMatchObject([
+      { id: 101, type: 'goal_state', cause: 'create' },
+      {
+        id: 102,
+        type: 'goal_state',
+        cause: 'verifier_reject',
+        snapshot: { goal: { lastReason: 'More work remains' } },
+      },
+      {
+        id: 103,
+        type: 'goal_state',
+        cause: 'usage_limited',
+        snapshot: { goal: { status: 'usage_limited' } },
+      },
+    ]);
+  });
+
   it('does not replay internal Goal runtime prompts as user history', () => {
     const conversation = {
       messages: [
@@ -210,6 +312,60 @@ describe('resumeHistoryUtils', () => {
     expect(items.some((i) => i.type === 'tool_group')).toBe(false);
     const userItem = items.find((i) => i.type === 'user') as { text: string };
     expect(userItem.text).toBe('post-gap message');
+  });
+
+  it('does not suppress a post-gap Goal lifecycle card with the pre-gap baseline', () => {
+    // The gap swallowed the pause record, so the post-gap resume snapshot is
+    // shape-equal to the pre-gap create snapshot; the gap boundary must reset
+    // the displayed baseline so the resume card is not treated as
+    // bookkeeping.
+    const goal: NonNullable<GoalSnapshotV2['goal']> = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the feature',
+      status: 'active',
+      evidenceCursor: { recordId: 'goal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const goalRecord = (
+      uuid: string,
+      cause: 'create' | 'resume',
+      snapshotGoal: GoalSnapshotV2['goal'],
+    ) => ({
+      uuid,
+      type: 'system' as const,
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause,
+        snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+      },
+    });
+    const conversation = {
+      messages: [
+        goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-resume', 'resume', goal),
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      {
+        conversation,
+        historyGaps: [
+          { childUuid: 'goal-resume', missingParentUuid: 'goal-pause' },
+        ],
+      } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items.filter((item) => item.type === 'goal_state')).toMatchObject([
+      { cause: 'create' },
+      { cause: 'resume' },
+    ]);
   });
 
   describe('UserPromptSubmit hook context provenance', () => {
