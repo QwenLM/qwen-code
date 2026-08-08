@@ -119,7 +119,12 @@ jobs:
             echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+          # Blank line after the marker, or none of the prose below renders. A
+          # line opening with `<!--` starts an HTML block that runs to the line
+          # containing the closing delimiter, and the REST of that line stays
+          # inside it — so gluing the text on shipped it as raw source with a
+          # dead link. Verified against GitHub's own renderer.
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued in [workflow run](%s)._' "$RUN_URL")"
           EXISTING_ACK_ID="$(
             # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \

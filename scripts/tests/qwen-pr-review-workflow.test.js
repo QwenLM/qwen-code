@@ -2207,3 +2207,32 @@ describe('workflow expression length', () => {
     expect(runReviewStep()).not.toContain('${{');
   });
 });
+
+describe('bot comment markers', () => {
+  // A line that opens with `<!--` starts an HTML block, and that block runs to
+  // the line containing the closing delimiter INCLUSIVE — so the rest of that
+  // same line is still inside it and is never parsed as Markdown. The
+  // queued-acknowledgement comment glued its prose straight onto the marker and
+  // reached every PR as raw source with a dead link. Measured through GitHub's
+  // own renderer (POST /markdown, mode=gfm) on the exact bodies:
+  //   marker + text            -> 0 <a>, 0 <em>
+  //   marker + "\n"   + text   -> 1 <a>, 1 <em>
+  //   marker + "\n\n" + text   -> 1 <a>, 1 <em>
+  it('never glues prose onto the end of a marker', () => {
+    const offenders = [];
+    const re = /<!--[^>]*-->/g;
+    let m;
+    while ((m = re.exec(workflow)) !== null) {
+      // Prose in a YAML or shell comment never reaches a comment body — and
+      // this rule is itself explained with an inline example of the bad form.
+      const lineStart = workflow.lastIndexOf('\n', m.index) + 1;
+      if (/^\s*#/.test(workflow.slice(lineStart, m.index))) continue;
+      const rest = workflow.slice(m.index + m[0].length);
+      // Fine: an escaped newline in the printf/format string that builds the
+      // body, or the marker ending the shell/jq string it was written into.
+      if (rest.startsWith('\\n') || /^["')\n]/.test(rest)) continue;
+      offenders.push(workflow.slice(m.index, m.index + 72).split('\n')[0]);
+    }
+    expect(offenders).toEqual([]);
+  });
+});
