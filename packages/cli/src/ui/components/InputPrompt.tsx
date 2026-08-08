@@ -7,7 +7,11 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  MAX_WIDTH,
+  type SuggestionCategory,
+} from './SuggestionsDisplay.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
@@ -2131,6 +2135,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       uiActions,
     ],
   );
+  const handleCategorySelect = useCallback(
+    (category: SuggestionCategory | 'all') => {
+      completion.selectCategory(category);
+      setExpandedSuggestionIndex(-1);
+    },
+    [completion],
+  );
 
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
@@ -2319,6 +2330,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             onSelectIndex={
               suggestionsFromExport ? undefined : handleSuggestionSelect
+            }
+            onSelectCategory={
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : handleCategorySelect
             }
           />
         </Box>
