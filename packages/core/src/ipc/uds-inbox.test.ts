@@ -22,7 +22,11 @@ import {
   type PeerFrame,
 } from './peer-frames.js';
 import { probePeerSocket, sendPeerFrame, PeerSendError } from './uds-client.js';
-import { startPeerInbox, type PeerInbox } from './uds-inbox.js';
+import {
+  _sweepOrphanSocketsForTesting as sweepOrphanSockets,
+  startPeerInbox,
+  type PeerInbox,
+} from './uds-inbox.js';
 
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
@@ -280,5 +284,74 @@ describe.skipIf(isWindows)('probePeerSocket', () => {
 
   it('is false for a non-local path', async () => {
     expect(await probePeerSocket('relative.sock')).toBe(false);
+  });
+});
+
+describe.skipIf(isWindows)('orphan socket sweeping', () => {
+  /** A PID that is essentially certain not to be running. */
+  const DEAD_PID = 0x7ffffffe;
+
+  it('removes a socket file whose process is gone', async () => {
+    const dir = path.join(tmpDir, 'socks');
+    await fs.mkdir(dir, { recursive: true });
+    const orphan = path.join(dir, `${DEAD_PID}.sock`);
+    await fs.writeFile(orphan, '');
+
+    expect(await sweepOrphanSockets(dir, '/tmp/self.sock')).toBe(1);
+    await expect(fs.stat(orphan)).rejects.toThrow();
+  });
+
+  it("leaves a live process's socket alone", async () => {
+    const dir = path.join(tmpDir, 'socks');
+    await fs.mkdir(dir, { recursive: true });
+    const live = path.join(dir, `${process.pid}.sock`);
+    await fs.writeFile(live, '');
+
+    expect(await sweepOrphanSockets(dir, '/tmp/self.sock')).toBe(0);
+    await expect(fs.stat(live)).resolves.toBeDefined();
+  });
+
+  it('never removes our own socket', async () => {
+    const dir = path.join(tmpDir, 'socks');
+    await fs.mkdir(dir, { recursive: true });
+    // Same name as a dead pid, but it is the path we are listening on.
+    const self = path.join(dir, `${DEAD_PID}.sock`);
+    await fs.writeFile(self, '');
+
+    expect(await sweepOrphanSockets(dir, self)).toBe(0);
+    await expect(fs.stat(self)).resolves.toBeDefined();
+  });
+
+  it('ignores files that are not <pid>.sock', async () => {
+    const dir = path.join(tmpDir, 'socks');
+    await fs.mkdir(dir, { recursive: true });
+    const keep = [
+      '2026-notes.sock',
+      'notes.txt',
+      'socket',
+      `${DEAD_PID}.sock.bak`,
+    ];
+    for (const name of keep) await fs.writeFile(path.join(dir, name), '');
+
+    expect(await sweepOrphanSockets(dir, '/tmp/self.sock')).toBe(0);
+    expect((await fs.readdir(dir)).sort()).toEqual([...keep].sort());
+  });
+
+  it('returns zero for a directory that does not exist', async () => {
+    expect(
+      await sweepOrphanSockets(path.join(tmpDir, 'nope'), '/tmp/self.sock'),
+    ).toBe(0);
+  });
+
+  it('runs at bind time, so starting a session cleans up after dead ones', async () => {
+    const dir = path.join(tmpDir, 'socks');
+    await fs.mkdir(dir, { recursive: true });
+    const orphan = path.join(dir, `${DEAD_PID}.sock`);
+    await fs.writeFile(orphan, '');
+
+    const started = await listen();
+    await expect(fs.stat(orphan)).rejects.toThrow();
+    // Our own socket survived the sweep it triggered.
+    await expect(fs.stat(started.socketPath)).resolves.toBeDefined();
   });
 });

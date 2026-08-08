@@ -28,12 +28,22 @@ import {
   parsePeerFrame,
   type PeerFrame,
 } from './peer-frames.js';
+import { isPidAlive } from '../utils/process-liveness.js';
 import { isLocalIpcPath, resolvePeerSocketPath } from './socket-path.js';
 
 const debugLogger = createDebugLogger('PEER_IPC');
 
 const SOCKET_DIR_MODE = 0o700;
 const SOCKET_MODE = 0o600;
+
+/**
+ * Only `<digits>.sock` is a socket this code created.
+ *
+ * Same strictness as the session registry's filename guard, for the same
+ * reason: a lenient match would let the sweep delete a file it never
+ * wrote.
+ */
+const SOCKET_FILENAME = /^\d+\.sock$/;
 
 export interface PeerInboxOptions {
   /** Defaults to this process's resolved socket path. */
@@ -76,6 +86,68 @@ function createLineReader(
     }
   };
 }
+
+/**
+ * Delete socket files in `dir` left behind by sessions that are gone.
+ *
+ * A session that exits cleanly unlinks its own socket; one that is killed
+ * cannot. Nothing else removes them, so without this the directory grows
+ * by one dead file per crash. Under `$XDG_RUNTIME_DIR` that is bounded by
+ * the login session, but the `/tmp/qwen-socks-<uid>/` fallback persists
+ * across reboots on some systems.
+ *
+ * Sweeping happens at bind time rather than on a timer: the directory
+ * only accumulates when a session dies, and a new session starting is
+ * both the natural moment to notice and the only moment anyone cares.
+ * Each socket directory is swept by the sessions that use it, so a
+ * process whose path fell back to `/tmp` cleans `/tmp`, not the runtime
+ * dir it could not use.
+ *
+ * Conservative by construction: a file is removed only when its PID is
+ * *provably* dead. A live PID is left alone even though it may have been
+ * recycled onto some unrelated process — a leftover file costs a few
+ * bytes, and deleting a live session's socket would make it silently
+ * unreachable.
+ */
+async function sweepOrphanSockets(
+  dir: string,
+  selfSocketPath: string,
+): Promise<number> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return 0;
+  }
+
+  let swept = 0;
+  await Promise.all(
+    entries.map(async (name) => {
+      if (!SOCKET_FILENAME.test(name)) return;
+      const fullPath = path.join(dir, name);
+      if (fullPath === selfSocketPath) return;
+
+      const pid = Number.parseInt(name.slice(0, -'.sock'.length), 10);
+      if (!Number.isInteger(pid) || pid <= 0) return;
+      if (isPidAlive(pid)) return;
+
+      try {
+        await fs.unlink(fullPath);
+        swept += 1;
+      } catch {
+        // Raced with another session's sweep, or not ours to remove.
+      }
+    }),
+  );
+
+  if (swept > 0) {
+    debugLogger.debug(`swept ${swept} orphaned peer socket(s) from ${dir}`);
+  }
+  return swept;
+}
+
+/** Exposed for tests; production callers go through {@link startPeerInbox}. */
+export const _sweepOrphanSocketsForTesting = sweepOrphanSockets;
 
 /**
  * Bind this session's inbox.
@@ -206,6 +278,10 @@ export async function startPeerInbox(
   // Never hold the event loop open on the inbox alone — a session waiting
   // only for a peer message should still be able to exit.
   server.unref();
+
+  // After listening, not before: becoming reachable is what the caller is
+  // waiting on, and housekeeping should not sit in front of it.
+  await sweepOrphanSockets(path.dirname(socketPath), socketPath);
 
   debugLogger.debug(`peer inbox listening: ${socketPath}`);
 
