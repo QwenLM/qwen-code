@@ -1009,6 +1009,62 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
+  // Git discovers its repository by walking up from the working directory, so
+  // an in-boundary directory can still hand it an outside repository.
+  it('denies a relocation into a directory whose .git redirects outside', async () => {
+    const decoy = path.join(effectiveCwd, 'gitfile-decoy');
+    await mkdir(decoy, { recursive: true });
+    await writeFile(
+      path.join(decoy, '.git'),
+      `gitdir: ${path.join(outsideRepo, '.git')}\n`,
+    );
+
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request('git -C gitfile-decoy reset --hard')),
+    ).resolves.toMatchObject({ allowed: false });
+    await expect(
+      guard(request('cd gitfile-decoy && git commit -m x')),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('keeps a linked-worktree session working when its own .git points outside', async () => {
+    const linkedRoot = mkdtempSync(path.join(os.tmpdir(), 'daemon-guard-wt-'));
+    const session = path.join(linkedRoot, 'checkout');
+    const adminDir = path.join(linkedRoot, 'main', '.git', 'worktrees', 'live');
+    await Promise.all([
+      mkdir(path.join(session, 'nested'), { recursive: true }),
+      mkdir(adminDir, { recursive: true }),
+    ]);
+    await writeFile(path.join(session, '.git'), `gitdir: ${adminDir}\n`);
+    await writeFile(
+      path.join(adminDir, 'gitdir'),
+      `${path.join(session, '.git')}\n`,
+    );
+
+    const guard = createDaemonToolGuard();
+    const call = {
+      ...request('cd nested && git commit -m x'),
+      effectiveCwd: session,
+    } as ExternalToolGuardPrepareRequest;
+    await expect(guard(call)).resolves.toEqual({ allowed: true });
+    await rm(linkedRoot, { recursive: true, force: true });
+  });
+
+  it('resolves cd -P through symlinks before applying ..', async () => {
+    await symlink(outsideRepo, path.join(effectiveCwd, 'outward-link'), 'dir');
+
+    const guard = createDaemonToolGuard();
+    await expect(
+      guard(request('cd -P outward-link/.. && git reset --hard')),
+    ).resolves.toMatchObject({ allowed: false });
+    // The default (logical) form really does stay inside: bash resolves
+    // `link/..` against the logical path, so allowing it matches the shell.
+    await expect(
+      guard(request('cd outward-link/.. && git commit -m x')),
+    ).resolves.toEqual({ allowed: true });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

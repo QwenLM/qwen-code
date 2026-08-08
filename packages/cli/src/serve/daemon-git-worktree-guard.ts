@@ -613,6 +613,7 @@ type RunAnalysis =
       kind: 'cd';
       variant: 'cd' | 'popd' | 'pushd';
       target?: GuardToken;
+      physical?: boolean;
     }
   | { kind: 'dynamic-program'; rest: GuardToken[]; state: PrefixState }
   | { kind: 'export'; state: PrefixState; operands: GuardToken[] }
@@ -799,6 +800,11 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         kind: 'cd',
         variant: program,
         target: findChdirTarget(run, index + 1, program),
+        // `cd -P` resolves each component through its symlinks before
+        // applying `..`, which a lexical resolve cannot reproduce.
+        physical: run
+          .slice(index + 1)
+          .some((token) => /^-[A-Za-z]*P/.test(token.text)),
       };
     }
     return { kind: 'other', state, assignmentsOnly: false };
@@ -995,6 +1001,42 @@ async function resolveGitDirRepository(
   throw new Error('gitdir indirection too deep');
 }
 
+/**
+ * Git discovers its repository by walking up from the working directory, so a
+ * directory that is itself inside the boundary can still hand git an outside
+ * repository through a `.git` gitfile (`gitdir: <outside>/.git`). Resolve the
+ * first `.git` between the target and the boundary the same way `--git-dir`
+ * targets are resolved — which keeps a linked worktree working, because its
+ * own gitfile resolves back to that worktree's checkout. Returns undefined
+ * when nothing is discovered inside the boundary; throws when an indirection
+ * cannot be read.
+ */
+async function resolveDiscoveredRepository(
+  startDirectory: string,
+  boundary: string,
+): Promise<string | undefined> {
+  let current = startDirectory;
+  for (let depth = 0; depth < 64; depth++) {
+    const candidate = path.join(current, '.git');
+    let exists = true;
+    try {
+      await stat(candidate);
+    } catch {
+      exists = false;
+    }
+    if (exists) {
+      return resolveGitDirRepository(
+        await realpathNearestExistingAsync(candidate),
+      );
+    }
+    if (current === boundary) return undefined;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+  return undefined;
+}
+
 interface GuardEvaluationContext {
   readonly canonicalEffectiveCwd: string;
   readonly ambientRelocations: readonly GitEnvRelocation[];
@@ -1116,6 +1158,26 @@ async function evaluateGitInvocation(
     repositoryTarget = await realpathNearestExistingAsync(repositoryTarget);
     if (!isWithinRoot(repositoryTarget, context.canonicalEffectiveCwd)) {
       return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, repositoryTarget);
+    }
+    // The directory git runs in is inside the boundary, but the repository it
+    // discovers from there may not be.
+    if (kind === 'cwd') {
+      let discovered: string | undefined;
+      try {
+        discovered = await resolveDiscoveredRepository(
+          repositoryTarget,
+          context.canonicalEffectiveCwd,
+        );
+      } catch {
+        return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, repositoryTarget);
+      }
+      if (discovered !== undefined) {
+        const canonicalDiscovered =
+          await realpathNearestExistingAsync(discovered);
+        if (!isWithinRoot(canonicalDiscovered, context.canonicalEffectiveCwd)) {
+          return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, canonicalDiscovered);
+        }
+      }
     }
   }
   return undefined;
@@ -1311,6 +1373,13 @@ async function evaluateCommandWithCwd(
             break;
           }
           if (isDynamicPathValue(target)) {
+            trackedCwd = undefined;
+            break;
+          }
+          if (analysis.physical && target.text.split(/[\\/]/).includes('..')) {
+            // Under `-P` the shell resolves `link/..` to the parent of the
+            // symlink's real target, which a lexical resolve would place back
+            // inside the boundary.
             trackedCwd = undefined;
             break;
           }
