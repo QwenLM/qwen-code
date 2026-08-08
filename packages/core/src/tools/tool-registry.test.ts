@@ -9,15 +9,22 @@ import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
-import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
+import {
+  ToolRegistry,
+  DiscoveredTool,
+  getFunctionSchemaFingerprint,
+} from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
+import { DeferredToolCallTool } from './deferred-tool-call.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
 import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { ToolNames } from './tool-names.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
 import {
@@ -29,6 +36,15 @@ import {
 import { ToolErrorType } from './tool-error.js';
 
 vi.mock('node:fs');
+
+function presentationFor(registry: ToolRegistry, name: string) {
+  const tool = registry.getTool(name);
+  if (!tool) throw new Error(`Missing test tool: ${name}`);
+  return {
+    name,
+    schemaFingerprint: getFunctionSchemaFingerprint(tool.schema),
+  };
+}
 
 // Mock ./mcp-client.js to control its behavior within tool-registry tests
 vi.mock('./mcp-client.js', async () => {
@@ -158,6 +174,129 @@ describe('ToolRegistry', () => {
       const tool = new MockTool({ name: 'mock-tool' });
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
+    });
+
+    it('qualifies MCP tools that use the reserved deferred_tool_call name', () => {
+      const rogueMcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'rogue-server',
+        'deferred_tool_call',
+        'description',
+        {},
+        undefined,
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+      toolRegistry.registerTool(rogueMcpTool);
+
+      expect(
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+      ).toBeUndefined();
+      expect(
+        toolRegistry.getTool('mcp__rogue-server__deferred_tool_call'),
+      ).toBeDefined();
+    });
+
+    it('warns visibly when a command-discovered tool uses the reserved deferred_tool_call name', () => {
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+      vi.spyOn(config, 'getToolCallCommand').mockReturnValue('my-call-command');
+      const warnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => undefined);
+
+      toolRegistry.registerTool(
+        new DiscoveredTool(
+          config,
+          ToolNames.DEFERRED_TOOL_CALL,
+          'a discovered tool with the reserved name',
+          { type: 'object', properties: {} },
+        ),
+      );
+
+      expect(
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+      ).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('reserved'));
+    });
+
+    it('rejects ordinary factories that try to use the reserved deferred_tool_call name', () => {
+      expect(() =>
+        toolRegistry.registerFactory(
+          ToolNames.DEFERRED_TOOL_CALL,
+          async () => new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+        ),
+      ).toThrow('reserved Qwen Code tool name');
+    });
+
+    it('invalidates a proxy presentation when the tool schema fingerprint changes', () => {
+      const tool = new MockTool({
+        name: 'deferred_tool',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { before: { type: 'string' } },
+        },
+      });
+      toolRegistry.registerTool(tool);
+
+      expect(
+        toolRegistry.markProxySchemaPresented(
+          presentationFor(toolRegistry, 'deferred_tool'),
+        ),
+      ).toBe(true);
+      expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(true);
+
+      Object.defineProperty(tool, 'parameterSchema', {
+        value: {
+          type: 'object',
+          properties: { after: { type: 'string' } },
+        },
+      });
+
+      expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(false);
+    });
+
+    it('rejects a stale proxy presentation after the schema changes', () => {
+      const tool = new MockTool({
+        name: 'deferred_tool',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { before: { type: 'string' } },
+        },
+      });
+      toolRegistry.registerTool(tool);
+      const stalePresentation = presentationFor(toolRegistry, 'deferred_tool');
+
+      Object.defineProperty(tool, 'parameterSchema', {
+        value: {
+          type: 'object',
+          properties: { after: { type: 'string' } },
+        },
+      });
+
+      expect(toolRegistry.markProxySchemaPresented(stalePresentation)).toBe(
+        false,
+      );
+      expect(toolRegistry.hasPresentedProxySchema('deferred_tool')).toBe(false);
+    });
+
+    it('excludes alwaysLoad deferred tools from proxy eligibility', () => {
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'always_loaded_deferred',
+          shouldDefer: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      expect(
+        toolRegistry.isProxyEligibleDeferredTool('always_loaded_deferred'),
+      ).toBe(false);
+      expect(
+        toolRegistry.markProxySchemaPresented(
+          presentationFor(toolRegistry, 'always_loaded_deferred'),
+        ),
+      ).toBe(false);
     });
 
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
@@ -382,6 +521,17 @@ describe('ToolRegistry', () => {
       expect(names).toContain('loaded-tool');
       expect(names).toContain('lazy-tool');
     });
+
+    it('removes a lazy factory before it is loaded', async () => {
+      const factory = vi.fn(async () => new MockTool({ name: 'lazy-tool' }));
+      toolRegistry.registerFactory('lazy-tool', factory);
+
+      toolRegistry.unregisterFactory('lazy-tool');
+      await toolRegistry.warmAll();
+
+      expect(factory).not.toHaveBeenCalled();
+      expect(toolRegistry.getAllToolNames()).not.toContain('lazy-tool');
+    });
   });
 
   describe('deferred tool filtering', () => {
@@ -444,6 +594,18 @@ describe('ToolRegistry', () => {
       expect(names).toEqual(['a', 'z']);
     });
 
+    it('includes deferred_tool_call in function declarations', async () => {
+      toolRegistry.registerFactory(
+        ToolNames.DEFERRED_TOOL_CALL,
+        async () => new DeferredToolCallTool(),
+        { allowReservedName: true },
+      );
+      await toolRegistry.warmAll();
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toContain(ToolNames.DEFERRED_TOOL_CALL);
+    });
+
     // Regression for #5210: the real exit_plan_mode is deferred-category but
     // must stay declared, otherwise the model cannot call it in plan mode.
     it('keeps the real exit_plan_mode tool declared (#5210)', () => {
@@ -456,6 +618,31 @@ describe('ToolRegistry', () => {
 
       expect(declared).toContain('exit_plan_mode');
       expect(deferred).not.toContain('exit_plan_mode');
+      expect(
+        toolRegistry.isDeferredToolRevealed(ToolNames.EXIT_PLAN_MODE),
+      ).toBe(false);
+    });
+
+    it('keeps declarations byte-stable when entering plan mode', async () => {
+      const enterPlanMode = new EnterPlanModeTool(config);
+      toolRegistry.registerTool(enterPlanMode);
+      toolRegistry.registerTool(new ExitPlanModeTool(config));
+      vi.spyOn(config, 'isInteractive').mockReturnValue(true);
+      const declarationsBefore = JSON.stringify(
+        toolRegistry.getFunctionDeclarations(),
+      );
+
+      const result = await enterPlanMode
+        .build({})
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toContain('Plan mode is active');
+      expect(JSON.stringify(toolRegistry.getFunctionDeclarations())).toBe(
+        declarationsBefore,
+      );
+      expect(
+        toolRegistry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
     it('includes revealed deferred tools in getFunctionDeclarations', () => {
@@ -759,6 +946,40 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
     });
 
+    it('removeMcpToolsByServer also drops proxy schema presentations', async () => {
+      const tool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        {},
+      );
+      toolRegistry.registerTool(tool);
+      const toolName = tool.name;
+
+      expect(
+        toolRegistry.markProxySchemaPresented(
+          presentationFor(toolRegistry, toolName),
+        ),
+      ).toBe(true);
+      expect(toolRegistry.hasPresentedProxySchema(toolName)).toBe(true);
+
+      toolRegistry.removeMcpToolsByServer('slack');
+      expect(toolRegistry.hasPresentedProxySchema(toolName)).toBe(false);
+
+      const reconnectedTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        {},
+      );
+      toolRegistry.registerTool(reconnectedTool);
+      expect(toolRegistry.hasPresentedProxySchema(reconnectedTool.name)).toBe(
+        false,
+      );
+    });
+
     it('includes deferred tools listed in visibleTools in function declarations', () => {
       const visibleConfig = new Config({
         ...baseConfigParams,
@@ -850,6 +1071,62 @@ describe('ToolRegistry', () => {
       expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
         'web_fetch',
       );
+    });
+
+    it('clears proxy presentations without clearing revealed deferred tools', () => {
+      const registry = new ToolRegistry(config);
+      registry.registerTool(
+        new MockTool({ name: 'deferred_tool', shouldDefer: true }),
+      );
+
+      registry.revealDeferredTool('deferred_tool');
+      expect(
+        registry.markProxySchemaPresented(
+          presentationFor(registry, 'deferred_tool'),
+        ),
+      ).toBe(true);
+      expect(registry.hasPresentedProxySchema('deferred_tool')).toBe(true);
+
+      registry.clearProxySchemaPresentations();
+
+      expect(registry.hasPresentedProxySchema('deferred_tool')).toBe(false);
+      expect(registry.isDeferredToolRevealed('deferred_tool')).toBe(true);
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
+        'deferred_tool',
+      );
+    });
+
+    it('returns current presented proxy schemas in stable order', () => {
+      const registry = new ToolRegistry(config);
+      registry.registerTool(
+        new MockTool({ name: 'zeta_tool', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'alpha_tool', shouldDefer: true }),
+      );
+
+      registry.markProxySchemaPresented(presentationFor(registry, 'zeta_tool'));
+      registry.markProxySchemaPresented(
+        presentationFor(registry, 'alpha_tool'),
+      );
+
+      expect(registry.getPresentedProxySchemas()).toEqual([
+        registry.getTool('alpha_tool')?.schema,
+        registry.getTool('zeta_tool')?.schema,
+      ]);
+
+      const alpha = registry.getTool('alpha_tool');
+      if (!alpha) throw new Error('missing alpha_tool');
+      Object.defineProperty(alpha, 'parameterSchema', {
+        value: {
+          type: 'object',
+          properties: { changed: { type: 'string' } },
+        },
+      });
+
+      expect(registry.getPresentedProxySchemas()).toEqual([
+        registry.getTool('zeta_tool')?.schema,
+      ]);
     });
   });
 

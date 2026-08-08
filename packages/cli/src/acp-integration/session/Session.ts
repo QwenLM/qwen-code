@@ -40,6 +40,7 @@ import type {
   ToolExecutionStatus,
   LoopTickResult,
   ToolArtifact,
+  DeferredToolPresentation,
   VisionBridgeResult,
   MemoryWriteCandidate,
   CronTaskDelivery,
@@ -57,6 +58,10 @@ import {
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
+  formatPermissionToolIdentity,
+  normalizeDeferredToolCallRequest,
+  providerToolName,
+  withPermissionToolIdentity,
   findRepeatedDuplicateProviderToolCall,
   markDuplicateProviderToolCallResponseSent,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -309,6 +314,17 @@ import {
 } from './daemon-todo-stop-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
+// Staged on the Content instance by reference. Any structuredClone, spread,
+// or serialization between staging and commit drops the state — that fails
+// closed (authorization lost, the model re-searches), so keep hand-offs of
+// the staged message reference-preserving rather than adding a clone.
+const DEFERRED_TOOL_PRESENTATIONS = Symbol('deferredToolPresentations');
+type ContentWithDeferredToolPresentations = Content & {
+  [DEFERRED_TOOL_PRESENTATIONS]?: {
+    presentations: readonly DeferredToolPresentation[];
+    committed: boolean;
+  };
+};
 const permissionRequestTails = new WeakMap<
   AgentSideConnection,
   Promise<void>
@@ -397,6 +413,7 @@ type RunToolResult = {
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+  deferredToolPresentations?: DeferredToolPresentation[];
 };
 
 type MidTurnDrainResult = {
@@ -2594,7 +2611,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const geminiClient = this.config.getGeminiClient()!;
+    const chat = geminiClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -2608,7 +2626,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    geminiClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.activeTodoPlanRevision = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
@@ -2672,10 +2690,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    this.config.getGeminiClient()!.setHistory(structuredClone(history));
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -3290,9 +3305,9 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
-                strippedOrphanEntries =
-                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
-                  null;
+                strippedOrphanEntries = this.config
+                  .getGeminiClient()!
+                  .stripOrphanedUserEntriesFromHistory();
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -3305,7 +3320,9 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              this.config
+                .getGeminiClient()!
+                .stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
               this.config
@@ -3544,7 +3561,7 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  this.#getCurrentChat().addHistory(nextMessage);
+                  this.#preserveUnsentMessageHistory(nextMessage, true);
                   return { stopReason: 'cancelled' };
                 }
 
@@ -3582,6 +3599,9 @@ export class Session implements SessionContext {
                     return { stopReason: sendResult.stopReason };
                   }
                   const responseStream = sendResult.responseStream;
+                  this.commitDeferredToolPresentationsForDeliveredMessage(
+                    nextMessage,
+                  );
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(channelDeliveryCapture);
@@ -4526,10 +4546,13 @@ export class Session implements SessionContext {
           const preservedParts = (messageForPreservation.parts ?? []).filter(
             (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
           );
-          this.#preserveUnsentMessageHistory(
+          const preservedMessage =
             preservedParts.length > 0
               ? { ...messageForPreservation, parts: preservedParts }
-              : null,
+              : null;
+          this.reattachDeferredToolPresentations(nextMessage, preservedMessage);
+          this.#preserveUnsentMessageHistory(
+            preservedMessage,
             sendResult.stopReason === 'cancelled' ||
               preservePreparedMessageOnSkippedSend,
           );
@@ -4543,6 +4566,7 @@ export class Session implements SessionContext {
         }
 
         const responseStream = sendResult.responseStream;
+        this.commitDeferredToolPresentationsForDeliveredMessage(nextMessage);
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.channelDeliveryCapture,
@@ -5099,7 +5123,7 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    const responseStream = await this.#getCurrentChat().sendMessageStream(
+    const rawResponseStream = await this.#getCurrentChat().sendMessageStream(
       options.getModelOverride?.() ??
         options.modelOverride ??
         this.config.getModel(),
@@ -5111,6 +5135,15 @@ export class Session implements SessionContext {
       },
       promptId,
     );
+    const toolRegistry = this.config.getToolRegistry();
+    const responseStream = (async function* () {
+      for await (const event of rawResponseStream) {
+        if (event.type === StreamEventType.COMPRESSED) {
+          toolRegistry.clearProxySchemaPresentations();
+        }
+        yield event;
+      }
+    })();
     return { responseStream };
   }
 
@@ -5119,6 +5152,13 @@ export class Session implements SessionContext {
     preserveFullMessage: boolean,
   ): void {
     if (!message) return;
+
+    // Preserved messages cross the same active-history boundary as messages
+    // accepted by sendMessageStream. Commit any ToolSearch presentation staged
+    // on the message before adding it to history so a later deferred call does
+    // not fail closed after cancellation, prompt supersession, or guard
+    // exhaustion.
+    this.commitDeferredToolPresentationsForDeliveredMessage(message);
 
     if (preserveFullMessage) {
       this.#getCurrentChat().addHistory(message);
@@ -5157,18 +5197,19 @@ export class Session implements SessionContext {
           { preserveFallbackOnAbort: true },
         )
       : await this.#drainMidTurnUserMessages(abortSignal);
-    this.#preserveUnsentMessageHistory(
-      {
-        role: 'user',
-        parts: [
-          ...toolRun.parts,
-          ...(toolRun.loopDetected
-            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
-            : []),
-          ...midTurnParts,
-        ],
-      },
-      true,
+    const message: Content = {
+      role: 'user',
+      parts: [
+        ...toolRun.parts,
+        ...(toolRun.loopDetected
+          ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+          : []),
+        ...midTurnParts,
+      ],
+    };
+    this.#preserveUnsentMessageHistory(message, true);
+    this.commitDeferredToolPresentations(
+      toolRun.deferredToolPresentations ?? [],
     );
     await this.messageRewriter?.waitForPendingRewrites();
   }
@@ -5203,8 +5244,10 @@ export class Session implements SessionContext {
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
       ...drained.parts,
     ];
+    const message: Content = { role: 'user', parts };
+    this.trackDeferredToolPresentationsForMessage(message, toolRun);
     return {
-      message: { role: 'user', parts },
+      message,
       hadMidTurnUserInput,
     };
   }
@@ -5995,6 +6038,9 @@ export class Session implements SessionContext {
                   beginChannelDeliveryResponseBlock(channelDeliveryCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.length ?? 0;
+                this.commitDeferredToolPresentationsForDeliveredMessage(
+                  nextMessage,
+                );
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -6605,6 +6651,9 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            this.commitDeferredToolPresentationsForDeliveredMessage(
+              nextMessage,
+            );
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -7246,14 +7295,34 @@ export class Session implements SessionContext {
           persistedOutputFiles: record.persistedOutputFiles,
         })),
       );
+      const deliveredPresentations: DeferredToolPresentation[] = [];
       orderedRecords.forEach((record, index) => {
+        const finalizedParts = finalized[index].responseParts;
+        const responseChanged =
+          finalizedParts.length !== record.responseParts.length ||
+          finalizedParts.some(
+            (part, partIndex) => part !== record.responseParts[partIndex],
+          );
+        const recordPresentations = responseChanged
+          ? undefined
+          : record.metadata.deferredToolPresentations;
+        if (recordPresentations) {
+          deliveredPresentations.push(...recordPresentations);
+        }
         this.config
           .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, record.metadata);
+          ?.recordToolResult(finalizedParts, {
+            ...record.metadata,
+            deferredToolPresentations: recordPresentations,
+          });
       });
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
+        deferredToolPresentations:
+          deliveredPresentations.length > 0
+            ? deliveredPresentations
+            : undefined,
       };
     };
     let skippedToolCallCounter = 0;
@@ -7639,8 +7708,8 @@ export class Session implements SessionContext {
       return results;
     };
 
-    const parts: Part[] = [];
-    try {
+    const buildRunToolResult = async (): Promise<RunToolResult> => {
+      const parts: Part[] = [];
       for (const batch of batches) {
         if (batch.kind === 'duplicate') {
           await emitDuplicateBatch(batch);
@@ -7772,9 +7841,96 @@ export class Session implements SessionContext {
         repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
       });
-    } finally {
+    };
+
+    let result: RunToolResult;
+    try {
+      result = await buildRunToolResult();
+    } catch (error) {
       await refreshMemoryIfNeeded();
+      throw error;
     }
+    await refreshMemoryIfNeeded();
+    return result;
+  }
+
+  private commitDeferredToolPresentations(
+    presentations: readonly DeferredToolPresentation[],
+  ): void {
+    const toolRegistry = this.config.getToolRegistry();
+    for (const presentation of presentations) {
+      toolRegistry.markProxySchemaPresented(presentation);
+    }
+  }
+
+  /**
+   * Stage proxy presentations on the exact user message that carries their
+   * function responses. A ToolSearch result only unlocks deferred_tool_call
+   * after that message is accepted into the active model history; keeping the
+   * metadata off the session-global registry until delivery prevents dropped
+   * or aborted responses from authorizing a schema the model never saw.
+   */
+  private trackDeferredToolPresentationsForMessage(
+    message: Content | null,
+    toolRun: RunToolResult,
+  ): void {
+    const presentations = toolRun.deferredToolPresentations;
+    if (!message || !presentations || presentations.length === 0) {
+      return;
+    }
+    (message as ContentWithDeferredToolPresentations)[
+      DEFERRED_TOOL_PRESENTATIONS
+    ] = { presentations, committed: false };
+  }
+
+  /**
+   * Commit staged presentations after the associated message has crossed the
+   * active-history boundary. This preserves the same-batch rule: a batch that
+   * contains both tool_search and deferred_tool_call cannot self-authorize, but
+   * the next model turn can use the proxy once the ToolSearch response is part
+   * of history.
+   */
+  private commitDeferredToolPresentationsForDeliveredMessage(
+    message: Content | null,
+  ): void {
+    if (!message) {
+      return;
+    }
+    const stagedMessage = message as ContentWithDeferredToolPresentations;
+    const state = stagedMessage[DEFERRED_TOOL_PRESENTATIONS];
+    if (!state || state.committed) {
+      return;
+    }
+    state.committed = true;
+    delete stagedMessage[DEFERRED_TOOL_PRESENTATIONS];
+    this.commitDeferredToolPresentations(state.presentations);
+  }
+
+  /**
+   * The skipped-send preserve path rebuilds the preserved message from its
+   * parts, which drops the presentation symbol staged on the original
+   * message. Reattach it so the commit inside #preserveUnsentMessageHistory
+   * fires — but only when the preserved message still carries the staged
+   * message's functionResponse parts, so a path that drops the tool results
+   * keeps the schema fail-closed instead of authorizing it.
+   */
+  private reattachDeferredToolPresentations(
+    stagedMessage: Content | null,
+    preservedMessage: Content | null,
+  ): void {
+    if (!stagedMessage || !preservedMessage) return;
+    const state = (stagedMessage as ContentWithDeferredToolPresentations)[
+      DEFERRED_TOOL_PRESENTATIONS
+    ];
+    if (!state || state.committed) return;
+    const stagedParts = stagedMessage.parts ?? [];
+    const carriesStagedToolResult = (preservedMessage.parts ?? []).some(
+      (part) => 'functionResponse' in part && stagedParts.includes(part),
+    );
+    if (!carriesStagedToolResult) return;
+    (preservedMessage as ContentWithDeferredToolPresentations)[
+      DEFERRED_TOOL_PRESENTATIONS
+    ] = state;
   }
 
   /**
@@ -7830,6 +7986,9 @@ export class Session implements SessionContext {
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
+    let responseToolName = fc.name ?? 'unknown_tool';
+    let telemetryToolName = fc.name ?? '';
+    let telemetryProviderName: string | undefined;
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
@@ -7849,7 +8008,7 @@ export class Session implements SessionContext {
             : {
                 functionResponse: {
                   id: callId,
-                  name: fc.name ?? 'unknown_tool',
+                  name: responseToolName,
                   response: { error: LOOP_DETECTED_SKIP_MESSAGE },
                 },
               },
@@ -7888,6 +8047,9 @@ export class Session implements SessionContext {
           call_id: callId,
           prompt_id: promptId,
           function_name: toolName,
+          ...(telemetryProviderName
+            ? { 'tool.provider_name': telemetryProviderName }
+            : {}),
           function_args: args,
           duration_ms: durationMs,
           status,
@@ -7913,7 +8075,7 @@ export class Session implements SessionContext {
         {
           functionResponse: {
             id: callId,
-            name: toolName,
+            name: responseToolName,
             response: { error: error.message },
           },
         },
@@ -8016,9 +8178,42 @@ export class Session implements SessionContext {
       );
     }
 
-    const toolName = fc.name;
     const toolRegistry = this.config.getToolRegistry();
-    const tool = toolRegistry.getTool(toolName);
+    const requestInfo: ToolCallRequestInfo = {
+      callId,
+      name: fc.name,
+      args,
+      isClientInitiated: false,
+      prompt_id: promptId,
+    };
+    const normalizedRequest = await normalizeDeferredToolCallRequest(
+      requestInfo,
+      toolRegistry,
+    );
+    if (!normalizedRequest.ok) {
+      // Failure still has three distinct identities: responses must use the
+      // provider-declared wrapper, while telemetry/retry isolation use the
+      // attempted target and recordings retain the structured error type.
+      responseToolName = normalizedRequest.providerName;
+      telemetryProviderName = normalizedRequest.providerName;
+      telemetryToolName =
+        normalizedRequest.targetName ?? normalizedRequest.providerName;
+      return earlyErrorResponse(normalizedRequest.error, telemetryToolName, {
+        status: 'error',
+        errorType: normalizedRequest.errorType,
+        executionStatus: 'not_started',
+        recordInvalidToolParams: true,
+      });
+    }
+
+    const effectiveRequest = normalizedRequest.request;
+    const toolName = effectiveRequest.name;
+    args = effectiveRequest.args;
+    responseToolName = providerToolName(effectiveRequest);
+    telemetryToolName = toolName;
+    telemetryProviderName = effectiveRequest.providerName;
+    const tool =
+      normalizedRequest.resolvedTool ?? toolRegistry.getTool(toolName);
 
     if (!tool) {
       return earlyErrorResponse(
@@ -8046,6 +8241,9 @@ export class Session implements SessionContext {
       {
         'tool.call_id': callId,
         'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
+        ...(telemetryProviderName
+          ? { 'tool.provider_name': telemetryProviderName }
+          : {}),
         // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
         // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
         // matching daemon/ACP tool spans during the migration window.
@@ -8080,7 +8278,9 @@ export class Session implements SessionContext {
         if (enablementCancellation) return enablementCancellation;
         if (pm && !toolEnabled) {
           return earlyErrorResponse(
-            new Error(`Tool "${toolName}" is disabled.`),
+            new Error(
+              `Tool ${formatPermissionToolIdentity(effectiveRequest)} is disabled.`,
+            ),
             toolName,
             {
               status: 'error',
@@ -8226,7 +8426,11 @@ export class Session implements SessionContext {
 
           if (finalPermission === 'deny') {
             return earlyErrorResponse(
-              new Error(denyMessage ?? `Tool "${toolName}" is denied.`),
+              new Error(
+                denyMessage
+                  ? withPermissionToolIdentity(denyMessage, effectiveRequest)
+                  : `Tool ${formatPermissionToolIdentity(effectiveRequest)} is denied.`,
+              ),
               toolName,
               {
                 status: 'error',
@@ -8659,8 +8863,12 @@ export class Session implements SessionContext {
                 } else {
                   return earlyErrorResponse(
                     new Error(
-                      hookResult.denyMessage ||
-                        `Permission denied by hook for "${toolName}"`,
+                      hookResult.denyMessage
+                        ? withPermissionToolIdentity(
+                            hookResult.denyMessage,
+                            effectiveRequest,
+                          )
+                        : `Permission denied by hook for ${formatPermissionToolIdentity(effectiveRequest)}`,
                     ),
                     toolName,
                     {
@@ -9294,20 +9502,20 @@ export class Session implements SessionContext {
           // Create response parts first (needed for emitResult and recordToolResult)
           let responseParts = aborted
             ? convertToFunctionErrorResponse(
-                toolName,
+                responseToolName,
                 callId,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
               )
             : toolResult.error
               ? convertToFunctionErrorResponse(
-                  toolName,
+                  responseToolName,
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
                 )
               : convertToFunctionResponse(
-                  toolName,
+                  responseToolName,
                   callId,
                   toolResult.llmContent,
                 );
@@ -9464,7 +9672,7 @@ export class Session implements SessionContext {
           ) {
             status = 'cancelled';
             responseParts = convertToFunctionErrorResponse(
-              toolName,
+              responseToolName,
               callId,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
@@ -9534,6 +9742,9 @@ export class Session implements SessionContext {
               'event.timestamp': new Date().toISOString(),
               call_id: callId,
               function_name: toolName,
+              ...(telemetryProviderName
+                ? { 'tool.provider_name': telemetryProviderName }
+                : {}),
               function_args: args,
               duration_ms: durationMs,
               status,
@@ -9574,9 +9785,11 @@ export class Session implements SessionContext {
                   ? new Error(toolResult.error.message)
                   : undefined,
               errorType: status === 'error' ? executionErrorType : undefined,
+              deferredToolPresentations: succeeded
+                ? toolResult.deferredToolPresentations
+                : undefined,
             },
           });
-
           if (succeeded && !nestedPermissionCancelled) {
             const result = responseParts.find(
               (part) => part.functionResponse !== undefined,
@@ -9607,6 +9820,9 @@ export class Session implements SessionContext {
                     },
                   ]
                 : undefined,
+            deferredToolPresentations: succeeded
+              ? toolResult.deferredToolPresentations
+              : undefined,
           };
         } catch (e) {
           const error = e instanceof Error ? e : new Error(String(e));

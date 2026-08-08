@@ -452,6 +452,158 @@ describe('useGeminiStream', () => {
     };
   };
 
+  describe('stream context acceptance', () => {
+    it('accepts context once after the first normal stream event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'first',
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'second',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).toHaveBeenCalledOnce();
+      expect(onDelivered).toHaveBeenCalledOnce();
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+    });
+
+    it('reports delivery failure when the stream ends without events', async () => {
+      mockSendMessageStream.mockReturnValue((async function* () {})());
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      {
+        caseName: 'an error event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Error,
+              value: { error: { message: 'provider error' } },
+            };
+          })(),
+      },
+      {
+        caseName: 'a cancellation event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.UserCancelled };
+          })(),
+      },
+      {
+        caseName: 'a local maximum-turns event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.MaxSessionTurns };
+          })(),
+      },
+      {
+        caseName: 'a local session-token-limit event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.SessionTokenLimitExceeded,
+              value: {
+                currentTokens: 200,
+                limit: 100,
+                message: 'limit reached before send',
+              },
+            };
+          })(),
+      },
+      {
+        caseName: 'a retry control event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.Retry };
+          })(),
+      },
+      {
+        caseName: 'a model-fallback control event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ModelFallback,
+              fromModel: 'primary',
+              toModel: 'fallback',
+              fallbackIndex: 1,
+            };
+          })(),
+      },
+      {
+        caseName: 'a locally generated loop-detection event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.LoopDetected,
+              value: { loopType: 'consecutive_identical_tool_calls' },
+            };
+          })(),
+      },
+      {
+        caseName: 'a thrown stream error',
+        createStream: () =>
+          // eslint-disable-next-line require-yield
+          (async function* () {
+            throw new Error('stream failed');
+          })(),
+      },
+    ])('does not accept context after $caseName', async ({ createStream }) => {
+      mockSendMessageStream.mockReturnValue(createStream());
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+  });
+
   it('sends a hidden Goal turn without user admission side effects', async () => {
     const permit = {
       goalId: 'goal-1',
@@ -1290,6 +1442,11 @@ describe('useGeminiStream', () => {
   });
 
   it('expands autonomous loop wakeup sentinels before queuing them', async () => {
+    mockSendMessageStream.mockImplementation(() =>
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'done' };
+      })(),
+    );
     let schedulerCallback:
       | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)
       | null = null;
@@ -1591,7 +1748,7 @@ describe('useGeminiStream', () => {
 
     // Capture the onComplete callback
     let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
       | null = null;
 
     mockUseReactToolScheduler.mockImplementation((onComplete) => {
@@ -1645,6 +1802,274 @@ describe('useGeminiStream', () => {
       'prompt-id-2',
       { type: SendMessageType.ToolResult },
     );
+  });
+
+  it('persists and commits only deferred schemas preserved by finalization', async () => {
+    const recordToolResult = vi.fn();
+    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+    mockConfig.getChatRecordingService = vi.fn(() => ({
+      recordToolResult,
+    })) as Config['getChatRecordingService'];
+    mockConfig.getToolRegistry = vi.fn(
+      () =>
+        ({
+          getToolSchemaList: vi.fn(() => []),
+          markProxySchemaPresented,
+        }) as any,
+    );
+
+    const keptParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'search-kept',
+          name: 'tool_search',
+          response: { output: '<functions>kept</functions>' },
+        },
+      },
+    ];
+    const replacedParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'search-replaced',
+          name: 'tool_search',
+          response: { output: 'Tool output truncated.' },
+        },
+      },
+    ];
+    const keptPresentation = {
+      name: 'mcp__weather__forecast',
+      schemaFingerprint: 'kept-schema',
+    };
+    const replacedPresentation = {
+      name: 'mcp__weather__history',
+      schemaFingerprint: 'replaced-schema',
+    };
+    const completedToolCalls = [
+      {
+        request: {
+          callId: 'search-kept',
+          name: 'tool_search',
+          args: { query: 'forecast' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-deferred-presentations',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'search-kept',
+          responseParts: keptParts,
+          deferredToolPresentations: [keptPresentation],
+        },
+        tool: { displayName: 'Tool Search' },
+        invocation: {
+          getDescription: () => 'search for forecast',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+      {
+        request: {
+          callId: 'search-replaced',
+          name: 'tool_search',
+          args: { query: 'history' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-deferred-presentations',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'search-replaced',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'search-replaced',
+                name: 'tool_search',
+                response: { output: '<functions>replaced</functions>' },
+              },
+            },
+          ],
+          deferredToolPresentations: [replacedPresentation],
+        },
+        tool: { displayName: 'Tool Search' },
+        invocation: {
+          getDescription: () => 'search for history',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    mockFinalizeToolResponses.mockResolvedValueOnce([
+      { responseParts: keptParts },
+      { responseParts: replacedParts },
+    ]);
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'accepted' };
+      })(),
+    );
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let accepted: boolean | void;
+    await act(async () => {
+      if (capturedOnComplete) {
+        accepted = await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    expect(accepted).toBe(true);
+    expect(recordToolResult).toHaveBeenNthCalledWith(
+      1,
+      keptParts,
+      expect.objectContaining({
+        callId: 'search-kept',
+        deferredToolPresentations: [keptPresentation],
+      }),
+      undefined,
+    );
+    expect(recordToolResult.mock.calls[1][1]).toHaveProperty(
+      'deferredToolPresentations',
+      undefined,
+    );
+    expect(markProxySchemaPresented).toHaveBeenCalledOnce();
+    expect(markProxySchemaPresented).toHaveBeenCalledWith(keptPresentation);
+    expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
+      ...keptParts,
+      ...replacedParts,
+    ]);
+  });
+
+  it('does not commit staged deferred schemas when delivery is rejected', async () => {
+    const recordToolResult = vi.fn();
+    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+    mockConfig.getChatRecordingService = vi.fn(() => ({
+      recordToolResult,
+    })) as Config['getChatRecordingService'];
+    mockConfig.getToolRegistry = vi.fn(
+      () =>
+        ({
+          getToolSchemaList: vi.fn(() => []),
+          markProxySchemaPresented,
+        }) as any,
+    );
+
+    const searchParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'search-rejected',
+          name: 'tool_search',
+          response: { output: '<functions>never delivered</functions>' },
+        },
+      },
+    ];
+    const stagedPresentation = {
+      name: 'mcp__weather__forecast',
+      schemaFingerprint: 'undelivered-schema',
+    };
+    const completedToolCalls = [
+      {
+        request: {
+          callId: 'search-rejected',
+          name: 'tool_search',
+          args: { query: 'forecast' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-deferred-rejected',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'search-rejected',
+          responseParts: searchParts,
+          deferredToolPresentations: [stagedPresentation],
+        },
+        tool: { displayName: 'Tool Search' },
+        invocation: {
+          getDescription: () => 'search for forecast',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    mockFinalizeToolResponses.mockResolvedValueOnce([
+      { responseParts: searchParts },
+    ]);
+    // The provider rejected the request, so the schema-bearing tool result
+    // never entered active history; the staged presentation must not be
+    // committed.
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Error,
+          value: { error: { message: 'provider error' } },
+        };
+      })(),
+    );
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let accepted: boolean | void;
+    await act(async () => {
+      if (capturedOnComplete) {
+        accepted = await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    expect(accepted).toBe(false);
+    expect(markProxySchemaPresented).not.toHaveBeenCalled();
   });
 
   it('forwards one exact Goal context across a ToolResult batch', async () => {
@@ -2117,6 +2542,18 @@ describe('useGeminiStream', () => {
     mockConfig.getGoalRuntime = vi.fn(() => runtime);
     mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+    mockConfig.getToolRegistry = vi.fn(
+      () =>
+        ({
+          getToolSchemaList: vi.fn(() => []),
+          markProxySchemaPresented,
+        }) as any,
+    );
+    const goalPresentation = {
+      name: 'mcp__weather__forecast',
+      schemaFingerprint: 'goal-schema',
+    };
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
       | null = null;
@@ -2176,6 +2613,7 @@ describe('useGeminiStream', () => {
             responseParts,
             errorType: undefined,
             terminateTurn: true,
+            deferredToolPresentations: [goalPresentation],
           },
           tool: { displayName: 'UpdateGoal' },
           invocation: {
@@ -2190,6 +2628,9 @@ describe('useGeminiStream', () => {
       role: 'user',
       parts: responseParts,
     });
+    // The terminating path adds tool results to history without another
+    // submitQuery, so staged ToolSearch presentations must still commit.
+    expect(markProxySchemaPresented).toHaveBeenCalledWith(goalPresentation);
     expect(flush).toHaveBeenCalledOnce();
     expect(finishTurn).toHaveBeenCalledWith(permit);
     expect(mockAddItem).toHaveBeenCalledWith(
@@ -2484,6 +2925,11 @@ describe('useGeminiStream', () => {
   });
 
   it('records mid-turn queued user messages after tool results accept them', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -3066,6 +3512,11 @@ describe('useGeminiStream', () => {
   });
 
   it('resolves mid-turn @ image messages before submitting tool results', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'inspect @/tmp/screenshot.png';
     const resolvedImagePart: Part = {
       inlineData: {
@@ -3243,6 +3694,11 @@ describe('useGeminiStream', () => {
   });
 
   it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
     const resolvedImagePart: Part = {
       inlineData: {
@@ -3978,6 +4434,11 @@ describe('useGeminiStream', () => {
   });
 
   it('handles mid-turn drain when chat recording is not configured', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'save the logs locally first';
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
     const toolCallResponseParts: Part[] = [
@@ -4819,11 +5280,13 @@ describe('useGeminiStream', () => {
       ),
     );
 
+    let completionAccepted: boolean | void;
     await act(async () => {
       if (capturedOnComplete) {
-        await capturedOnComplete([lateRealResult]);
+        completionAccepted = await capturedOnComplete([lateRealResult]);
       }
     });
+    expect(completionAccepted).toBe(false);
 
     await waitFor(() => {
       // The dedup hit must `markToolsAsSubmitted` so the UI/scheduler is
@@ -5118,11 +5581,15 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
 
     // Now fire the deduped completion while isResponding=true.
+    let activeStreamCompletionAccepted: boolean | void;
     await act(async () => {
       if (capturedOnComplete) {
-        await capturedOnComplete([lateRealResult]);
+        activeStreamCompletionAccepted = await capturedOnComplete([
+          lateRealResult,
+        ]);
       }
     });
+    expect(activeStreamCompletionAccepted).toBe(false);
 
     // The dedup MUST still fire — markToolsAsSubmitted called with the
     // deduped callId — even though the active-stream guard would
@@ -5196,7 +5663,11 @@ describe('useGeminiStream', () => {
     const heldStream = (async function* () {
       await holdStream;
     })();
-    mockSendMessageStream.mockReturnValue(heldStream);
+    mockSendMessageStream.mockReturnValueOnce(heldStream).mockReturnValueOnce(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'done' };
+      })(),
+    );
 
     const { result } = renderHook(() =>
       useGeminiStream(
@@ -5243,11 +5714,17 @@ describe('useGeminiStream', () => {
     });
 
     const staleCompletedOnComplete = staleOnComplete as
-      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | ((
+          completedTools: TrackedCompletedToolCall[],
+        ) => Promise<boolean | void>)
       | null;
+    let staleCompletionAccepted: boolean | void;
     await act(async () => {
-      await staleCompletedOnComplete?.([fastFailedTool]);
+      staleCompletionAccepted = await staleCompletedOnComplete?.([
+        fastFailedTool,
+      ]);
     });
+    expect(staleCompletionAccepted).toBe(true);
 
     await waitFor(() => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);

@@ -9,7 +9,6 @@ import type { Mock } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
 import type {
   AnyDeclarativeTool,
-  ChatRecordingService,
   Config,
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
@@ -79,6 +78,7 @@ import {
   runWithAgentContext,
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
+import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import {
@@ -805,7 +805,7 @@ describe('CoreToolScheduler', () => {
     getPlanFilePath?: () => string;
     truncateToolOutputThreshold?: number;
     truncateToolOutputLines?: number;
-    chatRecordingService?: ChatRecordingService;
+    chatRecordingService?: Pick<ChatRecordingService, 'recordToolResult'>;
     visionBridge?: boolean;
     visionAgent?: boolean;
     onToolResultFullTurnModel?: (model: string) => boolean;
@@ -813,6 +813,7 @@ describe('CoreToolScheduler', () => {
       promptId: string,
       fallbackOwner?: string,
     ) => string;
+    presentedProxySchemas?: Set<string>;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -832,6 +833,20 @@ describe('CoreToolScheduler', () => {
       getAllTools: () => [...options.toolsByName.values()],
       getToolsByServer: () => [],
       getAllToolNames: () => [...options.toolsByName.keys()],
+      isDeferredProxyPairRegistered: () => true,
+      isProxyEligibleDeferredTool: (name: string) => {
+        const tool = options.toolsByName.get(name);
+        return !!(tool && tool.shouldDefer && !tool.alwaysLoad);
+      },
+      hasPresentedProxySchema: (name: string) =>
+        options.presentedProxySchemas?.has(name) ?? false,
+      markProxySchemaPresented: (presentation: {
+        name: string;
+        schemaFingerprint: string;
+      }) => {
+        options.presentedProxySchemas?.add(presentation.name);
+        return true;
+      },
     } as unknown as ToolRegistry;
 
     const onAllToolCallsComplete = options.onAllToolCallsComplete ?? vi.fn();
@@ -913,9 +928,11 @@ describe('CoreToolScheduler', () => {
         ? undefined
         : onAllToolCallsComplete,
       onToolCallsUpdate,
+      chatRecordingService: options.chatRecordingService as
+        | ChatRecordingService
+        | undefined,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
-      chatRecordingService: options.chatRecordingService,
       onToolResultFullTurnModel: options.onToolResultFullTurnModel,
     });
 
@@ -1927,6 +1944,731 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('normalizes deferred_tool_call to the real target while responding with the proxy name', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'cron created',
+      returnDisplay: 'cron created',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-1',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    expect(ensureTool).toHaveBeenCalledWith(ToolNames.CRON_CREATE);
+    expect(execute).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.request.name).toBe(ToolNames.CRON_CREATE);
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
+  it('validates deferred_tool_call arguments against the real target schema', async () => {
+    const execute = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: {
+              schedule: { type: 'string' },
+            },
+            required: ['schedule'],
+            additionalProperties: false,
+          },
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-invalid-target-arguments',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: {},
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.request.name).toBe(ToolNames.CRON_CREATE);
+      expect(completedCall.request.providerName).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(completedCall.response.error?.message).toContain('schedule');
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
+  it('rejects deferred_tool_call when the target schema was not presented', async () => {
+    const execute = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-missing-presentation',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+      expect(completedCall.response.error?.message).toContain(
+        'has not been fetched',
+      );
+    }
+  });
+
+  it('keeps processing a batch when deferred target loading fails', async () => {
+    const readExecute = vi.fn().mockResolvedValue({
+      llmContent: 'read ok',
+      returnDisplay: 'read ok',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.READ_FILE,
+        new MockTool({
+          name: ToolNames.READ_FILE,
+          execute: readExecute,
+        }),
+      ],
+    ]);
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+      });
+    ensureTool.mockImplementation(async (name: string) => {
+      if (name === ToolNames.CRON_CREATE) {
+        throw new Error('factory exploded');
+      }
+      return toolsByName.get(name) as AnyDeclarativeTool;
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'proxy-load-fail',
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+          isClientInitiated: false,
+          prompt_id: 'prompt-proxy',
+        },
+        {
+          callId: 'read-after-fail',
+          name: ToolNames.READ_FILE,
+          args: { path: 'README.md' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-read',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(readExecute).toHaveBeenCalledWith({ path: 'README.md' });
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls.map((call) => call.status)).toEqual([
+      'error',
+      'success',
+    ]);
+    const failedCall = completedCalls[0];
+    expect(failedCall.status).toBe('error');
+    if (failedCall.status === 'error') {
+      expect(failedCall.response.error?.message).toContain(
+        'Failed to load deferred tool "cron_create": factory exploded',
+      );
+      expect(failedCall.response.responseParts[0].functionResponse?.name).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+    }
+  });
+
+  it('rejects deferred_tool_call self-target recursion', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName: new Map() });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-recursive',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          arguments: {},
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+      expect(completedCall.response.error?.message).toContain(
+        'cannot target itself',
+      );
+    }
+  });
+
+  it.each([
+    [
+      'missing name',
+      { arguments: { schedule: '0 9 * * *' } },
+      'must be the exact deferred tool name',
+    ],
+    [
+      'empty name',
+      { name: '   ', arguments: { schedule: '0 9 * * *' } },
+      'must be the exact deferred tool name',
+    ],
+    [
+      'non-object arguments',
+      { name: ToolNames.CRON_CREATE, arguments: 'not-an-object' },
+      'must be an object',
+    ],
+    [
+      'array arguments',
+      { name: ToolNames.CRON_CREATE, arguments: [] },
+      'must be an object',
+    ],
+    [
+      'null arguments',
+      { name: ToolNames.CRON_CREATE, arguments: null },
+      'must be an object',
+    ],
+  ])(
+    'rejects malformed deferred_tool_call envelope: %s',
+    async (_caseName, args, expectedMessage) => {
+      const execute = vi.fn();
+      const toolsByName = new Map<string, MockTool>([
+        [
+          ToolNames.CRON_CREATE,
+          new MockTool({
+            name: ToolNames.CRON_CREATE,
+            shouldDefer: true,
+            execute,
+          }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName,
+          presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+        });
+
+      await scheduler.schedule(
+        {
+          callId: 'proxy-malformed',
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: args as Record<string, unknown>,
+          isClientInitiated: false,
+          prompt_id: 'prompt-proxy',
+        },
+        new AbortController().signal,
+      );
+
+      expect(execute).not.toHaveBeenCalled();
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('error');
+      if (completedCall.status === 'error') {
+        expect(
+          completedCall.response.responseParts[0].functionResponse?.name,
+        ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+        expect(completedCall.response.error?.message).toContain(
+          expectedMessage,
+        );
+      }
+    },
+  );
+
+  it('shows target and proxy identities in deferred permission denial text', async () => {
+    const execute = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+        getPermissionsDeny: () => [ToolNames.CRON_CREATE],
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-denied',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe(
+        'Qwen Code requires permission to use "cron_create" via "deferred_tool_call", but that permission was declined.',
+      );
+      expect(completedCall.response.resultDisplay).toBe(
+        completedCall.response.error?.message,
+      );
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
+  it('shows the real target identity when a proxied call awaits confirmation', async () => {
+    const getConfirmationDetails = vi.fn().mockResolvedValue({
+      type: 'exec' as const,
+      title: 'Confirm cron_create',
+      command: 'create cron',
+      rootCommand: 'cron_create',
+      onConfirm: async () => {},
+    });
+    const execute = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          getDefaultPermission: async () => 'ask',
+          getConfirmationDetails,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      approvalMode: ApprovalMode.DEFAULT,
+      presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-confirm',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy',
+      },
+      new AbortController().signal,
+    );
+
+    const latestCalls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[];
+    const waitingCall = latestCalls.find(
+      (call): call is WaitingToolCall =>
+        call.request.callId === 'proxy-confirm' &&
+        call.status === 'awaiting_approval',
+    );
+    expect(waitingCall).toBeDefined();
+    expect(waitingCall?.request.name).toBe(ToolNames.CRON_CREATE);
+    expect(waitingCall?.request.args).toEqual({ schedule: '0 9 * * *' });
+    expect(waitingCall?.request.providerName).toBe(
+      ToolNames.DEFERRED_TOOL_CALL,
+    );
+    expect(waitingCall?.confirmationDetails.title).toBe('Confirm cron_create');
+    expect(getConfirmationDetails).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('commits deferred tool presentations after successful tool call finalization', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const recordToolResult = vi.fn();
+    const presentation = {
+      name: ToolNames.CRON_CREATE,
+      schemaFingerprint: 'schema',
+    };
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '<functions>...</functions>',
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [presentation],
+          }),
+        }),
+      ],
+    ]);
+    let committedAtCallbackTime: boolean | undefined;
+    const onAllToolCallsComplete = vi.fn().mockImplementation(async () => {
+      // Capture instead of asserting in-callback: the scheduler swallows
+      // callback rejections, so an in-callback assertion cannot fail the
+      // test when the commit ordering regresses.
+      committedAtCallbackTime = presentedProxySchemas.has(
+        ToolNames.CRON_CREATE,
+      );
+    });
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      presentedProxySchemas,
+      onAllToolCallsComplete,
+      chatRecordingService: { recordToolResult },
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'tool-search-commit',
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-search',
+      },
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    expect(committedAtCallbackTime).toBe(false);
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'tool-search-commit',
+        deferredToolPresentations: [presentation],
+      }),
+    );
+  });
+
+  it('does not commit deferred tool presentations when completion callback throws', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const recordToolResult = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '<functions>...</functions>',
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [
+              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+            ],
+          }),
+        }),
+      ],
+    ]);
+    const onAllToolCallsComplete = vi.fn().mockRejectedValue(new Error('boom'));
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      presentedProxySchemas,
+      onAllToolCallsComplete,
+      chatRecordingService: { recordToolResult },
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'tool-search-commit-throw',
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-search',
+      },
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        deferredToolPresentations: [
+          { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+        ],
+      }),
+    );
+  });
+
+  it('does not commit deferred tool presentations when the consumer declines them', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const recordToolResult = vi.fn();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '<functions>...</functions>',
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [
+              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+            ],
+          }),
+        }),
+      ],
+    ]);
+    const onAllToolCallsComplete = vi.fn().mockResolvedValue(false);
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      presentedProxySchemas,
+      onAllToolCallsComplete,
+      chatRecordingService: { recordToolResult },
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'tool-search-declined',
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-search',
+      },
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        deferredToolPresentations: [
+          { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+        ],
+      }),
+    );
+  });
+
+  it('does not commit deferred tool presentations when the schema block is truncated', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: `<functions>${'a'.repeat(200_000)}</functions>`,
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [
+              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+            ],
+          }),
+        }),
+      ],
+    ]);
+    const onAllToolCallsComplete = vi.fn().mockResolvedValue(undefined);
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      presentedProxySchemas,
+      onAllToolCallsComplete,
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'tool-search-truncated-schema',
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-search',
+      },
+      new AbortController().signal,
+    );
+
+    expect(outputOfFirstCall(onAllToolCallsComplete)).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+  });
+
+  it('does not let same-batch tool_search self-authorize deferred_tool_call', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const cronExecute = vi.fn().mockResolvedValue({
+      llmContent: 'cron created',
+      returnDisplay: 'cron created',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '<functions>...</functions>',
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [
+              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+            ],
+          }),
+        }),
+      ],
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute: cronExecute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'tool-search',
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-search',
+        },
+        {
+          callId: 'proxy-same-batch',
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+          isClientInitiated: false,
+          prompt_id: 'prompt-proxy',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(cronExecute).not.toHaveBeenCalled();
+    const firstBatchCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const proxyCall = firstBatchCalls.find(
+      (call) => call.request.callId === 'proxy-same-batch',
+    );
+    expect(proxyCall?.status).toBe('error');
+    if (proxyCall?.status === 'error') {
+      expect(proxyCall.response.error?.message).toContain(
+        'has not been fetched',
+      );
+      expect(proxyCall.response.responseParts[0].functionResponse?.name).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+    }
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-next-turn',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy-next',
+      },
+      new AbortController().signal,
+    );
+
+    expect(cronExecute).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+  });
+
   it('aborts and fails a tool call that exceeds the execution timeout', async () => {
     const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
     process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
@@ -1989,6 +2731,67 @@ describe('CoreToolScheduler', () => {
       } else {
         process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
       }
+    }
+  });
+
+  it('uses the provider-facing name when a deferred proxy target times out', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'partial cron output',
+      returnDisplay: 'partial cron output',
+      error: {
+        message: 'Cron creation timed out.',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.CRON_CREATE,
+        new MockTool({
+          name: ToolNames.CRON_CREATE,
+          shouldDefer: true,
+          execute,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas: new Set([ToolNames.CRON_CREATE]),
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'proxy-timeout',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-proxy-timeout',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.request.name).toBe(ToolNames.CRON_CREATE);
+      expect(completedCall.request.providerName).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_TIMEOUT,
+      );
+      expect(completedCall.response.responseParts[0].functionResponse?.id).toBe(
+        'proxy-timeout',
+      );
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
     }
   });
 
@@ -2862,6 +3665,81 @@ describe('CoreToolScheduler', () => {
     expect(outputs.join('\n')).toContain('/tmp/second.output');
   });
 
+  it('does not commit deferred tool presentations when batch budget offloads the schema block', async () => {
+    const presentedProxySchemas = new Set<string>();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: `<functions>${'a'.repeat(9000)}</functions>`,
+            returnDisplay: 'Loaded 1 tool(s)',
+            deferredToolPresentations: [
+              { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+            ],
+          }),
+        }),
+      ],
+      [
+        'smallBatchTool',
+        new MockTool({
+          name: 'smallBatchTool',
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'b'.repeat(3000),
+            returnDisplay: 'small',
+          }),
+        }),
+      ],
+    ]);
+    const recordToolResult = vi.fn();
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas,
+        toolOutputBatchBudget: 10_000,
+        chatRecordingService: { recordToolResult },
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'tool-search-offloaded-schema',
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-search',
+        },
+        {
+          callId: 'small',
+          name: 'smallBatchTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-search',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(outputOfFirstCall(onAllToolCallsComplete)).toContain(
+      'Tool output truncated.',
+    );
+    expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(false);
+    // Recording runs after the budget pass, so the offloaded search result
+    // must not carry resume-reauthorization metadata.
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'tool-search-offloaded-schema',
+        deferredToolPresentations: undefined,
+      }),
+    );
+  });
+
   it('offloads timeout error detail while preserving failure metadata', async () => {
     const timeoutResult = (detail: string): ToolResult => ({
       llmContent: detail,
@@ -3194,6 +4072,57 @@ describe('CoreToolScheduler', () => {
       'Tool output was too large and has been truncated',
     );
     expect(output).toBe(content);
+  });
+
+  it('keeps an atomic tool_search schema block inline', async () => {
+    const content = `<functions>${'a'.repeat(40_000)}</functions>`;
+    const presentation = {
+      name: ToolNames.CRON_CREATE,
+      schemaFingerprint: 'schema',
+    };
+    const presentedProxySchemas = new Set<string>();
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.TOOL_SEARCH,
+        new MockTool({
+          name: ToolNames.TOOL_SEARCH,
+          execute: vi.fn().mockResolvedValue({
+            llmContent: content,
+            returnDisplay: 'Loaded 1 tool',
+            deferredToolPresentations: [presentation],
+          }),
+          maxOutputChars: Number.POSITIVE_INFINITY,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        presentedProxySchemas,
+        toolOutputBatchBudget: 100_000,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'tool-search-atomic',
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-search-atomic',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    expect(output).toBe(content);
+    await vi.waitFor(() => {
+      expect(presentedProxySchemas.has(ToolNames.CRON_CREATE)).toBe(true);
+    });
   });
 
   it('schedules a memory pressure check after tool execution', async () => {
@@ -6649,6 +7578,41 @@ describe('convertToFunctionResponse', () => {
           name: toolName,
           id: callId,
           response: { output: 'Tool execution succeeded.' },
+        },
+      },
+    ]);
+  });
+
+  it('should rewrite singleton functionResponse name and id to the provider-facing envelope', () => {
+    const llmContent: Part = {
+      functionResponse: {
+        name: 'cron_create',
+        id: 'target-internal-id',
+        response: { output: 'cron created' },
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'base64...' } }],
+      },
+    };
+
+    const result = convertToFunctionResponse(
+      ToolNames.DEFERRED_TOOL_CALL,
+      'proxy-call-id',
+      llmContent,
+    );
+
+    expect(result).toEqual([
+      {
+        functionResponse: {
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          id: 'proxy-call-id',
+          response: { output: 'cron created' },
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'base64...',
+              },
+            },
+          ],
         },
       },
     ]);
@@ -13616,7 +14580,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
-  it('PM hard-deny path emits failure_kind=permission_denied (#4321)', async () => {
+  it('PM hard-deny path preserves proxy identity and emits failure_kind=permission_denied (#4321)', async () => {
     // _schedule line ~1444: finalPermission === 'deny' branch sets the
     // span failure with the PERMISSION_DENIED kind. Without test
     // coverage, dropping setToolSpanFailure on this branch would
@@ -13627,7 +14591,13 @@ describe('CoreToolScheduler telemetry spans', () => {
       ToolResult
     > {
       constructor() {
-        super('hardDenyTool', 'hardDenyTool', 'Always deny', Kind.Other, {});
+        super(
+          ToolNames.CRON_CREATE,
+          ToolNames.CRON_CREATE,
+          'Always deny',
+          Kind.Other,
+          {},
+        );
       }
       protected createInvocation(params: Record<string, unknown>) {
         return new (class extends BaseToolInvocation<
@@ -13660,6 +14630,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       discoverTools: async () => {},
       getAllTools: () => [],
       getToolsByServer: () => [],
+      isDeferredProxyPairRegistered: () => true,
+      isProxyEligibleDeferredTool: () => true,
+      hasPresentedProxySchema: () => true,
     } as unknown as ToolRegistry;
     const mockConfig = {
       getSessionId: () => 'test-session-id',
@@ -13683,9 +14656,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
     } as unknown as Config;
+    const onAllToolCallsComplete = vi.fn();
     const scheduler = new CoreToolScheduler({
       config: mockConfig,
-      onAllToolCallsComplete: vi.fn(),
+      onAllToolCallsComplete,
       onToolCallsUpdate: vi.fn(),
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
@@ -13694,8 +14668,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       [
         {
           callId: 'deny-1',
-          name: 'hardDenyTool',
-          args: {},
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: { name: ToolNames.CRON_CREATE, arguments: {} },
           isClientInitiated: false,
           prompt_id: 'prompt-deny',
         },
@@ -13704,12 +14678,24 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
 
     const toolSpan = toolSpanRecords.find(
-      (r) => r.name === 'tool.hardDenyTool',
+      (r) => r.name === `tool.${ToolNames.CRON_CREATE}`,
     );
     expect(toolSpan?.ended).toBe(true);
     expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
       'permission_denied',
     );
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe(
+        'Tool "cron_create" is denied: the tool\'s default permission is \'deny\'. (tool "cron_create" via "deferred_tool_call")',
+      );
+      expect(
+        completedCall.response.responseParts[0].functionResponse?.name,
+      ).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
   });
 
   it('non-interactive deny path emits failure_kind=non_interactive_denied (#4321)', async () => {
@@ -16264,9 +17250,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
   }
 
   function createSchedulerWithTool(tool: StrictStringTool) {
+    const ensureTool = vi.fn(async (name: string) =>
+      name === StrictStringTool.Name ? tool : undefined,
+    );
     const mockToolRegistry = {
-      ensureTool: async (name: string) =>
-        name === StrictStringTool.Name ? tool : undefined,
+      ensureTool,
       getTool: (name: string) =>
         name === StrictStringTool.Name ? tool : undefined,
       getFunctionDeclarations: () => [],
@@ -16282,6 +17270,11 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       getAllTools: () => [],
       getAllToolNames: () => [StrictStringTool.Name],
       getToolsByServer: () => [],
+      isDeferredProxyPairRegistered: () => true,
+      isProxyEligibleDeferredTool: (name: string) =>
+        name === StrictStringTool.Name,
+      hasPresentedProxySchema: (name: string) => name === StrictStringTool.Name,
+      markProxySchemaPresented: () => true,
     } as unknown as ToolRegistry;
 
     const mockConfig = {
@@ -16324,7 +17317,12 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       onEditorClose: vi.fn(),
     });
 
-    return { scheduler, onToolCallsUpdate, onAllToolCallsComplete };
+    return {
+      scheduler,
+      onToolCallsUpdate,
+      onAllToolCallsComplete,
+      ensureTool,
+    };
   }
 
   function makeRequest(
@@ -16453,6 +17451,141 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should keep validation retry counts for proxied deferred target failures', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    const proxyArgs = {
+      name: StrictStringTool.Name,
+      arguments: { value: {} },
+    };
+
+    await scheduler.schedule(
+      [makeRequest('p1', ToolNames.DEFERRED_TOOL_CALL, proxyArgs)],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p2', ToolNames.DEFERRED_TOOL_CALL, proxyArgs)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p3', ToolNames.DEFERRED_TOOL_CALL, proxyArgs)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('reuses the deferred tool instance resolved during normalization', async () => {
+    const authorizedTool = new StrictStringTool();
+    const replacementTool = new StrictStringTool();
+    const authorizedBuild = vi.spyOn(authorizedTool, 'build');
+    const replacementBuild = vi.spyOn(replacementTool, 'build');
+    const { scheduler, ensureTool } = createSchedulerWithTool(authorizedTool);
+    ensureTool
+      .mockResolvedValueOnce(authorizedTool)
+      .mockResolvedValue(replacementTool);
+
+    await scheduler.schedule(
+      [
+        makeRequest('proxy-once', ToolNames.DEFERRED_TOOL_CALL, {
+          name: StrictStringTool.Name,
+          arguments: { value: 'valid' },
+        }),
+      ],
+      new AbortController().signal,
+    );
+
+    expect(ensureTool).toHaveBeenCalledTimes(1);
+    expect(ensureTool).toHaveBeenCalledWith(StrictStringTool.Name);
+    expect(authorizedBuild).toHaveBeenCalledWith({ value: 'valid' });
+    expect(replacementBuild).not.toHaveBeenCalled();
+    expect(
+      toolSpanRecords.findLast(
+        (record) => record.attributes['call_id'] === 'proxy-once',
+      )?.attributes,
+    ).toMatchObject({
+      tool_name: StrictStringTool.Name,
+      'tool.provider_name': ToolNames.DEFERRED_TOOL_CALL,
+    });
+  });
+
+  it('should keep retry counts for deferred_tool_call normalization failures', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    const malformedProxyArgs = {
+      name: StrictStringTool.Name,
+      arguments: 'not an object',
+    };
+
+    await scheduler.schedule(
+      [makeRequest('p1', ToolNames.DEFERRED_TOOL_CALL, malformedProxyArgs)],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p2', ToolNames.DEFERRED_TOOL_CALL, malformedProxyArgs)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('p3', ToolNames.DEFERRED_TOOL_CALL, malformedProxyArgs)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('isolates malformed proxy envelopes by attempted target', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+      createSchedulerWithTool(tool);
+
+    for (const [index, name] of [
+      StrictStringTool.Name,
+      StrictStringTool.Name,
+      'anotherDeferredTool',
+    ].entries()) {
+      await scheduler.schedule(
+        [
+          makeRequest(`proxy-${index}`, ToolNames.DEFERRED_TOOL_CALL, {
+            name,
+            arguments: 'not an object',
+          }),
+        ],
+        new AbortController().signal,
+      );
+    }
+
+    expect(getLastErrorMessage(onToolCallsUpdate)).not.toContain(
+      RETRY_LOOP_STOP_DIRECTIVE,
+    );
+    const [completed] = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as [
+      ToolCall,
+    ];
+    expect(completed.request.name).toBe('anotherDeferredTool');
+    expect(completed.request.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+    }
   });
 
   it('should keep retry counts stable when truncation guidance is toggled', async () => {

@@ -7,6 +7,7 @@
 // External dependencies
 import type {
   Content,
+  FunctionDeclaration,
   GenerateContentConfig,
   GenerateContentResponse,
   Part,
@@ -84,7 +85,9 @@ import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
+import { formatFunctionSchemaBlocks } from '../tools/function-schema-rendering.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { DeferredToolPresentation } from '../tools/tools.js';
 
 // Telemetry
 import {
@@ -118,16 +121,21 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from '../utils/environmentContext.js';
 import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
-import type { DeferredToolSummary } from '../tools/tool-registry.js';
+import {
+  getFunctionSchemaFingerprint,
+  type DeferredToolSummary,
+} from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
   replayUiTelemetryFromConversation,
+  type ConversationRecord,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -163,6 +171,69 @@ import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
+
+/**
+ * Collects persisted schema presentations eligible for resume restoration.
+ * Eligibility requires the successful `tool_search` response to remain in the
+ * final model-facing history; the registry still validates each fingerprint
+ * before granting proxy authorization.
+ */
+function collectResumedDeferredToolPresentations(
+  conversation: ConversationRecord,
+  apiHistory: Content[],
+): DeferredToolPresentation[] {
+  const activeToolSearchResponseIds = new Set<string>();
+  for (const entry of apiHistory) {
+    for (const part of entry.parts ?? []) {
+      const response = part.functionResponse;
+      if (
+        response?.name === ToolNames.TOOL_SEARCH &&
+        typeof response.id === 'string'
+      ) {
+        activeToolSearchResponseIds.add(response.id);
+      }
+    }
+  }
+
+  const presentations: DeferredToolPresentation[] = [];
+  for (const record of conversation.messages) {
+    const result = record.toolCallResult;
+    const hasMatchingRecordedResponse = record.message?.parts?.some(
+      (part) =>
+        part.functionResponse?.name === ToolNames.TOOL_SEARCH &&
+        part.functionResponse.id === result?.callId,
+    );
+    // Results removed by compression or retry trimming are no longer in the
+    // model's context and must not recreate their presentation authorization.
+    if (
+      record.type !== 'tool_result' ||
+      result?.status !== 'success' ||
+      typeof result.callId !== 'string' ||
+      !hasMatchingRecordedResponse ||
+      !activeToolSearchResponseIds.has(result.callId)
+    ) {
+      continue;
+    }
+    const recordedPresentations: unknown = result.deferredToolPresentations;
+    if (!Array.isArray(recordedPresentations)) continue;
+    for (const presentation of recordedPresentations) {
+      if (
+        typeof presentation === 'object' &&
+        presentation !== null &&
+        'name' in presentation &&
+        typeof presentation.name === 'string' &&
+        'schemaFingerprint' in presentation &&
+        typeof presentation.schemaFingerprint === 'string'
+      ) {
+        presentations.push({
+          name: presentation.name,
+          schemaFingerprint: presentation.schemaFingerprint,
+        });
+      }
+    }
+  }
+  return presentations;
+}
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -343,6 +414,10 @@ export class GeminiClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private pendingResumedDeferredToolPresentations = new Map<
+    string,
+    DeferredToolPresentation
+  >();
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -443,6 +518,18 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      if (this.isDeferredToolProxyAvailable()) {
+        for (const presentation of collectResumedDeferredToolPresentations(
+          resumedSessionData.conversation,
+          this.getHistory(),
+        )) {
+          this.pendingResumedDeferredToolPresentations.set(
+            presentation.name,
+            presentation,
+          );
+        }
+        this.restorePendingResumedDeferredToolPresentations();
+      }
       const chat = this.getChat();
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
@@ -609,6 +696,24 @@ export class GeminiClient {
     return this.getChat().getHistoryFunctionResponseIds();
   }
 
+  private clearProxySchemaPresentationsAfterHistoryMutation(reason: string) {
+    debugLogger.debug(
+      `[DEFERRED_TOOL_CALL] clear proxy schema presentations after ${reason}`,
+    );
+    this.pendingResumedDeferredToolPresentations.clear();
+    this.config.getToolRegistry().clearProxySchemaPresentations();
+  }
+
+  private restorePendingResumedDeferredToolPresentations(): void {
+    const toolRegistry = this.config.getToolRegistry();
+    for (const [name, presentation] of this
+      .pendingResumedDeferredToolPresentations) {
+      if (toolRegistry.markProxySchemaPresented(presentation)) {
+        this.pendingResumedDeferredToolPresentations.delete(name);
+      }
+    }
+  }
+
   /**
    * Pop orphaned trailing user entries from the in-memory chat history.
    * Used by:
@@ -639,6 +744,21 @@ export class GeminiClient {
     debugLogger.debug(
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
+    // Presentation eligibility remains valid when retry removes only the
+    // failed prompt: the schema-bearing history is still active. A stripped
+    // tool_search response is different because it may be the presentation
+    // source, so fail closed instead of trying to reconstruct partial state
+    // from history text.
+    const strippedToolSearchResponse = strippedEntries.some((entry) =>
+      (entry.parts ?? []).some(
+        (part) => part.functionResponse?.name === ToolNames.TOOL_SEARCH,
+      ),
+    );
+    if (strippedToolSearchResponse) {
+      this.clearProxySchemaPresentationsAfterHistoryMutation(
+        'stripOrphanedUserEntriesFromHistory',
+      );
+    }
     this.config.getFileReadCache().clear();
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
@@ -707,6 +827,7 @@ export class GeminiClient {
 
   setHistory(history: Content[]) {
     this.getChat().setHistory(history);
+    this.clearProxySchemaPresentationsAfterHistoryMutation('setHistory');
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -733,6 +854,7 @@ export class GeminiClient {
       debugLogger.debug(
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
+      this.clearProxySchemaPresentationsAfterHistoryMutation('truncateHistory');
       this.config.getFileReadCache().clear();
     }
     this.forceFullIdeContext = true;
@@ -745,6 +867,7 @@ export class GeminiClient {
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
+    this.restorePendingResumedDeferredToolPresentations();
     const deferredTools = this.resolveDeferredToolsForReminder();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
@@ -1049,6 +1172,44 @@ export class GeminiClient {
     }
   }
 
+  private restoreProxySchemasAfterCompaction(
+    schemas: readonly FunctionDeclaration[],
+  ): void {
+    if (schemas.length === 0 || !this.chat) {
+      return;
+    }
+
+    const history = this.getChat().getHistory();
+    const startupLength = getStartupContextLength(history);
+    const startupContext = history[0];
+    if (startupLength === 0 || !startupContext) {
+      return;
+    }
+
+    const schemaReminder = wrapSystemReminder(
+      'Current schemas for deferred tools restored after context compression:\n\n' +
+        formatFunctionSchemaBlocks(schemas) +
+        '\n\nUse `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
+    );
+    this.getChat().setHistory([
+      {
+        ...startupContext,
+        parts: [...(startupContext.parts ?? []), { text: schemaReminder }],
+      },
+      ...history.slice(1),
+    ]);
+
+    const toolRegistry = this.config.getToolRegistry();
+    for (const schema of schemas) {
+      if (schema.name) {
+        toolRegistry.markProxySchemaPresented({
+          name: schema.name,
+          schemaFingerprint: getFunctionSchemaFingerprint(schema),
+        });
+      }
+    }
+  }
+
   /**
    * Rebuilds the main-session system instruction from the current
    * `userMemory` / model / prompt overrides and re-binds it to the live chat.
@@ -1117,6 +1278,20 @@ export class GeminiClient {
   }
 
   /**
+   * Whether both control tools required for deferred proxy calls are
+   * registered in the warmed registry. Treating either tool alone as
+   * sufficient would let history restore a proxy route that the current
+   * session cannot safely declare and execute end to end.
+   */
+  private isDeferredToolProxyAvailable(): boolean {
+    const toolRegistry = this.config.getToolRegistry();
+    return Boolean(
+      toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+    );
+  }
+
+  /**
    * Computes the deferred-tools list that should be announced through
    * user-role system reminders.
    *
@@ -1124,21 +1299,20 @@ export class GeminiClient {
    * inspects the registry's eager state and would otherwise miss factory-
    * backed deferred tools.
    *
-   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * Side effect: when ToolSearch or the deferred proxy wrapper is not
+   * registered, every deferred tool is eagerly revealed here so it lands in
+   * the declaration list. Skipping this would leave the tool both off the
+   * declarations AND off the deferred-summary list (since `undefined` is
+   * returned in that branch) — a silent disappearance that's harder to
+   * diagnose than seeing the tool name absent from `/mcp` output.
    *
-   * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * Returns `undefined` when the deferred proxy surface is unavailable:
+   * reminders must not advertise tools the model cannot call through it.
    */
   private resolveDeferredToolsForReminder(): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
     const deferredSummary = toolRegistry.getDeferredToolSummary();
-    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
-    if (!toolSearchAvailable) {
+    if (!this.isDeferredToolProxyAvailable()) {
       if (deferredSummary.length > 0) {
         for (const t of deferredSummary) {
           toolRegistry.revealDeferredTool(t.name);
@@ -1452,11 +1626,13 @@ export class GeminiClient {
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
   ): Promise<GeminiChat> {
+    this.pendingResumedDeferredToolPresentations.clear();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
+    let effectiveExtraHistory = extraHistory;
     const profiler = createSessionStartProfiler(sessionStartSource, {
       sessionId: this.config.getSessionId(),
     });
@@ -1466,7 +1642,7 @@ export class GeminiClient {
     const finishProfile = (ok: boolean) => {
       profiler.finish({
         ok,
-        extraHistoryLength: extraHistory?.length ?? 0,
+        extraHistoryLength: effectiveExtraHistory?.length ?? 0,
         historyLength: history.length,
         snapshotEntryCount: snapshotEntries.length,
         deferredReminderCount,
@@ -1481,6 +1657,12 @@ export class GeminiClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      toolRegistry.clearProxySchemaPresentations();
+      // A successful call in old history may rebuild presentation state only
+      // when this session still exposes the complete proxy surface. Direct
+      // calls to real deferred names are restored independently below, so the
+      // compatibility path remains available when proxying is disabled.
+      const deferredProxyAvailable = this.isDeferredToolProxyAvailable();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
       // the declaration list. Without this, the model sees history like
@@ -1489,16 +1671,116 @@ export class GeminiClient {
       // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
       // are correctly filtered out of the startup reminder built below.
       profiler.timeSync('resume_deferred_tool_reveal', () => {
-        if (extraHistory && extraHistory.length > 0) {
+        if (effectiveExtraHistory && effectiveExtraHistory.length > 0) {
           const deferredNames = new Set(
             toolRegistry.getDeferredToolSummary().map((t) => t.name),
           );
+          const successfulDeferredProxyTargets = new Set<string>();
+          const pendingProxyTargetsById = new Map<string, string>();
+          const pendingProxyTargetsWithoutId: string[] = [];
+          for (const entry of effectiveExtraHistory) {
+            for (const part of entry.parts ?? []) {
+              const call = part.functionCall;
+              if (
+                deferredProxyAvailable &&
+                call?.name === ToolNames.DEFERRED_TOOL_CALL
+              ) {
+                const targetName = call.args?.['name'];
+                if (typeof targetName === 'string') {
+                  if (call.id) {
+                    pendingProxyTargetsById.set(call.id, targetName);
+                  } else {
+                    pendingProxyTargetsWithoutId.push(targetName);
+                  }
+                }
+              }
+              const response = part.functionResponse;
+              // Match each deferred proxy response to its corresponding call
+              // to determine which tools were successfully invoked. Responses
+              // with an id are matched exactly via the map; responses without
+              // an id fall back to FIFO ordering from the no-id queue. A
+              // response whose id is absent from the map is skipped rather
+              // than consuming the no-id queue, to avoid mis-pairing.
+              if (
+                deferredProxyAvailable &&
+                response?.name === ToolNames.DEFERRED_TOOL_CALL
+              ) {
+                let targetName: string | undefined;
+                if (response.id) {
+                  targetName = pendingProxyTargetsById.get(response.id);
+                  if (targetName) {
+                    pendingProxyTargetsById.delete(response.id);
+                  }
+                } else {
+                  targetName = pendingProxyTargetsWithoutId.shift();
+                }
+                if (!targetName) continue;
+                const responseBody = response.response as
+                  | { error?: unknown }
+                  | undefined;
+                if (responseBody?.error) continue;
+                successfulDeferredProxyTargets.add(targetName);
+              }
+            }
+          }
           if (deferredNames.size > 0) {
-            for (const entry of extraHistory) {
+            const proxyTargetsToRestore = new Set<string>();
+            for (const entry of effectiveExtraHistory) {
               for (const part of entry.parts ?? []) {
                 const callName = part.functionCall?.name;
                 if (callName && deferredNames.has(callName)) {
                   toolRegistry.revealDeferredTool(callName);
+                  continue;
+                }
+                if (
+                  deferredProxyAvailable &&
+                  callName === ToolNames.DEFERRED_TOOL_CALL
+                ) {
+                  const targetName = part.functionCall?.args?.['name'];
+                  if (
+                    typeof targetName === 'string' &&
+                    deferredNames.has(targetName) &&
+                    successfulDeferredProxyTargets.has(targetName)
+                  ) {
+                    proxyTargetsToRestore.add(targetName);
+                  }
+                }
+              }
+            }
+            if (proxyTargetsToRestore.size > 0) {
+              const restoredSchemas: FunctionDeclaration[] = [];
+              for (const targetName of [...proxyTargetsToRestore].sort()) {
+                const tool = toolRegistry.getTool(targetName);
+                if (
+                  tool &&
+                  toolRegistry.isProxyEligibleDeferredTool(targetName)
+                ) {
+                  restoredSchemas.push(tool.schema);
+                }
+              }
+              if (restoredSchemas.length > 0) {
+                effectiveExtraHistory = [
+                  ...effectiveExtraHistory,
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text: wrapSystemReminder(
+                          'Current schemas for deferred tools restored from session history:\n\n' +
+                            formatFunctionSchemaBlocks(restoredSchemas) +
+                            '\n\nTo call a restored deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
+                        ),
+                      },
+                    ],
+                  },
+                ];
+                for (const schema of restoredSchemas) {
+                  if (schema.name) {
+                    toolRegistry.markProxySchemaPresented({
+                      name: schema.name,
+                      schemaFingerprint: getFunctionSchemaFingerprint(schema),
+                    });
+                  }
                 }
               }
             }
@@ -1519,7 +1801,7 @@ export class GeminiClient {
       deferredReminderCount = deferredTools?.length ?? 0;
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+        () => getInitialChatHistory(this.config, effectiveExtraHistory),
       );
       profiler.timeSync('skill_reminder_seed', () => {
         this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
@@ -2019,6 +2301,9 @@ export class GeminiClient {
       const changed = m.tokensSaved > 0;
       if (changed) {
         this.getChat().setHistory(mcResult.history);
+        this.clearProxySchemaPresentationsAfterHistoryMutation(
+          'microcompaction',
+        );
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -3200,12 +3485,19 @@ export class GeminiClient {
           // compaction inside chat.sendMessageStream may have summarized away
           // the previous merged IDE context.
           if (event.type === GeminiEventType.ChatCompressed) {
+            const presentedProxySchemas = this.config
+              .getToolRegistry()
+              .getPresentedProxySchemas();
+            this.clearProxySchemaPresentationsAfterHistoryMutation(
+              'auto-compression',
+            );
             this.forceFullIdeContext = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).
             try {
               await this.restoreStartupContextAfterCompaction();
+              this.restoreProxySchemasAfterCompaction(presentedProxySchemas);
             } catch (error) {
               this.config
                 .getDebugLogger()
@@ -3960,6 +4252,9 @@ export class GeminiClient {
   ): Promise<ChatCompressionInfo> {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
+    const presentedProxySchemas = this.config
+      .getToolRegistry()
+      .getPresentedProxySchemas();
     const previousChat = this.getChat();
     const info = await previousChat.tryCompress(
       prompt_id,
@@ -3968,9 +4263,11 @@ export class GeminiClient {
       customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.clearProxySchemaPresentationsAfterHistoryMutation('tryCompressChat');
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      this.restoreProxySchemasAfterCompaction(presentedProxySchemas);
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&
@@ -4068,6 +4365,7 @@ export class GeminiClient {
     }
 
     if (microcompactMeta) {
+      this.clearProxySchemaPresentationsAfterHistoryMutation('compress-fast');
       await this.disarmFileReadCacheAfterEviction(
         microcompactMeta,
         'compress-fast',

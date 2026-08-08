@@ -8,10 +8,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { CallableTool } from '@google/genai';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
-import { ToolRegistry } from './tool-registry.js';
+import { getFunctionSchemaFingerprint, ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import { formatFunctionSchemaBlocks } from './function-schema-rendering.js';
 import type { ToolResult } from './tools.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
@@ -40,12 +41,16 @@ function makeConfigWithRegistry(): {
   const config = new Config(baseConfigParams);
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
-  // Stub out the chat client reference so ToolSearch can sync newly
-  // revealed tools via setTools() without a real GeminiClient.
+  // Keep a client spy so tests can prove schema presentation never calls the
+  // legacy setTools() synchronization path.
   vi.spyOn(config, 'getGeminiClient').mockReturnValue({
     setTools: vi.fn().mockResolvedValue(undefined),
   } as never);
   return { config, registry };
+}
+
+function presentationNames(result: ToolResult): string[] {
+  return result.deferredToolPresentations?.map(({ name }) => name) ?? [];
 }
 
 describe('tokenize', () => {
@@ -190,7 +195,7 @@ describe('ToolSearchTool', () => {
     expect(tool.shouldDefer).toBe(false);
   });
 
-  it('select: mode loads named tool and reveals it', async () => {
+  it('select: mode loads named tool and records proxy presentation without revealing it', async () => {
     const hidden = new MockTool({
       name: 'cron_create',
       description: 'schedules a cron',
@@ -203,9 +208,19 @@ describe('ToolSearchTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     const content = String(result.llmContent);
-    expect(content).toContain('<functions>');
-    expect(content).toContain('"name":"cron_create"');
-    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+    expect(content).toContain(formatFunctionSchemaBlocks([hidden.schema]));
+    expect(content).toContain('deferred_tool_call');
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+    expect(result.deferredToolPresentations).toEqual([
+      {
+        name: 'cron_create',
+        schemaFingerprint: getFunctionSchemaFingerprint(hidden.schema),
+      },
+    ]);
+    expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
+    expect(registry.getFunctionDeclarations().map((d) => d.name)).not.toContain(
+      'cron_create',
+    );
   });
 
   it('escapes `<` in schema JSON so embedded </function> cannot close the wrapper', async () => {
@@ -248,8 +263,11 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('"name":"alpha"');
     expect(content).toContain('"name":"bravo"');
     expect(content).toContain('Not found: missing');
-    expect(registry.isDeferredToolRevealed('alpha')).toBe(true);
-    expect(registry.isDeferredToolRevealed('bravo')).toBe(true);
+    expect(registry.isDeferredToolRevealed('alpha')).toBe(false);
+    expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
+    expect(presentationNames(result)).toEqual(['alpha', 'bravo']);
+    expect(registry.hasPresentedProxySchema('alpha')).toBe(false);
+    expect(registry.hasPresentedProxySchema('bravo')).toBe(false);
   });
 
   it('keyword search returns top-N ranked tools', async () => {
@@ -436,7 +454,7 @@ describe('ToolSearchTool', () => {
     expect(truncatedSection).not.toContain('tool_0');
   });
 
-  it('revealed tools show up in subsequent getFunctionDeclarations', async () => {
+  it('presented deferred tools do not show up in subsequent getFunctionDeclarations', async () => {
     registry.registerTool(new MockTool({ name: 'visible' }));
     registry.registerTool(new MockTool({ name: 'hidden', shouldDefer: true }));
 
@@ -447,15 +465,43 @@ describe('ToolSearchTool', () => {
 
     const tool = new ToolSearchTool(config);
     const invocation = tool.build({ query: 'select:hidden' });
-    await invocation.execute(new AbortController().signal);
+    const result = await invocation.execute(new AbortController().signal);
 
-    // After search: hidden joins the declaration list.
+    // After search: hidden is proxy-presented, but the declaration list stays
+    // stable for prompt-cache reuse.
     expect(
       registry
         .getFunctionDeclarations()
         .map((d) => d.name)
         .sort(),
-    ).toEqual(['hidden', 'visible']);
+    ).toEqual(['visible']);
+    expect(presentationNames(result)).toEqual(['hidden']);
+    expect(registry.hasPresentedProxySchema('hidden')).toBe(false);
+  });
+
+  it('keeps serialized declarations byte-identical after presenting a deferred tool', async () => {
+    registry.registerTool(new MockTool({ name: 'visible' }));
+    registry.registerTool(new MockTool({ name: 'hidden', shouldDefer: true }));
+    registry.registerFactory(
+      ToolNames.DEFERRED_TOOL_CALL,
+      async () => new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+      { allowReservedName: true },
+    );
+    await registry.warmAll();
+
+    const before = JSON.stringify(registry.getFunctionDeclarations());
+    expect(registry.getFunctionDeclarations().map((tool) => tool.name)).toEqual(
+      [ToolNames.DEFERRED_TOOL_CALL, 'visible'],
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:hidden' })
+      .execute(new AbortController().signal);
+
+    const after = JSON.stringify(registry.getFunctionDeclarations());
+    expect(presentationNames(result)).toEqual(['hidden']);
+    expect(after).toBe(before);
   });
 
   it('rejects empty query at build time via schema (minLength)', () => {
@@ -695,7 +741,7 @@ describe('ToolSearchTool', () => {
     registry.registerTool(
       new MockTool({
         name: ToolNames.READ_FILE,
-        shouldDefer: false,
+        shouldDefer: true,
       }),
     );
     registry.registerTool(
@@ -725,6 +771,8 @@ describe('ToolSearchTool', () => {
     );
     expect(result.error).toBeUndefined();
     expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
+    expect(String(result.llmContent)).not.toContain('deferred_tool_call');
+    expect(result.deferredToolPresentations).toBeUndefined();
   });
 
   it('select: lets plan-required teammates inspect exit_plan_mode but not enter_plan_mode', async () => {
@@ -821,11 +869,7 @@ describe('ToolSearchTool', () => {
     expect(String(sq.llmContent)).toContain('"name":"cron_create"');
   });
 
-  it('keyword search excludes already-revealed deferred tools', async () => {
-    // Pin: once a deferred tool is revealed via a prior `select:` lookup,
-    // it should no longer appear in subsequent keyword searches — it's
-    // already in the model's declaration list, re-surfacing wastes
-    // tokens and risks the model thinking it needs to load it again.
+  it('keeps an uncommitted keyword presentation searchable', async () => {
     registry.registerTool(
       new MockTool({
         name: 'slack_send_message',
@@ -837,27 +881,172 @@ describe('ToolSearchTool', () => {
 
     const tool = new ToolSearchTool(config);
 
-    // First: keyword search reveals the tool.
+    // First: keyword search presents the tool schema for proxy use.
     const first = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(first.llmContent)).toContain('"name":"slack_send_message"');
-    // First search uses keyword path (which calls loadAndReturnSchemas →
-    // revealDeferredTool); confirm registry agrees.
-    expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(true);
+    expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(false);
+    expect(presentationNames(first)).toEqual(['slack_send_message']);
+    expect(registry.hasPresentedProxySchema('slack_send_message')).toBe(false);
 
-    // Second: same keyword search now finds nothing (tool excluded).
+    // Producing metadata is not enough: until the result enters active model
+    // history and the scheduler commits it, another search may return it.
     const second = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
-    expect(String(second.llmContent)).toContain('No tools found matching');
+    expect(String(second.llmContent)).toContain('"name":"slack_send_message"');
   });
 
-  it('returns an error result when setTools() throws — model must NOT see schemas as ready', async () => {
-    // Pin: setTools() sync-failure during reveal is surfaced as a tool
-    // error so the agent can choose to retry / abandon, instead of being
-    // told "tools loaded" while the API actually has no declarations
-    // (which would surface as "unknown tool" on the next call).
+  it('uses keyword result slots for unpresented deferred tools', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'slack',
+        description: 'primary slack operations',
+        shouldDefer: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: 'slack_archive',
+        description: 'archive slack messages',
+        shouldDefer: true,
+      }),
+    );
+    const tool = new ToolSearchTool(config);
+
+    const first = await tool
+      .build({ query: 'slack', max_results: 1 })
+      .execute(new AbortController().signal);
+    expect(presentationNames(first)).toEqual(['slack']);
+    const firstPresentation = first.deferredToolPresentations?.[0];
+    expect(firstPresentation).toBeDefined();
+    if (!firstPresentation) throw new Error('missing first presentation');
+    expect(registry.markProxySchemaPresented(firstPresentation)).toBe(true);
+
+    const second = await tool
+      .build({ query: 'slack', max_results: 1 })
+      .execute(new AbortController().signal);
+    expect(presentationNames(second)).toEqual(['slack_archive']);
+  });
+
+  it('allows exact selection of a presented deferred tool', async () => {
+    const deferred = new MockTool({ name: 'cron_create', shouldDefer: true });
+    registry.registerTool(deferred);
+    registry.markProxySchemaPresented({
+      name: deferred.name,
+      schemaFingerprint: getFunctionSchemaFingerprint(deferred.schema),
+    });
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: `select:${deferred.name}` })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('"name":"cron_create"');
+    expect(presentationNames(result)).toEqual(['cron_create']);
+  });
+
+  it('makes a refreshed deferred schema keyword-searchable again', async () => {
+    const oldTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create a calendar event',
+      {
+        type: 'object',
+        properties: { title: { type: 'string' } },
+      },
+    );
+    registry.registerTool(oldTool);
+    const toolSearch = new ToolSearchTool(config);
+    const first = await toolSearch
+      .build({ query: 'calendar' })
+      .execute(new AbortController().signal);
+    const firstPresentation = first.deferredToolPresentations?.[0];
+    expect(firstPresentation).toBeDefined();
+    if (!firstPresentation) throw new Error('missing first presentation');
+    expect(registry.markProxySchemaPresented(firstPresentation)).toBe(true);
+
+    const hidden = await toolSearch
+      .build({ query: 'calendar' })
+      .execute(new AbortController().signal);
+    expect(presentationNames(hidden)).toEqual([]);
+
+    registry.removeMcpToolsByServer('calendar');
+    const refreshedTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create a calendar event',
+      {
+        type: 'object',
+        properties: { startTime: { type: 'string' } },
+      },
+    );
+    registry.registerTool(refreshedTool);
+
+    const refreshed = await toolSearch
+      .build({ query: 'calendar' })
+      .execute(new AbortController().signal);
+    expect(String(refreshed.llmContent)).toContain('"startTime"');
+    expect(presentationNames(refreshed)).toEqual([refreshedTool.name]);
+  });
+
+  it('rejects a presentation when MCP refresh replaces the displayed schema', async () => {
+    const oldTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create an event',
+      {
+        type: 'object',
+        properties: { title: { type: 'string' } },
+      },
+    );
+    registry.registerTool(oldTool);
+    const toolSearch = new ToolSearchTool(config);
+
+    const oldResult = await toolSearch
+      .build({ query: `select:${oldTool.name}` })
+      .execute(new AbortController().signal);
+    const oldPresentation = oldResult.deferredToolPresentations?.[0];
+    expect(String(oldResult.llmContent)).toContain('"title"');
+    expect(oldPresentation).toEqual({
+      name: oldTool.name,
+      schemaFingerprint: getFunctionSchemaFingerprint(oldTool.schema),
+    });
+
+    registry.removeMcpToolsByServer('calendar');
+    const refreshedTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'calendar',
+      'create_event',
+      'create an event',
+      {
+        type: 'object',
+        properties: { startTime: { type: 'string' } },
+      },
+    );
+    registry.registerTool(refreshedTool);
+
+    expect(oldPresentation).toBeDefined();
+    expect(registry.markProxySchemaPresented(oldPresentation!)).toBe(false);
+    expect(registry.hasPresentedProxySchema(refreshedTool.name)).toBe(false);
+
+    const refreshedResult = await toolSearch
+      .build({ query: `select:${refreshedTool.name}` })
+      .execute(new AbortController().signal);
+    const refreshedPresentation =
+      refreshedResult.deferredToolPresentations?.[0];
+    expect(String(refreshedResult.llmContent)).toContain('"startTime"');
+    expect(refreshedPresentation).toBeDefined();
+    expect(registry.markProxySchemaPresented(refreshedPresentation!)).toBe(
+      true,
+    );
+    expect(registry.hasPresentedProxySchema(refreshedTool.name)).toBe(true);
+  });
+
+  it('returns schemas even when setTools would throw because ToolSearch no longer mutates declarations', async () => {
     registry.registerTool(
       new MockTool({
         name: 'cron_create',
@@ -873,46 +1062,228 @@ describe('ToolSearchTool', () => {
       .build({ query: 'select:cron_create' })
       .execute(new AbortController().signal);
 
-    expect(result.error).toBeDefined();
-    expect(result.error?.message).toContain('setTools failed');
-    expect(result.error?.message).toContain('chat not initialised');
-    // Critical: the schema MUST NOT be in llmContent — otherwise the
-    // model thinks the tool is callable and the next turn surfaces
-    // an "unknown tool" API error.
-    expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
-    expect(String(result.llmContent)).toContain('setTools failed');
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain('"name":"cron_create"');
+    expect(String(result.llmContent)).toContain('deferred_tool_call');
+    expect(presentationNames(result)).toEqual(['cron_create']);
+    expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
   });
 
-  it("rolls back this call's reveals when setTools() throws", async () => {
-    // The reveal happens BEFORE setTools() so that getFunctionDeclarations
-    // includes the tool when setTools rebuilds the chat's declaration
-    // list. If setTools throws, the reveal must be undone — otherwise
-    // the registry says "revealed" while the API has no schema, and
-    // collectCandidates will exclude the tool from future keyword
-    // searches (per its isDeferredToolRevealed filter), making the
-    // tool effectively unreachable until /clear.
+  it('does not call setTools or reveal deferred tools after returning schemas', async () => {
     registry.registerTool(
       new MockTool({ name: 'cron_create', shouldDefer: true }),
     );
     registry.registerTool(
       new MockTool({ name: 'cron_list', shouldDefer: true }),
     );
-    // Pre-reveal cron_list to confirm rollback only undoes THIS call's
-    // reveals, not pre-existing ones.
-    registry.revealDeferredTool('cron_list');
-
+    const setTools = vi.fn().mockRejectedValue(new Error('should not be used'));
     vi.spyOn(config, 'getGeminiClient').mockReturnValue({
-      setTools: vi.fn().mockRejectedValue(new Error('chat not initialised')),
+      setTools,
     } as never);
 
     const tool = new ToolSearchTool(config);
-    await tool
+    const result = await tool
       .build({ query: 'select:cron_create,cron_list' })
       .execute(new AbortController().signal);
 
+    expect(result.error).toBeUndefined();
+    expect(setTools).not.toHaveBeenCalled();
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
-    // cron_list was already revealed before this call, so it stays revealed.
-    expect(registry.isDeferredToolRevealed('cron_list')).toBe(true);
+    expect(registry.isDeferredToolRevealed('cron_list')).toBe(false);
+    expect(presentationNames(result)).toEqual(['cron_create', 'cron_list']);
+    expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
+    expect(registry.hasPresentedProxySchema('cron_list')).toBe(false);
+  });
+
+  it('declares schemas directly when an atomic search result exceeds the batch budget', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_deferred',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:oversized_deferred' })
+      .execute(new AbortController().signal);
+
+    expect(tool.maxOutputChars).toBe(Number.POSITIVE_INFINITY);
+    expect(setTools).toHaveBeenCalledOnce();
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(true);
+    expect(result.deferredToolPresentations).toBeUndefined();
+    expect(String(result.llmContent)).toContain('declared directly instead');
+  });
+
+  it('falls back to the per-tool cap when the batch budget is disabled', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_without_batch_budget',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(
+      Number.POSITIVE_INFINITY,
+    );
+    vi.spyOn(config, 'getTruncateToolOutputThreshold').mockReturnValue(500);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:oversized_without_batch_budget' })
+      .execute(new AbortController().signal);
+
+    expect(setTools).toHaveBeenCalledOnce();
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(true);
+    expect(result.deferredToolPresentations).toBeUndefined();
+    expect(String(result.llmContent)).toContain('declared directly instead');
+    expect(String(result.llmContent).length).toBeLessThan(500);
+  });
+
+  it('asks for smaller batches instead of declaring aggregate overflow directly', async () => {
+    const first = new MockTool({
+      name: 'medium_deferred_a',
+      description: 'a'.repeat(400),
+      shouldDefer: true,
+    });
+    const second = new MockTool({
+      name: 'medium_deferred_b',
+      description: 'b'.repeat(400),
+      shouldDefer: true,
+    });
+    registry.registerTool(first);
+    registry.registerTool(second);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(1_000);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:medium_deferred_a,medium_deferred_b' })
+      .execute(new AbortController().signal);
+
+    expect(setTools).not.toHaveBeenCalled();
+    expect(registry.isDeferredToolRevealed(first.name)).toBe(false);
+    expect(registry.isDeferredToolRevealed(second.name)).toBe(false);
+    expect(result.deferredToolPresentations).toBeUndefined();
+    expect(String(result.llmContent)).toContain(
+      'Request these tools individually or in a smaller follow-up batch',
+    );
+    expect(String(result.llmContent)).toContain(first.name);
+    expect(String(result.llmContent)).toContain(second.name);
+  });
+
+  it('rolls back an oversized direct declaration when setTools fails', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_deferred',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    const alreadyRevealed = new MockTool({
+      name: 'already_revealed',
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    registry.registerTool(alreadyRevealed);
+    registry.revealDeferredTool(alreadyRevealed.name);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockRejectedValue(new Error('provider rejected tools')),
+    } as never);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:oversized_deferred,already_revealed' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toBe('provider rejected tools');
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(false);
+    expect(registry.isDeferredToolRevealed(alreadyRevealed.name)).toBe(true);
+    // The schema whose reveal was rolled back must not leak into the
+    // result — otherwise the model believes it is callable and the next
+    // turn surfaces an "unknown tool" API error.
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"oversized_deferred"',
+    );
+  });
+
+  it('rolls back the oversized reveal when the client is not initialised yet', async () => {
+    const oversized = new MockTool({
+      name: 'oversized_no_client',
+      description: 'x'.repeat(2000),
+      shouldDefer: true,
+    });
+    registry.registerTool(oversized);
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue(
+      null as unknown as ReturnType<typeof config.getGeminiClient>,
+    );
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:oversized_no_client' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('not initialised');
+    // No orphaned reveal: the tool must stay hidden until it is actually
+    // declared to the provider.
+    expect(registry.isDeferredToolRevealed(oversized.name)).toBe(false);
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"oversized_no_client"',
+    );
+  });
+
+  it('preserves missing and truncated diagnostics after an oversized direct declaration', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'oversized_deferred',
+        description: 'x'.repeat(2000),
+        shouldDefer: true,
+      }),
+    );
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+
+    const result = await new ToolSearchTool(config)
+      .build({
+        query: 'select:oversized_deferred,missing_tool,truncated_tool',
+        max_results: 2,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain('Not found: missing_tool');
+    expect(String(result.llmContent)).toContain(
+      'Truncated by max_results — request these in a follow-up call: truncated_tool',
+    );
+  });
+
+  it('preserves diagnostics for already-declared tools in an oversized mixed selection', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'always_loaded',
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: 'oversized_deferred',
+        description: 'x'.repeat(2000),
+        shouldDefer: true,
+      }),
+    );
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(500);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:always_loaded,oversized_deferred' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain(
+      'Already declared and directly callable: always_loaded',
+    );
+    expect(registry.isDeferredToolRevealed('oversized_deferred')).toBe(true);
+    expect(result.deferredToolPresentations).toBeUndefined();
   });
 
   it("doesn't propagate when ensureTool throws mid-batch — reports missing instead", async () => {
@@ -942,18 +1313,16 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('"name":"alpha"');
     expect(content).toContain('"name":"charlie"');
     expect(content).toContain('Not found: bravo');
-    // alpha and charlie revealed; bravo not (the throw kept it out).
-    expect(registry.isDeferredToolRevealed('alpha')).toBe(true);
-    expect(registry.isDeferredToolRevealed('charlie')).toBe(true);
+    // alpha and charlie are pending proxy presentations; bravo not (the throw kept it out).
+    expect(presentationNames(result)).toEqual(['alpha', 'charlie']);
+    expect(registry.hasPresentedProxySchema('alpha')).toBe(false);
+    expect(registry.hasPresentedProxySchema('charlie')).toBe(false);
+    expect(registry.isDeferredToolRevealed('alpha')).toBe(false);
+    expect(registry.isDeferredToolRevealed('charlie')).toBe(false);
     expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
   });
 
-  it('treats a null GeminiClient identically to setTools() throwing', async () => {
-    // Without the explicit null-check, optional chaining (`?.setTools()`)
-    // silently no-ops if init hasn't completed yet, leaving the reveal
-    // in the registry while the API never received the schema. The
-    // dedupe filter in `collectCandidates` would then exclude that tool
-    // from future keyword searches, making it unreachable until /clear.
+  it('does not require a GeminiClient to return deferred schemas', async () => {
     registry.registerTool(
       new MockTool({ name: 'cron_create', shouldDefer: true }),
     );
@@ -966,11 +1335,11 @@ describe('ToolSearchTool', () => {
       .build({ query: 'select:cron_create' })
       .execute(new AbortController().signal);
 
-    expect(result.error).toBeDefined();
-    expect(result.error?.message).toContain('GeminiClient not initialised');
-    expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
-    // Reveal rolled back so subsequent ToolSearch can find the tool.
+    expect(result.error).toBeUndefined();
+    expect(String(result.llmContent)).toContain('"name":"cron_create"');
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+    expect(presentationNames(result)).toEqual(['cron_create']);
+    expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
   });
 
   it('excludes visibleTools from keyword-search candidates', async () => {
@@ -1036,27 +1405,30 @@ describe('ToolSearchTool', () => {
 
     // Schema returned (model can inspect it)
     expect(content).toContain('"name":"web_fetch"');
+    expect(content).not.toContain('deferred_tool_call');
     // But no reveal happened — tool is already visible
     expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
     // And setTools was NOT called — no KV-cache invalidation
     expect(mockSetTools).not.toHaveBeenCalled();
   });
 
-  it('select: for a non-visible deferred tool still triggers reveal', async () => {
+  it('select: for a non-visible deferred tool records proxy presentation without reveal', async () => {
     const { config, registry } = makeConfigWithRegistry();
     registry.registerTool(
       new MockTool({ name: 'cron_create', shouldDefer: true }),
     );
 
     const tool = new ToolSearchTool(config);
-    await tool
+    const result = await tool
       .build({ query: 'select:cron_create' })
       .execute(new AbortController().signal);
 
-    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+    expect(presentationNames(result)).toEqual(['cron_create']);
+    expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
   });
 
-  it('select: mixed visible+non-visible only reveals the hidden ones', async () => {
+  it('select: mixed visible+non-visible only proxy-presents the hidden ones', async () => {
     const visibleConfig = new Config({
       ...baseConfigParams,
       visibleTools: ['web_fetch'],
@@ -1086,28 +1458,33 @@ describe('ToolSearchTool', () => {
     // Both schemas returned
     expect(content).toContain('"name":"web_fetch"');
     expect(content).toContain('"name":"cron_create"');
-    // web_fetch NOT revealed (visible), cron_create revealed
+    // web_fetch NOT proxy-presented (already visible), cron_create presented.
     expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
-    expect(visibleRegistry.isDeferredToolRevealed('cron_create')).toBe(true);
-    // setTools called exactly once for cron_create
-    expect(mockSetTools).toHaveBeenCalledTimes(1);
+    expect(visibleRegistry.isDeferredToolRevealed('cron_create')).toBe(false);
+    expect(presentationNames(result)).toEqual(['cron_create']);
+    expect(visibleRegistry.hasPresentedProxySchema('web_fetch')).toBe(false);
+    expect(visibleRegistry.hasPresentedProxySchema('cron_create')).toBe(false);
+    expect(mockSetTools).not.toHaveBeenCalled();
   });
 });
 
 describe('ToolRegistry.clearRevealedDeferredTools', () => {
-  it('empties the revealed set so new sessions start clean', async () => {
-    const { config, registry } = makeConfigWithRegistry();
-    registry.registerTool(
-      new MockTool({ name: 'cron_create', shouldDefer: true }),
-    );
+  it('empties revealed and proxy-presentation state so new sessions start clean', async () => {
+    const { registry } = makeConfigWithRegistry();
+    const tool = new MockTool({ name: 'cron_create', shouldDefer: true });
+    registry.registerTool(tool);
 
-    const tool = new ToolSearchTool(config);
-    const invocation = tool.build({ query: 'select:cron_create' });
-    await invocation.execute(new AbortController().signal);
+    registry.revealDeferredTool('cron_create');
+    registry.markProxySchemaPresented({
+      name: 'cron_create',
+      schemaFingerprint: getFunctionSchemaFingerprint(tool.schema),
+    });
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+    expect(registry.hasPresentedProxySchema('cron_create')).toBe(true);
 
     registry.clearRevealedDeferredTools();
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+    expect(registry.hasPresentedProxySchema('cron_create')).toBe(false);
     // And the declarations list should once again exclude it.
     expect(registry.getFunctionDeclarations().map((d) => d.name)).not.toContain(
       'cron_create',

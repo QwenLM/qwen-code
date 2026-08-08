@@ -1607,6 +1607,65 @@ describe('DiscoveredMCPTool', () => {
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
 
+    it('does not execute a reconnected tool whose schema changed', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'must not execute' }],
+        }),
+      };
+      const changedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        {
+          type: 'object',
+          properties: { replacement: { type: 'string' } },
+          required: ['replacement'],
+        },
+        true,
+        undefined,
+        undefined,
+        newMockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(changedTool),
+        }),
+      };
+      const originalTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
+      );
+
+      await expect(
+        originalTool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow('changed its schema during reconnect');
+
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(newMockMcpClient.callTool).not.toHaveBeenCalled();
+    });
+
     it('does not reconnect a guarded invocation after an ambiguous connection error', async () => {
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {

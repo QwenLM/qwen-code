@@ -166,11 +166,14 @@ function summarizeExecutionAllowlist(
  *   it delete or rewrite the active team.
  * - Plan lifecycle tools are owned by the caller/main session. A subagent
  *   should return its plan to the caller instead of entering or exiting mode.
+ * - DeferredToolCall is the main-session discovery proxy. Subagents receive
+ *   their callable deferred schemas directly and must not route through it.
  * - Todo state is also parent-owned because subagents share the session's
  *   persisted Todo sidecar.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
+  ToolNames.DEFERRED_TOOL_CALL,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
@@ -237,6 +240,7 @@ export function extractParentToolNames(
  */
 const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
+  ToolNames.DEFERRED_TOOL_CALL,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,

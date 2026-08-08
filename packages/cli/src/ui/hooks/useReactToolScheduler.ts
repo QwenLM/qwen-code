@@ -108,7 +108,7 @@ export type TrackedToolCall =
   | TrackedCancelledToolCall;
 
 export function useReactToolScheduler(
-  onComplete: (tools: CompletedToolCall[]) => Promise<void>,
+  onComplete: (tools: CompletedToolCall[]) => Promise<boolean | void>,
   config: Config,
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
@@ -141,9 +141,7 @@ export function useReactToolScheduler(
   );
 
   const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
-    async (completedToolCalls) => {
-      await onComplete(completedToolCalls);
-    },
+    async (completedToolCalls) => onComplete(completedToolCalls),
     [onComplete],
   );
 
@@ -207,6 +205,7 @@ export function useReactToolScheduler(
         getPreferredEditor,
         onEditorClose,
         onToolResultFullTurnModel,
+        deferDeferredToolPresentationCommit: true,
       }),
     [
       config,

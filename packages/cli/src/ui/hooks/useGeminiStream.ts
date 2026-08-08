@@ -29,6 +29,7 @@ import {
   type GeminiErrorEventValue,
   type GoalTurnPermit,
   type SteerInput,
+  type DeferredToolPresentation,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -825,10 +826,11 @@ export const useGeminiStream = (
           addItem(toolGroupDisplay, Date.now());
 
           // Handle tool response submission immediately when tools complete
-          await handleCompletedTools(
+          return handleCompletedTools(
             completedToolCallsFromScheduler as TrackedToolCall[],
           );
         }
+        return false;
       },
       config,
       getPreferredEditor,
@@ -3076,6 +3078,8 @@ export const useGeminiStream = (
       metadata?: {
         notificationDisplayText?: string;
         todoWorkChainId?: string;
+        /** Fires after the next model request accepts the prepared context. */
+        onContextAccepted?: () => void;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
         onAdmissionFailed?: () => void;
@@ -3477,6 +3481,14 @@ export const useGeminiStream = (
         }
 
         let cleanupReviewLease = false;
+        // Stream rejection may be observed both while iterating and during
+        // post-processing. Report it once and suppress a later onDelivered.
+        let deliveryFailed = false;
+        const reportDeliveryFailure = () => {
+          if (deliveryFailed) return;
+          deliveryFailed = true;
+          metadata?.onDeliveryFailed?.();
+        };
         let keepGoalBinding = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
@@ -3536,9 +3548,40 @@ export const useGeminiStream = (
                   : {}),
             },
           );
+          const acknowledgedStream = (async function* () {
+            let accepted = false;
+            for await (const event of stream) {
+              const terminalRejection =
+                event.type === ServerGeminiEventType.Error ||
+                event.type === ServerGeminiEventType.UserCancelled;
+              // Only provider-produced output proves that the request context
+              // was accepted. Limit, retry, fallback, compression, and hook
+              // events can all be emitted locally before a request reaches
+              // the provider and must therefore fail closed.
+              const provesAcceptance =
+                event.type === ServerGeminiEventType.Content ||
+                event.type === ServerGeminiEventType.Thought ||
+                event.type === ServerGeminiEventType.ToolCallRequest ||
+                event.type === ServerGeminiEventType.Finished ||
+                event.type === ServerGeminiEventType.Citation;
+              if (terminalRejection) {
+                reportDeliveryFailure();
+              } else if (provesAcceptance && !accepted) {
+                accepted = true;
+                metadata?.onContextAccepted?.();
+              }
+              yield event;
+            }
+            // An empty stream or a stream containing only locally generated
+            // control events provides no evidence that the model received
+            // schema-bearing context, so fail closed.
+            if (!accepted) {
+              reportDeliveryFailure();
+            }
+          })();
 
           const processingResult = await processGeminiStreamEvents(
-            stream,
+            acknowledgedStream,
             userMessageTimestamp,
             processingSignal,
             submitType,
@@ -3560,7 +3603,7 @@ export const useGeminiStream = (
           ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
-            metadata?.onDeliveryFailed?.();
+            reportDeliveryFailure();
             return;
           }
 
@@ -3658,8 +3701,8 @@ export const useGeminiStream = (
           }
 
           if (lastPromptErroredRef.current || goalTerminalErrorRef.current) {
-            metadata?.onDeliveryFailed?.();
-          } else {
+            reportDeliveryFailure();
+          } else if (!deliveryFailed) {
             metadata?.onDelivered?.();
           }
 
@@ -3695,7 +3738,7 @@ export const useGeminiStream = (
           }
         } catch (error: unknown) {
           cleanupReviewLease = true;
-          metadata?.onDeliveryFailed?.();
+          reportDeliveryFailure();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -4002,7 +4045,7 @@ export const useGeminiStream = (
       }
 
       if (activeModelStreamsRef.current > 0) {
-        return;
+        return false;
       }
 
       // Finalize any client-initiated tools as soon as they are done.
@@ -4205,7 +4248,7 @@ export const useGeminiStream = (
             'Goal tool continuation ended without a result',
           );
         }
-        return;
+        return false;
       }
 
       type ReadyToolResponse = {
@@ -4263,16 +4306,28 @@ export const useGeminiStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
+      const deliveredDeferredToolPresentations: DeferredToolPresentation[] = [];
       orderedResponses.forEach(({ request, response, status }, index) => {
+        const finalizedParts = finalizedResponses[index].responseParts;
+        const responseChanged =
+          finalizedParts.length !== response.responseParts.length ||
+          finalizedParts.some(
+            (part, partIndex) => part !== response.responseParts[partIndex],
+          );
+        const deferredToolPresentations =
+          status === 'success' && !responseChanged
+            ? response.deferredToolPresentations
+            : undefined;
         const goalContext = request.goalContext;
         config.getChatRecordingService?.()?.recordToolResult?.(
-          finalizedResponses[index].responseParts,
+          finalizedParts,
           {
             callId: request.callId,
             status,
             resultDisplay: response.resultDisplay,
             error: response.error,
             errorType: response.errorType,
+            deferredToolPresentations,
             executionStatus: response.executionStatus,
           },
           goalContext
@@ -4285,7 +4340,17 @@ export const useGeminiStream = (
               : { goalContext: { ...goalContext } }
             : undefined,
         );
+        if (deferredToolPresentations) {
+          deliveredDeferredToolPresentations.push(...deferredToolPresentations);
+        }
       });
+
+      const commitDeferredToolPresentations = () => {
+        const toolRegistry = config.getToolRegistry();
+        for (const presentation of deliveredDeferredToolPresentations) {
+          toolRegistry.markProxySchemaPresented(presentation);
+        }
+      };
 
       if (
         turnCancelledRef.current ||
@@ -4300,7 +4365,7 @@ export const useGeminiStream = (
             'Goal tool continuation was cancelled',
           );
         }
-        return;
+        return false;
       }
 
       // If all the tools were cancelled, don't submit a response to Gemini.
@@ -4331,7 +4396,7 @@ export const useGeminiStream = (
             'Goal tool continuation was cancelled',
           );
         }
-        return;
+        return false;
       }
 
       const callIdsToMarkAsSubmitted = geminiTools.map(
@@ -4389,6 +4454,10 @@ export const useGeminiStream = (
       );
       if (terminatesGoalTurn && toolGoalBinding) {
         geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+        // Tool results cross the active-history boundary here without a
+        // follow-up submitQuery, so commit staged ToolSearch presentations
+        // like the other early-return preservation paths do.
+        commitDeferredToolPresentations();
         try {
           await config.getChatRecordingService()?.flush();
           const runtime = await config.getGoalRuntimeReady();
@@ -4530,7 +4599,7 @@ export const useGeminiStream = (
             'Goal tool continuation stopped after a model switch',
           );
         }
-        return;
+        return false;
       }
 
       const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
@@ -4550,14 +4619,17 @@ export const useGeminiStream = (
           );
         });
       if (backgroundLaunchExhaustedCapacity) {
-        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        if (geminiClient) {
+          geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+          commitDeferredToolPresentations();
+        }
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation stopped: background capacity exhausted',
           );
         }
-        return;
+        return false;
       }
 
       // Drain steerable user messages at this sampling boundary and append
@@ -4605,7 +4677,7 @@ export const useGeminiStream = (
             'Goal tool continuation was cancelled',
           );
         }
-        return;
+        return false;
       }
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
@@ -4613,15 +4685,35 @@ export const useGeminiStream = (
           toolGoalBinding,
           'Goal tool continuation was preempted',
         );
-        return;
+        return false;
       }
 
+      let settled = false;
+      let settleAcceptance: (accepted: boolean) => void = () => {};
+      const acceptance = new Promise<boolean>((resolve) => {
+        settleAcceptance = (accepted) => {
+          if (settled) return;
+          settled = true;
+          resolve(accepted);
+        };
+      });
       void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
         steerInput: drainedSteer,
-        onDelivered: drainedSteer?.accept,
-        onDeliveryFailed: drainedSteer?.restore,
+        onContextAccepted: () => {
+          drainedSteer?.accept();
+          commitDeferredToolPresentations();
+          settleAcceptance(true);
+        },
+        onDeliveryFailed: () => {
+          drainedSteer?.restore();
+          settleAcceptance(false);
+        },
         goalBinding: toolGoalBinding,
-      });
+      }).then(
+        () => settleAcceptance(false),
+        () => settleAcceptance(false),
+      );
+      return acceptance;
     },
     [
       submitQuery,
