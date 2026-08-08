@@ -19,6 +19,7 @@ import {
   unescapeMarkdownDollars,
 } from './inline-math.js';
 import {
+  BARE_URL_PATTERN,
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -50,7 +51,7 @@ const SAFETY_MARGIN = 4;
 
 const INLINE_MARKDOWN_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
   'g',
 );
 

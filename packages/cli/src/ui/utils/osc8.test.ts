@@ -266,8 +266,19 @@ describe('osc8 helpers', () => {
       ['https://example.com?q=1)', 'https://example.com?q=1'],
       ['https://example.com:::', 'https://example.com'],
       ['https://example.com).', 'https://example.com'],
+      // Full-width CJK punctuation glues onto URLs in Chinese prose.
+      ['https://example.com。', 'https://example.com'],
+      ['https://example.com，', 'https://example.com'],
+      ['https://example.com（', 'https://example.com'],
+      ['https://example.com）', 'https://example.com'],
+      ['https://example.com、', 'https://example.com'],
     ])('trims sentence punctuation: %s -> %s', (input, expected) => {
       expect(trimTrailingUrlPunctuation(input)).toBe(expected);
+    });
+
+    it('preserves a trailing full-width close-paren when balanced inside the URL', () => {
+      const url = 'https://example.com/wiki/Foo（bar）';
+      expect(trimTrailingUrlPunctuation(url)).toBe(url);
     });
 
     it('preserves a trailing close-paren when balanced inside the URL', () => {

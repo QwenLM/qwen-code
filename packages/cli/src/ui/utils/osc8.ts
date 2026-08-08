@@ -97,14 +97,16 @@ export function isSafeOscScheme(url: string): boolean {
  * is unchanged.
  *
  * The set of trimmable trailing characters matches GitHub / GitLab linkifier
- * behavior. We additionally rebalance a trailing `)` against opening `(` in
+ * behavior, extended with the full-width CJK equivalents (`。`、`，`；`：`！`？`
+ * etc.) because Chinese prose glues those onto URLs exactly like ASCII ones.
+ * We additionally rebalance a trailing `)`/`）` against opening `(`/`（` in
  * the URL so URLs that legitimately end with `)` (Wikipedia disambiguation,
  * MSDN) aren't truncated.
  */
 export function trimTrailingUrlPunctuation(url: string): string {
-  // Count `( [ {` opens once up-front; we then decrement running `)`/`]`/`}`
-  // close counts as we trim, keeping the whole trim O(n) instead of O(n²)
-  // for adversarial inputs like `https://x.com))))…`.
+  // Count `( [ {` opens (ASCII and full-width) once up-front; we then
+  // decrement running `)`/`]`/`}` close counts as we trim, keeping the whole
+  // trim O(n) instead of O(n²) for adversarial inputs like `https://x.com))))…`.
   let openParen = 0;
   let openBracket = 0;
   let openBrace = 0;
@@ -113,12 +115,12 @@ export function trimTrailingUrlPunctuation(url: string): string {
   let closeBrace = 0;
   for (let i = 0; i < url.length; i++) {
     const cc = url.charCodeAt(i);
-    if (cc === 0x28) openParen++;
-    else if (cc === 0x5b) openBracket++;
-    else if (cc === 0x7b) openBrace++;
-    else if (cc === 0x29) closeParen++;
-    else if (cc === 0x5d) closeBracket++;
-    else if (cc === 0x7d) closeBrace++;
+    if (cc === 0x28 || cc === 0xff08) openParen++;
+    else if (cc === 0x5b || cc === 0xff3b) openBracket++;
+    else if (cc === 0x7b || cc === 0xff5b) openBrace++;
+    else if (cc === 0x29 || cc === 0xff09) closeParen++;
+    else if (cc === 0x5d || cc === 0xff3d) closeBracket++;
+    else if (cc === 0x7d || cc === 0xff5d) closeBrace++;
   }
 
   let end = url.length;
@@ -136,23 +138,42 @@ export function trimTrailingUrlPunctuation(url: string): string {
       c === 0x27 ||
       c === 0x22 ||
       c === 0x60 ||
-      c === 0x3e
+      c === 0x3e ||
+      // Full-width CJK punctuation: 。 、 ， ； ： ！ ？ ＇ ＂ ｀ ＞ … – — ―
+      // plus opening （ ［ ｛ (a URL never legitimately ends with one).
+      c === 0x3002 ||
+      c === 0x3001 ||
+      c === 0xff08 ||
+      c === 0xff3b ||
+      c === 0xff5b ||
+      c === 0xff0c ||
+      c === 0xff1b ||
+      c === 0xff1a ||
+      c === 0xff01 ||
+      c === 0xff1f ||
+      c === 0xff07 ||
+      c === 0xff02 ||
+      c === 0xff40 ||
+      c === 0xff1e ||
+      c === 0x2026 ||
+      (c >= 0x2013 && c <= 0x2015)
     ) {
       end--;
       continue;
     }
-    // Trailing `)`/`]`/`}` only when unbalanced against opens in the prefix.
-    if (c === 0x29 && closeParen > openParen) {
+    // Trailing `)`/`]`/`}` (ASCII or full-width) only when unbalanced
+    // against opens in the prefix.
+    if ((c === 0x29 || c === 0xff09) && closeParen > openParen) {
       closeParen--;
       end--;
       continue;
     }
-    if (c === 0x5d && closeBracket > openBracket) {
+    if ((c === 0x5d || c === 0xff3d) && closeBracket > openBracket) {
       closeBracket--;
       end--;
       continue;
     }
-    if (c === 0x7d && closeBrace > openBrace) {
+    if ((c === 0x7d || c === 0xff5d) && closeBrace > openBrace) {
       closeBrace--;
       end--;
       continue;
@@ -177,6 +198,19 @@ export const MD_LINK_PATTERN = String.raw`\[.*?\]\((?:[^()]|\([^()]*\))*\)`;
  * with `^...$` because callers pass the whole match string.
  */
 export const MD_LINK_CAPTURE = /^\[(.*?)\]\(((?:[^()]|\([^()]*\))*)\)$/;
+
+/**
+ * Bare-URL pattern shared between the React and ANSI renderers. Unlike a
+ * plain `\S+` run it stops at CJK / full-width punctuation: Chinese prose
+ * routinely glues `（…）`/`。` onto a URL with no space
+ * (`https://x.com（2 commits）`), and `\S` swallows the punctuation plus
+ * everything up to the next ASCII space, turning the OSC 8 target into a
+ * 404. Raw CJK ideographs stay in the match — un-percent-encoded IRI paths
+ * are plausible; full-width punctuation never is. ASCII trailing punctuation
+ * is still matched and left to `trimTrailingUrlPunctuation` so visible bytes
+ * stay unchanged on unsupported terminals.
+ */
+export const BARE_URL_PATTERN = String.raw`https?:\/\/[^\s\u00a0\u2013-\u2015\u2018-\u201f\u2026\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+`;
 
 /**
  * Should the markdown renderers wrap a `[label](url)` token in an OSC 8
