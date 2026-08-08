@@ -2302,14 +2302,16 @@ export const AppContainer = (props: AppContainerProps) => {
   // without a notice the only symptom is a peer that seems to be ignored.
   useEffect(() => {
     if (!peerMessaging) return;
-    return peerMessaging.onHeldChange((held) => {
-      if (held.length === 0) return;
-      const newest = held[held.length - 1];
+    return peerMessaging.onHeldChange((held, added) => {
+      // Removals notify too — approving three held messages walks the set
+      // down one at a time — and announcing those would report the user's
+      // own decision back as a fresh inbound hold.
+      if (!added) return;
       historyManager.addItem(
         {
           type: MessageType.INFO,
           text:
-            `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
+            `Held a message from another session (${describeHoldCause(added.cause)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
         Date.now(),

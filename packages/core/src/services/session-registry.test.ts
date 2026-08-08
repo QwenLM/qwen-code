@@ -111,39 +111,52 @@ describe('registerSession', () => {
     expect(live[0].name).toMatch(/^app-[0-9a-f]{2}$/);
   });
 
-  it('creates the registry directory as 0700', async () => {
-    await registerSession({
-      sessionId: 's1',
-      cwd: '/w/app',
-      kind: 'interactive',
-    });
-    const stat = await fs.stat(getSessionRegistryDir());
-    expect(stat.mode & 0o777).toBe(0o700);
-  });
+  // Windows synthesizes st_mode from file attributes (a writable dir reads
+  // 0o777, a file 0o666) and chmod there can only toggle the read-only bit,
+  // so POSIX permission bits are not assertable on the test_windows gate.
+  // Same guard as atomicFileWrite.test.ts and session-writer-lease.test.ts.
+  it.skipIf(process.platform === 'win32')(
+    'creates the registry directory as 0700',
+    async () => {
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      });
+      const stat = await fs.stat(getSessionRegistryDir());
+      expect(stat.mode & 0o777).toBe(0o700);
+    },
+  );
 
-  it('tightens a pre-existing loose registry directory', async () => {
-    await fs.mkdir(getSessionRegistryDir(), { recursive: true, mode: 0o755 });
-    await fs.chmod(getSessionRegistryDir(), 0o755);
+  it.skipIf(process.platform === 'win32')(
+    'tightens a pre-existing loose registry directory',
+    async () => {
+      await fs.mkdir(getSessionRegistryDir(), { recursive: true, mode: 0o755 });
+      await fs.chmod(getSessionRegistryDir(), 0o755);
 
-    await registerSession({
-      sessionId: 's1',
-      cwd: '/w/app',
-      kind: 'interactive',
-    });
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      });
 
-    const stat = await fs.stat(getSessionRegistryDir());
-    expect(stat.mode & 0o777).toBe(0o700);
-  });
+      const stat = await fs.stat(getSessionRegistryDir());
+      expect(stat.mode & 0o777).toBe(0o700);
+    },
+  );
 
-  it('writes the record as 0600', async () => {
-    await registerSession({
-      sessionId: 's1',
-      cwd: '/w/app',
-      kind: 'interactive',
-    });
-    const stat = await fs.stat(getSessionRecordPath());
-    expect(stat.mode & 0o777).toBe(0o600);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'writes the record as 0600',
+    async () => {
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      });
+      const stat = await fs.stat(getSessionRecordPath());
+      expect(stat.mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('reports failure instead of throwing when the home dir is unwritable', async () => {
     __setMockGlobalDir(path.join(tmpDir, 'nope', '\0invalid'));

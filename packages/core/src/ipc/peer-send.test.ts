@@ -129,6 +129,21 @@ describe('sendToPeer', () => {
     });
   });
 
+  // parsePeerFrame rejects empty content and the inbox drops what it
+  // cannot parse without a delivery status, so 'sent' would be a lie.
+  it('refuses an empty message instead of reporting it sent', async () => {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+
+    const outcome = await sendToPeer({
+      target: 'app-ab',
+      message: '',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(outcome).toEqual({ kind: 'empty' });
+    expect(sendPeerFrame).not.toHaveBeenCalled();
+  });
+
   it('asserts bypass when this session is in YOLO', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     await sendToPeer({

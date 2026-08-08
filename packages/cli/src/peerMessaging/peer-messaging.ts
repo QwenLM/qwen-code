@@ -54,7 +54,7 @@ export class PeerMessaging {
   private submitFn: PeerSubmitFn | null = null;
   private readonly buffered: PeerUserFrame[] = [];
   private readonly heldListeners = new Set<
-    (held: readonly HeldMessage[]) => void
+    (held: readonly HeldMessage[], added?: HeldMessage) => void
   >();
   private closed = false;
 
@@ -83,7 +83,7 @@ export class PeerMessaging {
           from: messaging.inbox?.socketPath,
         });
       },
-      onHeldChange: (held) => messaging.emitHeldChange(held),
+      onHeldChange: (held, added) => messaging.emitHeldChange(held, added),
     });
 
     const inbox = await startPeerInbox({
@@ -132,7 +132,9 @@ export class PeerMessaging {
     return this.gate?.reevaluate(reason) ?? 0;
   }
 
-  onHeldChange(listener: (held: readonly HeldMessage[]) => void): () => void {
+  onHeldChange(
+    listener: (held: readonly HeldMessage[], added?: HeldMessage) => void,
+  ): () => void {
     this.heldListeners.add(listener);
     return () => this.heldListeners.delete(listener);
   }
@@ -190,10 +192,13 @@ export class PeerMessaging {
     );
   }
 
-  private emitHeldChange(held: readonly HeldMessage[]): void {
+  private emitHeldChange(
+    held: readonly HeldMessage[],
+    added?: HeldMessage,
+  ): void {
     for (const listener of this.heldListeners) {
       try {
-        listener(held);
+        listener(held, added);
       } catch (error) {
         debugLogger.debug(
           `held-change listener threw: ${

@@ -26,7 +26,13 @@ afterEach(() => {
   }
 });
 
-describe('resolvePeerSocketPath', () => {
+const isWindows = process.platform === 'win32';
+
+// Every assertion here spells out a POSIX path. On win32 `path.join`
+// yields backslashes and there is no `$XDG_RUNTIME_DIR`/`/tmp` to fall
+// back to, so the whole group is POSIX-only — same guard the sibling
+// `uds-inbox.test.ts` uses.
+describe.skipIf(isWindows)('resolvePeerSocketPath', () => {
   it('prefers XDG_RUNTIME_DIR', () => {
     process.env['XDG_RUNTIME_DIR'] = '/run/user/1000';
     expect(resolvePeerSocketPath(4242)).toBe(
@@ -61,7 +67,10 @@ describe('resolvePeerSocketPath', () => {
 });
 
 describe('isLocalIpcPath', () => {
-  it('accepts an absolute posix path', () => {
+  // On win32 the only accepted form is a `\\.\pipe\` local pipe, so an
+  // absolute POSIX path is correctly rejected there. The rejection cases
+  // below hold on both platforms and stay unguarded.
+  it.skipIf(isWindows)('accepts an absolute posix path', () => {
     expect(isLocalIpcPath('/run/user/1000/qwen-socks/1.sock')).toBe(true);
   });
 

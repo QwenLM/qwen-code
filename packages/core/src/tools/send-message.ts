@@ -145,6 +145,17 @@ class SendMessageInvocation extends BaseToolInvocation<
         };
       }
 
+      case 'empty': {
+        const msg =
+          `"${to}" is another Qwen Code session, and an empty message would be ` +
+          'dropped on arrival. Re-send with the message text.';
+        return {
+          llmContent: msg,
+          returnDisplay: 'Empty message.',
+          error: { message: msg, type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING },
+        };
+      }
+
       case 'failed': {
         const msg = `Failed to send to ${outcome.address}: ${outcome.reason}`;
         return {
@@ -337,12 +348,19 @@ class SendMessageInvocation extends BaseToolInvocation<
     // same-named peer session: a teammate is part of this session's own
     // work, and silently routing off-process would be the more surprising
     // of the two.
+    // `members` excludes the leader by definition, but TeamManager also
+    // routes "leader" and the lead agent id, and the team prompt tells
+    // teammates to report with `to: "leader"`. Leaving those out of the
+    // gate would offer a team-internal address to peer resolution first,
+    // so a peer named "leader-*" could swallow a teammate's report.
     const teamManager = this.config.getTeamManager();
-    const teammateExists =
+    const teamAddressExists =
       !!teamManager &&
-      findMemberByName(teamManager.getTeamFile().members, to) !== undefined;
+      (to.toLowerCase() === LEADER_NAME ||
+        to === teamManager.getTeamFile().leadAgentId ||
+        findMemberByName(teamManager.getTeamFile().members, to) !== undefined);
 
-    if (!teammateExists) {
+    if (!teamAddressExists) {
       // Route 3: another Qwen Code session on this machine.
       const peerResult = await this.trySendToPeer(to);
       if (peerResult) return peerResult;
@@ -436,6 +454,10 @@ export class SendMessageTool extends BaseDeclarativeTool<
           message: {
             type: 'string',
             description: 'Message text to send.',
+            // A peer session's wire format rejects empty content and drops
+            // the frame without a receipt, so an empty send has no meaning
+            // on any route.
+            minLength: 1,
             // Cap message size so a teammate can't grow the
             // recipient's inbox file unboundedly with a single send.
             maxLength: 65536,

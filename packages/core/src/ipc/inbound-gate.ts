@@ -93,8 +93,15 @@ export interface InboundGateOptions {
     frame: PeerUserFrame,
     status: 'held' | 'denied' | 'expired' | 'delivered',
   ) => void;
-  /** Called whenever the held set changes, for UI. */
-  onHeldChange?: (held: readonly HeldMessage[]) => void;
+  /**
+   * Called whenever the held set changes, for UI.
+   *
+   * `added` is the message this change parked, and is absent when the
+   * change only removed messages (a decision, a release, shutdown). The
+   * UI notice announces new arrivals, so without this it would report
+   * the user's own `/peers accept` back as fresh inbound holds.
+   */
+  onHeldChange?: (held: readonly HeldMessage[], added?: HeldMessage) => void;
 }
 
 /**
@@ -190,12 +197,13 @@ export class InboundGate {
       }
     }
 
-    this.held.push({ frame, cause, heldAt: Date.now() });
+    const entry: HeldMessage = { frame, cause, heldAt: Date.now() };
+    this.held.push(entry);
     debugLogger.debug(
       `held peer message ${frame.msgId} (cause=${cause}, ${this.held.length} held)`,
     );
     this.options.reportStatus?.(frame, 'held');
-    this.notifyHeldChange();
+    this.notifyHeldChange(entry);
     return 'held';
   }
 
@@ -287,9 +295,9 @@ export class InboundGate {
     this.notifyHeldChange();
   }
 
-  private notifyHeldChange(): void {
+  private notifyHeldChange(added?: HeldMessage): void {
     try {
-      this.options.onHeldChange?.(this.held);
+      this.options.onHeldChange?.(this.held, added);
     } catch (error) {
       debugLogger.debug(
         `onHeldChange threw: ${

@@ -48,6 +48,7 @@ export type PeerSendOutcome =
   | { kind: 'disabled' }
   | { kind: 'not-found'; suggestions: string[] }
   | { kind: 'ambiguous'; matches: string[] }
+  | { kind: 'empty' }
   | { kind: 'failed'; peer: PeerSessionInfo; address: string; reason: string };
 
 export interface SendToPeerOptions {
@@ -89,6 +90,12 @@ export async function sendToPeer(
       ),
     };
   }
+
+  // The receiver's wire contract rejects empty content (`parsePeerFrame`
+  // returns null) and an unparseable frame is dropped with only a debug
+  // log — no delivery status comes back. Reporting 'sent' for one would
+  // tell the model a message landed that no one will ever see.
+  if (options.message.length === 0) return { kind: 'empty' };
 
   const peer = resolved.peer;
   const address = formatPeerAddress(peer, peers);
