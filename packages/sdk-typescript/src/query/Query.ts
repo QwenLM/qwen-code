@@ -33,7 +33,13 @@ import {
 } from '../types/protocol.js';
 import type { Transport } from '../transport/Transport.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { QueryOptions, CLIMcpServerConfig } from '../types/types.js';
+import type {
+  QueryOptions,
+  CLIMcpServerConfig,
+  EffortOverride,
+  EffortStatus,
+  EffortTier,
+} from '../types/types.js';
 import { isSdkMcpServerConfig } from '../types/types.js';
 import { Stream } from '../utils/Stream.js';
 import { serializeJsonLine } from '../utils/jsonLines.js';
@@ -63,6 +69,25 @@ interface TransportWithEndInput extends Transport {
 
 const logger = SdkLogger.createLogger('Query');
 
+function parseEffortStatus(value: unknown): EffortStatus | undefined {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('applied' in value) ||
+    typeof value.applied !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return {
+    applied: value.applied,
+    override:
+      ((value as { override?: EffortOverride | null }).override as
+        | EffortOverride
+        | null
+        | undefined) ?? null,
+  };
+}
+
 export class Query implements AsyncIterable<SDKMessage> {
   private transport: Transport;
   private options: QueryOptions;
@@ -76,6 +101,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private sdkMcpTransports: Map<string, SdkControlServerTransport> = new Map();
   private sdkMcpServers: Map<string, McpServer> = new Map();
   readonly initialized: Promise<void>;
+  private initialEffortStatus: EffortStatus | undefined;
   private closed = false;
   private messageRouterStarted = false;
   private transportReadFinalized = false;
@@ -295,22 +321,32 @@ export class Query implements AsyncIterable<SDKMessage> {
       const sdkMcpServersForCli = this.getSdkMcpServersForCli();
       const mcpServersForCli = this.getMcpServersForCli();
 
-      await this.sendControlRequest(ControlRequestType.INITIALIZE, {
-        hooks: null,
-        timeout: this.options.timeout?.canUseTool
-          ? { canUseTool: this.options.timeout.canUseTool }
-          : undefined,
-        sdkMcpServers:
-          Object.keys(sdkMcpServersForCli).length > 0
-            ? sdkMcpServersForCli
+      const response = await this.sendControlRequest(
+        ControlRequestType.INITIALIZE,
+        {
+          hooks: null,
+          timeout: this.options.timeout?.canUseTool
+            ? { canUseTool: this.options.timeout.canUseTool }
             : undefined,
-        mcpServers:
-          Object.keys(mcpServersForCli).length > 0
-            ? mcpServersForCli
-            : undefined,
-        agents: this.options.agents,
-        effort: this.options.effort,
-      });
+          sdkMcpServers:
+            Object.keys(sdkMcpServersForCli).length > 0
+              ? sdkMcpServersForCli
+              : undefined,
+          mcpServers:
+            Object.keys(mcpServersForCli).length > 0
+              ? mcpServersForCli
+              : undefined,
+          agents: this.options.agents,
+          effort: this.options.effort,
+        },
+      );
+      this.initialEffortStatus = parseEffortStatus(response?.['effort_status']);
+      if (this.initialEffortStatus?.applied === false) {
+        const reason = this.initialEffortStatus.override
+          ? `${this.initialEffortStatus.override.source}.${this.initialEffortStatus.override.field} takes precedence`
+          : 'thinking may be disabled';
+        logger.warn(`Initial reasoning effort was not applied (${reason})`);
+      }
       logger.info('Query initialized successfully');
     } catch (error) {
       logger.error('Initialization error:', error);
@@ -991,16 +1027,25 @@ export class Query implements AsyncIterable<SDKMessage> {
    * Set the reasoning effort tier at runtime.
    *
    * @param effort - One of 'low', 'medium', 'high', 'xhigh', 'max'
-   * @returns `true` if the effort was applied, `false` if it was a no-op (e.g. thinking disabled)
+   * @returns `true` when the tier is active. Use {@link setEffortStatus} to
+   * distinguish disabled thinking from a higher-priority wire override.
    */
-  async setEffort(
-    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max',
-  ): Promise<boolean> {
+  async setEffort(effort: EffortTier): Promise<boolean> {
+    return (await this.setEffortStatus(effort)).applied;
+  }
+
+  /** Set the reasoning effort and return the effective wire status. */
+  async setEffortStatus(effort: EffortTier): Promise<EffortStatus> {
     const response = await this.sendControlRequest(
       ControlRequestType.SET_EFFORT,
       { effort },
     );
-    return Boolean((response as Record<string, unknown> | null)?.applied);
+    return parseEffortStatus(response) ?? { applied: false, override: null };
+  }
+
+  /** Return the server-reported status for the initial effort request. */
+  getInitialEffortStatus(): EffortStatus | undefined {
+    return this.initialEffortStatus;
   }
 
   /**

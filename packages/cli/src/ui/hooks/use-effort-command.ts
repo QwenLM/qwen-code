@@ -9,7 +9,7 @@ import type { Config, ReasoningEffort } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { formatEffortChangeMessage } from '../commands/effort-utils.js';
 
 interface UseEffortCommandReturn {
   isEffortDialogOpen: boolean;
@@ -50,29 +50,13 @@ export const useEffortCommand = (
         // for future sessions, but say it won't take effect until thinking is
         // re-enabled; otherwise confirm the requested tier.
         if (addItem) {
-          if (config.getReasoningEffort() !== effort) {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          } else {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          }
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: formatEffortChangeMessage(config, effort),
+            },
+            Date.now(),
+          );
         }
       } finally {
         setIsEffortDialogOpen(false);

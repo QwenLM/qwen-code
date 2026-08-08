@@ -337,6 +337,41 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should expose a shadowed initial effort status', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        effort: 'high',
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      transport.simulateMessage(
+        createControlResponse(initRequest.request_id, true, {
+          effort_status: {
+            effort: 'high',
+            applied: false,
+            override: {
+              source: 'extra_body',
+              field: 'thinking_budget',
+            },
+          },
+        }),
+      );
+
+      await query.initialized;
+      expect(query.getInitialEffortStatus()).toEqual({
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+      });
+      await query.close();
+    });
+
     it('should generate unique session ID', async () => {
       const transport2 = new MockTransport();
       const query1 = new Query(transport, { cwd: '/test' });
@@ -1341,6 +1376,45 @@ describe('Query', () => {
       const result = await setEffortPromise;
       expect(result).toBe(true);
 
+      await query.close();
+    });
+
+    it('should expose the setEffort override status', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+      await respondToInitialize(transport, query);
+
+      const statusPromise = query.setEffortStatus('max');
+      await vi.waitFor(() => {
+        expect(
+          findControlRequest(
+            transport.getAllWrittenMessages(),
+            ControlRequestType.SET_EFFORT,
+          ),
+        ).toBeDefined();
+      });
+      const request = findControlRequest(
+        transport.getAllWrittenMessages(),
+        ControlRequestType.SET_EFFORT,
+      )!;
+      transport.simulateMessage(
+        createControlResponse(request.request_id, true, {
+          subtype: 'set_effort',
+          effort: 'max',
+          applied: false,
+          override: {
+            source: 'extra_body',
+            field: 'thinking_budget',
+          },
+        }),
+      );
+
+      await expect(statusPromise).resolves.toEqual({
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+      });
       await query.close();
     });
 
