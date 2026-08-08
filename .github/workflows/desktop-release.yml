@@ -347,7 +347,7 @@ jobs:
             find "$rg_dir" -type f -name 'rg' -path '*-darwin/*' -exec \
               codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
               --options runtime --timestamp \
-              --entitlements src-tauri/Entitlements.plist {} +
+              {} +
           else
             echo "::warning::Ripgrep vendor directory not found at $rg_dir; no ripgrep binaries signed."
           fi
@@ -356,7 +356,7 @@ jobs:
           if [ -f "$node_bin" ]; then
             codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
               --options runtime --timestamp \
-              --entitlements src-tauri/Entitlements.plist "$node_bin"
+              --entitlements src-tauri/NodeEntitlements.plist "$node_bin"
           else
             echo "::warning::Node.js runtime binary not found at $node_bin; no Node.js binary signed."
           fi

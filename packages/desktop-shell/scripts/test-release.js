@@ -111,9 +111,30 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
-  assert.ok(
-    workflow.includes('--entitlements src-tauri/Entitlements.plist {} +'),
+  assert.doesNotMatch(
+    workflow,
+    /--entitlements src-tauri\/Entitlements\.plist \{\} \+/,
+    'ripgrep must not inherit the app entitlements',
+  );
+  assert.match(
+    workflow,
+    /--options runtime --timestamp \\\n\s+\{\} \+/,
     'ripgrep codesign failures must fail the signing step',
+  );
+  assert.ok(
+    workflow.includes(
+      '--entitlements src-tauri/NodeEntitlements.plist "$node_bin"',
+    ),
+    'Node.js must use its minimal helper entitlements',
+  );
+  const nodeEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
+    'utf8',
+  );
+  assert.doesNotMatch(
+    nodeEntitlements,
+    /com\.apple\.security\.device\.audio-input/,
+    'Node.js must not receive microphone access',
   );
   assert.match(
     workflow,
