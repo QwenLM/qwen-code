@@ -730,7 +730,9 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
     }
     if (SHELL_WRAPPER_PROGRAMS.has(program)) {
       const scan = consumeShellWrapper(run, index);
-      if (scan.kind === 'none') return { kind: 'other', state };
+      if (scan.kind === 'none') {
+        return { kind: 'other', state, assignmentsOnly: false };
+      }
       if (scan.kind === 'dynamic') return { kind: 'undecidable' };
       return {
         kind: 'payload',
