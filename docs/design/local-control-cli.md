@@ -22,7 +22,7 @@ The mode rejects a non-default `--hostname`, `--token`, `--allow-origin`, `--no-
 
 - LAN exposure requires the explicit flag.
 - Every invocation gets a new token from `crypto.randomBytes(32)`; environment tokens are not reused.
-- Only the advertised LAN origins are admitted for browser REST and WebSocket requests, and every protected route still requires the generated bearer token.
+- Only the advertised LAN origins and the daemon's loopback self-origin are admitted for browser REST and WebSocket requests, and every protected route still requires the generated bearer token.
 - The token stays in the URL fragment, so browsers do not send it in HTTP requests, access logs, or referrers before the Web Shell stores it.
 - Existing bearer authentication, timing-safe comparison, and non-loopback boot checks remain the enforcement boundary.
 - Only non-internal IPv4 interface addresses are advertised. Multiple interfaces produce separate labelled QR codes rather than guessing which network is correct.

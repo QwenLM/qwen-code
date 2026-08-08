@@ -94,7 +94,7 @@ async function showLocalControlPairing(
     });
   }
   writeStdoutLine(
-    '\nKeep this terminal open. Sleep inhibition is best effort. Press Ctrl+C to turn Local Control off.',
+    '\nKeep this terminal open. Sleep inhibition is best effort. Traffic is encrypted only when --tls-cert and --tls-key are set. Press Ctrl+C to turn Local Control off.',
   );
 }
 
@@ -798,9 +798,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         childHeapMode: argv['child-heap-mode'],
         ...(argv['local-control']
           ? {
-              allowOrigins: localControlPairing.map(
-                ({ url }) => new URL(url).origin,
-              ),
+              allowOrigins: localControlPairing
+                .map(({ url }) => new URL(url).origin)
+                .concat(
+                  new URL(
+                    `${argv['tls-cert'] ? 'https' : 'http'}://127.0.0.1:${argv.port}`,
+                  ).origin,
+                ),
             }
           : argv['allow-origin'] && argv['allow-origin'].length > 0
             ? { allowOrigins: argv['allow-origin'] }

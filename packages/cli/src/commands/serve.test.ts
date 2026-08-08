@@ -413,14 +413,14 @@ describe('serve rate limit env parsing', () => {
       return true;
     });
     mockRunQwenServe.mockImplementationOnce(async (options) => ({
-      url: 'http://0.0.0.0:4170/',
+      url: 'https://0.0.0.0/',
       webShellMounted: true,
       resolvedToken: options.token,
       runtimeReady: Promise.resolve(),
     }));
 
     await startServeHandlerWithArgs(
-      '--local-control --tls-cert cert.pem --tls-key key.pem',
+      '--local-control --open --port 443 --tls-cert cert.pem --tls-key key.pem',
     );
     await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
 
@@ -444,8 +444,19 @@ describe('serve rate limit env parsing', () => {
       new URL(String(mockQr.generate.mock.calls[0]?.[0])).origin,
     );
     expect(options.allowOrigins).not.toContain('*');
+    expect(options.allowOrigins).toContain('https://127.0.0.1');
     expect(stdoutWrites.join('')).toContain('Local Control is on');
     expect(stdoutWrites.join('')).toContain('Sleep inhibition is best effort');
+    expect(stdoutWrites.join('')).toContain(
+      'Traffic is encrypted only when --tls-cert and --tls-key are set',
+    );
+    await vi.waitFor(() =>
+      expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^https:\/\/127\.0\.0\.1\/#token=[A-Za-z0-9_-]{43}$/,
+        ),
+      ),
+    );
   });
 
   it('does not inhibit sleep when pairing output fails', async () => {
