@@ -8,9 +8,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
 import type {
+  AgentEventEmitter,
   Config,
   ToolRegistry,
-  AgentEventEmitter,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
@@ -262,10 +262,49 @@ describe('SubAgentTracker', () => {
 
       eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
-      // Give time for any async operation
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('should emit progress update to parent on TOOL_CALL event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createToolCallEvent({
+        name: 'read_file',
+        callId: 'call-123',
+        args: { path: 'test.ts' },
+        description: 'Reading file',
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining('read_file'),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
+          }),
+        }),
+      );
     });
 
     it('should not emit when aborted', async () => {
@@ -376,7 +415,7 @@ describe('SubAgentTracker', () => {
       );
 
       await vi.waitFor(() => {
-        expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+        expect(sendUpdateSpy).toHaveBeenCalledTimes(3);
       });
       await Promise.resolve();
     });
@@ -385,6 +424,7 @@ describe('SubAgentTracker', () => {
     // subagent's TodoWrite result must not promote into a session-level
     // plan update. The guard lives in ToolCallEmitter.emitResult, keyed on
     // the subagentMeta this tracker stamps onto every emit.
+
     it('does not promote a subagent TodoWrite as the session plan', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 
@@ -501,6 +541,54 @@ describe('SubAgentTracker', () => {
             // consumers (e.g. the Agent prompt) get the same identity the
             // primary path in Session.ts provides.
             _meta: expect.objectContaining({ toolName: 'edit_file' }),
+          }),
+        }),
+      );
+    });
+
+    it('should emit progress update to parent on TOOL_WAITING_APPROVAL Event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-edit',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: '/test.ts',
+          originalContent: 'old',
+          newContent: 'new',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining(
+                  'Waiting for permission: edit_file',
+                ),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
           }),
         }),
       );

@@ -18,6 +18,7 @@ import type {
 import {
   AgentEventType,
   ToolConfirmationOutcome,
+  ToolNames,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import type { SessionContext } from './types.js';
@@ -149,6 +150,35 @@ export class SubAgentTracker {
         args: event.args,
       });
 
+      // Emit progress update to parent to make subagent execution visible in ACP clients
+      // Skip for TodoWriteTool as it doesn't emit tool_call updates either
+      if (event.name !== ToolNames.TODO_WRITE) {
+        let progressMessage = `Running tool: ${event.name}`;
+        if (tool && invocation) {
+          try {
+            const desc = invocation.getDescription();
+            if (desc) {
+              progressMessage = `${event.name}: ${desc}`;
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        void this.toolCallEmitter
+          .emitProgressUpdate(
+            this.subagentMeta.parentToolCallId,
+            this.subagentMeta.subagentType,
+            progressMessage,
+          )
+          .catch((error) => {
+            debugLogger.debug(
+              'Failed to emit subagent progress update for tool call:',
+              error,
+            );
+          });
+      }
+
       // Use unified emitter - handles TodoWriteTool skipping internally
       void this.toolCallEmitter
         .emitStart({
@@ -212,6 +242,20 @@ export class SubAgentTracker {
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
+
+      // Update parent progress to indicate permission is needed
+      void this.toolCallEmitter
+        .emitProgressUpdate(
+          this.subagentMeta.parentToolCallId,
+          this.subagentMeta.subagentType,
+          `Waiting for permission: ${event.name}`,
+        )
+        .catch((error) => {
+          debugLogger.debug(
+            'Failed to emit subagent progress update for approval:',
+            error,
+          );
+        });
 
       // Build permission request
       const fullConfirmationDetails = {
