@@ -52,6 +52,8 @@ function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
+
 export function localControlUrls(
   baseUrl: string,
   token: string,
@@ -225,7 +227,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('hostname', {
         type: 'string',
-        default: '127.0.0.1',
+        default: DEFAULT_SERVE_HOSTNAME,
         description:
           'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
       })
@@ -356,7 +358,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         if (argv['local-control'] === true && argv['port'] === 0) {
           throw new Error('Local Control requires a fixed port.');
         }
-        if (argv['local-control'] === true && argv.hostname !== '127.0.0.1') {
+        if (
+          argv['local-control'] === true &&
+          argv.hostname !== DEFAULT_SERVE_HOSTNAME
+        ) {
           throw new Error('Local Control manages its hostname.');
         }
         return true;

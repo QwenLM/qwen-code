@@ -1,15 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod desktop_state;
+mod local_control;
 mod runtime;
 
 use desktop_state::{default_window_size, restore_window, SettingsStore};
+use local_control::{LocalControlInfo, LocalControlSession};
 use runtime::{resolve_workspace, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::menu::{Menu, SubmenuBuilder};
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{
     AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
@@ -42,6 +45,7 @@ struct RuntimeStopped {
 
 struct ApplicationState {
     runtime: Mutex<Option<DesktopRuntime>>,
+    local_control: Mutex<Option<LocalControlSession>>,
     settings: SettingsStore,
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
@@ -59,9 +63,17 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_menu_event(|app, event| {
+            if event.id() == "local-control" {
+                let _ = show_local_control_window(app);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             bootstrap_state,
             choose_workspace,
+            local_control_status,
+            enable_local_control,
+            disable_local_control,
             open_logs,
             restart_runtime,
             install_update,
@@ -87,6 +99,11 @@ fn main() {
             WindowEvent::CloseRequested { .. } => save_window_state(app_handle),
             _ => {}
         },
+        RunEvent::WindowEvent { label, event, .. } if label == "local-control" => {
+            if matches!(event, WindowEvent::CloseRequested { .. }) {
+                stop_local_control(app_handle);
+            }
+        }
         RunEvent::Exit | RunEvent::ExitRequested { .. } => {
             save_window_state(app_handle);
             stop_runtime(app_handle);
@@ -97,6 +114,13 @@ fn main() {
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
+    let menu = Menu::default(&handle)?;
+    menu.append(
+        &SubmenuBuilder::new(&handle, "Control")
+            .text("local-control", "Local Control…")
+            .build()?,
+    )?;
+    handle.set_menu(menu)?;
     let settings = SettingsStore::load(&handle).map_err(std::io::Error::other)?;
     let window_state = settings.window();
     let log_path = desktop_log_path(&handle).map_err(std::io::Error::other)?;
@@ -154,6 +178,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     handle.manage(ApplicationState {
         runtime: Mutex::new(None),
+        local_control: Mutex::new(None),
         settings,
         log_path,
         origin,
@@ -234,6 +259,47 @@ fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String>
         .workspace()
         .ok_or_else(|| "Choose a workspace before starting Qwen Code.".to_string())?;
     start_runtime_async(app, workspace);
+    Ok(())
+}
+
+#[tauri::command]
+fn local_control_status(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+) -> Result<LocalControlInfo, String> {
+    require_bootstrap_origin(&webview)?;
+    Ok(lock(&state.local_control)
+        .as_ref()
+        .map(LocalControlSession::info)
+        .unwrap_or_else(LocalControlInfo::inactive))
+}
+
+#[tauri::command]
+fn enable_local_control(
+    webview: WebviewWindow,
+    app: AppHandle,
+) -> Result<LocalControlInfo, String> {
+    require_bootstrap_origin(&webview)?;
+    let state = app.state::<ApplicationState>();
+    let mut local_control = lock(&state.local_control);
+    if let Some(session) = local_control.as_ref() {
+        return Ok(session.info());
+    }
+    let (runtime_url, runtime_token) = lock(&state.runtime)
+        .as_ref()
+        .map(|runtime| (runtime.base_url().clone(), runtime.token().to_string()))
+        .ok_or_else(|| "Start a Desktop workspace before enabling Local Control.".to_string())?;
+    let session = LocalControlSession::start(&runtime_url, &runtime_token)?;
+    let info = session.info();
+    *local_control = Some(session);
+    let _ = app.emit("local-control-changed", &info);
+    Ok(info)
+}
+
+#[tauri::command]
+fn disable_local_control(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    require_bootstrap_origin(&webview)?;
+    stop_local_control(&app);
     Ok(())
 }
 
@@ -379,8 +445,16 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
 }
 
 fn stop_runtime(app: &AppHandle) {
+    stop_local_control(app);
     if let Some(runtime) = lock(&app.state::<ApplicationState>().runtime).take() {
         runtime.stop();
+    }
+}
+
+fn stop_local_control(app: &AppHandle) {
+    if let Some(mut session) = lock(&app.state::<ApplicationState>().local_control).take() {
+        session.stop();
+        let _ = app.emit("local-control-changed", LocalControlInfo::inactive());
     }
 }
 
@@ -422,6 +496,26 @@ fn focus_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("local-control") {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "local-control",
+        WebviewUrl::App("local-control.html".into()),
+    )
+    .title("Qwen Code Local Control")
+    .inner_size(460.0, 720.0)
+    .min_inner_size(420.0, 560.0)
+    .resizable(false)
+    .build()
+    .map(|_| ())
+    .map_err(|error| format!("Failed to open Local Control: {error}"))
 }
 
 fn navigate_to_bootstrap(app: &AppHandle) -> Result<(), String> {
