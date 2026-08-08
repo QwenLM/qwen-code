@@ -10,20 +10,44 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { serveCommand, maybeOpenWebShellBrowser } from './serve.js';
+import {
+  localControlUrls,
+  maybeOpenWebShellBrowser,
+  serveCommand,
+} from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
+const mockNetworkInterfaces = vi.hoisted(() => vi.fn());
+const mockSleepInhibitor = vi.hoisted(() => ({
+  acquire: vi.fn(() => ({ release: vi.fn() })),
+}));
+const mockQr = vi.hoisted(() => ({
+  generate: vi.fn(
+    (
+      _input: string,
+      _opts?: { small: boolean },
+      callback?: (qrcode: string) => void,
+    ) => callback?.('QR'),
+  ),
+  setErrorLevel: vi.fn(),
+}));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, networkInterfaces: mockNetworkInterfaces };
+});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
     openBrowserSecurely: mockOpenBrowserSecurely,
+    sleepInhibitor: mockSleepInhibitor,
     shouldLaunchBrowser: mockShouldLaunchBrowser,
   };
 });
+vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
 }));
@@ -131,6 +155,33 @@ describe('serve command args', () => {
     expect(buildParser().parseSync('--open')['open']).toBe(true);
   });
 
+  it('parses --local-control and requires its generated token and Web Shell', () => {
+    expect(buildParser().parseSync('')['local-control']).toBe(false);
+    expect(buildParser().parseSync('--token fixed')['token']).toBe('fixed');
+    expect(
+      buildParser().parseSync('--allow-origin http://localhost:3000')[
+        'allow-origin'
+      ],
+    ).toEqual(['http://localhost:3000']);
+    expect(buildParser().parseSync('--local-control')['local-control']).toBe(
+      true,
+    );
+    expect(() =>
+      buildParser().parseSync('--local-control --token fixed'),
+    ).toThrow(/generates its own token/);
+    expect(() =>
+      buildParser().parseSync(
+        '--local-control --allow-origin http://localhost:3000',
+      ),
+    ).toThrow(/manages its browser origins/);
+    expect(() => buildParser().parseSync('--local-control --no-web')).toThrow(
+      /Local Control requires the Web Shell/,
+    );
+    expect(() => buildParser().parseSync('--local-control --port 0')).toThrow(
+      /Local Control requires a fixed port/,
+    );
+  });
+
   it('parses repeatable --channel values', () => {
     const parsed = buildParser().parseSync(
       '--channel telegram --channel feishu',
@@ -199,12 +250,58 @@ describe('serve command args', () => {
   });
 });
 
+describe('localControlUrls', () => {
+  it('builds fragment-authenticated URLs for each non-loopback IPv4 address', () => {
+    const urls = localControlUrls('http://0.0.0.0:4170/', 'a/b token', {
+      en0: [
+        {
+          address: '192.168.1.20',
+          netmask: '255.255.255.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: false,
+          cidr: '192.168.1.20/24',
+        },
+      ],
+      lo0: [
+        {
+          address: '127.0.0.1',
+          netmask: '255.0.0.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: true,
+          cidr: '127.0.0.1/8',
+        },
+      ],
+    });
+
+    expect(urls).toEqual([
+      {
+        interfaceName: 'en0',
+        url: 'http://192.168.1.20:4170/#token=a%2Fb%20token',
+      },
+    ]);
+  });
+});
+
 describe('serve rate limit env parsing', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env = { ...originalEnv, QWEN_CODE_SUPPRESS_YOLO_WARNING: '1' };
+    mockNetworkInterfaces.mockReturnValue({
+      en0: [
+        {
+          address: '192.168.1.20',
+          netmask: '255.255.255.0',
+          family: 'IPv4',
+          mac: '00:00:00:00:00:00',
+          internal: false,
+          cidr: '192.168.1.20/24',
+        },
+      ],
+    });
   });
 
   afterEach(() => {
@@ -280,6 +377,71 @@ describe('serve rate limit env parsing', () => {
         rateLimitWindowMs: 60000,
       }),
     );
+  });
+
+  it('starts Local Control with a fresh token, QR pairing, and sleep inhibition', async () => {
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    mockRunQwenServe.mockImplementationOnce(async (options) => ({
+      url: 'http://0.0.0.0:4170/',
+      webShellMounted: true,
+      resolvedToken: options.token,
+      runtimeReady: Promise.resolve(),
+    }));
+
+    await startServeHandlerWithArgs('--local-control --hostname 192.168.1.2');
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    const options = mockRunQwenServe.mock.calls[0]?.[0];
+    expect(options).toEqual(
+      expect.objectContaining({
+        hostname: '0.0.0.0',
+        strictPort: true,
+        token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      }),
+    );
+    expect(mockSleepInhibitor.acquire).toHaveBeenCalledWith(
+      'Qwen Code Local Control is active',
+    );
+    expect(mockQr.setErrorLevel).toHaveBeenCalledWith('Q');
+    expect(String(mockQr.generate.mock.calls[0]?.[0])).toContain(
+      `#token=${options.token}`,
+    );
+    expect(options.allowOrigins).toContain(
+      new URL(String(mockQr.generate.mock.calls[0]?.[0])).origin,
+    );
+    expect(options.allowOrigins).not.toContain('*');
+    expect(stdoutWrites.join('')).toContain('Local Control is on');
+  });
+
+  it('does not inhibit sleep when pairing output fails', async () => {
+    const close = vi.fn();
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    mockQr.generate.mockImplementationOnce(() => {
+      throw new Error('QR failed');
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://0.0.0.0:4170/',
+      webShellMounted: true,
+      resolvedToken: 'secret',
+      runtimeReady: Promise.resolve(),
+      close,
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(close).toHaveBeenCalledOnce();
+    expect(mockSleepInhibitor.acquire).not.toHaveBeenCalled();
   });
 
   it('passes normalized named channels to runQwenServe', async () => {
