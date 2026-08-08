@@ -3285,6 +3285,11 @@ export class Session implements SessionContext {
                 this.settings,
               );
 
+              if (pendingSend.signal.aborted) {
+                this.todoStopGuard.suspend();
+                return { stopReason: 'cancelled' };
+              }
+
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,
                 modelPromptBlocks,
