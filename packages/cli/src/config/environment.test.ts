@@ -33,10 +33,15 @@ const TRACKED_ENV = [
   'NODE_PATH',
   'npm_config_node_options',
   'npm_config_node-options',
+  'npm_config_userconfig',
   'NPM_CONFIG_NODE_OPTIONS',
   'Node_Options',
+  'ZDOTDIR',
+  'BASH_FUNC_id%%',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
+  'NODE_EXTRA_CA_CERTS',
+  'QWEN_CLI_ENTRY',
   'QWEN_HOME',
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_RUNTIME_DIR',
@@ -532,30 +537,166 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 
-  // ENV (the POSIX sh startup file) sits on the denylist alongside BASH_ENV;
-  // the regression suite pins every other key's scope coverage, so ENV gets
-  // the same treatment. Before the denylist, a workspace `.env` could point
-  // every session shell at a repo-controlled startup file.
-  it('never applies ENV from .env files or settings.env', () => {
+  // ENV is sourced only by interactive sh, while the shell tool spawns
+  // non-interactive `bash -c`, and `ENV=production` is a mainstream
+  // application convention — so ENV stays reload-only (its pre-denylist
+  // tier), not loader-class. The initial .env load applies it; reload and
+  // the daemon's per-workspace runtime env build must still reject it.
+  it('applies ENV from a project .env on the initial load only', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(
+      envPath,
+      ['ENV=production', 'RUNTIME_DOTENV=allowed', ''].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['ENV']).toBe('production');
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    // A reload does not re-apply or delete the initially-loaded value.
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['ENV']).toBe('production');
+
+    // The daemon's per-workspace runtime env never picks it up (explicit
+    // empty base: the default baseEnv is process.env, which legitimately
+    // carries the initially-loaded value by now).
+    const snapshot = buildRuntimeEnvironment(testSettings({}), workspace, {});
+    expect(snapshot.effectiveEnv['ENV']).toBeUndefined();
+    expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  it('rejects ENV added by a mid-session .env edit', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(envPath, ['RUNTIME_DOTENV=allowed', ''].join('\n'));
+
+    loadEnvironment(testSettings({}), workspace);
+
+    fs.writeFileSync(
+      envPath,
+      ['RUNTIME_DOTENV=allowed', 'ENV=production', ''].join('\n'),
+    );
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['ENV']).toBeUndefined();
+  });
+
+  // The npm config-file keys redirect npm to an attacker-chosen .npmrc, and
+  // ZDOTDIR points zsh at an attacker-chosen startup directory — both must
+  // die on the initial .env load like NODE_OPTIONS.
+  it('never applies npm config-file redirects or ZDOTDIR from .env files', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(
       path.join(workspace, '.env'),
-      ['ENV=/workspace-a/shrc', 'RUNTIME_DOTENV=allowed', ''].join('\n'),
+      [
+        'npm_config_userconfig=/workspace-a/.npmrc',
+        'ZDOTDIR=/workspace-a/zdot',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
     );
-    const settings = testSettings({
-      env: { ENV: '/workspace-a/shrc-from-settings' },
-    });
 
-    loadEnvironment(settings, workspace);
-    expect(process.env['ENV']).toBeUndefined();
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['npm_config_userconfig']).toBeUndefined();
+    expect(process.env['ZDOTDIR']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
 
-    reloadEnvironment(settings, workspace);
-    expect(process.env['ENV']).toBeUndefined();
-    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  // dotenv refuses to parse `%%` keys, so settings.json env is the
+  // BASH_FUNC_* entry point; the prefix rule must reject it there.
+  it('never applies BASH_FUNC_* exported function definitions from settings.env', () => {
+    const workspace = makeWorkspace();
 
-    const snapshot = buildRuntimeEnvironment(settings, workspace);
-    expect(snapshot.effectiveEnv['ENV']).toBeUndefined();
-    expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe('allowed');
+    loadEnvironment(
+      testSettings({
+        env: { 'BASH_FUNC_id%%': '() { echo pwned; }' },
+      }),
+      workspace,
+    );
+
+    expect(process.env['BASH_FUNC_id%%']).toBeUndefined();
+  });
+
+  // A project .env pointing the session-process entrypoint or a TLS trust
+  // anchor at attacker-chosen files is the #8653 shape; user-level files
+  // stay exempt (operator opt-in).
+  it('never applies entrypoint or trust-anchor keys from project .env files', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'QWEN_CLI_ENTRY=/workspace-a/evil-entry.js',
+        'NODE_EXTRA_CA_CERTS=/workspace-a/ca.pem',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
+    expect(process.env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
+  });
+
+  // The boot snapshot seeds ALL parsed keys (rejected ones included), so a
+  // shell-exported loader var sits in the snapshot next to its rejected
+  // .env twin. The reload delete pass must not remove the shell-exported
+  // value — qwen never applied it.
+  it('does not delete a shell-exported loader var on reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    process.env['NODE_OPTIONS'] = '--max-old-space-size=4096';
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'NODE_OPTIONS=--import file:///workspace-a/hook.mjs',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['NODE_OPTIONS']).toBe('--max-old-space-size=4096');
+
+    const { removedKeys } = reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['NODE_OPTIONS']).toBe('--max-old-space-size=4096');
+    expect(removedKeys).not.toContain('NODE_OPTIONS');
+  });
+
+  // The daemon reaches per-workspace .env files only through
+  // buildRuntimeEnvironment (its loadSettings calls pass
+  // skipLoadEnvironment), so the rejection report must fire from this loop
+  // or it vanishes for exactly the workspaces the daemon hosts.
+  it('reports loader-key rejections from the buildRuntimeEnvironment .env loop', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(
+      envPath,
+      ['NODE_OPTIONS=--import file:///workspace-a/hook.mjs', ''].join('\n'),
+    );
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+
+    try {
+      const snapshot = buildRuntimeEnvironment(testSettings({}), workspace);
+      expect(snapshot.effectiveEnv['NODE_OPTIONS']).toBeUndefined();
+    } finally {
+      stderrWrite.mockRestore();
+    }
+
+    const warnings = stderrWrites.filter((chunk) =>
+      chunk.includes('cannot set loader-affecting env vars'),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(envPath);
+    expect(warnings[0]).toContain('NODE_OPTIONS');
   });
 });

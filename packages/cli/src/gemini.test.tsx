@@ -537,20 +537,30 @@ describe('gemini.tsx main function', () => {
 
   // Regression for #8653: every daemon-hosted session runs in an ACP child,
   // so the scrub at that boundary must not silently disappear. The positive
-  // case fails if the call is deleted; the negative case pins the isAcpMode
-  // gate (non-ACP launches keep their own loader vars).
+  // case fails if the call is deleted; the negative cases pin the gate —
+  // only daemon-stamped children (QWEN_CODE_SERVE) scrub, direct editor ACP
+  // integrations and non-ACP launches keep their own loader vars.
   it.each([
-    ['scrubs', { acp: true } as CliArgs, true],
-    ['keeps', {} as CliArgs, false],
+    ['scrubs for a daemon-spawned child', { acp: true } as CliArgs, true, true],
+    [
+      'keeps for a direct (editor) ACP child',
+      { acp: true } as CliArgs,
+      false,
+      false,
+    ],
+    ['keeps for a non-ACP launch', {} as CliArgs, false, false],
   ])(
     'inherited loader env vars past the ACP handoff (%s)',
-    async (_mode, argv, expectScrubbed) => {
+    async (_mode, argv, daemonStamped, expectScrubbed) => {
       vi.stubEnv(
         'NODE_OPTIONS',
         '--import file:///other-checkout/register.mjs',
       );
       vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
       vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      if (daemonStamped) {
+        vi.stubEnv('QWEN_CODE_SERVE', '1');
+      }
 
       const { parseArguments, loadCliConfig } = await import(
         './config/config.js'
@@ -602,6 +612,7 @@ describe('gemini.tsx main function', () => {
     vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
     vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
     vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
 
     const { parseArguments } = await import('./config/config.js');
     const { loadSettings } = await import('./config/settings.js');
@@ -639,14 +650,15 @@ describe('gemini.tsx main function', () => {
     }
   });
 
-  // Regression for #8653 (gate): sandbox.ts never sets QWEN_CODE_NO_RELAUNCH
-  // in the sandboxed child, so gating the scrub on anything beyond isAcpMode
-  // would skip it there and leak loader vars into session subprocesses.
+  // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
+  // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
+  // stage of a daemon-spawned ACP child must still scrub.
   it('scrubs inherited loader env vars in the sandboxed ACP stage', async () => {
     vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
     vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
     vi.stubEnv('SANDBOX', 'sandbox-exec');
     vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
 
     const { parseArguments, loadCliConfig } = await import(
       './config/config.js'

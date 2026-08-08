@@ -40,6 +40,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // RELOAD_EXCLUDED_KEYS, which only applies on reload).
   'QWEN_TLS_INSECURE',
   'NODE_TLS_REJECT_UNAUTHORIZED',
+  // NODE_EXTRA_CA_CERTS reaches the same outcome by adding a TLS trust
+  // anchor instead of disabling verification.
+  'NODE_EXTRA_CA_CERTS',
+  // QWEN_CLI_ENTRY is the script path daemon-spawned session processes run.
+  // A project `.env` or settings.env fixing it turns
+  // `cd <untrusted repo> && qwen serve` into code execution as the daemon
+  // via an attacker-chosen ACP entrypoint, for every workspace's sessions.
+  'QWEN_CLI_ENTRY',
 ];
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [
@@ -56,11 +64,17 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // loader subset of RELOAD_EXCLUDED_KEYS (environment.ts), which guards
 // .env/settings.env application — not the inherited launch environment.
 //
-// Scope is deliberate: Node/OS-loader variables only. Other startup-file or
-// runtime-specific variables (ZDOTDIR for zsh, DYLD_FALLBACK_LIBRARY_PATH,
-// PYTHONSTARTUP, …) can likewise be abused, but they are not on the
-// loader-affecting list this denylist defines; extending the list is a
-// separate decision with its own compatibility surface.
+// Scope is deliberate: code-injection vectors only — variables that make a
+// spawned interpreter or OS loader execute an attacker-chosen file.
+// LD_LIBRARY_PATH/DYLD_LIBRARY_PATH (library *search* paths) and ENV
+// (sourced only by interactive sh, while the shell tool spawns
+// non-interactive `bash -c`) are not here: scrubbing them breaks mainstream
+// toolchains (conda/CUDA library dirs, `ENV=production` app conventions)
+// for every session subprocess, and their hijack residue is the same class
+// as the PATH-prefix follow-up tracked out of #8653. They stay reload-only
+// in RELOAD_EXCLUDED_KEYS. Runtime-specific search paths for other
+// interpreters (PYTHONPATH, JAVA_TOOL_OPTIONS, …) are the same tradeoff and
+// are deferred with it.
 //
 // This denylist intentionally does NOT move into core `sanitizeChildEnv`:
 // per-server `mcpServers[].env` and per-hook `hooks[].env` are explicit,
@@ -80,16 +94,26 @@ export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
   // npm maps its `node-options` config onto npm_config_node_options in the
   // environment, and `npm run` lifecycle scripts apply it like NODE_OPTIONS —
-  // the same hijack through an adjacent key.
+  // the same hijack through an adjacent key. The config-file keys are the
+  // same hijack one level up: they point npm at an attacker-chosen .npmrc
+  // that can itself set node-options/script-shell/ignore-scripts, and `npm
+  // run` itself exports them into the script environment.
   'npm_config_node_options',
+  'npm_config_userconfig',
+  'npm_config_globalconfig',
+  'npm_config_script_shell',
+  'npm_config_prefix',
   'NODE_PATH',
   'LD_PRELOAD',
   'LD_AUDIT',
-  'LD_LIBRARY_PATH',
   'DYLD_INSERT_LIBRARIES',
-  'DYLD_LIBRARY_PATH',
   'BASH_ENV',
-  'ENV',
+  // zsh sources $ZDOTDIR/.zshenv on every invocation, including
+  // non-interactive `zsh -c` — the zsh analogue of BASH_ENV.
+  'ZDOTDIR',
+  // BASH_FUNC_* exported-function definitions are bash's other env-driven
+  // code-import channel (non-interactive `bash -c` still imports them);
+  // matched by prefix in isLoaderEnvKey, not listed here.
 ] as const;
 
 // Loader-key matching is case-insensitive and treats npm config-key
@@ -109,8 +133,14 @@ const LOADER_ENV_KEYS: ReadonlySet<string> = new Set(
   INHERITED_LOADER_ENV_KEYS.map(canonicalLoaderKey),
 );
 
+// Exported bash function definitions (`BASH_FUNC_<name>%%=() { ... }`) are
+// imported by every bash child, non-interactive `bash -c` included — env key
+// names cannot be arrayed above since the function name is embedded in the
+// key. bash compares the prefix case-sensitively, but Windows env lookup
+// does not, so match the canonical (case-folded) spelling.
 export function isLoaderEnvKey(key: string): boolean {
-  return LOADER_ENV_KEYS.has(canonicalLoaderKey(key));
+  const canonical = canonicalLoaderKey(key);
+  return canonical.startsWith('bash-func-') || LOADER_ENV_KEYS.has(canonical);
 }
 
 export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): string[] {

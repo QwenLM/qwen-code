@@ -7239,8 +7239,10 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
 
   // Regression for #8653: the daemon scrubs loader vars from its own
   // process.env (session subprocesses run here in other workspaces' cwds)
-  // while the frozen base env keeps them so dev-mode ACP children still boot.
-  it('scrubs loader env vars from the daemon process but keeps them for ACP children', async () => {
+  // AND from the frozen base env the session-hosting children spawn with —
+  // a loader var reaching the ACP child runs during Node bootstrap, before
+  // the child's own post-boot scrub could remove it.
+  it('scrubs loader env vars from the daemon process and the session-child base env', async () => {
     const previousNodeOptions = process.env['NODE_OPTIONS'];
     const previousNodePath = process.env['NODE_PATH'];
     process.env['NODE_OPTIONS'] =
@@ -7269,10 +7271,8 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
           'sourceEnv'
         ] as NodeJS.ProcessEnv | undefined;
-        expect(sourceEnv?.['NODE_OPTIONS']).toBe(
-          '--import file:///other-checkout/register.mjs',
-        );
-        expect(sourceEnv?.['NODE_PATH']).toBe('/other-checkout/node_modules');
+        expect(sourceEnv?.['NODE_OPTIONS']).toBeUndefined();
+        expect(sourceEnv?.['NODE_PATH']).toBeUndefined();
       } finally {
         await handle.close();
       }
@@ -7293,6 +7293,43 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         delete process.env['NODE_PATH'];
       } else {
         process.env['NODE_PATH'] = previousNodePath;
+      }
+    }
+  });
+
+  // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
+  // carries the tsx loader: dev-mode ACP children and channel workers boot
+  // .ts entries and still need the loader, so only then does the frozen
+  // base env keep loader vars.
+  it('keeps loader vars in the session-child base env under the dev harness', async () => {
+    const previousDev = process.env['DEV'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    process.env['DEV'] = 'true';
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    try {
+      const handle = await bootHandle({ serveWebShell: false });
+      try {
+        const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+          'sourceEnv'
+        ] as NodeJS.ProcessEnv | undefined;
+        expect(sourceEnv?.['NODE_OPTIONS']).toBe(
+          '--import file:///other-checkout/register.mjs',
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      if (previousDev === undefined) {
+        delete process.env['DEV'];
+      } else {
+        process.env['DEV'] = previousDev;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
       }
     }
   });

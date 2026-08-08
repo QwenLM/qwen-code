@@ -2006,10 +2006,11 @@ describe('daemonWorkerCommand', () => {
     );
   });
 
-  // Regression for #8653: the supervisor spawns the worker with the
-  // daemon's pre-scrub base env (loader vars stay so dev-mode workers can
-  // boot under the harness loader). The worker must self-scrub like the ACP
-  // child so nothing it spawns inherits them into another workspace.
+  // Regression for #8653: in dev mode the supervisor spawns the worker with
+  // the daemon's loader-carrying base env (the harness tsx loader must reach
+  // the worker's .ts entry). The worker must self-scrub like the ACP child
+  // so nothing it spawns inherits them into another workspace. Production
+  // base envs are scrubbed before the freeze, making this a no-op there.
   it('scrubs inherited loader env vars before starting channels', async () => {
     mockProcessExit();
     const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);

@@ -1713,6 +1713,9 @@ describe('serve fast path environment bootstrap', () => {
   // env distributed to every workspace's session subprocesses — the exact
   // cross-workspace vector the daemon-side scrub closes.
   it('never applies loader-affecting keys from .env files or settings.env', () => {
+    // Hermetic: the walk-up reaches the user-level candidates, so the real
+    // ~/.qwen/.env must not leak into this test.
+    useTempQwenHome();
     const trackedKeys = [
       'NODE_OPTIONS',
       'npm_config_node_options',
@@ -1843,11 +1846,40 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // QWEN_CLI_ENTRY is the spawned session-process entrypoint: a start-dir
+  // .env fixing it turns `qwen serve` in an untrusted repo into arbitrary
+  // script execution for every workspace's sessions. The fast path consults
+  // no reload tier, so the key must be hardcoded-excluded here.
+  it('never applies QWEN_CLI_ENTRY from a project .env on the fast path', () => {
+    useTempQwenHome();
+    const previous = process.env['QWEN_CLI_ENTRY'];
+    delete process.env['QWEN_CLI_ENTRY'];
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-cli-entry-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_CLI_ENTRY=/workspace-a/evil-entry.js\n',
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
+    } finally {
+      if (previous === undefined) {
+        delete process.env['QWEN_CLI_ENTRY'];
+      } else {
+        process.env['QWEN_CLI_ENTRY'] = previous;
+      }
+    }
+  });
+
   // Daemon-side loadSettings() skips the .env load for untrusted workspaces
   // and only re-runs it later for trusted ones, so a loader key rejected at
   // boot would vanish without a breadcrumb unless the fast path reports it.
   it('warns when loader-affecting keys are rejected on the fast path', () => {
     resetLoaderKeyRejectionReportingForTesting();
+    useTempQwenHome();
     const trackedKeys = ['NODE_OPTIONS', 'LD_PRELOAD'] as const;
     const previous: Record<string, string | undefined> = {};
     for (const key of trackedKeys) {
@@ -1901,6 +1933,7 @@ describe('serve fast path environment bootstrap', () => {
   // persist them; the reset keeps a later consume (a second consumer or a
   // re-entered boot path in one process) from re-logging the same keys.
   it('resets the rejected-loader-key stash after one consume', () => {
+    useTempQwenHome();
     const trackedKeys = ['NODE_OPTIONS'] as const;
     const previous: Record<string, string | undefined> = {};
     for (const key of trackedKeys) {

@@ -249,6 +249,12 @@ function setUpCloudShellEnvironmentFromFilesFastPath(
 // subprocesses — the exact #8653 vector the daemon-side scrub closes.
 // Rejected keys are stashed for the daemon to persist via
 // consumeServeFastPathRejectedLoaderKeys() once its durable log exists.
+//
+// The declaration sits above its writers: this module is imported early in
+// the CLI bootstrap, and a future import cycle that reaches a writer during
+// module evaluation must not hit a TDZ ReferenceError.
+let serveFastPathRejectedLoaderKeys: readonly string[] = [];
+
 export function loadServeFastPathEnvironment(
   settings: ServeFastPathSettings,
   startDir: string = process.cwd(),
@@ -291,7 +297,9 @@ export function loadServeFastPathEnvironment(
       }
       rejectedLoaderKeys.push(
         ...reportRejectedLoaderKeys(
-          `.env file ${normalizedEnvFilePath}`,
+          // Raw candidate path, matching the source label environment.ts
+          // reports — the warn-once dedup is keyed on this string.
+          `.env file ${envFilePath}`,
           Object.keys(parsedEnv),
         ),
       );
@@ -325,8 +333,6 @@ export function loadServeFastPathEnvironment(
 // warn-once map dedupes any later daemon-side warning for the same file+key,
 // so stash the rejections for the daemon to persist once its durable log is
 // up — boot stderr rarely survives systemd/desktop launches.
-let serveFastPathRejectedLoaderKeys: readonly string[] = [];
-
 export function consumeServeFastPathRejectedLoaderKeys(): readonly string[] {
   const keys = serveFastPathRejectedLoaderKeys;
   serveFastPathRejectedLoaderKeys = [];

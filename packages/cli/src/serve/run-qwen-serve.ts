@@ -22,6 +22,7 @@ import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
   scrubAndReportInheritedLoaderEnv,
+  scrubInheritedLoaderEnv,
   setLoaderKeyRejectionReporter,
 } from '../config/shared-env-keys.js';
 import {
@@ -2082,20 +2083,34 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
-  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+  // Snapshot before any scrub: close() restores the host's launch
+  // environment from this copy, not from the (possibly scrubbed) base env.
+  const launchEnv = { ...process.env };
+  const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...(optsIn.memoryProjectScope !== undefined
       ? {
           QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
         }
       : {}),
-  });
-  // The frozen base env keeps loader vars so dev-mode ACP children can still
-  // boot with the harness loader, but the daemon process itself is done with
-  // them: session-shell subprocesses run here with process.env while their
-  // cwd is another workspace. The scrub is reverted on close() so an
-  // embedded caller reusing the host process gets its launch environment
-  // back.
+  };
+  // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
+  // carries the tsx loader's NODE_OPTIONS, so only then does the base env
+  // keep loader vars — dev-mode ACP children and channel workers need the
+  // loader to boot their .ts entries. Every other launch scrubs them here,
+  // before the freeze: the base env is what session-hosting children (the
+  // ACP child, channel daemon workers) spawn with, and a loader var that
+  // reaches them runs during Node bootstrap — before the child's own
+  // post-boot scrub could ever remove it.
+  if (process.env['DEV'] !== 'true') {
+    scrubInheritedLoaderEnv(baseEnv);
+  }
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> =
+    Object.freeze(baseEnv);
+  // The daemon process itself is done with loader vars either way:
+  // session-shell subprocesses run here with process.env while their cwd is
+  // another workspace. The scrub is reverted on close() so an embedded
+  // caller reusing the host process gets its launch environment back.
   const scrubbedLoaderEnvKeys = scrubAndReportInheritedLoaderEnv(
     process.env,
     'qwen serve',
@@ -2104,7 +2119,7 @@ async function runQwenServeImpl(
   const restoreScrubbedLoaderEnv = (): void => {
     for (const key of scrubbedLoaderEnvKeys) {
       if (Object.hasOwn(process.env, key)) continue;
-      const value = daemonRuntimeBaseEnv[key];
+      const value = launchEnv[key];
       if (value === undefined) continue;
       process.env[key] = value;
     }

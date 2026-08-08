@@ -34,6 +34,7 @@ import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
+import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
@@ -668,16 +669,20 @@ export async function main() {
     }
   }
 
-  if (isAcpMode) {
-    // An ACP child hosts sessions for arbitrary workspaces. Loader vars from
-    // the parent's launch environment were only needed to boot this process
-    // (e.g. the dev harness tsx loader); left in process.env they propagate
-    // into every session subprocess — shell tool, MCP servers, hooks — and
-    // hijack module resolution across workspace boundaries. Placement is
-    // after the relaunch/sandbox handoff: those respawn this process with
-    // process.env and still need the loader to boot, and the respawned child
-    // re-runs this scrub itself. Only the final process (no relaunch) reaches
-    // here.
+  if (isAcpMode && process.env[QWEN_CODE_SERVE_ENV]) {
+    // A daemon-spawned ACP child hosts sessions for arbitrary workspaces.
+    // Loader vars from the daemon's launch environment were only needed to
+    // boot this process (e.g. the dev harness tsx loader); left in
+    // process.env they propagate into every session subprocess — shell
+    // tool, MCP servers, hooks — and hijack module resolution across
+    // workspace boundaries. The gate is the daemon stamp: direct ACP
+    // integrations (editor companions) spawn the same --acp command line
+    // but host the user's own session, where an exported
+    // NODE_OPTIONS=--max-old-space-size is expected to reach tool
+    // subprocesses. Placement is after the relaunch/sandbox handoff: those
+    // respawn this process with process.env and still need the loader to
+    // boot, and the respawned child re-runs this scrub itself. Only the
+    // final process (no relaunch) reaches here.
     scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
   }
 

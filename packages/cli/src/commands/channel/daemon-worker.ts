@@ -903,10 +903,11 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     try {
       assertInternalDaemonWorkerInvocation();
       const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
-      // Mirror the ACP-child self-scrub: the supervisor spawns this worker
-      // with the daemon's pre-scrub base env (loader vars stay so dev-mode
-      // workers can boot under the harness loader), but nothing the worker
-      // spawns may inherit them into another workspace.
+      // Mirror the ACP-child self-scrub: in dev mode the supervisor spawns
+      // this worker with the daemon's loader-carrying base env (the harness
+      // tsx loader must reach this .ts entry), but nothing the worker spawns
+      // may inherit them into another workspace. Production base envs are
+      // scrubbed before the freeze, so this is a no-op there.
       scrubAndReportInheritedLoaderEnv(
         process.env,
         'qwen channel daemon-worker',

@@ -38,6 +38,35 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
   });
 
+  // QWEN_CLI_ENTRY is the spawned session-process entrypoint; a project file
+  // fixing it is arbitrary script execution as the daemon.
+  // NODE_EXTRA_CA_CERTS adds a TLS trust anchor — the
+  // NODE_TLS_REJECT_UNAUTHORIZED outcome by addition instead of disable.
+  it('excludes entrypoint and trust-anchor keys', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CLI_ENTRY');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('NODE_EXTRA_CA_CERTS');
+  });
+
+  // The compile-cache keys stay settable from project files: a
+  // project-configured V8 cache dir is a pinned feature (#7594, tests in
+  // both loaders), and Node validates cache entries against the source, so
+  // a poisoned/shared dir degrades to cache misses.
+  it('keeps compile-cache keys out of the hardcoded exclusions', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).not.toContain(
+      'NODE_COMPILE_CACHE',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).not.toContain(
+      'QWEN_CODE_PENDING_COMPILE_CACHE',
+    );
+  });
+
+  // Workspace settings.env QWEN_SERVER_TOKEN is an intentional fast-path
+  // feature (fast-path.test.ts loads it without the full settings loader);
+  // it stays reload-only rather than hardcoded-excluded.
+  it('keeps QWEN_SERVER_TOKEN out of the hardcoded exclusions', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).not.toContain('QWEN_SERVER_TOKEN');
+  });
+
   it('does not bootstrap attribution markers from a home .env', () => {
     expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_SERVE');
     expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_DESKTOP');
@@ -60,6 +89,38 @@ describe('isLoaderEnvKey', () => {
     expect(isLoaderEnvKey('PATH')).toBe(false);
     expect(isLoaderEnvKey('NODE_OPTIONS_EXTRA')).toBe(false);
   });
+
+  // The npm config-file keys redirect npm to an attacker-chosen .npmrc —
+  // the node-options hijack one level up. Note the underscore/hyphen
+  // equivalence only covers npm's real config names: `userconfig` has no
+  // hyphen, so npm_config_user-config maps to a different (harmless) key.
+  it('matches the npm config-file redirect keys', () => {
+    expect(isLoaderEnvKey('npm_config_userconfig')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_globalconfig')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_script_shell')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_prefix')).toBe(true);
+    expect(isLoaderEnvKey('NPM_CONFIG_USERCONFIG')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_script-shell')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_user-config')).toBe(false);
+  });
+
+  // bash imports exported function definitions from the environment even in
+  // non-interactive `bash -c`; the function name is embedded in the key, so
+  // this is a prefix rule rather than a listed literal.
+  it('matches BASH_FUNC_* exported function definitions by prefix', () => {
+    expect(isLoaderEnvKey('BASH_FUNC_id%%')).toBe(true);
+    expect(isLoaderEnvKey('BASH_FUNC_anything()')).toBe(true);
+    expect(isLoaderEnvKey('bash_func_id%%')).toBe(true);
+  });
+
+  // Library search paths and the interactive-sh-only ENV are deliberately
+  // reload-only: scrubbing them breaks mainstream toolchains.
+  it('does not match search paths or the ENV convention', () => {
+    expect(isLoaderEnvKey('LD_LIBRARY_PATH')).toBe(false);
+    expect(isLoaderEnvKey('DYLD_LIBRARY_PATH')).toBe(false);
+    expect(isLoaderEnvKey('ENV')).toBe(false);
+    expect(isLoaderEnvKey('env')).toBe(false);
+  });
 });
 
 describe('scrubInheritedLoaderEnv', () => {
@@ -69,14 +130,17 @@ describe('scrubInheritedLoaderEnv', () => {
     const env: NodeJS.ProcessEnv = {
       NODE_OPTIONS: '--import file:///other-checkout/register.mjs',
       npm_config_node_options: '--import file:///other-checkout/hook.mjs',
+      npm_config_userconfig: '/other-checkout/.npmrc',
       NODE_PATH: '/other-checkout/node_modules',
       LD_PRELOAD: '/evil.so',
       LD_AUDIT: '/evil-audit.so',
-      LD_LIBRARY_PATH: '/evil-lib',
       DYLD_INSERT_LIBRARIES: '/evil.dylib',
-      DYLD_LIBRARY_PATH: '/evil-lib',
       BASH_ENV: '/tmp/hook.sh',
-      ENV: '/tmp/shrc',
+      ZDOTDIR: '/other-checkout/zdot',
+      'BASH_FUNC_id%%': '() { echo pwned; }',
+      LD_LIBRARY_PATH: '/opt/conda/lib',
+      DYLD_LIBRARY_PATH: '/usr/local/cuda/lib64',
+      ENV: 'production',
       PATH: '/other-checkout/node_modules/.bin:/usr/bin',
       HOME: '/home/user',
       QWEN_SERVER_TOKEN: 'leave-secret-scrubbing-to-other-layers',
@@ -92,20 +156,24 @@ describe('scrubInheritedLoaderEnv', () => {
     expect(removedKeys).toEqual([
       'NODE_OPTIONS',
       'npm_config_node_options',
+      'npm_config_userconfig',
       'NODE_PATH',
       'LD_PRELOAD',
       'LD_AUDIT',
-      'LD_LIBRARY_PATH',
       'DYLD_INSERT_LIBRARIES',
-      'DYLD_LIBRARY_PATH',
       'BASH_ENV',
-      'ENV',
+      'ZDOTDIR',
+      'BASH_FUNC_id%%',
     ]);
     expect(scrubInheritedLoaderEnv(env)).toEqual([]);
-    // PATH/HOME are launch-environment facts the session still needs; only
-    // loader-class keys are scrubbed.
+    // PATH/HOME are launch-environment facts the session still needs, and
+    // the library search paths / ENV stay for toolchain compatibility; only
+    // injection-class keys are scrubbed.
     expect(env['PATH']).toBe('/other-checkout/node_modules/.bin:/usr/bin');
     expect(env['HOME']).toBe('/home/user');
+    expect(env['LD_LIBRARY_PATH']).toBe('/opt/conda/lib');
+    expect(env['DYLD_LIBRARY_PATH']).toBe('/usr/local/cuda/lib64');
+    expect(env['ENV']).toBe('production');
     expect(env['QWEN_SERVER_TOKEN']).toBe(
       'leave-secret-scrubbing-to-other-layers',
     );
@@ -151,14 +219,16 @@ describe('scrubInheritedLoaderEnv', () => {
     expect([...INHERITED_LOADER_ENV_KEYS].sort()).toEqual([
       'BASH_ENV',
       'DYLD_INSERT_LIBRARIES',
-      'DYLD_LIBRARY_PATH',
-      'ENV',
       'LD_AUDIT',
-      'LD_LIBRARY_PATH',
       'LD_PRELOAD',
       'NODE_OPTIONS',
       'NODE_PATH',
+      'ZDOTDIR',
+      'npm_config_globalconfig',
       'npm_config_node_options',
+      'npm_config_prefix',
+      'npm_config_script_shell',
+      'npm_config_userconfig',
     ]);
   });
 });

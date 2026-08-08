@@ -13,7 +13,6 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
-  INHERITED_LOADER_ENV_KEYS,
   isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
@@ -31,10 +30,19 @@ export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 
 const RELOAD_EXCLUDED_KEYS = new Set([
   ...PROJECT_ENV_HARDCODED_EXCLUSIONS,
-  ...INHERITED_LOADER_ENV_KEYS,
+  // The daemon auth token: the full loader never takes it from
+  // settings.env, and a mid-session .env edit must not rotate it. (The
+  // serve fast path consults only the hardcoded tier, so its documented
+  // workspace-settings.env token feature is unaffected.)
   'QWEN_SERVER_TOKEN',
-  'QWEN_CLI_ENTRY',
-  'NODE_TLS_REJECT_UNAUTHORIZED',
+  // Loader-class keys are rejected by the isLoaderEnvKey guard before this
+  // Set is consulted, so they are not spread here. These three keep their
+  // pre-denylist reload-only exclusion: too compatibility-heavy for the
+  // inherited-env scrub (mainstream toolchain/app conventions), but a
+  // mid-session .env edit must still not apply them.
+  'LD_LIBRARY_PATH',
+  'DYLD_LIBRARY_PATH',
+  'ENV',
   'PATH',
   'HOME',
   'TMPDIR',
@@ -444,6 +452,13 @@ export function buildRuntimeEnvironment(
       }
       setRuntimeEnvIfUnset(effectiveEnv, key, envFile.parsedEnv[key]!);
     }
+    // The daemon reaches per-workspace .env files only through this loop
+    // (its loadSettings calls pass skipLoadEnvironment), so the rejection
+    // report must fire here too or it vanishes for those workspaces.
+    reportRejectedLoaderKeys(
+      `.env file ${envFile.path}`,
+      Object.keys(envFile.parsedEnv),
+    );
   }
 
   if (settings.env) {
@@ -662,7 +677,14 @@ export function reloadEnvironment(
       ...settingsEnvSourcedKeys,
     ]);
     for (const key of previouslyKnown) {
-      if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
+      // The boot snapshot seeds ALL parsed keys (rejected ones included), so
+      // loader keys can reach this pass; the isLoaderEnvKey guard stops a
+      // reload from deleting a shell-exported loader var qwen never applied.
+      if (
+        !allNewKeys.has(key) &&
+        !RELOAD_EXCLUDED_KEYS.has(key) &&
+        !isLoaderEnvKey(key)
+      ) {
         delete process.env[key];
         removedKeys.push(key);
       }
