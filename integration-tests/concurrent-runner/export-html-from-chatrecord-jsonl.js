@@ -611,10 +611,17 @@ function extractLocations(rawInput, toolCallResult) {
   if (toolCallResult && typeof toolCallResult === 'object') {
     const display = toolCallResult.resultDisplay;
     if (display && typeof display === 'object') {
-      if (typeof display.fileName === 'string' && display.fileName) {
+      // Prefer filePath (full path) over fileName (basename-only) when both are present.
+      const displayPath =
+        typeof display.filePath === 'string' && display.filePath
+          ? display.filePath
+          : typeof display.fileName === 'string' && display.fileName
+            ? display.fileName
+            : undefined;
+      if (displayPath) {
         // Avoid duplicates
-        if (!locations.some((loc) => loc.path === display.fileName)) {
-          locations.push({ path: display.fileName });
+        if (!locations.some((loc) => loc.path === displayPath)) {
+          locations.push({ path: displayPath });
         }
       }
     }
@@ -630,7 +637,11 @@ function extractDiffContent(resultDisplay) {
     return [
       {
         type: 'diff',
-        path: display.fileName,
+        // Prefer filePath (full path) over fileName (basename-only) when both are present.
+        path:
+          typeof display.filePath === 'string' && display.filePath
+            ? display.filePath
+            : display.fileName,
         oldText: display.originalContent ?? '',
         newText: display.newContent,
       },
