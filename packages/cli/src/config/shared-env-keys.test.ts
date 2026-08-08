@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
+  isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
@@ -60,6 +61,13 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  // DEV gates the daemon's loader-env scrub; a project file setting it
+  // would keep loader vars in the base env distributed to every workspace's
+  // session children, reopening the #8653 vector.
+  it('excludes DEV so a project .env cannot spoof the dev harness', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('DEV');
+  });
+
   // Workspace settings.env QWEN_SERVER_TOKEN is an intentional fast-path
   // feature (fast-path.test.ts loads it without the full settings loader);
   // it stays reload-only rather than hardcoded-excluded.
@@ -70,6 +78,22 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('does not bootstrap attribution markers from a home .env', () => {
     expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_SERVE');
     expect(HOME_ENV_BOOTSTRAP_KEYS).not.toContain('QWEN_CODE_DESKTOP');
+  });
+});
+
+describe('isHardcodedProjectEnvExclusion', () => {
+  // Windows env lookup is case-insensitive; exact-case membership would let
+  // `node_extra_ca_certs`/`qwen_cli_entry` slip past every application gate.
+  it('matches the hardcoded exclusions case-insensitively', () => {
+    expect(isHardcodedProjectEnvExclusion('QWEN_HOME')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_home')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('node_extra_ca_certs')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('Node_Extra_Ca_Certs')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_cli_entry')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('DEV')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('dev')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SERVER_TOKEN')).toBe(false);
+    expect(isHardcodedProjectEnvExclusion('NODE_OPTIONS')).toBe(false);
   });
 });
 
@@ -265,6 +289,30 @@ describe('reportRejectedLoaderKeys', () => {
     expect(writes.join('').match(/NODE_OPTIONS/gu)).toHaveLength(1);
     expect(writes.join('')).toContain('LD_PRELOAD');
     expect(writes.join('')).toContain('DYLD_INSERT_LIBRARIES');
+  });
+
+  // Without the reset the dedup map survives across boots/reloads in one
+  // process and silently swallows a repeat rejection for the same source.
+  it('warns again for an already-reported source and key after the reset', () => {
+    resetLoaderKeyRejectionReportingForTesting();
+    const writes: string[] = [];
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    try {
+      reportRejectedLoaderKeys('/workspace/.env', ['NODE_OPTIONS']);
+      reportRejectedLoaderKeys('/workspace/.env', ['NODE_OPTIONS']);
+      resetLoaderKeyRejectionReportingForTesting();
+      reportRejectedLoaderKeys('/workspace/.env', ['NODE_OPTIONS']);
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(writes).toHaveLength(2);
   });
 });
 

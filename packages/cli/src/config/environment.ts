@@ -13,6 +13,7 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
@@ -391,10 +392,7 @@ function canApplyParsedEnvKey(
   // #8653 cross-workspace vector.
   if (isLoaderEnvKey(key)) return false;
   if (options.reload && RELOAD_EXCLUDED_KEYS.has(key)) return false;
-  if (
-    !envFile.isHomeScopedEnvFile &&
-    PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
-  ) {
+  if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;
   }
   return envFile.isQwenScopedEnvFile || !excludedVars.includes(key);
@@ -467,7 +465,7 @@ export function buildRuntimeEnvironment(
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
       if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
-      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (isHardcodedProjectEnvExclusion(key)) continue;
       if (excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
       setRuntimeEnvIfUnset(effectiveEnv, key, value);
@@ -555,7 +553,7 @@ export function loadEnvironment(
       if (RELOAD_EXCLUDED_KEYS.has(key)) {
         continue;
       }
-      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
+      if (isHardcodedProjectEnvExclusion(key)) {
         continue;
       }
       // Allow settings.env to fill in when process.env has the key but its
@@ -640,7 +638,7 @@ export function reloadEnvironment(
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
       if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
-      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (isHardcodedProjectEnvExclusion(key)) continue;
       if (typeof value !== 'string') continue;
       const dotEnvValue = newDotEnvKeys.get(key);
       if (dotEnvValue !== undefined && dotEnvValue !== '') continue;
@@ -677,14 +675,7 @@ export function reloadEnvironment(
       ...settingsEnvSourcedKeys,
     ]);
     for (const key of previouslyKnown) {
-      // The boot snapshot seeds ALL parsed keys (rejected ones included), so
-      // loader keys can reach this pass; the isLoaderEnvKey guard stops a
-      // reload from deleting a shell-exported loader var qwen never applied.
-      if (
-        !allNewKeys.has(key) &&
-        !RELOAD_EXCLUDED_KEYS.has(key) &&
-        !isLoaderEnvKey(key)
-      ) {
+      if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
         delete process.env[key];
         removedKeys.push(key);
       }

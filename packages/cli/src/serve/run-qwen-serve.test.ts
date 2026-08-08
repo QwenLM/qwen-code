@@ -7341,6 +7341,65 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     }
   });
 
+  // DEV gates the scrub and must only come from the launch environment: a
+  // workspace .env carrying DEV=true cannot keep loader vars in the
+  // session-child base env (the #8653 vector by way of a spoofable gate).
+  it('scrubs loader vars even when a workspace .env sets DEV=true', async () => {
+    const previousDev = process.env['DEV'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['DEV'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    fs.writeFileSync(path.join(tmpDir, '.env'), 'DEV=true\n');
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    try {
+      loadServeFastPathEnvironment({}, tmpDir);
+      // The hardcoded exclusion keeps DEV out of process.env entirely —
+      // both from .env files and from settings.env.
+      expect(process.env['DEV']).toBeUndefined();
+      loadServeFastPathEnvironment({ env: { DEV: 'true' } }, tmpDir);
+      expect(process.env['DEV']).toBeUndefined();
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+          'sourceEnv'
+        ] as NodeJS.ProcessEnv | undefined;
+        expect(sourceEnv?.['NODE_OPTIONS']).toBeUndefined();
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      if (previousDev === undefined) {
+        delete process.env['DEV'];
+      } else {
+        process.env['DEV'] = previousDev;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+    }
+  });
+
   // Desktop/systemd-launched daemons rarely surface boot stderr, so the
   // scrub breadcrumb is additionally persisted to the durable daemon log.
   it('persists the loader env scrub decision in the daemon log', async () => {
@@ -7498,6 +7557,101 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         delete process.env['NODE_OPTIONS'];
       } else {
         process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+    }
+  });
+
+  // close() uninstalls the daemon-log reporter; a later env load in the
+  // same process must fall back to stderr instead of writing into the
+  // closed daemon log.
+  it('falls back to stderr for loader key rejections after close', async () => {
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    delete process.env['NODE_OPTIONS'];
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      await handle.close();
+
+      // The file appears only after close, so no earlier report could have
+      // seeded the warn-once dedup for this source.
+      fs.writeFileSync(
+        path.join(tmpDir, '.env'),
+        'NODE_OPTIONS=--max-old-space-size=8192\n',
+      );
+      const stderrWrites: string[] = [];
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((chunk) => {
+          stderrWrites.push(String(chunk));
+          return true;
+        });
+      try {
+        loadEnvironment({}, tmpDir);
+      } finally {
+        stderrWrite.mockRestore();
+      }
+
+      const warnings = stderrWrites.filter(
+        (chunk) =>
+          chunk.includes('cannot set loader-affecting env vars') &&
+          chunk.includes(tmpDir),
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('NODE_OPTIONS');
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    } finally {
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+    }
+  });
+
+  // runQwenServe is a documented embeddable entry point and startup can
+  // reject after the scrub (malformed deadline env, TLS mismatch,
+  // EADDRINUSE...). The close() restore is unreachable on that path, so the
+  // catch must hand the host its launch environment back.
+  it('restores the launch environment when startup fails after the scrub', async () => {
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousDeadline = process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'] = 'not-a-number';
+    try {
+      await expect(bootHandle({ serveWebShell: false })).rejects.toThrow(
+        /QWEN_SERVE_PROMPT_DEADLINE_MS/u,
+      );
+      expect(process.env['NODE_OPTIONS']).toBe(
+        '--import file:///other-checkout/register.mjs',
+      );
+    } finally {
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousDeadline === undefined) {
+        delete process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'];
+      } else {
+        process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'] = previousDeadline;
       }
     }
   });

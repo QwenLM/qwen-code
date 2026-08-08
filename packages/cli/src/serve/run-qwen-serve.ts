@@ -1957,6 +1957,11 @@ interface DaemonLoggerLifecycleCallbacks {
   initialized(logger: DaemonLogger): void;
   published(): void;
   signalOwned(): void;
+  // Called once the startup scrub has mutated the host process.env, with
+  // the restore close() would run. runQwenServe's catch invokes it when
+  // startup fails after the scrub — the close() path is unreachable then,
+  // and an embedded caller must not keep a permanently scrubbed env.
+  scrubApplied(restoreScrubbedLoaderEnv: () => void): void;
 }
 
 /**
@@ -2019,6 +2024,7 @@ export async function runQwenServe(
 ): Promise<RunHandle> {
   let daemonLog: DaemonLogger | undefined;
   let owner: 'startup' | 'handle' | 'signal' = 'startup';
+  let restoreScrubbedLoaderEnv: (() => void) | undefined;
   try {
     return await runQwenServeImpl(optsIn, deps, {
       initialized: (logger) => {
@@ -2030,8 +2036,16 @@ export async function runQwenServe(
       signalOwned: () => {
         if (owner === 'startup') owner = 'signal';
       },
+      scrubApplied: (restore) => {
+        restoreScrubbedLoaderEnv = restore;
+      },
     });
   } catch (error) {
+    // Startup failed after the scrub and (when the logger was up) the
+    // reporter install; the close() path that reverts both is unreachable.
+    if (daemonLog) {
+      setLoaderKeyRejectionReporter(undefined);
+    }
     if (daemonLog && owner === 'startup') {
       const startupLog = daemonLog;
       writeDaemonLifecycleBestEffort(() =>
@@ -2042,6 +2056,7 @@ export async function runQwenServe(
       );
       await startupLog.close();
     }
+    restoreScrubbedLoaderEnv?.();
     throw error;
   }
 }
@@ -2097,9 +2112,11 @@ async function runQwenServeImpl(
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
   // carries the tsx loader's NODE_OPTIONS, so only then does the base env
   // keep loader vars — dev-mode ACP children and channel workers need the
-  // loader to boot their .ts entries. Every other launch scrubs them here,
-  // before the freeze: the base env is what session-hosting children (the
-  // ACP child, channel daemon workers) spawn with, and a loader var that
+  // loader to boot their .ts entries. DEV is hardcoded-excluded from
+  // project .env/settings.env (shared-env-keys.ts), so this consults the
+  // launch environment only. Every other launch scrubs them here, before
+  // the freeze: the base env is what session-hosting children (the ACP
+  // child, channel daemon workers) spawn with, and a loader var that
   // reaches them runs during Node bootstrap — before the child's own
   // post-boot scrub could ever remove it.
   if (process.env['DEV'] !== 'true') {
@@ -2124,6 +2141,7 @@ async function runQwenServeImpl(
       process.env[key] = value;
     }
   };
+  loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the

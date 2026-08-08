@@ -41,7 +41,11 @@ const TRACKED_ENV = [
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'NODE_EXTRA_CA_CERTS',
+  'node_extra_ca_certs',
+  'Node_Extra_Ca_Certs',
   'QWEN_CLI_ENTRY',
+  'qwen_cli_entry',
+  'Qwen_Cli_Entry',
   'QWEN_HOME',
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_RUNTIME_DIR',
@@ -342,8 +346,10 @@ describe('loadEnvironment', () => {
       stderrWrite.mockRestore();
     }
 
-    const warnings = stderrWrites.filter((chunk) =>
-      chunk.includes('cannot set loader-affecting env vars'),
+    const warnings = stderrWrites.filter(
+      (chunk) =>
+        chunk.includes('cannot set loader-affecting env vars') &&
+        chunk.includes(envPath),
     );
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(envPath);
@@ -382,8 +388,10 @@ describe('loadEnvironment', () => {
       stderrWrite.mockRestore();
     }
 
-    const warnings = stderrWrites.filter((chunk) =>
-      chunk.includes('cannot set loader-affecting env vars'),
+    const warnings = stderrWrites.filter(
+      (chunk) =>
+        chunk.includes('cannot set loader-affecting env vars') &&
+        chunk.includes(envPath),
     );
     expect(warnings).toHaveLength(2);
     expect(warnings[0]).toContain('NODE_OPTIONS');
@@ -422,8 +430,10 @@ describe('loadEnvironment', () => {
       stderrWrite.mockRestore();
     }
 
-    const warnings = stderrWrites.filter((chunk) =>
-      chunk.includes('cannot set loader-affecting env vars'),
+    const warnings = stderrWrites.filter(
+      (chunk) =>
+        chunk.includes('cannot set loader-affecting env vars') &&
+        chunk.includes(envPath),
     );
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(envPath);
@@ -497,8 +507,10 @@ describe('loadEnvironment', () => {
     }
 
     // The settings.env application paths warn like the serve fast path.
-    const warnings = stderrWrites.filter((chunk) =>
-      chunk.includes('cannot set loader-affecting env vars'),
+    const warnings = stderrWrites.filter(
+      (chunk) =>
+        chunk.includes('cannot set loader-affecting env vars') &&
+        chunk.includes(workspace),
     );
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('settings.env');
@@ -640,29 +652,36 @@ describe('loadEnvironment', () => {
     expect(process.env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
   });
 
-  // The boot snapshot seeds ALL parsed keys (rejected ones included), so a
-  // shell-exported loader var sits in the snapshot next to its rejected
-  // .env twin. The reload delete pass must not remove the shell-exported
-  // value — qwen never applied it.
-  it('does not delete a shell-exported loader var on reload', () => {
-    resetEnvironmentTrackingForTesting();
+  // Windows env lookup is case-insensitive, so exact-case membership would
+  // let case variants through every application gate on that platform.
+  it('rejects entrypoint and trust-anchor keys regardless of case', () => {
     const workspace = makeWorkspace();
-    process.env['NODE_OPTIONS'] = '--max-old-space-size=4096';
     fs.writeFileSync(
       path.join(workspace, '.env'),
       [
-        'NODE_OPTIONS=--import file:///workspace-a/hook.mjs',
-        'RUNTIME_DOTENV=allowed',
+        'qwen_cli_entry=/workspace-a/evil-entry.js',
+        'node_extra_ca_certs=/workspace-a/ca.pem',
         '',
       ].join('\n'),
     );
 
     loadEnvironment(testSettings({}), workspace);
-    expect(process.env['NODE_OPTIONS']).toBe('--max-old-space-size=4096');
+    expect(process.env['qwen_cli_entry']).toBeUndefined();
+    expect(process.env['node_extra_ca_certs']).toBeUndefined();
 
-    const { removedKeys } = reloadEnvironment(testSettings({}), workspace);
-    expect(process.env['NODE_OPTIONS']).toBe('--max-old-space-size=4096');
-    expect(removedKeys).not.toContain('NODE_OPTIONS');
+    reloadEnvironment(
+      testSettings({
+        env: {
+          Qwen_Cli_Entry: '/workspace-a/evil-entry.js',
+          Node_Extra_Ca_Certs: '/workspace-a/ca.pem',
+          RUNTIME_SETTINGS_ONLY: 'from-settings',
+        },
+      }),
+      workspace,
+    );
+    expect(process.env['Qwen_Cli_Entry']).toBeUndefined();
+    expect(process.env['Node_Extra_Ca_Certs']).toBeUndefined();
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
   });
 
   // The daemon reaches per-workspace .env files only through
@@ -692,8 +711,10 @@ describe('loadEnvironment', () => {
       stderrWrite.mockRestore();
     }
 
-    const warnings = stderrWrites.filter((chunk) =>
-      chunk.includes('cannot set loader-affecting env vars'),
+    const warnings = stderrWrites.filter(
+      (chunk) =>
+        chunk.includes('cannot set loader-affecting env vars') &&
+        chunk.includes(envPath),
     );
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(envPath);

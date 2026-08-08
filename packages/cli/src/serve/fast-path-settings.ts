@@ -13,8 +13,8 @@ import { V1_INDICATOR_KEYS } from '../config/migration/versions/v1-to-v2-shared.
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
-  PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -277,10 +277,7 @@ export function loadServeFastPathEnvironment(
       for (const key in parsedEnv) {
         if (!Object.hasOwn(parsedEnv, key)) continue;
         if (isLoaderEnvKey(key)) continue;
-        if (
-          !isHomeScopedEnvFile &&
-          PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
-        ) {
+        if (!isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
           continue;
         }
         if (!isQwenScopedEnvFile && excludedVars.includes(key)) {
@@ -305,7 +302,7 @@ export function loadServeFastPathEnvironment(
 
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
-      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (isHardcodedProjectEnvExclusion(key)) continue;
       if (isLoaderEnvKey(key)) continue;
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;

@@ -48,7 +48,25 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // `cd <untrusted repo> && qwen serve` into code execution as the daemon
   // via an attacker-chosen ACP entrypoint, for every workspace's sessions.
   'QWEN_CLI_ENTRY',
+  // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
+  // only the dev harness (scripts/dev.js) stamps it into the launch env. A
+  // project file setting it would silently keep loader vars in the base env
+  // distributed to every workspace's session children — reopening the #8653
+  // vector for any repo whose .env happens to carry DEV=true.
+  'DEV',
 ];
+
+// Windows env lookup is case-insensitive, so exact-case membership would let
+// case variants (e.g. `node_extra_ca_certs`) slip past every application
+// gate. All gates go through this predicate instead of Array.includes on the
+// list above, mirroring the loader-key predicate.
+const HARDCODED_PROJECT_ENV_EXCLUSIONS: ReadonlySet<string> = new Set(
+  PROJECT_ENV_HARDCODED_EXCLUSIONS.map((key) => key.toLowerCase()),
+);
+
+export function isHardcodedProjectEnvExclusion(key: string): boolean {
+  return HARDCODED_PROJECT_ENV_EXCLUSIONS.has(key.toLowerCase());
+}
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_HOME',

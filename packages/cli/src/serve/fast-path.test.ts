@@ -196,6 +196,11 @@ function useTempQwenHome(): string {
     mkdtempSync(join(os.tmpdir(), 'qws-fast-path-home-')),
   );
   process.env['QWEN_HOME'] = tempQwenHome;
+  // getUserLevelEnvPathsFastPath always includes os.homedir() candidates,
+  // so redirect HOME/USERPROFILE too — a real ~/.env or ~/.qwen/.env would
+  // otherwise leak keys and warning counts into these tests.
+  process.env['HOME'] = tempQwenHome;
+  process.env['USERPROFILE'] = tempQwenHome;
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
     tempQwenHome,
     'system-settings.json',
@@ -1852,24 +1857,37 @@ describe('serve fast path environment bootstrap', () => {
   // no reload tier, so the key must be hardcoded-excluded here.
   it('never applies QWEN_CLI_ENTRY from a project .env on the fast path', () => {
     useTempQwenHome();
-    const previous = process.env['QWEN_CLI_ENTRY'];
-    delete process.env['QWEN_CLI_ENTRY'];
+    const trackedKeys = ['QWEN_CLI_ENTRY', 'qwen_cli_entry'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-cli-entry-')),
     );
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_CLI_ENTRY=/workspace-a/evil-entry.js\n',
+      [
+        'QWEN_CLI_ENTRY=/workspace-a/evil-entry.js',
+        // Windows env lookup is case-insensitive, so the gate must reject
+        // case variants too.
+        'qwen_cli_entry=/workspace-a/evil-entry-lower.js',
+        '',
+      ].join('\n'),
     );
 
     try {
       loadServeFastPathEnvironment({}, tempWorkspace);
       expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
+      expect(process.env['qwen_cli_entry']).toBeUndefined();
     } finally {
-      if (previous === undefined) {
-        delete process.env['QWEN_CLI_ENTRY'];
-      } else {
-        process.env['QWEN_CLI_ENTRY'] = previous;
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
       }
     }
   });
@@ -1969,6 +1987,7 @@ describe('serve fast path environment bootstrap', () => {
   // A second fast-path load must not clobber the keys rejected by the
   // first, and the same key rejected by both loads lands in the stash once.
   it('accumulates rejected loader keys across loads without duplicates', () => {
+    useTempQwenHome();
     const trackedKeys = ['NODE_OPTIONS', 'LD_PRELOAD'] as const;
     const previous: Record<string, string | undefined> = {};
     for (const key of trackedKeys) {
@@ -1999,6 +2018,8 @@ describe('serve fast path environment bootstrap', () => {
         'NODE_OPTIONS',
       ]);
     } finally {
+      rmSync(firstWorkspace, { recursive: true, force: true });
+      rmSync(secondWorkspace, { recursive: true, force: true });
       for (const key of trackedKeys) {
         if (previous[key] === undefined) {
           delete process.env[key];
