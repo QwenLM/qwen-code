@@ -256,6 +256,285 @@ describe('ModelRegistry', () => {
       expect(model?.generationConfig.modalities).toEqual(explicitModalities);
     });
 
+    it('prefers catalog modalities over model-name heuristics', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'gpt-new',
+              baseUrl: 'https://openrouter.ai/api/v1',
+              envKey: 'OPENROUTER_API_KEY',
+            },
+          ],
+        },
+        undefined,
+        {
+          openrouter: {
+            models: {
+              'gpt-new': { modalities: { input: ['text', 'video'] } },
+            },
+          },
+        },
+      );
+
+      expect(
+        registry.getModel(AuthType.USE_OPENAI, 'gpt-new')?.generationConfig
+          .modalities,
+      ).toEqual({ video: true });
+    });
+
+    it('preserves a known catalog text-only result over a multimodal name heuristic', () => {
+      const registry = new ModelRegistry(
+        { openai: [{ id: 'gpt-4o' }] },
+        undefined,
+        {
+          openai: {
+            api: 'https://api.openai.com/v1',
+            models: {
+              'gpt-4o': { modalities: { input: ['text'] } },
+            },
+          },
+        },
+      );
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4o');
+      expect(model?.generationConfig.modalities).toEqual({});
+      expect(model && registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
+    it('uses catalog metadata at the canonical OpenAI endpoint', () => {
+      const registry = new ModelRegistry(
+        { openai: [{ id: 'gpt-4o' }] },
+        undefined,
+        {
+          openai: {
+            env: ['OPENAI_API_KEY'],
+            models: {
+              'gpt-4o': {
+                modalities: { input: ['text', 'image', 'pdf'] },
+              },
+            },
+          },
+        },
+      );
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4o');
+      expect(model?.baseUrl).toBe('https://api.openai.com/v1');
+      expect(model?.generationConfig.modalities).toEqual({
+        image: true,
+        pdf: true,
+      });
+      expect(model && registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
+    it('uses the resolved session endpoint for catalog lookup', () => {
+      const registry = new ModelRegistry(
+        { myproxy: [{ id: 'meta-llama/llama-4-maverick' }] },
+        { myproxy: 'openai' },
+        {
+          openrouter: {
+            api: 'https://openrouter.ai/api/v1',
+            models: {
+              'meta-llama/llama-4-maverick': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://openrouter.ai/api/v1',
+        },
+      );
+
+      const model = registry.getModel(
+        AuthType.USE_OPENAI,
+        'meta-llama/llama-4-maverick',
+      );
+      expect(model?.baseUrl).toBe('https://openrouter.ai/api/v1');
+      expect(model?.generationConfig.modalities).toEqual({ image: true });
+      expect(model && registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
+    it('passes mapped provider ids to catalog resolution', () => {
+      const registry = new ModelRegistry(
+        {
+          minimax: [{ id: 'MiniMax-M3' }],
+        },
+        { minimax: 'openai' },
+        {
+          minimax: {
+            models: {
+              'MiniMax-M3': {
+                modalities: { input: ['text', 'image', 'video'] },
+              },
+            },
+          },
+        },
+      );
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3')!;
+      expect(model.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
+    it('keeps explicit modalities ahead of catalog metadata', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'gpt-new',
+              baseUrl: 'https://openrouter.ai/api/v1',
+              envKey: 'OPENROUTER_API_KEY',
+              generationConfig: { modalities: { pdf: true } },
+            },
+          ],
+        },
+        undefined,
+        {
+          openrouter: {
+            models: {
+              'gpt-new': { modalities: { input: ['text', 'video'] } },
+            },
+          },
+        },
+      );
+
+      expect(
+        registry.getModel(AuthType.USE_OPENAI, 'gpt-new')?.generationConfig
+          .modalities,
+      ).toEqual({ pdf: true });
+    });
+
+    it('preserves modalities saved by an older auth template', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'qwen3.5-plus',
+              baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+              envKey: 'ALIBABA_CODING_PLAN_API_KEY',
+              generationConfig: {
+                modalities: { image: true, video: true },
+              },
+            },
+          ],
+        },
+        undefined,
+        {
+          'alibaba-coding-plan-cn': {
+            api: 'https://coding.dashscope.aliyuncs.com/v1',
+            models: {
+              'qwen3.5-plus': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+      );
+      const model = registry.getModel(AuthType.USE_OPENAI, 'qwen3.5-plus')!;
+
+      expect(model.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(registry.getModalitiesSource(model)).toBe('explicit');
+    });
+
+    it('uses regional catalog metadata for Coding Plan models', () => {
+      const catalog = {
+        'alibaba-coding-plan-cn': {
+          api: 'https://coding.dashscope.aliyuncs.com/v1',
+          models: {
+            'qwen3.5-plus': {
+              modalities: { input: ['text', 'image'] },
+            },
+            'kimi-k2.5': { modalities: { input: ['text', 'image'] } },
+          },
+        },
+        'alibaba-coding-plan': {
+          api: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+          models: {
+            'qwen3.5-plus': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+            'kimi-k2.5': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      };
+
+      for (const { baseUrl, expected } of [
+        {
+          baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+          expected: { image: true },
+        },
+        {
+          baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+          expected: { image: true, video: true },
+        },
+      ]) {
+        const registry = new ModelRegistry(
+          {
+            openai: ['qwen3.5-plus', 'kimi-k2.5'].map((id) => ({
+              id,
+              baseUrl,
+              envKey: 'BAILIAN_CODING_PLAN_API_KEY',
+            })),
+          },
+          undefined,
+          catalog,
+        );
+
+        for (const modelId of ['qwen3.5-plus', 'kimi-k2.5']) {
+          const model = registry.getModel(AuthType.USE_OPENAI, modelId)!;
+          expect(model.generationConfig.modalities).toEqual(expected);
+          expect(registry.getModalitiesSource(model)).toBe('catalog');
+        }
+      }
+    });
+
+    it('uses original provider metadata for an Alibaba proxy model', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'MiniMax-M3',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+        undefined,
+        {
+          'alibaba-cn': {
+            api: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            models: {
+              'qwen-model': { modalities: { input: ['text'] } },
+            },
+          },
+          minimax: {
+            models: {
+              'MiniMax-M3': {
+                modalities: { input: ['text', 'image', 'video'] },
+              },
+            },
+          },
+        },
+      );
+      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3')!;
+
+      expect(model.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
     it('returns text-only ({}) for models with no multimodal default', () => {
       const registry = new ModelRegistry({
         openai: [
@@ -300,7 +579,7 @@ describe('ModelRegistry', () => {
       });
     });
 
-    it('normalizes stale MiniMax-M3 provider modalities to image + video', () => {
+    it('preserves explicitly configured MiniMax-M3 modalities', () => {
       const registry = new ModelRegistry({
         openai: [
           {
@@ -318,7 +597,6 @@ describe('ModelRegistry', () => {
       const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3');
       expect(model?.generationConfig.modalities).toEqual({
         image: true,
-        video: true,
       });
     });
   });

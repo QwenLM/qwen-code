@@ -38,6 +38,14 @@ export {
   QWEN_OAUTH_MODELS,
 } from './constants.js';
 
+export {
+  getCatalogModalities,
+  loadModelMetadataCatalog,
+  type LoadModelMetadataCatalogOptions,
+  type ModelMetadataCatalog,
+  type ModelMetadataLookup,
+} from './model-metadata-catalog.js';
+
 // Model configuration resolver
 export {
   resolveModelConfig,

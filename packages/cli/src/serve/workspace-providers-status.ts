@@ -8,10 +8,11 @@ import {
   ApprovalMode,
   APPROVAL_MODES,
   createDebugLogger,
+  loadModelMetadataCatalog,
   ModelsConfig,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import type { AuthType, ModelMetadataCatalog } from '@qwen-code/qwen-code-core';
 import type {
   ServeWorkspaceProviderCurrent,
   ServeWorkspaceProviderModel,
@@ -45,6 +46,7 @@ export interface WorkspaceProvidersStatusProviderOptions {
   argv?: Partial<CliGenerationConfigInputs['argv']>;
   env?: Record<string, string | undefined>;
   workspaceTrusted?: boolean;
+  modelMetadataCatalog?: ModelMetadataCatalog;
 }
 
 export function createWorkspaceProvidersStatusProvider(
@@ -54,11 +56,11 @@ export function createWorkspaceProvidersStatusProvider(
     buildWorkspaceProvidersStatus(workspaceCwd, acpChannelLive, options);
 }
 
-function buildWorkspaceProvidersStatus(
+async function buildWorkspaceProvidersStatus(
   workspaceCwd: string,
   acpChannelLive: boolean,
   options: WorkspaceProvidersStatusProviderOptions,
-): ServeWorkspaceProvidersStatus {
+): Promise<ServeWorkspaceProvidersStatus> {
   try {
     const loaded = loadSettings(
       workspaceCwd,
@@ -77,6 +79,20 @@ function buildWorkspaceProvidersStatus(
     );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();
+    const modelMetadataCatalog =
+      options.modelMetadataCatalog ??
+      (env['NODE_ENV'] === 'test' ||
+      env['VITEST'] !== undefined ||
+      env['VITEST_WORKER_ID'] !== undefined
+        ? {}
+        : await loadModelMetadataCatalog({
+            proxyUrl:
+              settings.proxy ||
+              env['HTTPS_PROXY'] ||
+              env['https_proxy'] ||
+              env['HTTP_PROXY'] ||
+              env['http_proxy'],
+          }));
     const selectedAuthType =
       settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
     const argv: CliGenerationConfigInputs['argv'] = {
@@ -98,6 +114,7 @@ function buildWorkspaceProvidersStatus(
       providerProtocolConfig: settings.providerProtocol,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
+      modelMetadataCatalog,
     });
     const currentAuth = selectedAuthType;
     const currentModelId = (

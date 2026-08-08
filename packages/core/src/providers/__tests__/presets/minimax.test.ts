@@ -28,11 +28,14 @@ describe('minimaxProvider', () => {
     expect(urls).toContain('https://api.minimaxi.com/v1');
   });
 
-  it('includes MiniMax-M3 with official model metadata', () => {
+  it('keeps MiniMax-M3 modalities available to setup displays', () => {
     expect(minimaxProvider.models?.[0]).toMatchObject({
       id: 'MiniMax-M3',
       contextWindowSize: 1000000,
-      modalities: { image: true, video: true },
+    });
+    expect(minimaxProvider.models?.[0]?.modalities).toEqual({
+      image: true,
+      video: true,
     });
   });
 
@@ -40,12 +43,13 @@ describe('minimaxProvider', () => {
     const plan = buildInstallPlan(minimaxProvider, {
       baseUrl: 'https://api.minimaxi.com/v1',
       apiKey: 'sk-minimax',
-      modelIds: ['MiniMax-M2.5'],
+      modelIds: ['MiniMax-M3', 'MiniMax-M2.5'],
     });
 
     const models = plan.modelProviders?.[0]?.models;
-    expect(models).toHaveLength(1);
-    expect(models?.[0]).toMatchObject({
+    expect(models).toHaveLength(2);
+    expect(models?.[0]?.generationConfig?.modalities).toBeUndefined();
+    expect(models?.[1]).toMatchObject({
       id: 'MiniMax-M2.5',
       name: '[MiniMax] MiniMax-M2.5',
       generationConfig: { contextWindowSize: 196608 },

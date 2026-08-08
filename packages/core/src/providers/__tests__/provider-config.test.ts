@@ -105,6 +105,35 @@ describe('buildInstallPlan', () => {
     });
   });
 
+  it('keeps advanced modalities on custom ids when preset ids use the catalog', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [
+        {
+          id: 'model-a',
+          modalities: { image: true },
+        },
+      ],
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'custom-model'],
+      advancedConfig: {
+        multimodal: { audio: true, video: true },
+      },
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(
+      models?.find((model) => model.id === 'model-a')?.generationConfig,
+    ).toBeUndefined();
+    expect(
+      models?.find((model) => model.id === 'custom-model')?.generationConfig
+        ?.modalities,
+    ).toEqual({ audio: true, video: true });
+  });
+
   it('builds a plan with no predefined models (custom provider path)', () => {
     const config = makeConfig({
       models: undefined,
@@ -179,6 +208,35 @@ describe('buildInstallPlan', () => {
 
     expect(plan.modelProviders?.[0]?.models).toBe(prebuilt);
     expect(plan.modelSelection).toEqual({ modelId: 'pre-1' });
+  });
+
+  it('keeps preset modalities in templates but omits them from new installs', () => {
+    const config = makeConfig({
+      models: [
+        {
+          id: 'model-a',
+          contextWindowSize: 8192,
+          modalities: { image: true, video: true },
+        },
+      ],
+    });
+    const template = buildProviderTemplate(config);
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+
+    expect(template[0]?.generationConfig?.modalities).toEqual({
+      image: true,
+      video: true,
+    });
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig?.modalities,
+    ).toBeUndefined();
+    expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(template),
+    );
   });
 
   it('throws when models list is empty', () => {

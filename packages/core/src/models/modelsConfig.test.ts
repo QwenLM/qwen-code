@@ -82,6 +82,62 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getModel()).toBe('chat-model');
   });
 
+  it('does not reuse a modelProviders endpoint as a protocol default', async () => {
+    const idealabBaseUrl = 'https://idealab.example.com/v1';
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        idealab: [{ id: 'gpt-new', baseUrl: idealabBaseUrl }],
+        openai: [{ id: 'gpt-4o' }],
+      },
+      providerProtocolConfig: { idealab: 'openai' },
+      generationConfig: {
+        model: 'gpt-new',
+        baseUrl: idealabBaseUrl,
+      },
+      generationConfigSources: {
+        model: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'gpt-new',
+          detail: 'model.id',
+        },
+        baseUrl: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'gpt-new',
+          detail: 'baseUrl',
+        },
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4o');
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(
+      'https://api.openai.com/v1',
+    );
+  });
+
+  it('keeps a CLI endpoint as the protocol default', async () => {
+    const cliBaseUrl = 'https://session-proxy.example.com/v1';
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: { openai: [{ id: 'gpt-4o' }] },
+      generationConfig: {
+        model: 'runtime-model',
+        baseUrl: cliBaseUrl,
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        baseUrl: { kind: 'cli', detail: '--base-url' },
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4o');
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(cliBaseUrl);
+  });
+
   it('should fully rollback state when switchModel fails after applying defaults (authType change)', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
@@ -1599,6 +1655,298 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('uses catalog modalities for raw model switches', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'old-model',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        apiKeyEnvKey: 'OPENROUTER_API_KEY',
+        modalities: {},
+      },
+      generationConfigSources: {
+        modalities: { kind: 'computed', detail: 'auto-detected from model' },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          models: {
+            'new-model': { modalities: { input: ['text', 'image', 'pdf'] } },
+          },
+        },
+      },
+    });
+
+    await modelsConfig.setModel('new-model');
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      pdf: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'computed',
+      detail: 'loaded from models.dev catalog',
+    });
+  });
+
+  it('uses catalog modalities for an initial manually configured provider', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'vendor/new-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      },
+      generationConfig: { model: 'vendor/new-model' },
+      modelMetadataCatalog: {
+        openrouter: {
+          api: 'https://openrouter.ai/api/v1',
+          models: {
+            'vendor/new-model': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+  });
+
+  it('re-derives modalities when manual credentials select a new model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'vision-model',
+            baseUrl: 'https://vendor.example/v1',
+          },
+        ],
+      },
+      generationConfig: { model: 'vision-model' },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'vision-model': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'vision-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+
+    modelsConfig.updateCredentials(
+      { apiKey: 'manual-key', model: 'plain-text-model' },
+      { modalities: { audio: true } },
+    );
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']?.kind).toBe(
+      'settings',
+    );
+  });
+
+  it('replaces provider-sourced modalities when switching registry models', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'audio-model',
+            generationConfig: { modalities: { audio: true } },
+          },
+          {
+            id: 'catalog-model',
+            baseUrl: 'https://vendor.example/v1',
+          },
+        ],
+      },
+      generationConfig: { model: 'audio-model' },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'catalog-model': {
+              modalities: { input: ['text', 'image', 'pdf'] },
+            },
+          },
+        },
+      },
+    });
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'audio-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'catalog-model');
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      pdf: true,
+    });
+  });
+
+  it('does not overwrite provider-sourced persisted modalities during construction', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'catalog-model',
+            baseUrl: 'https://vendor.example/v1',
+          },
+        ],
+      },
+      generationConfig: {
+        model: 'catalog-model',
+        modalities: { video: true },
+      },
+      generationConfigSources: {
+        modalities: {
+          kind: 'modelProviders',
+          authType: AuthType.USE_OPENAI,
+          modelId: 'catalog-model',
+          detail: 'generationConfig.modalities',
+        },
+      },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'catalog-model': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      video: true,
+    });
+  });
+
+  it('uses the registry catalog result for an initial mapped provider', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        minimax: [{ id: 'MiniMax-M3' }],
+      } as unknown as ModelProvidersConfig,
+      providerProtocolConfig: { minimax: 'openai' },
+      generationConfig: { model: 'MiniMax-M3' },
+      modelMetadataCatalog: {
+        minimax: {
+          models: {
+            'MiniMax-M3': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'computed',
+      detail: 'loaded from models.dev catalog',
+    });
+  });
+
+  it('preserves caller modalities without a source map during construction', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'vendor-model',
+        baseUrl: 'https://vendor.example/v1',
+        modalities: { audio: true },
+      },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'vendor-model': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+    expect(
+      modelsConfig.getGenerationConfigSources()['modalities'],
+    ).toBeUndefined();
+  });
+
+  it('preserves explicit settings modalities across auth sync and registry switches', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'vendor/old-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+          {
+            id: 'vendor/new-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      },
+      generationConfig: {
+        model: 'vendor/old-model',
+        modalities: { audio: true },
+      },
+      generationConfigSources: {
+        modalities: {
+          kind: 'settings',
+          settingsPath: 'model.generationConfig.modalities',
+        },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          models: {
+            'vendor/old-model': { modalities: { input: ['text', 'image'] } },
+            'vendor/new-model': { modalities: { input: ['text', 'video'] } },
+          },
+        },
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'vendor/old-model');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'vendor/new-model');
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'settings',
+      settingsPath: 'model.generationConfig.modalities',
+    });
+  });
+
   it('refreshes model-derived modalities when hot-switching to the default qwen-oauth model', async () => {
     // Start on qwen-oauth with a text-only model so modalities are empty.
     const modelsConfig = new ModelsConfig({
@@ -2343,6 +2691,41 @@ describe('ModelsConfig', () => {
       expect(
         modelsConfig.getAllConfiguredModels().find((m) => m.id === 'gpt-3.5'),
       ).toBeDefined();
+    });
+
+    it('applies catalog modalities to a provider installed at runtime', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelMetadataCatalog: {
+          openrouter: {
+            api: 'https://openrouter.ai/api/v1',
+            models: {
+              'vendor/installed-model': {
+                modalities: { input: ['text', 'image', 'pdf'] },
+              },
+            },
+          },
+        },
+      });
+
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [
+          {
+            id: 'vendor/installed-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      });
+      await modelsConfig.switchModel(
+        AuthType.USE_OPENAI,
+        'vendor/installed-model',
+      );
+
+      expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+        image: true,
+        pdf: true,
+      });
     });
 
     it('should preserve current model selection if still available after reload', async () => {
