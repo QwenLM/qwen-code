@@ -9,7 +9,10 @@ import { constants as fsConstants } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  decodeProcessOutput,
+} from '@qwen-code/qwen-code-core';
 import { wrapForMultiplexer } from '../../utils/osc.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
@@ -177,7 +180,7 @@ async function saveFromCommand(
     }, PROCESS_TIMEOUT_MS);
 
     child.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
+      stderr += decodeProcessOutput(data);
     });
 
     child.stdout.pipe(fileStream);
@@ -271,7 +274,7 @@ async function checkClipboardForImage(
       }, PROCESS_TIMEOUT_MS);
 
       child.stdout.on('data', (data: Buffer) => {
-        stdout += data.toString();
+        stdout += decodeProcessOutput(data);
       });
       child.on('close', (code) => {
         clearTimeout(timer);
@@ -366,7 +369,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
     }, PROCESS_TIMEOUT_MS);
 
     child.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString();
+      stdout += decodeProcessOutput(data);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -436,7 +439,7 @@ async function saveFileWithWlPaste(
           );
           let stderr = '';
           child.stderr.on('data', (d: Buffer) => {
-            stderr += d.toString();
+            stderr += decodeProcessOutput(d);
           });
           const timer = setTimeout(() => {
             try {

@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { decodeProcessOutput } from '@qwen-code/qwen-code-core';
 import type {
   RecordedVoiceAudio,
   VoiceRecorder,
@@ -88,7 +89,7 @@ class SoxRecorder implements VoiceRecorder {
     const child = this.child;
     child.stderr?.on('data', (chunk: Buffer) => {
       if (this.stderr.length < MAX_STDERR_LENGTH) {
-        this.stderr = (this.stderr + chunk.toString()).slice(
+        this.stderr = (this.stderr + decodeProcessOutput(chunk)).slice(
           0,
           MAX_STDERR_LENGTH,
         );

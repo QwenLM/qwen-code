@@ -7,6 +7,7 @@
 import { isUtf8 } from 'node:buffer';
 import { execSync } from 'node:child_process';
 import os from 'node:os';
+import { TextDecoder } from 'node:util';
 import { detect as chardetDetect } from 'chardet';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -57,6 +58,24 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
 
   // Last resort
   return 'utf-8';
+}
+
+export function decodeProcessOutput(buffer: Buffer | string): string {
+  if (!Buffer.isBuffer(buffer)) return String(buffer);
+  if (buffer.length === 0) return '';
+  const encoding = getCachedEncodingForBuffer(buffer);
+  try {
+    return new TextDecoder(encoding).decode(buffer);
+  } catch {
+    // The detected label may be a Windows OEM code page (cp437/cp850/cp852)
+    // that Node's WHATWG TextDecoder rejects with RangeError. Fall back to
+    // utf-8 so a throw never escapes into an 'exit'/'data' handler, which
+    // would otherwise leave the shell-execution promise unsettled.
+    debugLogger.debug(
+      `TextDecoder rejected encoding label "${encoding}"; falling back to utf-8`,
+    );
+    return new TextDecoder('utf-8').decode(buffer);
+  }
 }
 
 /**

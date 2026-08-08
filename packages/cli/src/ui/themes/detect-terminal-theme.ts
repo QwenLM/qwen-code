@@ -6,7 +6,10 @@
 
 import { execSync } from 'node:child_process';
 import process from 'node:process';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  decodeProcessOutput,
+} from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('THEME_DETECT');
 
@@ -114,7 +117,7 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
     const timer = setTimeout(() => finish(undefined), OSC11_TIMEOUT_MS);
 
     const onData = (data: Buffer) => {
-      buffer += data.toString();
+      buffer += decodeProcessOutput(data);
       // OSC response: ESC ] 11 ; <data> BEL  or  ESC ] 11 ; <data> ST
       // eslint-disable-next-line no-control-regex
       const match = /\x1b\]11;(.*?)(?:\x07|\x1b\\)/.exec(buffer);

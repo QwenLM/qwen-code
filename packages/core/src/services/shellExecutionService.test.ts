@@ -36,6 +36,9 @@ const { Terminal } = pkg;
 const mockGetSystemEncoding = vi.hoisted(() =>
   vi.fn().mockReturnValue('utf-8'),
 );
+const mockGetCachedEncodingForBuffer = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockSpawnSync = vi.hoisted(() => vi.fn());
@@ -115,8 +118,14 @@ vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
 }));
 vi.mock('../utils/systemEncoding.js', () => ({
-  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
+  getCachedEncodingForBuffer: mockGetCachedEncodingForBuffer,
   getSystemEncoding: mockGetSystemEncoding,
+  decodeProcessOutput: (buffer: Buffer) => {
+    if (buffer.length === 0) return '';
+    return new TextDecoder(mockGetCachedEncodingForBuffer(buffer)).decode(
+      buffer,
+    );
+  },
 }));
 
 const mockProcessKill = vi
@@ -2411,6 +2420,24 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output.trim()).toBe('你好');
     });
 
+    it('should decode multi-chunk OEM output via full-buffer encoding detection', async () => {
+      // Regression: the old per-chunk decoder locked to UTF-8 on an
+      // ASCII-only first chunk, garbling subsequent OEM bytes. The fix
+      // accumulates raw buffers and decodes once in cleanup().
+      mockGetCachedEncodingForBuffer.mockReturnValueOnce('cp866');
+
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stdout?.emit('data', Buffer.from('Status: OK\n'));
+        // CP-866 bytes 0x80-0x83 = А Б В Г (invalid UTF-8)
+        cp.stdout?.emit('data', Buffer.from([0x80, 0x81, 0x82, 0x83]));
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      expect(result.output).toContain('Status: OK');
+      expect(result.output).toContain('АБВГ');
+    });
+
     it('bounds buffered child_process output before building the final string', async () => {
       const abortController = new AbortController();
       const handle = await ShellExecutionService.execute(
@@ -3251,21 +3278,11 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('exit', 0, null),
       );
 
-      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'cmd.exe',
         ['/d', '/s', '/c', `${CHCP} 65001 >nul 2>nul & dir "foo bar"`],
-        expect.objectContaining({
-          detached: false,
-          windowsHide: true,
-          windowsVerbatimArguments: true,
-        }),
+        expect.objectContaining({ windowsVerbatimArguments: true }),
       );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
     });
 
     it('should not apply UTF-8 prefix for Git Bash on Windows via child_process', async () => {

@@ -18,6 +18,7 @@ import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
 import {
   FatalSandboxError,
   Storage,
+  decodeProcessOutput,
   isSubpath,
   resolveBundleDir,
 } from '@qwen-code/qwen-code-core';
@@ -352,7 +353,7 @@ export async function start_sandbox(
 
       // Proxy stdout is intentionally not piped — it disrupts ink rendering.
       proxyProcess.stderr?.on('data', (data) => {
-        writeStderrLine(data.toString());
+        writeStderrLine(decodeProcessOutput(data));
       });
       proxyProcess.on('close', (code, signal) => {
         if (sandboxProcess?.pid) {
@@ -898,7 +899,7 @@ export async function start_sandbox(
 
     // Proxy stdout is intentionally not piped — it disrupts ink rendering.
     proxyProcess.stderr?.on('data', (data) => {
-      writeStderrLine(data.toString().trim());
+      writeStderrLine(decodeProcessOutput(data).trim());
     });
     proxyProcess.on('close', (code, signal) => {
       if (sandboxProcess?.pid) {
@@ -953,7 +954,7 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
     let stdoutData = '';
     if (checkProcess.stdout) {
       checkProcess.stdout.on('data', (data) => {
-        stdoutData += data.toString();
+        stdoutData += decodeProcessOutput(data);
       });
     }
 
@@ -981,12 +982,13 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
     let stderrData = '';
 
     const onStdoutData = (data: Buffer) => {
-      writeStderrLine(data.toString().trim()); // Show pull progress
+      writeStderrLine(decodeProcessOutput(data).trim()); // Show pull progress
     };
 
     const onStderrData = (data: Buffer) => {
-      stderrData += data.toString();
-      writeStderrLine(data.toString().trim()); // Show pull errors/info from the command itself
+      const decoded = decodeProcessOutput(data);
+      stderrData += decoded;
+      writeStderrLine(decoded.trim());
     };
 
     const onError = (err: Error) => {
