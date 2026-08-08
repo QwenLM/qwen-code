@@ -62,16 +62,26 @@ const TYPE_KEYWORDS: Record<string, string[]> = {
   reference: ['reference', 'dashboard', 'ticket', 'docs', 'doc', 'link'],
 };
 
+const ASCII_TOKEN = /[a-z0-9]{3,}/gu;
+const CJK_RUN =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Hangul}]+/gu;
+
+function normalizeRecallText(text: string): string {
+  return text.normalize('NFKC').toLowerCase();
+}
+
 function tokenize(text: string): string[] {
-  return Array.from(
-    new Set(
-      text
-        .toLowerCase()
-        .split(/[^a-z0-9]+/)
-        .map((token) => token.trim())
-        .filter((token) => token.length >= 3),
-    ),
-  );
+  const normalized = normalizeRecallText(text);
+  const tokens = new Set(normalized.match(ASCII_TOKEN) ?? []);
+
+  for (const run of normalized.match(CJK_RUN) ?? []) {
+    const codePoints = Array.from(run);
+    for (let index = 0; index < codePoints.length - 1; index += 1) {
+      tokens.add(codePoints[index] + codePoints[index + 1]);
+    }
+  }
+
+  return Array.from(tokens);
 }
 
 function normalizeBody(body: string): string {
@@ -138,26 +148,31 @@ function scoreDocument(
   queryTokens: string[],
   doc: ScannedAutoMemoryDocument,
 ): number {
-  const normalizedBody = normalizeBody(doc.body);
-  const haystack = [doc.type, doc.title, doc.description, normalizedBody]
-    .join(' ')
-    .toLowerCase();
+  const title = normalizeRecallText(doc.title);
+  const description = normalizeRecallText(doc.description);
+  const body = normalizeRecallText(normalizeBody(doc.body));
 
-  let score = 0;
+  let lexicalScore = 0;
   for (const token of queryTokens) {
-    if (haystack.includes(token)) {
-      score += 2;
+    if (title.includes(token)) {
+      lexicalScore += 4;
     }
-    if (TYPE_KEYWORDS[doc.type]?.includes(token)) {
-      score += 1;
+    if (description.includes(token)) {
+      lexicalScore += 3;
+    }
+    if (body.includes(token)) {
+      lexicalScore += 1;
     }
   }
 
-  if (normalizedBody.length > 0) {
-    score += 1;
+  if (lexicalScore === 0) {
+    return 0;
   }
 
-  return score;
+  const typeBoost = queryTokens.filter((token) =>
+    TYPE_KEYWORDS[doc.type]?.includes(token),
+  ).length;
+  return lexicalScore + typeBoost;
 }
 
 export function selectRelevantAutoMemoryDocuments(

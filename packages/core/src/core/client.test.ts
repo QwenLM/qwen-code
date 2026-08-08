@@ -4965,9 +4965,9 @@ hello
       );
     });
 
-    it('should not block the main request when auto-memory recall is slow', async () => {
-      // Recall never settles — settledAt stays null so the UserQuery consume
-      // point skips it and turn.run() is called immediately without memory.
+    it('should bound the main request wait when auto-memory recall is slow', async () => {
+      // Recall never settles, so the UserQuery consume point proceeds after
+      // the fixed initial budget without memory.
       mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 
       const mockStream = (async function* () {
@@ -4995,6 +4995,49 @@ hello
         'test-model',
         expect.not.arrayContaining([
           expect.stringContaining('Slow memory result'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should inject auto-memory when recall settles inside the initial wait budget', async () => {
+      mockMemoryManager.recall.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  prompt: '## Relevant memory\n\nBounded memory result.',
+                  selectedDocs: [],
+                  strategy: 'model',
+                }),
+              10,
+            );
+          }),
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Quick question' }],
+          new AbortController().signal,
+          'prompt-id-bounded-memory',
+        ),
+      );
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nBounded memory result.',
         ]),
         expect.any(AbortSignal),
       );
@@ -5154,11 +5197,13 @@ hello
             strategy: 'model';
           }) => void)
         | undefined;
-      mockMemoryManager.recall.mockReturnValue(
-        new Promise((resolve) => {
+      let recallSignal: AbortSignal | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        recallSignal = options.abortSignal;
+        return new Promise((resolve) => {
           resolveRecall = resolve;
-        }),
-      );
+        });
+      });
 
       // The model requests a tool call so pendingToolCalls is non-empty and
       // the prefetch is preserved for the subsequent ToolResult turn.
@@ -5201,6 +5246,7 @@ hello
         ]),
         expect.any(AbortSignal),
       );
+      expect(recallSignal?.aborted).toBe(false);
 
       // Recall settles between turns
       resolveRecall!({
@@ -5347,6 +5393,36 @@ hello
       expect(abortHandlerInvoked).toBe(false);
       callerController.abort();
       expect(abortHandlerInvoked).toBe(true);
+    });
+
+    it('should end the bounded initial wait when the prefetch is cancelled', async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      const handle = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        firedAt: Date.now(),
+        controller,
+      };
+      client['pendingMemoryPrefetch'] = handle;
+      const privateClient = client as unknown as {
+        tryConsumeMemoryPrefetch: (
+          deliveryPoint: 'initial',
+          waitMs: number,
+        ) => Promise<unknown>;
+        cancelPendingMemoryPrefetch: (reason: 'abort') => void;
+      };
+
+      const consume = privateClient.tryConsumeMemoryPrefetch('initial', 100);
+      setTimeout(() => privateClient.cancelPendingMemoryPrefetch('abort'), 10);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(consume).resolves.toBeNull();
+      expect(controller.signal.aborted).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
     it('should abort the previous prefetch when a new UserQuery arrives mid-flight', async () => {

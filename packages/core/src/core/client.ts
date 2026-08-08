@@ -163,6 +163,7 @@ import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
+const INITIAL_MEMORY_RECALL_WAIT_MS = 100;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -289,9 +290,9 @@ function sameActiveGoalProjection(
  * Lifecycle:
  *  1. Created on UserQuery/Cron — the recall promise fires immediately,
  *     `pendingMemoryPrefetch` is set to this handle.
- *  2. Consumed at either of two opportunistic points: a zero-wait
- *     `settledAt !== null` poll just before the UserQuery main request,
- *     or — if recall hadn't settled yet — on the first ToolResult turn.
+ *  2. Consumed at either of two points: a bounded wait just before the
+ *     UserQuery main request, or — if recall remains pending — on the first
+ *     ToolResult turn.
  *  3. Aborted-and-discarded by every cleanup path (resetChat,
  *     MaxSessionTurns, etc.) or replaced when a new UserQuery arrives.
  */
@@ -823,18 +824,47 @@ export class GeminiClient {
   }
 
   /**
-   * Atomically consume the pending prefetch if it has already settled.
-   * Returns the recall result (caller decides where to inject it in
-   * `requestToSend`), or `null` if there's nothing to consume yet.
+   * Atomically consume the pending prefetch, optionally waiting for a bounded
+   * initial-turn budget. Budget expiry leaves the recall running for the next
+   * safe delivery point.
    *
    * Centralises the consume-and-mark dance so the UserQuery and ToolResult
    * inject sites can't drift on the guard logic.
    */
   private async tryConsumeMemoryPrefetch(
     deliveryPoint: Exclude<MemoryRecallDeliveryPoint, 'discarded'>,
+    waitMs = 0,
   ): Promise<RelevantAutoMemoryPromptResult | null> {
     const handle = this.pendingMemoryPrefetch;
-    if (!handle || handle.settledAt === null || handle.consumed) {
+    if (!handle || handle.consumed) {
+      return null;
+    }
+
+    if (handle.settledAt === null && waitMs > 0) {
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          handle.controller.signal.removeEventListener('abort', finish);
+          resolve();
+        };
+
+        const timer = setTimeout(finish, waitMs);
+        if (handle.controller.signal.aborted) {
+          finish();
+        } else {
+          handle.controller.signal.addEventListener('abort', finish, {
+            once: true,
+          });
+          void handle.promise.then(finish, finish);
+        }
+      });
+    }
+
+    if (
+      this.pendingMemoryPrefetch !== handle ||
+      handle.settledAt === null ||
+      handle.consumed
+    ) {
       return null;
     }
     handle.consumed = true;
@@ -2951,14 +2981,12 @@ export class GeminiClient {
           }
         }
 
-        // Zero-wait poll: consume only if the prefetch has already settled.
-        // Done AFTER the async reminder setup above so recall settling during
-        // those awaits still gets caught here. (settledAt is set in
-        // promise.finally(); microtask ordering guarantees it's visible
-        // after any await prior to this point — flatMapTextParts above is
-        // the natural drain.) If still not settled, skip — the ToolResult
-        // inject point will retry on the next turn.
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch('initial');
+        const userQueryMemory = await this.tryConsumeMemoryPrefetch(
+          'initial',
+          messageType === SendMessageType.UserQuery
+            ? INITIAL_MEMORY_RECALL_WAIT_MS
+            : 0,
+        );
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
