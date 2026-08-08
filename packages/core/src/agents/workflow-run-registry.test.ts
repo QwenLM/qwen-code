@@ -412,6 +412,34 @@ describe('WorkflowRunRegistry', () => {
     });
   });
 
+  it('preserves plain-text rendering for copied info confirmations', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_plain_info'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_plain_info', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        name: 'HookedTool',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Hook confirmation',
+          prompt: '[literal](https://example.com)',
+          renderPromptAsPlainText: true,
+        },
+      }),
+    );
+
+    expect(r.get('wf_plain_info')!.pendingApprovals[0]).toMatchObject({
+      confirmationDetails: {
+        type: 'info',
+        prompt: '[literal](https://example.com)',
+        renderPromptAsPlainText: true,
+      },
+    });
+  });
+
   it('rejects unsupported and oversized approval details', async () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_restricted_approval'));

@@ -782,6 +782,17 @@ The catalog marks the types supported by this management API with
 presence metadata, startup state, and runtime state; literal secrets are never
 returned. Channel snapshots use `Cache-Control: no-store`.
 
+Field descriptors can expose nested object metadata through `properties`.
+Numeric descriptors can use `exclusiveMinimum` for open lower bounds. Clients
+that do not render an advertised field kind must preserve its existing config
+value instead of coercing or deleting it. Object fields cannot be required,
+and nested properties cannot be secrets or environment-resolvable fields;
+those management protocols remain top-level only. A nested `required` property
+is enforced only while its parent object is present in the write; omitting the
+parent object leaves its nested requirements unchecked. Writes replace each
+field's stored value wholesale, so preserving an object means resending the
+stored object; the daemon does not merge partial objects.
+
 Configuration writes use optimistic concurrency and the strict bearer-token
 gate:
 
@@ -800,19 +811,21 @@ Runtime actions are strict-gated `POST` requests to
 worker owned by the resolved workspace.
 
 Pairing management is available only for instances configured with the
-`pairing` sender policy:
+`pairing` sender policy or group policy:
 
 - `GET .../channels/:name/pairing-requests`
 - `POST .../channels/:name/pairing-requests/approve` with `{ "code": "..." }`
 - `GET .../channels/:name/pairing-approvals`
 - `DELETE .../channels/:name/pairing-approvals` with
-  `{ "senderId": "..." }`
+  either `{ "senderId": "..." }` or `{ "groupId": "..." }`
 
 All pairing routes require a bearer token and use `Cache-Control: no-store`.
 Requests, approvals, and revocations are scoped to the selected Channel
-instance and workspace. The approvals snapshot contains sender IDs because the
-allowlist does not persist sender display names. Revoking an unknown sender
-returns `404 channel_pairing_approval_not_found`.
+instance and workspace. Pending requests include a typed user or group subject;
+group requests also retain the sender who initiated the request. Approval
+snapshots contain `senderIds` and `groupIds` because allowlists do not persist
+display names. Revoking an unknown user or group returns
+`404 channel_pairing_approval_not_found`.
 
 ### Channel delivery and Notify
 
