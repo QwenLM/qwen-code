@@ -657,20 +657,14 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: expect.stringContaining(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE),
-      }),
-      expect.any(Number),
-    );
-    // #8741: the blocked error names the blocking entry.
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: expect.stringContaining('[bg_ab12cd34]'),
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {
@@ -738,20 +732,14 @@ describe('useResumeCommand', () => {
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: expect.stringContaining(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE),
-      }),
-      expect.any(Number),
-    );
-    // #8741: the blocked error names the blocking monitor.
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: expect.stringContaining('[mon_123]'),
-      }),
-      expect.any(Number),
-    );
+    expect(historyManager.addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = historyManager.addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
+    expect(blockedItem.text).toContain('[mon_123]');
   });
 
   it('rolls core back when persisted Goal state is malformed', async () => {

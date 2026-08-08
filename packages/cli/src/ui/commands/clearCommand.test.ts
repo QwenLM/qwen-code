@@ -451,8 +451,6 @@ describe('clearCommand', () => {
 
       const result = await clearCommand.action(blockedContext, '');
 
-      // #8741: the error must name the blocking entries, not just say
-      // "stop your tasks" — the user may not know which tasks exist.
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
@@ -528,8 +526,6 @@ describe('clearCommand', () => {
 
       const result = await clearCommand.action(blockedContext, '');
 
-      // #8741: same enumerated error in interactive mode — the visible
-      // message is what tells the user which task to stop.
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',

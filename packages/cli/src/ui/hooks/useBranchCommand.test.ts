@@ -165,21 +165,14 @@ describe('useBranchCommand', () => {
     expect(finalize).not.toHaveBeenCalled();
     expect(forkSession).not.toHaveBeenCalled();
     expect(startNewSessionConfig).not.toHaveBeenCalled();
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: expect.stringContaining('running background tasks'),
-      }),
-      expect.any(Number),
-    );
-    // #8741: the blocked error names the blocking entry so the user can
-    // stop it without guessing what is still running.
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: expect.stringContaining('[bg_ab12cd34]'),
-      }),
-      expect.any(Number),
-    );
+    expect(addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain('running background tasks');
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
   it('clears terminal background state after the branch initializes', async () => {

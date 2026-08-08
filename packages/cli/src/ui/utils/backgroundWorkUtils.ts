@@ -5,7 +5,11 @@
  */
 
 import { buildBackgroundEntryLabel } from '@qwen-code/qwen-code-core';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  TaskStatus,
+  WorkflowStatus,
+} from '@qwen-code/qwen-code-core';
 import { formatDuration } from './formatters.js';
 import { stripUnsafeCharacters } from './textUtils.js';
 
@@ -46,13 +50,15 @@ export function resetBackgroundStateForSessionSwitch(config: Config): void {
   config.getWorkflowRunRegistry().reset();
 }
 
+/** Cap on enumerated lines so a pathological registry can't produce a wall of text. */
+const MAX_LISTED_BLOCKING_ENTRIES = 10;
+
 export interface BlockingBackgroundWork {
-  /** Number of entries currently blocking a session switch. */
-  count: number;
   /**
    * One formatted line per blocking entry, sorted by start time, e.g.
-   * `  [bg_ab12cd34] npm run dev (running 21h 4m)`. Sanitized — labels are
-   * user/process-supplied.
+   * `  [bg_ab12cd34] npm run dev (running 21h 4m)`. Capped at
+   * `MAX_LISTED_BLOCKING_ENTRIES` plus a `…and N more` tail. Sanitized —
+   * labels are user/process-supplied.
    */
   lines: string[];
   /** True when at least one blocking entry is an agent, shell, or monitor
@@ -80,7 +86,7 @@ export function describeBlockingBackgroundWork(
     startTime: number;
     id: string;
     label: string;
-    status: string;
+    status: TaskStatus | WorkflowStatus;
     isWorkflowRun: boolean;
   }> = [];
 
@@ -127,16 +133,21 @@ export function describeBlockingBackgroundWork(
   if (entries.length === 0) return undefined;
 
   entries.sort((a, b) => a.startTime - b.startTime);
-  return {
-    count: entries.length,
-    lines: entries.map((entry) =>
-      stripUnsafeCharacters(
-        `  [${entry.id}] ${entry.label} (${entry.status} ${formatDuration(
-          now - entry.startTime,
-          { hideTrailingZeros: true },
-        )})`,
-      ),
+  const listed = entries.slice(0, MAX_LISTED_BLOCKING_ENTRIES);
+  const lines = listed.map((entry) =>
+    stripUnsafeCharacters(
+      `  [${entry.id}] ${entry.label} (${entry.status} ${formatDuration(
+        now - entry.startTime,
+        { hideTrailingZeros: true },
+      )})`,
     ),
+  );
+  const overflow = entries.length - listed.length;
+  if (overflow > 0) {
+    lines.push(`  …and ${overflow} more`);
+  }
+  return {
+    lines,
     hasTaskEntries: entries.some((entry) => !entry.isWorkflowRun),
     hasWorkflowRuns: entries.some((entry) => entry.isWorkflowRun),
   };

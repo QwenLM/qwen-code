@@ -268,7 +268,7 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
       ],
     });
     const summary = describeBlockingBackgroundWork(config);
-    expect(summary?.count).toBe(4);
+    expect(summary?.lines).toHaveLength(4);
     const joined = summary?.lines.join('\n');
     expect(joined).toContain('[mon_1]');
     expect(joined).toContain('[shell_1]');
@@ -320,6 +320,21 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(summary?.lines[0]).toContain('npm run dev');
     expect(summary?.lines[0]).not.toContain('\u001b');
     expect(summary?.lines[0]).not.toContain('\u0007');
+  });
+
+  it('caps enumeration at 10 lines plus an overflow tail', () => {
+    const shells = Array.from({ length: 12 }, (_, i) => ({
+      shellId: `shell_${i}`,
+      status: 'running',
+      command: `cmd ${i}`,
+      startTime: now - (12 - i) * 1_000,
+    }));
+    const summary = describeBlockingBackgroundWork(
+      createEnumeratingMockConfig({ shells }),
+    );
+    expect(summary?.lines).toHaveLength(11);
+    expect(summary?.lines[10]).toBe('  …and 2 more');
+    expect(summary?.lines.join('\n')).toContain('[shell_0]');
   });
 });
 
