@@ -302,20 +302,20 @@ export async function launchAgentViewPtyHost(
   const output = new BoundedOutputRing(
     options.maxOutputBytes ?? DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES,
   );
-  const inheritedEnv = stringProcessEnv(process.env);
+  const workerEnv: Record<string, string> = {
+    ...stringProcessEnv(process.env),
+    ...launch.env,
+    TERM: 'xterm-256color',
+  };
   for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
-    delete inheritedEnv[key];
+    delete workerEnv[key];
   }
   const ptyProcess = pty.module.spawn(command[0], command.slice(1), {
     cwd: launch.activeCwd,
     name: 'xterm-256color',
     cols: launch.terminal.columns,
     rows: launch.terminal.rows,
-    env: {
-      ...inheritedEnv,
-      ...launch.env,
-      TERM: 'xterm-256color',
-    },
+    env: workerEnv,
     handleFlowControl: false,
   });
   const inputDecoder = new StringDecoder('utf8');

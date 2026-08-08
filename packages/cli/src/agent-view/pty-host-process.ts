@@ -33,7 +33,9 @@ const HOST_READY_REQUEST_TIMEOUT_MS = 250;
 const REMOTE_HOST_EXIT_POLL_MS = 5000;
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const MAX_PTY_HOST_REQUEST_LINE_BYTES = 1024 * 1024;
-const MAX_PTY_HOST_RESPONSE_LINE_BYTES = 4 * 1024 * 1024;
+// JSON escaping inflates control bytes up to 6x, so a full 1 MiB
+// retained ring can serialize to ~6 MiB; keep the wire cap above that.
+const MAX_PTY_HOST_RESPONSE_LINE_BYTES = 8 * 1024 * 1024;
 const PTY_HOST_AUTH_TOKEN_ENV = 'QWEN_AGENT_VIEW_PTY_HOST_TOKEN';
 const ALLOWED_KILL_SIGNALS = new Set<NodeJS.Signals>([
   'SIGINT',

@@ -268,6 +268,24 @@ describe('Agent View PTY host process server', () => {
     });
   });
 
+  it('returns control-byte-heavy logs through the connected handle', async () => {
+    const host = fakeHost(1024 * 1024);
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const output = '\x01'.repeat(1024 * 1024);
+    host.emitData(output);
+
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-control-byte-logs'),
+      socketPath,
+    );
+
+    await expect(connected.getOutput?.()).resolves.toBe(output);
+  });
+
   it.skipIf(process.platform === 'win32')(
     'restricts Unix socket and parent directory permissions',
     async () => {
@@ -561,7 +579,7 @@ describe('Agent View PTY host process server', () => {
     const socketPath = shortSocketPath();
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
-      socket.end(`${'x'.repeat(4 * 1024 * 1024 + 1)}\n`);
+      socket.end(`${'x'.repeat(8 * 1024 * 1024 + 1)}\n`);
     });
     await listenServer(server, socketPath);
     try {
