@@ -24,6 +24,7 @@ import {
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
+import { loadSharp, type SharpModule } from './sharp-module.js';
 
 export const OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME = 'omni_downsample_image';
 
@@ -76,38 +77,6 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
     additionalProperties: false,
   },
 };
-
-/** Minimal slice of the sharp module the tool uses. */
-type SharpModule = (
-  input: string,
-  options?: object,
-) => {
-  rotate(): SharpPipeline;
-};
-interface SharpPipeline {
-  resize(options: {
-    width: number;
-    height: number;
-    fit: 'inside';
-    withoutEnlargement: boolean;
-  }): SharpPipeline;
-  jpeg(options: { quality: number }): SharpPipeline;
-  toFile(
-    outputPath: string,
-  ): Promise<{ width: number; height: number; size: number }>;
-}
-
-/**
- * Load sharp lazily (decision D9: soft dependency, mirroring the
- * image-view.ts convention). A load failure is an EXECUTION failure of
- * this invocation — onFailure semantics take over — never a startup gate.
- */
-async function loadSharp(): Promise<SharpModule> {
-  // sharp is a CJS `export =` module, so the callable is on `.default`
-  // at runtime even though NodeNext types collapse that namespace away.
-  return ((await import('sharp')) as unknown as { default: SharpModule })
-    .default;
-}
 
 class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<DownsampleImageParams> {
   getDescription(): string {

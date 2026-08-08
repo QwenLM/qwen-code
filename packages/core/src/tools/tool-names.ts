@@ -74,6 +74,10 @@ export const ToolNames = {
   OMNI_DOWNSAMPLE_IMAGE: 'omni_downsample_image',
   OMNI_DOWNSCALE_VIDEO: 'omni_downscale_video',
   OMNI_DOWNSAMPLE_AUDIO: 'omni_downsample_audio',
+  OMNI_EXTRACT_KEYFRAMES: 'omni_extract_keyframes',
+  OMNI_EXTRACT_AUDIO: 'omni_extract_audio',
+  OMNI_CLIP_VIDEO: 'omni_clip_video',
+  OMNI_CONVERT_IMAGE: 'omni_convert_image',
 } as const;
 
 /**
@@ -131,6 +135,10 @@ export const ToolDisplayNames = {
   OMNI_DOWNSAMPLE_IMAGE: 'DownsampleImage',
   OMNI_DOWNSCALE_VIDEO: 'DownscaleVideo',
   OMNI_DOWNSAMPLE_AUDIO: 'DownsampleAudio',
+  OMNI_EXTRACT_KEYFRAMES: 'ExtractKeyframes',
+  OMNI_EXTRACT_AUDIO: 'ExtractAudio',
+  OMNI_CLIP_VIDEO: 'ClipVideo',
+  OMNI_CONVERT_IMAGE: 'ConvertImage',
 } as const;
 
 // Migration from old tool names to new tool names

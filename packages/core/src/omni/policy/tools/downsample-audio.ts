@@ -17,6 +17,7 @@ import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
   BaseMediaPolicyToolInvocation,
+  describeChannels,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
@@ -85,14 +86,6 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
     additionalProperties: false,
   },
 };
-
-/** "立体声" / "单声道" / "N声道" for the disclosure text. */
-function describeChannels(channels: number | undefined): string {
-  if (channels === undefined) return '';
-  if (channels === 1) return ' 单声道';
-  if (channels === 2) return ' 立体声';
-  return ` ${channels}声道`;
-}
 
 class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<DownsampleAudioParams> {
   constructor(

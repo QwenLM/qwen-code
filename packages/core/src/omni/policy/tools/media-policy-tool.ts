@@ -212,6 +212,15 @@ export function formatBytesShort(bytes: number): string {
   return `${bytes}B`;
 }
 
+/** "立体声" / "单声道" / "N声道" for disclosure texts (leading space so
+ * an unknown channel count renders as nothing). */
+export function describeChannels(channels: number | undefined): string {
+  if (channels === undefined) return '';
+  if (channels === 1) return ' 单声道';
+  if (channels === 2) return ' 立体声';
+  return ` ${channels}声道`;
+}
+
 /** Uniform error ToolResult for a failed policy-tool execution. */
 export function mediaPolicyToolError(message: string): ToolResult {
   return {

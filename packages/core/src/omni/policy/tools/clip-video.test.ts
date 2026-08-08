@@ -1,0 +1,241 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MediaProbeResult } from '../../ffmpeg.js';
+import type { ToolResult } from '../../../tools/tools.js';
+import { DEFAULT_POLICY_TOOL_TIMEOUT_MS } from './media-policy-tool.js';
+import {
+  CLIP_VIDEO_DEFAULTS,
+  OMNI_CLIP_VIDEO_TOOL_NAME,
+  OmniClipVideoTool,
+} from './clip-video.js';
+
+const mocks = vi.hoisted(() => ({
+  probeMediaMetadata: vi.fn(),
+  runFfmpeg: vi.fn(),
+}));
+
+vi.mock('../../ffmpeg.js', () => ({
+  probeMediaMetadata: mocks.probeMediaMetadata,
+  runFfmpeg: mocks.runFfmpeg,
+}));
+
+const OUTPUT_SIZE = 900 * 1024;
+
+describe('OmniClipVideoTool', () => {
+  let root: string;
+  let inputPath: string;
+  let outputDir: string;
+
+  const tool = new OmniClipVideoTool({});
+
+  const probe = (result: Partial<MediaProbeResult>): void => {
+    mocks.probeMediaMetadata.mockResolvedValue(result as MediaProbeResult);
+  };
+
+  const ffmpegSucceeds = (): void => {
+    mocks.runFfmpeg.mockImplementation(async (args: string[]) => {
+      await fs.writeFile(args[args.length - 1], Buffer.alloc(OUTPUT_SIZE));
+      return { code: 0, stderr: '' };
+    });
+  };
+
+  const run = async (
+    params: Record<string, unknown>,
+  ): Promise<{ result: ToolResult; signal: AbortSignal }> => {
+    const invocation = tool.build({
+      inputPath,
+      outputDir,
+      ...params,
+    } as never);
+    const signal = new AbortController().signal;
+    return { result: await invocation.execute(signal), signal };
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-cv-'));
+    inputPath = path.join(root, 'clip.mp4');
+    await fs.writeFile(inputPath, Buffer.alloc(1024));
+    outputDir = path.join(root, 'staging');
+    await fs.mkdir(outputDir);
+    ffmpegSucceeds();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('declares the media-policy descriptor and defaults', () => {
+    expect(tool.name).toBe(OMNI_CLIP_VIDEO_TOOL_NAME);
+    expect(tool.mediaPolicyDescriptor).toEqual({
+      kind: 'media_policy',
+      version: '1',
+      inputMediaTypes: ['video'],
+      outputs: [
+        {
+          kind: 'media',
+          mimeTypes: ['video/mp4'],
+          required: true,
+          lossy: true,
+        },
+        { kind: 'text', role: 'disclosure', required: true },
+      ],
+      settingsSchema: expect.objectContaining({ type: 'object' }),
+    });
+    expect(CLIP_VIDEO_DEFAULTS).toEqual({
+      crf: 23,
+      preset: 'veryfast',
+      audioBitrateKbps: 128,
+    });
+  });
+
+  it('cuts [startSec, startSec+durationSec] with a frame-accurate re-encode', async () => {
+    probe({ durationMs: 63_000 });
+    const { result, signal } = await run({ startSec: 10, durationSec: 15 });
+
+    expect(mocks.probeMediaMetadata).toHaveBeenCalledWith(
+      inputPath,
+      'video',
+      signal,
+    );
+    const outputPath = path.join(outputDir, 'clip.mp4');
+    expect(mocks.runFfmpeg).toHaveBeenCalledWith(
+      [
+        '-y',
+        '-ss',
+        '10',
+        '-t',
+        '15',
+        '-i',
+        inputPath,
+        '-vf',
+        'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-c:v',
+        'libx264',
+        '-crf',
+        '23',
+        '-preset',
+        'veryfast',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        outputPath,
+      ],
+      { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toEqual([
+      {
+        kind: 'video',
+        storage: 'workspace',
+        title: 'Clipped video',
+        workspacePath: 'clip.mp4',
+        mimeType: 'video/mp4',
+        sizeBytes: OUTPUT_SIZE,
+        metadata: {
+          omniDisclosure: '原 63s → 片段 [10s–25s] 15s，片段外内容全部丢弃',
+        },
+      },
+    ]);
+  });
+
+  it('clips from startSec to the end when durationSec is absent', async () => {
+    probe({ durationMs: 63_000 });
+    const { result } = await run({ startSec: 10 });
+    const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+    expect(args).not.toContain('-t');
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 63s → 片段 [10s–63s] 53s，片段外内容全部丢弃',
+    );
+  });
+
+  it('clamps the disclosed end to the video length', async () => {
+    probe({ durationMs: 63_000 });
+    const { result } = await run({ startSec: 50, durationSec: 100 });
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 63s → 片段 [50s–63s] 13s，片段外内容全部丢弃',
+    );
+  });
+
+  it('discloses an unknown original duration without clamping', async () => {
+    probe({});
+    const { result } = await run({ startSec: 10, durationSec: 15 });
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 未知时长 → 片段 [10s–25s] 15s，片段外内容全部丢弃',
+    );
+  });
+
+  it('rejects a start at or beyond the end of the video without transcoding', async () => {
+    probe({ durationMs: 63_000 });
+    const { result } = await run({ startSec: 63 });
+    expect(result.error?.message).toBe(
+      'startSec (63s) is at or beyond the end of the video (63s)',
+    );
+    expect(mocks.runFfmpeg).not.toHaveBeenCalled();
+  });
+
+  it('reports the ffmpeg error', async () => {
+    probe({ durationMs: 63_000 });
+    mocks.runFfmpeg.mockResolvedValue({ code: 187, stderr: 'boom' });
+    const { result } = await run({ startSec: 10 });
+    expect(result.error?.message).toMatch(/ffmpeg failed \(exit 187\)/);
+    expect(result.error?.message).toContain('boom');
+  });
+
+  it('reports an aborted run', async () => {
+    probe({ durationMs: 63_000 });
+    const controller = new AbortController();
+    mocks.runFfmpeg.mockImplementation(async () => {
+      controller.abort();
+      return { code: 0, stderr: '' };
+    });
+    const invocation = tool.build({ inputPath, outputDir, startSec: 10 });
+    const result = await invocation.execute(controller.signal);
+    expect(result.error?.message).toBe('video clipping aborted');
+  });
+
+  it('threads policyTools.<tool>.runtime.timeoutMs into runFfmpeg', async () => {
+    probe({ durationMs: 63_000 });
+    const configured = new OmniClipVideoTool({
+      getOmniPolicyToolsSettings: () => ({
+        [OMNI_CLIP_VIDEO_TOOL_NAME]: {
+          runtime: { timeoutMs: 120_000 },
+        },
+      }),
+    });
+    const invocation = configured.build({
+      inputPath,
+      outputDir,
+      startSec: 10,
+    });
+    await invocation.execute(new AbortController().signal);
+    expect(mocks.runFfmpeg).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ timeoutMs: 120_000 }),
+    );
+  });
+
+  it.each([
+    ['both startSec and durationSec absent', {}],
+    ['negative startSec', { startSec: -1 }],
+    ['zero durationSec', { durationSec: 0 }],
+    ['relative outputDir', { startSec: 10, outputDir: 'staging' }],
+    ['unknown property', { startSec: 10, extra: 1 }],
+  ])('build rejects %s', (_label, overrides) => {
+    expect(() =>
+      tool.build({ inputPath, outputDir, ...overrides } as never),
+    ).toThrow();
+  });
+});

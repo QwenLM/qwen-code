@@ -8139,6 +8139,30 @@ export class Config {
         );
         return new OmniDownsampleAudioTool(this);
       });
+      await registerLazy(ToolNames.OMNI_EXTRACT_KEYFRAMES, async () => {
+        const { OmniExtractKeyframesTool } = await import(
+          '../omni/policy/tools/extract-keyframes.js'
+        );
+        return new OmniExtractKeyframesTool(this);
+      });
+      await registerLazy(ToolNames.OMNI_EXTRACT_AUDIO, async () => {
+        const { OmniExtractAudioTool } = await import(
+          '../omni/policy/tools/extract-audio.js'
+        );
+        return new OmniExtractAudioTool(this);
+      });
+      await registerLazy(ToolNames.OMNI_CLIP_VIDEO, async () => {
+        const { OmniClipVideoTool } = await import(
+          '../omni/policy/tools/clip-video.js'
+        );
+        return new OmniClipVideoTool(this);
+      });
+      await registerLazy(ToolNames.OMNI_CONVERT_IMAGE, async () => {
+        const { OmniConvertImageTool } = await import(
+          '../omni/policy/tools/convert-image.js'
+        );
+        return new OmniConvertImageTool(this);
+      });
     }
 
     await registerLazy(ToolNames.MONITOR, async () => {
