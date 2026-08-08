@@ -43,14 +43,33 @@ git checkout "${BRANCH}"
 GATE_LOG="${WORKDIR}/gate-output.log"
 : > "${GATE_LOG}"
 reject_fix() {
-  echo "❌ ${1}"
+  local label="${1}"
+  local preexisting="${2:-false}"
+  echo "❌ ${label}"
   # Declare the verdict before writing its detail. An empty outcome on a failed
   # step means the gate itself crashed, so losing the detail file must not turn
   # a deterministic rejection into an infrastructure retry.
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  echo "retryable=true" >> "${GITHUB_OUTPUT}"
+  if [[ "${preexisting}" == 'true' ]]; then
+    # NOT retryable: the repair agent is only allowed to amend this round's
+    # fix, and a failure that exists without the fix is outside that boundary
+    # by definition — the 18-minute repair budget cannot reach it. The remedy
+    # is a base update (merge main into the branch), not a repair.
+    echo "preexisting=true" >> "${GITHUB_OUTPUT}"
+  else
+    echo "retryable=true" >> "${GITHUB_OUTPUT}"
+  fi
   {
-    echo "**${1}**"
+    echo "**${label}**"
+    if [[ "${preexisting}" == 'true' ]]; then
+      echo
+      echo "This failure is NOT caused by this round's commit: the same" \
+        "check fails at \`origin/${BRANCH}\` (the branch as pushed, before" \
+        "this round) in the same environment. The repair pass was skipped" \
+        "because it may only amend the round's own fix. The usual cause is" \
+        "the branch being behind \`main\` while dependencies are installed" \
+        "from it — merge \`main\` into the branch and re-run."
+    fi
     echo
     # Captured output can contain triple-backtick fences.
     echo '````'
@@ -60,11 +79,46 @@ reject_fix() {
     echo "::warning::could not write the gate rejection detail; the verdict stands."
   exit 1
 }
+baseline_also_fails() {
+  # A deterministic rejection is only chargeable to this round if the same
+  # check passes WITHOUT the round's commits. Measured counterexample, run
+  # 31276008548: PR #8614's branch predated #8693's tsconfig guard while
+  # node_modules came from the post-#8693 trusted base, so `npm run build`
+  # was just as red at origin/<branch> — 63 minutes of accepted agent work
+  # were discarded and an 18-minute repair burned on a failure the repair
+  # agent is forbidden to touch, thirteen rounds in a row.
+  # Returns 0 (pre-existing) only when the SAME command demonstrably fails
+  # at the pre-round ref; any A/B infrastructure problem returns 1 so the
+  # rejection keeps today's semantics (fail closed toward "charge the fix").
+  local current baseline rc
+  current="$(git rev-parse HEAD)" || return 1
+  baseline="$(git rev-parse --quiet --verify "origin/${BRANCH}^{commit}")" ||
+    return 1
+  # No round commit (schema/contract checks run before the commit gate) —
+  # the baseline IS the tree under test; nothing to compare.
+  [[ "${baseline}" != "${current}" ]] || return 1
+  echo "🔁 Baseline A/B: re-running the failed check at origin/${BRANCH}" \
+    "(${baseline})" | tee -a "${GATE_LOG}"
+  git checkout --quiet --detach "${baseline}" 2>> "${GATE_LOG}" || return 1
+  rc=0
+  if ! "$@" >> "${GATE_LOG}" 2>&1; then
+    rc=1
+  fi
+  if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}"; then
+    # The tree is no longer the one under verification and nothing after
+    # this point may trust it.
+    reject_fix 'could not restore the verification tree after the baseline check'
+  fi
+  [[ "${rc}" -eq 1 ]]
+}
 run_check() {
   # pipefail makes the pipeline carry the command's status, not tee's.
   local label="${1}"
   shift
   if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+    if baseline_also_fails "$@"; then
+      reject_fix "${label} (pre-existing: also fails without this round's commit)" 'true'
+    fi
     reject_fix "${label}"
   fi
 }

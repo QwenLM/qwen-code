@@ -11142,3 +11142,134 @@ exit 1
     expect(skill).toContain('label event');
   });
 });
+
+describe('review verification gate: baseline A/B on deterministic rejection', () => {
+  // A deterministic rejection is only chargeable to the round if the same
+  // check passes without the round's commit. Run 31276008548 measured the
+  // alternative: PR #8614's branch predated #8693's tsconfig guard while
+  // node_modules came from the post-#8693 trusted base, so `npm run build`
+  // was just as red at origin/<branch> — 63 minutes of accepted work were
+  // discarded and an 18-minute repair burned on a failure the repair agent
+  // is forbidden to touch, thirteen rounds in a row. The gate now re-runs
+  // the failing check at the pre-round ref and, when it fails there too,
+  // reports pre-existing and skips the doomed repair (retryable stays
+  // unset). These tests execute the REAL script in a real git repo with a
+  // stubbed npm whose failures are keyed by commit SHA.
+  const runGate = ({ failAt }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
+    try {
+      const sh = (cmd, cwd) =>
+        execFileSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
+      const origin = join(dir, 'origin.git');
+      const work = join(dir, 'work');
+      sh(`git init -q --bare '${origin}'`, dir);
+      sh(`git clone -q '${origin}' '${work}'`, dir);
+      const g = (cmd) => sh(cmd, work);
+      g('git config user.email t@t && git config user.name t');
+      g('echo base > f.txt && git add . && git commit -qm base');
+      g('git branch -M main && git push -q origin main');
+      g('git checkout -qb feature');
+      g('echo branch > f.txt && git commit -qam branch');
+      g('git push -q origin feature');
+      g('echo agent > f.txt && git commit -qam agent');
+      const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
+      const failShas = failAt.map(shaOf).join(' ');
+
+      // Stubs: npm fails `run build` when HEAD is in FAIL_BUILD_SHAS; the
+      // staged helper scripts all pass; the package resolver maps nothing.
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'npm'),
+        [
+          '#!/bin/bash',
+          'if [[ "$1" == "run" && "$2" == "build" ]]; then',
+          '  head="$(git rev-parse HEAD)"',
+          '  for s in ${FAIL_BUILD_SHAS}; do',
+          '    if [[ "$s" == "$head" ]]; then echo "stub build FAILED at $head"; exit 1; fi',
+          '  done',
+          'fi',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'npm'), 0o755);
+      const rt = join(dir, 'rt');
+      mkdirSync(rt);
+      writeFileSync(join(rt, 'check-settings-schema.sh'), 'exit 0\n');
+      writeFileSync(
+        join(rt, 'check-autofix-contracts.sh'),
+        'cat > /dev/null\nexit 0\n',
+      );
+      writeFileSync(
+        join(rt, 'resolve-owning-packages.sh'),
+        'cat > /dev/null\n',
+      );
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      const outFile = join(dir, 'gh-output');
+      writeFileSync(outFile, '');
+
+      const res = spawnSync(
+        'bash',
+        [resolve('.github/scripts/run-autofix-review-verification.sh')],
+        {
+          cwd: work,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            BRANCH: 'feature',
+            WORKDIR: workdir,
+            RUNNER_TEMP: rt,
+            GITHUB_OUTPUT: outFile,
+            FAIL_BUILD_SHAS: failShas,
+          },
+        },
+      );
+      return {
+        status: res.status,
+        stdout: `${res.stdout}\n${res.stderr}`,
+        outputs: readFileSync(outFile, 'utf8'),
+        rejection: existsSync(join(workdir, 'gate-rejection.md'))
+          ? readFileSync(join(workdir, 'gate-rejection.md'), 'utf8')
+          : '',
+        headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('charges a failure to the round when the baseline is green', () => {
+    const r = runGate({ failAt: ['feature'] });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    // The A/B genuinely ran — the verdict is measured, not assumed.
+    expect(r.stdout).toContain('Baseline A/B');
+    expect(r.rejection).not.toContain('pre-existing');
+    // The tree is back on the branch for anything that reads it afterwards.
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('reports pre-existing and skips the repair when the baseline fails too', () => {
+    const r = runGate({ failAt: ['feature', 'origin/feature'] });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('preexisting=true');
+    // retryable stays unset: the repair step keys on it and must not run.
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain('pre-existing');
+    expect(r.rejection).toContain('merge `main`');
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('keeps the green path intact', () => {
+    const r = runGate({ failAt: [] });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=fixed');
+    expect(r.outputs).not.toContain('preexisting');
+  });
+});
