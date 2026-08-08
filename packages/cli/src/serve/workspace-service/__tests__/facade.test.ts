@@ -2285,6 +2285,34 @@ describe('createDaemonWorkspaceService', () => {
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
     });
 
+    it('fails the whole batch when a persisted outcome is missing for a valid target', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [],
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['review', 'deploy'], false),
+      ).rejects.toThrow('Missing persisted Skill batch outcome: deploy');
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+
     it('returns validation errors without persisting when no target is valid', async () => {
       const persistDisabledSkillsBatch = vi.fn();
       const svc = createDaemonWorkspaceService(
@@ -2296,6 +2324,7 @@ describe('createDaemonWorkspaceService', () => {
             skills,
           }),
           persistDisabledSkillsBatch,
+          isChannelLive: () => true,
         }),
       );
 
@@ -2306,6 +2335,9 @@ describe('createDaemonWorkspaceService', () => {
           false,
         ),
       ).resolves.toMatchObject({
+        activation: 'applied',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
         results: [],
         errors: [
           { skillName: 'missing', code: 'skill_not_found' },
@@ -2743,6 +2775,71 @@ describe('createDaemonWorkspaceService', () => {
         afterStatus,
       );
       expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retain a status snapshot read while a batch settings refresh is in flight', async () => {
+      const refresh = deferred<{
+        sessionsRefreshed: number;
+        sessionsFailed: number;
+      }>();
+      const beforeStatus = {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills,
+      };
+      const afterStatus = {
+        ...beforeStatus,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'disabled',
+            name: 'review',
+            description: 'Review changed code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(beforeStatus)
+        .mockResolvedValueOnce(beforeStatus)
+        .mockResolvedValueOnce(afterStatus);
+      const invokeWorkspaceCommand = vi.fn(
+        () => refresh.promise,
+      ) as unknown as InvokeWorkspaceCommandFn;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const toggle = svc.setWorkspaceSkillsEnabled(
+        makeCtx(),
+        ['review'],
+        false,
+      );
+      await vi.waitFor(() =>
+        expect(invokeWorkspaceCommand).toHaveBeenCalledOnce(),
+      );
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        beforeStatus,
+      );
+      refresh.resolve({ sessionsRefreshed: 1, sessionsFailed: 0 });
+      await toggle;
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        afterStatus,
+      );
+      expect(queryWorkspaceStatus).toHaveBeenCalledTimes(3);
     });
   });
 
