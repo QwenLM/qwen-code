@@ -84,7 +84,10 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
-import { ObservedChannelContactStore } from './observed-contact-store.js';
+import {
+  OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
+  ObservedChannelContactStore,
+} from './observed-contact-store.js';
 import {
   createChannelLoopController,
   isChannelCronEnabled,
@@ -554,6 +557,10 @@ export async function runChannelDaemonWorker(
               observe: (channelName, observation) => {
                 observedContacts.observe(channelName, observation);
               },
+              list: () =>
+                observedContacts.list({
+                  freshWithinSeconds: OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
+                }),
             },
             ...(loopController ? { loopController } : {}),
           }),

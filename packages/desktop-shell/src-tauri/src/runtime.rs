@@ -3,7 +3,7 @@ use rand::RngCore;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -44,13 +44,13 @@ impl DesktopRuntime {
     pub fn start(app: &AppHandle, workspace: &Path, log_path: &Path) -> Result<Self, String> {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
         let layout = RuntimeLayout::resolve(app)?;
-        let workspace = resolve_workspace(workspace)?;
+        // Callers pass a workspace already resolved by resolve_workspace.
         let token = random_token();
         let mut command = Command::new(&layout.node);
         command
             .arg(&layout.entry)
-            .args(runtime_arguments(&workspace))
-            .current_dir(&workspace)
+            .args(runtime_arguments(workspace))
+            .current_dir(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -176,13 +176,28 @@ fn require_file(path: &Path, description: &str) -> Result<(), String> {
     Err(format!("{description} is missing at {}", path.display()))
 }
 
-fn resolve_workspace(configured: &Path) -> Result<PathBuf, String> {
-    let workspace = fs::canonicalize(configured).map_err(|error| {
+fn ensure_supported_workspace_path(path: &Path) -> Result<(), String> {
+    if matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+    ) {
+        return Err(format!(
+            "Desktop workspace path uses an unsupported Windows extended-length form: {}. Choose a local drive path; network (UNC) shares, paths over 260 characters, and names ending in a dot or space are not supported.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_workspace(configured: &Path) -> Result<PathBuf, String> {
+    // dunce::canonicalize strips the Windows `\\?\` prefix when safe (#8615).
+    let workspace = dunce::canonicalize(configured).map_err(|error| {
         format!(
             "Failed to resolve desktop workspace {}: {error}",
             configured.display()
         )
     })?;
+    ensure_supported_workspace_path(&workspace)?;
     if workspace.is_dir() {
         Ok(workspace)
     } else {
@@ -459,12 +474,60 @@ fn runtime_arguments(workspace: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_failure_output, parse_listening_url, runtime_arguments, DesktopRuntime,
-        RuntimeStopped, FAILURE_OUTPUT_LIMIT,
+        append_failure_output, parse_listening_url, resolve_workspace, runtime_arguments,
+        DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
     use std::path::Path;
+    #[cfg(windows)]
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use url::Url;
+
+    #[test]
+    fn resolve_workspace_strips_windows_verbatim_prefix() {
+        let dir = std::env::temp_dir().join(format!("qwen-desktop-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp workspace");
+        let resolved = resolve_workspace(&dir).expect("resolve workspace");
+        std::fs::remove_dir_all(&dir).expect("cleanup temp workspace");
+        let resolved = resolved.to_string_lossy();
+        assert!(
+            !resolved.starts_with("\\\\?\\"),
+            "workspace keeps the verbatim prefix: {resolved}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_residual_windows_verbatim_workspace_paths() {
+        for path in [
+            r"\\?\C:\workspace",
+            r"\\?\UNC\server\share",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+        ] {
+            let error = super::ensure_supported_workspace_path(Path::new(path))
+                .expect_err("reject residual verbatim path");
+            assert!(error.contains("unsupported Windows extended-length form"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_workspace_rejects_residual_verbatim_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let base =
+            std::env::temp_dir().join(format!("qwen-desktop-long-ws-{}", std::process::id()));
+        let mut workspace = PathBuf::from(format!(r"\\?\{}", base.display()));
+        while workspace.as_os_str().encode_wide().count() <= 270 {
+            workspace.push("long-workspace-component");
+        }
+        std::fs::create_dir_all(&workspace).expect("create long workspace");
+        let result = resolve_workspace(&workspace);
+        std::fs::remove_dir_all(PathBuf::from(format!(r"\\?\{}", base.display())))
+            .expect("cleanup long workspace");
+        let error = result.expect_err("reject long workspace");
+        assert!(error.contains("unsupported Windows extended-length form"));
+    }
 
     #[test]
     fn parses_loopback_listening_line() {
