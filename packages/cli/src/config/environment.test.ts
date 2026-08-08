@@ -75,10 +75,23 @@ beforeEach(() => {
     previousEnv.set(key, process.env[key]);
     delete process.env[key];
   }
+  // Hermetic against the runner's real user-level .env files: findEnvFiles()
+  // always discovers ~/.env and ~/.qwen/.env, and home scope deliberately
+  // bypasses the hardcoded exclusions — so a dev machine with
+  // QWEN_CLI_ENTRY/NODE_OPTIONS in its home .env would both add warnings the
+  // source-scoped counts never expect and apply keys the process.env
+  // assertions require unset (CI runners have no home .env, so it ships
+  // green and bites locally). Redirect HOME (USERPROFILE for Windows) to an
+  // empty dir.
+  previousEnv.set('HOME', process.env['HOME']);
+  previousEnv.set('USERPROFILE', process.env['USERPROFILE']);
+  const fakeHome = makeWorkspace();
+  process.env['HOME'] = fakeHome;
+  process.env['USERPROFILE'] = fakeHome;
 });
 
 afterEach(() => {
-  for (const key of TRACKED_ENV) {
+  for (const key of [...TRACKED_ENV, 'HOME', 'USERPROFILE']) {
     const value = previousEnv.get(key);
     if (value === undefined) {
       delete process.env[key];
