@@ -27,6 +27,7 @@ const TRACKED_ENV = [
   'RUNTIME_SETTINGS',
   'RUNTIME_SETTINGS_ONLY',
   'BASH_ENV',
+  'ENV',
   'LD_PRELOAD',
   'NODE_OPTIONS',
   'NODE_PATH',
@@ -529,5 +530,32 @@ describe('loadEnvironment', () => {
     expect(process.env['Node_Options']).toBeUndefined();
     expect(process.env['npm_config_node-options']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // ENV (the POSIX sh startup file) sits on the denylist alongside BASH_ENV;
+  // the regression suite pins every other key's scope coverage, so ENV gets
+  // the same treatment. Before the denylist, a workspace `.env` could point
+  // every session shell at a repo-controlled startup file.
+  it('never applies ENV from .env files or settings.env', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      ['ENV=/workspace-a/shrc', 'RUNTIME_DOTENV=allowed', ''].join('\n'),
+    );
+    const settings = testSettings({
+      env: { ENV: '/workspace-a/shrc-from-settings' },
+    });
+
+    loadEnvironment(settings, workspace);
+    expect(process.env['ENV']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    reloadEnvironment(settings, workspace);
+    expect(process.env['ENV']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    const snapshot = buildRuntimeEnvironment(settings, workspace);
+    expect(snapshot.effectiveEnv['ENV']).toBeUndefined();
+    expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe('allowed');
   });
 });

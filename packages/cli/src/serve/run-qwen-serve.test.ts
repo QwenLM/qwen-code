@@ -28,6 +28,7 @@ import {
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { loadServeFastPathEnvironment } from './fast-path-settings.js';
+import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
@@ -7275,6 +7276,12 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       } finally {
         await handle.close();
       }
+      // runQwenServe is a documented embeddable entry point; close() must
+      // hand the host process its launch environment back.
+      expect(process.env['NODE_OPTIONS']).toBe(
+        '--import file:///other-checkout/register.mjs',
+      );
+      expect(process.env['NODE_PATH']).toBe('/other-checkout/node_modules');
     } finally {
       stderrWrite.mockRestore();
       if (previousNodeOptions === undefined) {
@@ -7388,6 +7395,65 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         delete process.env['QWEN_RUNTIME_DIR'];
       } else {
         process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+    }
+  });
+
+  // Per-workspace .env loads keep running long after boot (skill status,
+  // settings reloads); boot stderr is gone by then, so fresh loader-key
+  // rejections must be mirrored into the durable daemon log.
+  it('persists post-boot loader key rejections in the daemon log', async () => {
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    delete process.env['NODE_OPTIONS'];
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, '.env'),
+          'NODE_OPTIONS=--max-old-space-size=8192\n',
+        );
+        loadEnvironment({}, tmpDir);
+        const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+        await vi.waitFor(
+          () => {
+            const content = fs.readFileSync(logPath, 'utf8');
+            expect(content).toContain(
+              'rejected loader-affecting env keys; they were not applied',
+            );
+            expect(content).toContain('NODE_OPTIONS');
+          },
+          { timeout: 7_000, interval: 50 },
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      stderrWrite.mockRestore();
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
       }
     }
   });

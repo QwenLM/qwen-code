@@ -289,11 +289,11 @@ export function loadServeFastPathEnvironment(
           process.env[key] = parsedEnv[key];
         }
       }
-      const fileRejectedKeys = Object.keys(parsedEnv).filter(isLoaderEnvKey);
-      rejectedLoaderKeys.push(...fileRejectedKeys);
-      reportRejectedLoaderKeys(
-        `.env file ${normalizedEnvFilePath}`,
-        fileRejectedKeys,
+      rejectedLoaderKeys.push(
+        ...reportRejectedLoaderKeys(
+          `.env file ${normalizedEnvFilePath}`,
+          Object.keys(parsedEnv),
+        ),
       );
     } catch {
       // Errors are ignored to match dotenv quiet-mode behavior.
@@ -301,10 +301,6 @@ export function loadServeFastPathEnvironment(
   }
 
   if (settings.env) {
-    const settingsRejectedKeys = Object.keys(settings.env).filter(
-      isLoaderEnvKey,
-    );
-    rejectedLoaderKeys.push(...settingsRejectedKeys);
     for (const [key, value] of Object.entries(settings.env)) {
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
       if (isLoaderEnvKey(key)) continue;
@@ -312,13 +308,17 @@ export function loadServeFastPathEnvironment(
         process.env[key] = value;
       }
     }
-    reportRejectedLoaderKeys(
-      `settings.env (${startDir})`,
-      settingsRejectedKeys,
+    rejectedLoaderKeys.push(
+      ...reportRejectedLoaderKeys(
+        `settings.env (${startDir})`,
+        Object.keys(settings.env),
+      ),
     );
   }
   publishPendingCompileCache();
-  serveFastPathRejectedLoaderKeys = rejectedLoaderKeys;
+  serveFastPathRejectedLoaderKeys = [
+    ...new Set([...serveFastPathRejectedLoaderKeys, ...rejectedLoaderKeys]),
+  ];
 }
 
 // The fast path rejects loader keys before initDaemonLogger exists, and the

@@ -8,7 +8,7 @@ import {
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
 
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
@@ -55,6 +55,27 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // cwd is another workspace and hijack module resolution there. This is the
 // loader subset of RELOAD_EXCLUDED_KEYS (environment.ts), which guards
 // .env/settings.env application — not the inherited launch environment.
+//
+// Scope is deliberate: Node/OS-loader variables only. Other startup-file or
+// runtime-specific variables (ZDOTDIR for zsh, DYLD_FALLBACK_LIBRARY_PATH,
+// PYTHONSTARTUP, …) can likewise be abused, but they are not on the
+// loader-affecting list this denylist defines; extending the list is a
+// separate decision with its own compatibility surface.
+//
+// This denylist intentionally does NOT move into core `sanitizeChildEnv`:
+// per-server `mcpServers[].env` and per-hook `hooks[].env` are explicit,
+// trust-gated overrides that must keep working, and a blanket child-env
+// strip would silently null them everywhere. The choke points that need the
+// denylist are config-driven, and each applies it at its own surface:
+// .env/settings.env loading (environment.ts), serve fast-path boot
+// (fast-path-settings.ts), and inherited launch-env scrubbing (daemon and
+// ACP child boot).
+//
+// Known adjacent surface: LSP `.lsp.json` env overrides carry their own
+// narrower denylist (`SECURITY_SENSITIVE_ENV_KEYS` in
+// core/lsp/LspServerManager.ts — missing BASH_ENV/ENV/npm_config_node_options).
+// Unifying the two lists is deferred: the LSP surface is experimental
+// (behind --experimental-lsp) and its keys were chosen independently.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
   // npm maps its `node-options` config onto npm_config_node_options in the
@@ -114,7 +135,7 @@ export function scrubAndReportInheritedLoaderEnv(
 ): string[] {
   const removedKeys = scrubInheritedLoaderEnv(env);
   if (removedKeys.length > 0) {
-    writeStderrLine(
+    writeStderrLineSafe(
       `${commandLabel}: scrubbed inherited loader env vars from the ` +
         `${processLabel} process; session subprocesses will not inherit ` +
         `them: ${removedKeys.join(', ')}`,
@@ -132,25 +153,46 @@ export function scrubAndReportInheritedLoaderEnv(
 // starts with an empty map and warns once for itself.
 const reportedLoaderKeyRejections = new Map<string, Set<string>>();
 
+// The daemon re-runs per-workspace .env loads long after boot stderr is
+// gone; a sink lets the daemon mirror fresh rejections into its durable
+// log. Interleaving is impossible: reportRejectedLoaderKeys is synchronous
+// and the sink is only swapped at boot.
+export type LoaderKeyRejectionReporter = (
+  source: string,
+  freshKeys: readonly string[],
+) => void;
+
+let loaderKeyRejectionReporter: LoaderKeyRejectionReporter | undefined;
+
+export function setLoaderKeyRejectionReporter(
+  reporter: LoaderKeyRejectionReporter | undefined,
+): void {
+  loaderKeyRejectionReporter = reporter;
+}
+
 // candidateKeys is the raw key list of a parsed source (e.g.
 // Object.keys(parsedEnv)); the intersection with the loader denylist happens
 // here so every application site reports with identical matching semantics.
 export function reportRejectedLoaderKeys(
   source: string,
   candidateKeys: readonly string[],
-): void {
+): string[] {
+  const rejectedKeys = candidateKeys.filter(isLoaderEnvKey);
   const warnedKeys =
     reportedLoaderKeyRejections.get(source) ?? new Set<string>();
-  const freshKeys = candidateKeys.filter(
-    (key) => isLoaderEnvKey(key) && !warnedKeys.has(key),
-  );
-  if (freshKeys.length === 0) return;
+  const freshKeys = rejectedKeys.filter((key) => !warnedKeys.has(key));
+  if (freshKeys.length === 0) return rejectedKeys;
   for (const key of freshKeys) warnedKeys.add(key);
   reportedLoaderKeyRejections.set(source, warnedKeys);
-  writeStderrLine(
-    `qwen: ${source} cannot set loader-affecting env vars; ignored: ` +
-      freshKeys.join(', '),
-  );
+  if (loaderKeyRejectionReporter) {
+    loaderKeyRejectionReporter(source, freshKeys);
+  } else {
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set loader-affecting env vars; ignored: ` +
+        freshKeys.join(', '),
+    );
+  }
+  return rejectedKeys;
 }
 
 /** Test-only: forget already-reported loader-key rejections. */

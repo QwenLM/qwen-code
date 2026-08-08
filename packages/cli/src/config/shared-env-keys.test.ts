@@ -10,6 +10,8 @@ import {
   INHERITED_LOADER_ENV_KEYS,
   isLoaderEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  reportRejectedLoaderKeys,
+  resetLoaderKeyRejectionReportingForTesting,
   scrubAndReportInheritedLoaderEnv,
   scrubInheritedLoaderEnv,
 } from './shared-env-keys.js';
@@ -158,6 +160,41 @@ describe('scrubInheritedLoaderEnv', () => {
       'NODE_PATH',
       'npm_config_node_options',
     ]);
+  });
+});
+
+describe('reportRejectedLoaderKeys', () => {
+  it('returns every rejected key while warning only once per source and key', () => {
+    resetLoaderKeyRejectionReportingForTesting();
+    const writes: string[] = [];
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    try {
+      expect(
+        reportRejectedLoaderKeys('/workspace/.env', [
+          'NODE_OPTIONS',
+          'PATH',
+          'LD_PRELOAD',
+        ]),
+      ).toEqual(['NODE_OPTIONS', 'LD_PRELOAD']);
+      expect(
+        reportRejectedLoaderKeys('/workspace/.env', [
+          'NODE_OPTIONS',
+          'DYLD_INSERT_LIBRARIES',
+        ]),
+      ).toEqual(['NODE_OPTIONS', 'DYLD_INSERT_LIBRARIES']);
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(writes.join('').match(/NODE_OPTIONS/gu)).toHaveLength(1);
+    expect(writes.join('')).toContain('LD_PRELOAD');
+    expect(writes.join('')).toContain('DYLD_INSERT_LIBRARIES');
   });
 });
 

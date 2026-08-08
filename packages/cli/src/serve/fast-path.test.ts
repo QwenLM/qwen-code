@@ -1933,6 +1933,49 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // A second fast-path load must not clobber the keys rejected by the
+  // first, and the same key rejected by both loads lands in the stash once.
+  it('accumulates rejected loader keys across loads without duplicates', () => {
+    const trackedKeys = ['NODE_OPTIONS', 'LD_PRELOAD'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    const firstWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-accum-1-')),
+    );
+    const secondWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-loader-accum-2-')),
+    );
+    writeFileSync(
+      join(firstWorkspace, '.env'),
+      'NODE_OPTIONS=--max-old-space-size=8192\n',
+    );
+    writeFileSync(join(secondWorkspace, '.env'), 'LD_PRELOAD=/hijack.so\n');
+
+    try {
+      loadServeFastPathEnvironment({}, firstWorkspace);
+      loadServeFastPathEnvironment(
+        { env: { LD_PRELOAD: '/hijack.so', NODE_OPTIONS: '--inspect' } },
+        secondWorkspace,
+      );
+      expect([...consumeServeFastPathRejectedLoaderKeys()].sort()).toEqual([
+        'LD_PRELOAD',
+        'NODE_OPTIONS',
+      ]);
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
   it('prioritizes trusted parent folders over nested distrust rules', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();

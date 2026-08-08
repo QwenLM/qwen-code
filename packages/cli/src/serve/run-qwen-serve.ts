@@ -20,7 +20,10 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
-import { scrubAndReportInheritedLoaderEnv } from '../config/shared-env-keys.js';
+import {
+  scrubAndReportInheritedLoaderEnv,
+  setLoaderKeyRejectionReporter,
+} from '../config/shared-env-keys.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
@@ -2090,12 +2093,22 @@ async function runQwenServeImpl(
   // The frozen base env keeps loader vars so dev-mode ACP children can still
   // boot with the harness loader, but the daemon process itself is done with
   // them: session-shell subprocesses run here with process.env while their
-  // cwd is another workspace.
+  // cwd is another workspace. The scrub is reverted on close() so an
+  // embedded caller reusing the host process gets its launch environment
+  // back.
   const scrubbedLoaderEnvKeys = scrubAndReportInheritedLoaderEnv(
     process.env,
     'qwen serve',
     'daemon',
   );
+  const restoreScrubbedLoaderEnv = (): void => {
+    for (const key of scrubbedLoaderEnvKeys) {
+      if (Object.hasOwn(process.env, key)) continue;
+      const value = daemonRuntimeBaseEnv[key];
+      if (value === undefined) continue;
+      process.env[key] = value;
+    }
+  };
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -2612,6 +2625,16 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  // Per-workspace .env loads keep running after boot (skill status, voice
+  // capability checks, settings reloads); boot stderr is long gone by then,
+  // so fresh loader-key rejections must land in the durable daemon log or
+  // they vanish without a diagnostic.
+  setLoaderKeyRejectionReporter((source, freshKeys) => {
+    daemonLog.warn(
+      'rejected loader-affecting env keys; they were not applied',
+      { source, rejectedKeys: freshKeys },
+    );
+  });
   // Boot stderr rarely survives desktop/systemd daemon launches, so persist
   // the scrub decision in the durable daemon log as well.
   if (scrubbedLoaderEnvKeys.length > 0) {
@@ -7076,8 +7099,10 @@ async function runQwenServeImpl(
                         daemonLog.info('daemon stopped');
                       }
                     });
+                    setLoaderKeyRejectionReporter(undefined);
                     await daemonLog.close();
                   }
+                  restoreScrubbedLoaderEnv();
                   if (finalErr) rej(finalErr);
                   else res();
                 });
