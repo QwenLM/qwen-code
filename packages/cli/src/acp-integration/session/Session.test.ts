@@ -50,6 +50,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
+import * as audioBridgeService from '../../services/audio-bridge-service.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
@@ -146,6 +147,12 @@ vi.mock('../../services/voice-transcriber.js', async (importOriginal) => {
   return {
     ...actual,
     transcribeVoiceAudio: transcribeVoiceAudioSpy,
+    // The audio bridge pre-flights this once per turn; the Session tests
+    // exercise the post-preflight paths, so resolve it as configured.
+    resolveVoiceTranscriptionConfig: vi.fn(() => ({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://asr.example/v1',
+    })),
   };
 });
 
@@ -5324,7 +5331,42 @@ describe('Session', () => {
       }
     });
 
-    it('routes ACP audio prompts through the voice bridge for text-only primary models', async () => {
+    it('clamps non-audio MIME payloads supplied as ACP audio blocks', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ image: true, video: true });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'inspect this payload' },
+            {
+              type: 'audio',
+              mimeType: 'video/mp4',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=',
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('video/mp4');
+      expect(textParts(sent).join('\n')).toContain('Media omitted');
+    });
+
+    it('routes ACP audio prompts through the audio bridge for text-only primary models', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi
         .fn()
@@ -5375,7 +5417,7 @@ describe('Session', () => {
       );
     });
 
-    it('does not run the voice bridge when the primary model supports audio', async () => {
+    it('does not run the audio bridge when the primary model supports audio', async () => {
       mockConfig.getEffectiveInputModalities = vi
         .fn()
         .mockReturnValue({ audio: true });
@@ -5402,6 +5444,45 @@ describe('Session', () => {
       expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
         true,
       );
+      expect(agentMessageChunks()).not.toEqual(
+        expect.arrayContaining([expect.stringContaining('Audio bridge')]),
+      );
+    });
+
+    it('clamps oversized native audio when the bridge skips an audio-capable primary', async () => {
+      const key = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[key];
+      delete process.env[key];
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ audio: true });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'listen to this' },
+            {
+              type: 'audio',
+              mimeType: 'audio/wav',
+              // ~11 MiB decoded: over the 10 MiB inline-media cap the bridge
+              // skip must hand back to.
+              data: 'A'.repeat(Math.ceil((11 * 1024 * 1024 * 4) / 3)),
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('Media omitted');
     });
 
     it('replaces ACP audio with a fallback when no voice model is configured', async () => {
@@ -5427,6 +5508,11 @@ describe('Session', () => {
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
       expect(textParts(sent).join('\n')).toContain(
         'no voice model is configured',
+      );
+      // The failed/no-egress notice is still emitted so the user sees why
+      // the audio was unavailable.
+      expect(agentMessageChunks()).toContain(
+        'Audio bridge could not transcribe 1 audio file(s): no voice model is configured.',
       );
       expect(agentMessageChunks()).not.toEqual(
         expect.arrayContaining([
@@ -5480,7 +5566,7 @@ describe('Session', () => {
       );
     });
 
-    it('rejects oversized ACP audio before decoding for the voice bridge', async () => {
+    it('rejects oversized ACP audio before decoding for the audio bridge', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];
       process.env[ENV_KEY] = String(20 * 1024 * 1024);
@@ -5520,7 +5606,126 @@ describe('Session', () => {
       );
     });
 
-    it('falls back to text-only parts when voice bridge transcription fails', async () => {
+    it('fails closed oversized direct ACP audio at the default inline media cap', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      delete process.env[ENV_KEY];
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'caption before audio' },
+            {
+              type: 'audio',
+              mimeType: 'audio/ogg',
+              data: 'A'.repeat(Math.ceil(((10 * 1024 * 1024 + 1) * 4) / 3)),
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('audio too large');
+      expect(textParts(sent).join('\n')).not.toContain('Media omitted');
+      expect(agentMessageChunks()).toContain(
+        'Audio bridge could not transcribe 1 audio file(s): audio too large.',
+      );
+    });
+
+    it('fails closed oversized ACP audio in an embedded resource block', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      delete process.env[ENV_KEY];
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'caption before audio' },
+            {
+              type: 'resource',
+              resource: {
+                uri: 'file:///recording.ogg',
+                mimeType: 'audio/ogg',
+                blob: 'A'.repeat(Math.ceil(((10 * 1024 * 1024 + 1) * 4) / 3)),
+              },
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('audio too large');
+      expect(textParts(sent).join('\n')).not.toContain('Media omitted');
+      expect(agentMessageChunks()).toContain(
+        'Audio bridge could not transcribe 1 audio file(s): audio too large.',
+      );
+    });
+
+    it('still bridges direct ACP audio when the inline media cap is lowered', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '1024';
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+      transcribeVoiceAudioSpy.mockResolvedValue('lowered cap transcript');
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'caption before audio' },
+            {
+              type: 'audio',
+              mimeType: 'audio/ogg',
+              // ~2 KiB decoded: over the 1 KiB env cap, under the bridge limit
+              data: 'A'.repeat(2731),
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).toHaveBeenCalledTimes(1);
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('lowered cap transcript');
+      expect(textParts(sent).join('\n')).not.toContain('Media omitted');
+    });
+
+    it('falls back to text-only parts when audio bridge transcription fails', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi
         .fn()
@@ -5712,6 +5917,69 @@ describe('Session', () => {
         expect.any(String),
       );
       expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
+    });
+
+    it('keeps native ACP audio on the primary route while bridging a mixed image', async () => {
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ audio: true });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        agentCapable: true,
+      });
+      const audioPart: Part = {
+        inlineData: { mimeType: 'audio/ogg', data: 'T2dnUw==' },
+      };
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [
+          { text: 'look at this' },
+          audioPart,
+          { text: '[transcribed image]' },
+        ],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-agent',
+        egressOccurred: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'audio',
+            mimeType: 'audio/ogg',
+            data: 'T2dnUw==',
+          },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: mockConfig,
+          parts: expect.arrayContaining([audioPart]),
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        expect.any(Object),
+        expect.any(String),
+      );
+      expect(firstSentMessage()).toEqual(
+        expect.arrayContaining([audioPart, { text: '[transcribed image]' }]),
+      );
     });
 
     it('clamps full-turn images before selecting the ACP route', async () => {
@@ -6032,6 +6300,156 @@ describe('Session', () => {
       }
     });
 
+    it('preserves unsupported audio @ paths for the audio bridge', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-audio-')),
+      );
+      const audioPath = path.join(tempDir, 'recording.wav');
+      await fs.writeFile(audioPath, 'audio');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      transcribeVoiceAudioSpy.mockResolvedValue('audio transcript');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `listen to @${audioPath}` }],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            paths: [audioPath],
+            preserveUnsupportedAudioForBridge: true,
+            validatedPathIdentities: expect.any(Map),
+          }),
+        );
+        expect(textParts(firstSentMessage())).toContainEqual(
+          expect.stringContaining('audio transcript'),
+        );
+        expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+          false,
+        );
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads audio @ paths for an audio-capable primary model', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-audiocap-')),
+      );
+      const audioPath = path.join(tempDir, 'recording.wav');
+      await fs.writeFile(audioPath, 'audio');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ audio: true });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `listen to @${audioPath}` }],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            paths: [audioPath],
+            preserveUnsupportedAudioForBridge: true,
+          }),
+        );
+        expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+          true,
+        );
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails closed after reading an audio @ path without a voice model', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-no-voice-')),
+      );
+      const audioPath = path.join(tempDir, 'recording.wav');
+      await fs.writeFile(audioPath, 'audio');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: undefined,
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `listen to @${audioPath}` }],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            paths: [audioPath],
+            preserveUnsupportedAudioForBridge: true,
+          }),
+        );
+        const sent = firstSentMessage();
+        expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+        expect(textParts(sent)).toContainEqual(
+          expect.stringContaining('no voice model is configured'),
+        );
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('resolves image @ paths from ACP text through the vision bridge', async () => {
       const tempDir = await fs.realpath(
         await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-image-')),
@@ -6082,6 +6500,7 @@ describe('Session', () => {
           paths: [imagePath],
           signal: expect.any(AbortSignal),
           preserveUnsupportedImageForBridge: true,
+          preserveUnsupportedAudioForBridge: true,
           validatedPathIdentities: expect.any(Map),
           displayPaths: new Map([[imagePath, imagePath]]),
         });
@@ -6089,6 +6508,52 @@ describe('Session', () => {
           ?.parts as Part[];
         expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
         expect(textParts(firstSentMessage())).toContain('[text @ file image]');
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads image @ paths for an image-capable primary model without the vision bridge', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-imgcap-')),
+      );
+      const imagePath = path.join(tempDir, 'shot.png');
+      await fs.writeFile(imagePath, 'image');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ image: true });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `look at @${imagePath}` }],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            paths: [imagePath],
+          }),
+        );
+        expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+          true,
+        );
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -8959,7 +9424,7 @@ describe('Session', () => {
         });
 
         const audioFallbackPart = {
-          text: '[Voice bridge could not transcribe attached audio: no voice model is configured. The audio content is unavailable; do not assume or invent what it says.]',
+          text: '[Audio bridge could not transcribe attached audio: no voice model is configured. The audio content is unavailable; do not assume or invent what it says.]',
         };
         const midTurnParts: Part[] = [
           {
@@ -9114,11 +9579,9 @@ describe('Session', () => {
       });
 
       it('adds a fallback marker when audio resolution fails', async () => {
-        const clampSpy = vi
-          .spyOn(core, 'clampInlineMediaPart')
-          .mockImplementation(() => {
-            throw new Error('audio decode failed');
-          });
+        const bridgeSpy = vi
+          .spyOn(audioBridgeService, 'runAudioBridge')
+          .mockRejectedValue(new Error('audio resolution failed'));
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
           returnDisplay: 'file contents',
@@ -9197,10 +9660,10 @@ describe('Session', () => {
             'please listen to this audio',
           );
           expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-            'Failed to resolve mid-turn message: audio decode failed',
+            'Failed to resolve mid-turn message: audio resolution failed',
           );
         } finally {
-          clampSpy.mockRestore();
+          bridgeSpy.mockRestore();
         }
       });
 
@@ -14081,6 +14544,7 @@ describe('Session', () => {
 
         expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
           paths: [canonicalFilePath],
+          preserveUnsupportedAudioForBridge: true,
           signal: expect.any(AbortSignal),
           validatedPathIdentities: expect.any(Map),
           displayPaths: new Map([[canonicalFilePath, fileName]]),

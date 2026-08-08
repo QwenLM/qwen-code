@@ -2519,7 +2519,10 @@ export class GeminiClient {
       this.lastPromptId = prompt_id;
       startInteractionSpan(this.config, {
         promptId: prompt_id,
-        model: options?.modelOverride ?? this.config.getModel(),
+        // Routing selectors carry NUL markers (and optional `\0baseUrl`
+        // suffixes); telemetry identity is the model id before the first NUL.
+        model:
+          options?.modelOverride?.split('\0', 1)[0] || this.config.getModel(),
         messageType,
       });
       const interactionSpan = getActiveInteractionSpan();

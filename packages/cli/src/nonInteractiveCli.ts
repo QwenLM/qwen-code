@@ -90,6 +90,12 @@ import {
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
+import {
+  formatAudioBridgeNotice,
+  hasAudioParts,
+  replaceAudioPartsWithUnavailable,
+  runAudioBridge,
+} from './services/audio-bridge-service.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -1170,6 +1176,9 @@ export async function runNonInteractive(
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
+            // Unconditional (mirrors ACP): runAudioBridge owns the
+            // fail-closed outcome when no batch voice model can transcribe.
+            preserveUnsupportedAudioForBridge: true,
           });
 
           if (!shouldProceed || !processedQuery) {
@@ -1253,20 +1262,72 @@ export async function runNonInteractive(
       let initialParts = normalizePartList(initialPartList);
       let fullTurnModelOverride: string | undefined;
       let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
-      const emitVisionNotice = (subtype: string, notice: string) => {
+      const emitBridgeNotice = (subtype: string, notice: string) => {
         if (outputFormat === OutputFormat.TEXT) {
           process.stderr.write(`${notice}\n`);
         } else {
           adapter.emitSystemMessage(subtype, { notice });
         }
       };
+      if (inlineModelOverride !== undefined && hasAudioParts(initialParts)) {
+        let supportsAudio = false;
+        let routeResolutionFailed = false;
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(inlineModelOverride, { failClosed: true });
+          supportsAudio =
+            runtimeView.contentGeneratorConfig.modalities?.audio === true;
+        } catch (error) {
+          routeResolutionFailed = true;
+          debugLogger.warn(
+            `audio route capability check failed for '${inlineModelOverride}': ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        if (!supportsAudio) {
+          const reason = routeResolutionFailed
+            ? 'the active model override could not be resolved'
+            : 'the active model override does not support audio';
+          initialParts = replaceAudioPartsWithUnavailable(initialParts, reason);
+          emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
+        } else {
+          initialParts = initialParts.map((part) =>
+            hasAudioParts([part]) ? clampInlineMediaPart(part) : part,
+          );
+        }
+      } else if (
+        inlineModelOverride === undefined &&
+        hasAudioParts(initialParts)
+      ) {
+        const audioBridgeResult = await runAudioBridge({
+          config,
+          settings,
+          parts: initialParts,
+          signal: abortController.signal,
+        });
+        if (
+          audioBridgeResult.status !== 'skipped' ||
+          audioBridgeResult.egressCount > 0
+        ) {
+          emitBridgeNotice(
+            'audio_bridge',
+            formatAudioBridgeNotice(audioBridgeResult),
+          );
+        }
+        initialParts = audioBridgeResult.parts;
+        if (abortController.signal.aborted) {
+          await routeAbort();
+        }
+      }
       if (
         inlineModelOverride === undefined &&
         shouldRunVisionBridge(config) &&
         hasImageParts(initialParts)
       ) {
         const fullTurnModel = config.getDefaultVisionBridgeModel();
-        if (fullTurnModel?.agentCapable) {
+        if (fullTurnModel?.agentCapable && !hasAudioParts(initialParts)) {
           const fullTurnParts = initialParts.map((part) =>
             clampInlineMediaPart(part),
           );
@@ -1279,7 +1340,7 @@ export async function runNonInteractive(
               .resolveForModel(fullTurnModelOverride.slice(0, -1), {
                 failClosed: true,
               });
-            emitVisionNotice(
+            emitBridgeNotice(
               'vision_routing',
               formatFullTurnVisionNotice(fullTurnModel),
             );
@@ -1295,7 +1356,7 @@ export async function runNonInteractive(
               bridgeResult.status !== 'skipped' ||
               bridgeResult.egressOccurred
             ) {
-              emitVisionNotice(
+              emitBridgeNotice(
                 'vision_bridge',
                 formatVisionBridgeNotice(bridgeResult),
               );
@@ -1310,7 +1371,7 @@ export async function runNonInteractive(
                 error instanceof Error ? error.message : String(error)
               }`,
             );
-            emitVisionNotice(
+            emitBridgeNotice(
               'vision_bridge_failed',
               'Vision bridge failed; proceeding without the image(s).',
             );
@@ -1447,7 +1508,11 @@ export async function runNonInteractive(
       let isFirstGoalSegment = activeGoalTurn !== undefined;
       let hasUnsentToolResponse = false;
       let modelOverride: string | undefined =
-        inlineModelOverride ?? fullTurnModelOverride;
+        inlineModelOverride === undefined
+          ? fullTurnModelOverride
+          : inlineModelOverride.endsWith('\0')
+            ? inlineModelOverride
+            : `${inlineModelOverride}\0`;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
@@ -2190,7 +2255,13 @@ export async function runNonInteractive(
           currentPromptId,
           {
             type: sendType,
-            modelOverride,
+            // NUL marks an exact-route selector so the skill target's
+            // modalities resolve (interactive sends do the same); bare ids
+            // would fall back to the session config's modalities.
+            modelOverride:
+              modelOverride === undefined || modelOverride.endsWith('\0')
+                ? modelOverride
+                : `${modelOverride}\0`,
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -2507,7 +2578,11 @@ export async function runNonInteractive(
                   type: itemIsFirstTurn
                     ? item.sendMessageType
                     : SendMessageType.ToolResult,
-                  modelOverride: itemModelOverride,
+                  modelOverride:
+                    itemModelOverride === undefined ||
+                    itemModelOverride.endsWith('\0')
+                      ? itemModelOverride
+                      : `${itemModelOverride}\0`,
                   ...(itemIsFirstTurn && {
                     notificationDisplayText: item.displayText,
                     todoWorkChainId: item.todoWorkChainId,

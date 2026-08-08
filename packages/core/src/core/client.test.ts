@@ -10007,6 +10007,38 @@ Other open files:
         }
       });
 
+      it('strips the NUL routing marker from the telemetry model attribute', async () => {
+        const startSpy = vi
+          .spyOn(telemetryIndex, 'startInteractionSpan')
+          .mockImplementation(() => {});
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        try {
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'my prompt' }],
+              new AbortController().signal,
+              'prompt-nul-model',
+              {
+                type: SendMessageType.UserQuery,
+                modelOverride: 'qwen3-max\u0000',
+              },
+            ),
+          );
+
+          expect(startSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({ model: 'qwen3-max' }),
+          );
+        } finally {
+          startSpy.mockRestore();
+        }
+      });
+
       it.each([
         {
           name: 'empty UserQuery value',

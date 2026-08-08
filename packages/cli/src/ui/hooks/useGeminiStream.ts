@@ -128,6 +128,12 @@ import {
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import {
+  formatAudioBridgeNotice,
+  hasAudioParts,
+  replaceAudioPartsWithUnavailable,
+  runAudioBridge,
+} from '../../services/audio-bridge-service.js';
+import {
   getInlineImageData,
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
@@ -1169,7 +1175,7 @@ export const useGeminiStream = (
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
       const fullTurnModel = config.getDefaultVisionBridgeModel();
-      if (fullTurnModel?.agentCapable) {
+      if (fullTurnModel?.agentCapable && !hasAudioParts(parts)) {
         const fullTurnParts = (Array.isArray(parts) ? parts : [parts]).map(
           (part) =>
             typeof part === 'string'
@@ -1228,6 +1234,99 @@ export const useGeminiStream = (
         : { parts: null, shouldProceed: false };
     },
     [addItem, config],
+  );
+
+  const applyBridgeConversionsIfNeeded = useCallback(
+    async (
+      parts: PartListUnion | null,
+      timestamp: number,
+      signal: AbortSignal,
+    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
+      let nextParts = parts;
+      if (nextParts !== null && hasAudioParts(nextParts)) {
+        const activeOverride = modelOverrideRef.current;
+        let shouldRunBridge = activeOverride === undefined;
+        let targetSupportsAudio: boolean | undefined;
+        if (activeOverride !== undefined) {
+          const routeSelector = activeOverride.endsWith('\0')
+            ? activeOverride.slice(0, -1)
+            : activeOverride;
+          let supportsAudio = false;
+          let routeResolutionFailed = false;
+          try {
+            const runtimeView = await config
+              .getBaseLlmClient()
+              .resolveForModel(routeSelector, { failClosed: true });
+            supportsAudio =
+              runtimeView.contentGeneratorConfig.modalities?.audio === true;
+          } catch (error) {
+            routeResolutionFailed = true;
+            debugLogger.warn(
+              `audio route capability check failed for '${routeSelector}': ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          targetSupportsAudio = supportsAudio;
+          if (!supportsAudio) {
+            if (inlineModelOverrideActiveRef.current || routeResolutionFailed) {
+              const reason = routeResolutionFailed
+                ? 'the active model override could not be resolved'
+                : 'the active model override does not support audio';
+              nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
+              addItem(
+                {
+                  type: MessageType.ERROR,
+                  text: `Audio was not sent: ${reason}.`,
+                },
+                timestamp,
+              );
+            } else {
+              shouldRunBridge = true;
+            }
+          } else {
+            nextParts = (
+              Array.isArray(nextParts) ? nextParts : [nextParts]
+            ).map((part) =>
+              typeof part !== 'string' && hasAudioParts([part])
+                ? clampInlineMediaPart(part)
+                : part,
+            );
+          }
+        }
+        if (shouldRunBridge) {
+          const result = await runAudioBridge({
+            config,
+            settings,
+            parts: nextParts,
+            signal,
+            ...(targetSupportsAudio === undefined
+              ? {}
+              : { targetSupportsAudio }),
+          });
+          if (result.status !== 'skipped' || result.egressCount > 0) {
+            addItem(
+              {
+                type:
+                  result.status === 'failed' &&
+                  result.convertedCount === 0 &&
+                  !signal.aborted
+                    ? MessageType.ERROR
+                    : MessageType.INFO,
+                text: formatAudioBridgeNotice(result),
+              },
+              timestamp,
+            );
+          }
+          if (signal.aborted) {
+            return { parts: null, shouldProceed: false };
+          }
+          nextParts = result.parts;
+        }
+      }
+      return applyVisionBridgeIfNeeded(nextParts, timestamp, signal);
+    },
+    [addItem, applyVisionBridgeIfNeeded, config, settings],
   );
 
   const prepareQueryForGemini = useCallback(
@@ -1348,7 +1447,7 @@ export const useGeminiStream = (
                 }
               }
 
-              const bridgeResult = await applyVisionBridgeIfNeeded(
+              const bridgeResult = await applyBridgeConversionsIfNeeded(
                 localQueryToSendToGemini,
                 userMessageTimestamp,
                 abortSignal,
@@ -1430,6 +1529,9 @@ export const useGeminiStream = (
             messageId: userMessageTimestamp,
             signal: abortSignal,
             addItem,
+            // Unconditional (mirrors ACP): runAudioBridge owns the
+            // fail-closed outcome when no batch voice model can transcribe.
+            preserveUnsupportedAudioForBridge: true,
           });
 
           if (!atCommandResult.shouldProceed) {
@@ -1438,7 +1540,7 @@ export const useGeminiStream = (
           localQueryToSendToGemini = atCommandResult.processedQuery;
         }
 
-        const bridgeResult = await applyVisionBridgeIfNeeded(
+        const bridgeResult = await applyBridgeConversionsIfNeeded(
           localQueryToSendToGemini,
           userMessageTimestamp,
           abortSignal,
@@ -1469,7 +1571,7 @@ export const useGeminiStream = (
       logger,
       shellModeActive,
       scheduleToolCalls,
-      applyVisionBridgeIfNeeded,
+      applyBridgeConversionsIfNeeded,
     ],
   );
 
@@ -2875,6 +2977,7 @@ export const useGeminiStream = (
                   onDebugMessage,
                   messageId: timestamp + index,
                   signal: atCommandSignal,
+                  preserveUnsupportedAudioForBridge: true,
                 }),
             );
             const shouldSkipMessage =
@@ -2933,7 +3036,7 @@ export const useGeminiStream = (
           }
         }
 
-        const bridgeResult = await applyVisionBridgeIfNeeded(
+        const bridgeResult = await applyBridgeConversionsIfNeeded(
           resolvedQuery,
           timestamp + index,
           signal,
@@ -3007,7 +3110,7 @@ export const useGeminiStream = (
     },
     [
       addItem,
-      applyVisionBridgeIfNeeded,
+      applyBridgeConversionsIfNeeded,
       config,
       handleSlashCommand,
       onDebugMessage,
@@ -3499,11 +3602,16 @@ export const useGeminiStream = (
             dualOutput.emitUserMessage(userParts);
           }
 
+          const activeModelOverride = modelOverrideRef.current;
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
             todoWorkChainId: metadata?.todoWorkChainId,
-            modelOverride: modelOverrideRef.current,
+            modelOverride:
+              activeModelOverride === undefined ||
+              activeModelOverride.endsWith('\0')
+                ? activeModelOverride
+                : `${activeModelOverride}\0`,
             steerInput: metadata?.steerInput,
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
             ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef

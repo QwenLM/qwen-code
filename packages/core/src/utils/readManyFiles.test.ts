@@ -548,6 +548,25 @@ describe('readManyFiles', () => {
       ]);
     });
 
+    it('keeps unsupported audio inline for the audio bridge', async () => {
+      const relativePath = 'recording.wav';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const audioBytes = Buffer.from('fake wav data');
+      await fs.writeFile(absolutePath, audioBytes);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        preserveUnsupportedAudioForBridge: true,
+      });
+
+      expect(findInlineDataPart(result.contentParts)?.inlineData).toEqual({
+        mimeType: 'audio/wav',
+        data: audioBytes.toString('base64'),
+        displayName: 'recording.wav',
+      });
+    });
+
     it('reads a validated image from its approved snapshot during a path swap', async () => {
       const relativePath = 'approved.png';
       const absolutePath = path.join(tempRootDir, relativePath);
