@@ -65,6 +65,22 @@ describe('resolveDashScopeGenerationEndpoint', () => {
     ).toBe(EXPECTED_DEFAULT_ENDPOINT);
   });
 
+  it('does not duplicate /api/v1 for a compat URL already rooted at /api/v1', () => {
+    expect(
+      resolveDashScopeGenerationEndpoint(
+        'https://dashscope-intl.aliyuncs.com/api/v1/compatible-mode/v1',
+      ),
+    ).toBe(EXPECTED_DEFAULT_ENDPOINT);
+  });
+
+  it('does not duplicate /api/v1 for a compat URL with a doubled slash', () => {
+    expect(
+      resolveDashScopeGenerationEndpoint(
+        'https://dashscope-intl.aliyuncs.com/api/v1//compatible-mode/v1',
+      ),
+    ).toBe(EXPECTED_DEFAULT_ENDPOINT);
+  });
+
   it('returns a full endpoint ending in /generation unchanged', () => {
     const fullEndpoint = `https://dashscope-intl.aliyuncs.com/api/v1/${DASHSCOPE_NATIVE_GENERATION_PATH}`;
     expect(resolveDashScopeGenerationEndpoint(fullEndpoint)).toBe(fullEndpoint);

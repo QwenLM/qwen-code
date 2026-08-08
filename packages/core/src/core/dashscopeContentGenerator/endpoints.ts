@@ -10,6 +10,8 @@ export const DEFAULT_DASHSCOPE_NATIVE_BASE_URL =
 export const DASHSCOPE_NATIVE_GENERATION_PATH =
   'services/aigc/multimodal-generation/generation';
 
+const COMPAT_MODE_SUFFIX = '/compatible-mode/v1';
+
 function stripTrailingSlashes(value: string): string {
   let end = value.length;
   while (end > 0 && value.charCodeAt(end - 1) === 47 /* / */) end--;
@@ -33,7 +35,7 @@ export function resolveDashScopeGenerationEndpoint(
   baseUrl: string | undefined,
 ): string {
   const trimmed = (baseUrl ?? '').trim();
-  const base = stripTrailingSlashes(
+  let base = stripTrailingSlashes(
     trimmed.length > 0 ? trimmed : DEFAULT_DASHSCOPE_NATIVE_BASE_URL,
   );
 
@@ -41,8 +43,11 @@ export function resolveDashScopeGenerationEndpoint(
     return base;
   }
 
-  if (base.endsWith('/compatible-mode/v1')) {
-    return `${base.slice(0, -'/compatible-mode/v1'.length)}/api/v1/${DASHSCOPE_NATIVE_GENERATION_PATH}`;
+  // A pasted compat URL may already be rooted at /api/v1
+  // (`https://host/api/v1/compatible-mode/v1`), so drop the compat suffix and
+  // let the /api/v1 detection below decide whether one needs appending.
+  if (base.endsWith(COMPAT_MODE_SUFFIX)) {
+    base = stripTrailingSlashes(base.slice(0, -COMPAT_MODE_SUFFIX.length));
   }
 
   const pathname = resolvePathname(base);
