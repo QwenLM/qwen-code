@@ -30,6 +30,7 @@ function abortError(): Error {
 export class WorkflowDispatchScheduler {
   private state: WorkflowDispatchState = 'running';
   private inFlight = 0;
+  private pauseBarrierPending = false;
   private readonly queue: Job[] = [];
   private readonly gateWaiters: GateWaiter[] = [];
   private readonly stateListeners = new Set<
@@ -40,6 +41,7 @@ export class WorkflowDispatchScheduler {
     private readonly limit: number,
     private readonly signal?: AbortSignal,
     onStateChange?: (snapshot: WorkflowDispatchSnapshot) => void,
+    private readonly beforePaused?: () => Promise<void>,
   ) {
     if (!Number.isInteger(limit) || limit < 1) {
       throw new Error(
@@ -87,7 +89,7 @@ export class WorkflowDispatchScheduler {
   pause(): boolean {
     if (this.state !== 'running' || this.signal?.aborted) return false;
     this.setState('pausing');
-    if (this.inFlight === 0) this.setState('paused');
+    if (this.inFlight === 0) this.finishPause();
     return true;
   }
 
@@ -135,7 +137,7 @@ export class WorkflowDispatchScheduler {
         .finally(() => {
           this.inFlight--;
           if (this.state === 'pausing' && this.inFlight === 0) {
-            this.setState('paused');
+            this.finishPause();
           }
           this.pump();
         });
@@ -147,6 +149,36 @@ export class WorkflowDispatchScheduler {
     this.state = state;
     const snapshot = this.snapshot();
     for (const listener of [...this.stateListeners]) listener(snapshot);
+  }
+
+  private finishPause(): void {
+    if (
+      this.state !== 'pausing' ||
+      this.inFlight !== 0 ||
+      this.pauseBarrierPending
+    ) {
+      return;
+    }
+    if (!this.beforePaused) {
+      this.setState('paused');
+      return;
+    }
+    this.pauseBarrierPending = true;
+    void Promise.resolve()
+      .then(this.beforePaused)
+      .then(() => {
+        this.pauseBarrierPending = false;
+        if (
+          this.state === 'pausing' &&
+          this.inFlight === 0 &&
+          !this.signal?.aborted
+        ) {
+          this.setState('paused');
+        }
+      })
+      .catch(() => {
+        this.pauseBarrierPending = false;
+      });
   }
 
   private abortPending(): void {

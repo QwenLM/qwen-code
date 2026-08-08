@@ -4,24 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
+import type {
+  WorkflowRunRecord,
+  WorkflowStatus,
+  WorkflowTask,
+} from '@qwen-code/qwen-code-core';
 import {
   isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
-  listWorkflowSnapshots,
+  listWorkflowRunRecords,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 
-/**
- * P7b: adapt a persisted snapshot to the `WorkflowTask` shape the row /
- * detail formatters expect. The dialog-only fields (`abortController`,
- * `outputFile`, etc.) are filled with inert values — a snapshot is always
- * terminal, so the controls that read those fields are never reached.
- */
-function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
+type WorkflowDisplayEntry = Omit<WorkflowTask, 'status'> & {
+  status: WorkflowStatus | 'interrupted';
+  canResume?: boolean;
+  resumeBlockedReason?: string;
+};
+
+function recordToDisplay(s: WorkflowRunRecord): WorkflowDisplayEntry {
   return {
     id: s.runId,
     kind: 'workflow',
@@ -48,14 +52,16 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     outputOffset: 0,
     notified: true,
     abortController: new AbortController(),
-  } as WorkflowTask;
+    canResume: s.canResume,
+    resumeBlockedReason: s.resumeBlockedReason,
+  } as WorkflowDisplayEntry;
 }
 
 /**
  * Format one workflow run as a one-line summary used by both the
  * top-level listing and the per-run detail view.
  */
-function rowLine(entry: WorkflowTask, now: number): string {
+function rowLine(entry: WorkflowDisplayEntry, now: number): string {
   const endTime = entry.endTime ?? now;
   const runtime = formatDuration(endTime - entry.startTime, {
     hideTrailingZeros: true,
@@ -87,10 +93,16 @@ function rowLine(entry: WorkflowTask, now: number): string {
     entry.status === 'failed' && entry.error
       ? ` — ${entry.error.slice(0, 80)}`
       : '';
-  return `  ${entry.runId.padEnd(20)} ${entry.status.padEnd(10)} ${runtime.padStart(8)}  ${label}${phase}${counts}${phaseCount}${budgetChip}${errorTail}`;
+  const recoveryTail =
+    entry.status === 'interrupted'
+      ? entry.canResume
+        ? ' · recoverable'
+        : ` · not recoverable${entry.resumeBlockedReason ? `: ${entry.resumeBlockedReason.slice(0, 80)}` : ''}`
+      : '';
+  return `  ${entry.runId.padEnd(20)} ${entry.status.padEnd(12)} ${runtime.padStart(8)}  ${label}${phase}${counts}${phaseCount}${budgetChip}${recoveryTail}${errorTail}`;
 }
 
-function detailLines(entry: WorkflowTask, now: number): string[] {
+function detailLines(entry: WorkflowDisplayEntry, now: number): string[] {
   const lines: string[] = [];
   const endTime = entry.endTime ?? now;
   const runtime = formatDuration(endTime - entry.startTime, {
@@ -108,6 +120,14 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
     lines.push(`  whenToUse   : ${entry.meta.whenToUse}`);
   }
   lines.push(`  status      : ${entry.status}`);
+  if (entry.canResume !== undefined) {
+    lines.push(
+      `  recovery    : ${entry.canResume ? 'recoverable' : 'not recoverable'}`,
+    );
+    if (!entry.canResume && entry.resumeBlockedReason) {
+      lines.push(`  reason      : ${entry.resumeBlockedReason}`);
+    }
+  }
   lines.push(`  runtime     : ${runtime}`);
   if (entry.currentPhase) {
     lines.push(`  currentPhase: ${entry.currentPhase}`);
@@ -197,23 +217,23 @@ export const workflowsCommand: SlashCommand = {
         };
       }
       const runId = tokens[1];
-      let target = registry.get(runId);
-      let fromSnapshot = false;
+      const target = registry.get(runId);
       if (!target) {
-        // Fall back to a persisted snapshot — the same source the listing
-        // and detail view merge in. A terminal run evicted from the
-        // in-memory registry (10-entry cap) or left behind by an earlier
-        // CLI process is still known to this command; answering "Unknown
-        // live workflow runId" for it contradicts the listing.
-        const snapshot = (await listWorkflowSnapshots(config)).find(
-          (s) => s.runId === runId,
+        const record = (await listWorkflowRunRecords(config)).find(
+          (entry) => entry.runId === runId,
         );
-        if (snapshot) {
-          target = snapshotToTask(snapshot);
-          fromSnapshot = true;
+        if (record) {
+          const content =
+            record.status !== 'interrupted' &&
+            isTerminalWorkflowStatus(record.status)
+              ? `Workflow ${runId} is ${record.status} and cannot be paused or resumed.`
+              : `Workflow ${runId} is ${record.status} and has no live owner; it cannot be paused or resumed.`;
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content,
+          };
         }
-      }
-      if (!target) {
         return {
           type: 'message' as const,
           messageType: 'error' as const,
@@ -232,7 +252,7 @@ export const workflowsCommand: SlashCommand = {
           content: `Workflow ${runId} is ${target.status} and cannot be paused or resumed.`,
         };
       }
-      if (!fromSnapshot && !target.isBackgrounded) {
+      if (!target.isBackgrounded) {
         return {
           type: 'message' as const,
           messageType: 'error' as const,
@@ -284,15 +304,15 @@ export const workflowsCommand: SlashCommand = {
     // dump for that run if it exists. Reject early on unknown runId so
     // the user sees a clear error instead of an empty listing.
     if (trimmedArgs.length > 0) {
-      let target = registry.get(trimmedArgs);
+      let target: WorkflowDisplayEntry | undefined = registry.get(trimmedArgs);
       if (!target) {
         // Fall back to a persisted snapshot — the run may predate this CLI
         // process (the in-memory registry dies with the process, the
         // snapshot on disk does not).
-        const snapshot = (await listWorkflowSnapshots(config)).find(
-          (s) => s.runId === trimmedArgs,
+        const record = (await listWorkflowRunRecords(config)).find(
+          (entry) => entry.runId === trimmedArgs,
         );
-        if (snapshot) target = snapshotToTask(snapshot);
+        if (record) target = recordToDisplay(record);
       }
       if (!target) {
         return {
@@ -311,13 +331,13 @@ export const workflowsCommand: SlashCommand = {
     // Merge persisted snapshots (runs from earlier CLI processes) into the
     // listing. In-memory registry entries win on a runId collision — they
     // carry live status, while a snapshot is a frozen terminal projection.
-    const snapshots = await listWorkflowSnapshots(config);
+    const records = await listWorkflowRunRecords(config);
     const liveRunIds = new Set(allEntries.map((e) => e.runId));
-    const snapshotTasks = snapshots
-      .filter((s) => !liveRunIds.has(s.runId))
-      .map(snapshotToTask);
+    const persistedEntries = records
+      .filter((entry) => !liveRunIds.has(entry.runId))
+      .map(recordToDisplay);
 
-    if (allEntries.length === 0 && snapshotTasks.length === 0) {
+    if (allEntries.length === 0 && persistedEntries.length === 0) {
       return {
         type: 'message' as const,
         messageType: 'info' as const,
@@ -335,7 +355,7 @@ export const workflowsCommand: SlashCommand = {
       .sort((a, b) => a.startTime - b.startTime);
     const terminal = [
       ...allEntries.filter((e) => !isActiveWorkflowStatus(e.status)),
-      ...snapshotTasks,
+      ...persistedEntries,
     ].sort((a, b) => (b.endTime ?? 0) - (a.endTime ?? 0));
 
     const lines: string[] = [];

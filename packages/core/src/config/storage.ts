@@ -415,10 +415,24 @@ export class Storage {
   }
 
   /**
+   * Directory containing the durable artifacts for one workflow run.
+   */
+  getWorkflowRunDir(runId: string): string {
+    return path.join(this.getWorkflowRunsDir(), runId);
+  }
+
+  /**
+   * Path to the durable replay manifest for a workflow run.
+   */
+  getWorkflowRunManifestPath(runId: string): string {
+    return path.join(this.getWorkflowRunDir(runId), 'manifest.json');
+  }
+
+  /**
    * Path to the resume journal for an in-progress / resumable workflow run.
    */
   getWorkflowRunJournalPath(runId: string): string {
-    return path.join(this.getWorkflowRunsDir(), runId, 'journal.jsonl');
+    return path.join(this.getWorkflowRunDir(runId), 'journal.jsonl');
   }
 
   /**

@@ -32,14 +32,35 @@
  */
 
 import { createHash } from 'node:crypto';
-import { read, writeLine } from '../../utils/jsonl-utils.js';
+import {
+  constants as fsConstants,
+  promises as fs,
+  lstatSync,
+  realpathSync,
+  type Stats,
+} from 'node:fs';
+import * as path from 'node:path';
+import { parseLineTolerant } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
 
 /** Journal-format version tag, prefixed onto every key. */
 export const JOURNAL_KEY_VERSION = 'v2';
+
+/** Durable checkpoint schema for committed journal prefixes. */
+export const JOURNAL_FORMAT_VERSION = 1;
+
+export interface JournalCheckpoint {
+  version: typeof JOURNAL_FORMAT_VERSION;
+  keyVersion: typeof JOURNAL_KEY_VERSION;
+  byteLength: number;
+  sha256: string;
+  integrity: 'complete' | 'failed';
+  error?: string;
+}
 
 export interface JournalStartedEntry {
   type: 'started';
@@ -161,6 +182,304 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
   return { results, started };
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isJournalEntry(value: unknown): value is JournalEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const entry = value as Record<string, unknown>;
+  if (
+    typeof entry['key'] !== 'string' ||
+    entry['key'].length === 0 ||
+    typeof entry['agentId'] !== 'string' ||
+    entry['agentId'].length === 0
+  ) {
+    return false;
+  }
+  if (entry['type'] === 'started') return true;
+  return entry['type'] === 'result' && Object.hasOwn(entry, 'result');
+}
+
+function validateCheckpoint(checkpoint: JournalCheckpoint): void {
+  if (
+    checkpoint.version !== JOURNAL_FORMAT_VERSION ||
+    checkpoint.keyVersion !== JOURNAL_KEY_VERSION ||
+    !Number.isSafeInteger(checkpoint.byteLength) ||
+    checkpoint.byteLength < 0 ||
+    !/^[0-9a-f]{64}$/.test(checkpoint.sha256) ||
+    (checkpoint.integrity !== 'complete' && checkpoint.integrity !== 'failed')
+  ) {
+    throw new Error('Invalid workflow journal checkpoint');
+  }
+  if (checkpoint.integrity !== 'complete') {
+    throw new Error(
+      `Workflow journal checkpoint integrity failed${checkpoint.error ? `: ${checkpoint.error}` : ''}`,
+    );
+  }
+}
+
+function parseCommittedEntries(bytes: Buffer): JournalEntry[] {
+  if (bytes.byteLength === 0) return [];
+  if (bytes[bytes.byteLength - 1] !== 0x0a) {
+    throw new Error('Invalid workflow journal: committed line is truncated');
+  }
+  const lines = bytes.toString('utf8').split('\n');
+  lines.pop();
+  return lines.map((line, index) => {
+    if (line.length === 0) {
+      throw new Error(`Invalid workflow journal entry at line ${index + 1}`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new Error(`Invalid workflow journal JSON at line ${index + 1}`);
+    }
+    if (!isJournalEntry(parsed)) {
+      throw new Error(`Invalid workflow journal entry at line ${index + 1}`);
+    }
+    return parsed;
+  });
+}
+
+interface JournalParentGuard {
+  assertUnchanged(): void;
+}
+
+function assertSafeJournalFile(stat: Stats, journalPath: string): void {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new Error(`Unsafe workflow journal path: ${journalPath}`);
+  }
+}
+
+function assertSameJournalFile(
+  expected: Stats,
+  actual: Stats,
+  journalPath: string,
+): void {
+  if (expected.dev !== actual.dev || expected.ino !== actual.ino) {
+    throw new Error(`Workflow journal path changed: ${journalPath}`);
+  }
+}
+
+async function guardJournalParents(
+  journalPath: string,
+  create: boolean,
+): Promise<JournalParentGuard | undefined> {
+  const runDir = path.dirname(journalPath);
+  const root = path.dirname(runDir);
+  if (create) {
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  }
+  let rootStat;
+  try {
+    rootStat = await fs.lstat(root);
+  } catch (error) {
+    if (!create && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`Unsafe workflow journal root: ${root}`);
+  }
+  if (create) {
+    await fs.mkdir(runDir, { mode: 0o700 }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    });
+  }
+  let runStat;
+  try {
+    runStat = await fs.lstat(runDir);
+  } catch (error) {
+    if (!create && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  if (!runStat.isDirectory() || runStat.isSymbolicLink()) {
+    throw new Error(`Unsafe workflow journal directory: ${runDir}`);
+  }
+  const [realRoot, realRunDir] = await Promise.all([
+    fs.realpath(root),
+    fs.realpath(runDir),
+  ]);
+  if (path.dirname(realRunDir) !== realRoot) {
+    throw new Error(`Workflow journal directory escapes its root: ${runDir}`);
+  }
+  const rootIdentity = { dev: rootStat.dev, ino: rootStat.ino, realRoot };
+  const runIdentity = { dev: runStat.dev, ino: runStat.ino, realRunDir };
+  return {
+    assertUnchanged(): void {
+      const currentRoot = lstatSync(root);
+      const currentRun = lstatSync(runDir);
+      if (
+        currentRoot.isSymbolicLink() ||
+        !currentRoot.isDirectory() ||
+        currentRoot.dev !== rootIdentity.dev ||
+        currentRoot.ino !== rootIdentity.ino ||
+        realpathSync(root) !== rootIdentity.realRoot ||
+        currentRun.isSymbolicLink() ||
+        !currentRun.isDirectory() ||
+        currentRun.dev !== runIdentity.dev ||
+        currentRun.ino !== runIdentity.ino ||
+        realpathSync(runDir) !== runIdentity.realRunDir
+      ) {
+        throw new Error(`Workflow journal parent changed: ${runDir}`);
+      }
+    },
+  };
+}
+
+async function guardJournalTarget(
+  journalPath: string,
+): Promise<JournalParentGuard> {
+  let expected: Stats | undefined;
+  try {
+    expected = await fs.lstat(journalPath);
+    assertSafeJournalFile(expected, journalPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  return {
+    assertUnchanged(): void {
+      let current: Stats | undefined;
+      try {
+        current = lstatSync(journalPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (!expected && !current) return;
+      if (!expected || !current) {
+        throw new Error(`Workflow journal path changed: ${journalPath}`);
+      }
+      assertSafeJournalFile(current, journalPath);
+      assertSameJournalFile(expected, current, journalPath);
+    },
+  };
+}
+
+async function readJournalBytes(journalPath: string): Promise<Buffer> {
+  const guard = await guardJournalParents(journalPath, false);
+  if (!guard) return Buffer.alloc(0);
+  let before: Stats;
+  try {
+    before = await fs.lstat(journalPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      guard.assertUnchanged();
+      return Buffer.alloc(0);
+    }
+    throw error;
+  }
+  assertSafeJournalFile(before, journalPath);
+  let handle;
+  try {
+    handle = await fs.open(
+      journalPath,
+      fsConstants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      guard.assertUnchanged();
+      return Buffer.alloc(0);
+    }
+    throw error;
+  }
+  try {
+    guard.assertUnchanged();
+    const [opened, current] = await Promise.all([
+      handle.stat(),
+      fs.lstat(journalPath),
+    ]);
+    assertSafeJournalFile(opened, journalPath);
+    assertSafeJournalFile(current, journalPath);
+    assertSameJournalFile(before, current, journalPath);
+    assertSameJournalFile(opened, current, journalPath);
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function appendJournalLine(
+  journalPath: string,
+  entry: JournalEntry,
+): Promise<void> {
+  const guard = await guardJournalParents(journalPath, true);
+  if (!guard) throw new Error(`Workflow journal directory is unavailable.`);
+  let before: Stats | undefined;
+  try {
+    before = await fs.lstat(journalPath);
+    assertSafeJournalFile(before, journalPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const handle = await fs.open(
+    journalPath,
+    fsConstants.O_APPEND |
+      fsConstants.O_WRONLY |
+      (before ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL) |
+      (process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW),
+    0o600,
+  );
+  try {
+    guard.assertUnchanged();
+    const [opened, current] = await Promise.all([
+      handle.stat(),
+      fs.lstat(journalPath),
+    ]);
+    assertSafeJournalFile(opened, journalPath);
+    assertSafeJournalFile(current, journalPath);
+    if (before) assertSameJournalFile(before, current, journalPath);
+    assertSameJournalFile(opened, current, journalPath);
+    await handle.chmod(0o600);
+    await handle.writeFile(Buffer.from(`${JSON.stringify(entry)}\n`, 'utf8'));
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readCommittedPrefix(
+  journalPath: string,
+  checkpoint: JournalCheckpoint,
+): Promise<{ bytes: Buffer; committed: Buffer; replay: JournalReplay }> {
+  validateCheckpoint(checkpoint);
+  let bytes: Buffer;
+  try {
+    bytes = await readJournalBytes(journalPath);
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === 'ENOENT' &&
+      checkpoint.byteLength === 0
+    ) {
+      bytes = Buffer.alloc(0);
+    } else {
+      throw new Error(`Workflow journal is truncated: ${errorMessage(error)}`);
+    }
+  }
+  if (bytes.byteLength < checkpoint.byteLength) {
+    throw new Error(
+      `Workflow journal is truncated: expected ${checkpoint.byteLength} bytes, got ${bytes.byteLength}`,
+    );
+  }
+  const committed = bytes.subarray(0, checkpoint.byteLength);
+  const sha256 = createHash('sha256').update(committed).digest('hex');
+  if (sha256 !== checkpoint.sha256) {
+    throw new Error('Workflow journal checkpoint hash mismatch');
+  }
+  return {
+    bytes,
+    committed,
+    replay: buildReplay(parseCommittedEntries(committed)),
+  };
+}
+
 /**
  * Append-only JSONL journal for one workflow run. Reads tolerate a missing
  * file (fresh run); appends are fire-and-forget at the call site (the
@@ -168,12 +487,28 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
  * failure must not fail the dispatch).
  */
 export class WorkflowJournal {
+  private tail: Promise<void> = Promise.resolve();
+  private writeError?: string;
+  private resumeCheckpoint?: JournalCheckpoint;
+
   constructor(readonly path: string) {}
 
   /** Load + parse all entries into replay maps. Empty maps if no file. */
-  async load(): Promise<JournalReplay> {
+  async load(checkpoint?: JournalCheckpoint): Promise<JournalReplay> {
+    if (checkpoint) {
+      const { replay } = await readCommittedPrefix(this.path, checkpoint);
+      this.resumeCheckpoint = { ...checkpoint };
+      return replay;
+    }
     try {
-      const entries = await read<JournalEntry>(this.path);
+      const entries = (await readJournalBytes(this.path))
+        .toString('utf8')
+        .split('\n')
+        .flatMap((line) =>
+          line.trim().length === 0
+            ? []
+            : parseLineTolerant<JournalEntry>(line.trim(), this.path),
+        );
       return buildReplay(entries);
     } catch (e) {
       debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
@@ -183,6 +518,70 @@ export class WorkflowJournal {
 
   /** Append one entry. Rejects only on I/O error (callers `.catch`). */
   append(entry: JournalEntry): Promise<void> {
-    return writeLine(this.path, entry);
+    const write = this.tail.then(async () => {
+      await this.discardUncommittedSuffix();
+      await appendJournalLine(this.path, entry);
+    });
+    this.tail = write.catch((error: unknown) => {
+      this.writeError ??= errorMessage(error);
+    });
+    return write;
+  }
+
+  /** Flush all preceding appends and describe their durable file prefix. */
+  flush(): Promise<JournalCheckpoint> {
+    const checkpoint = this.tail.then(async (): Promise<JournalCheckpoint> => {
+      let bytes = Buffer.alloc(0);
+      let flushError: string | undefined;
+      try {
+        await this.discardUncommittedSuffix();
+        bytes = await readJournalBytes(this.path);
+      } catch (error) {
+        flushError = errorMessage(error);
+      }
+      const error = this.writeError ?? flushError;
+      return {
+        version: JOURNAL_FORMAT_VERSION,
+        keyVersion: JOURNAL_KEY_VERSION,
+        byteLength: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        integrity: error ? ('failed' as const) : ('complete' as const),
+        ...(error ? { error } : {}),
+      };
+    });
+    this.tail = checkpoint.then(
+      () => undefined,
+      (error: unknown) => {
+        this.writeError ??= errorMessage(error);
+      },
+    );
+    return checkpoint;
+  }
+
+  private async discardUncommittedSuffix(): Promise<void> {
+    const checkpoint = this.resumeCheckpoint;
+    if (!checkpoint) return;
+    const targetGuard = await guardJournalTarget(this.path);
+    const { bytes, committed } = await readCommittedPrefix(
+      this.path,
+      checkpoint,
+    );
+    targetGuard.assertUnchanged();
+    if (bytes.byteLength > checkpoint.byteLength) {
+      const guard = await guardJournalParents(this.path, false);
+      if (!guard) {
+        throw new Error('Workflow journal directory is unavailable.');
+      }
+      await atomicWriteFile(this.path, committed, {
+        noFollow: true,
+        mode: 0o600,
+        forceMode: true,
+        assertCanCommit: () => {
+          guard.assertUnchanged();
+          targetGuard.assertUnchanged();
+        },
+      });
+    }
+    this.resumeCheckpoint = undefined;
   }
 }

@@ -50,6 +50,50 @@ describe('WorkflowDispatchScheduler', () => {
     expect(scheduler.resume()).toBe(false);
   });
 
+  it('publishes paused only after the durable checkpoint barrier settles', async () => {
+    let releaseCheckpoint: (() => void) | undefined;
+    const checkpoint = new Promise<void>((resolve) => {
+      releaseCheckpoint = resolve;
+    });
+    const states: string[] = [];
+    const beforePaused = vi.fn(() => checkpoint);
+    const scheduler = new WorkflowDispatchScheduler(
+      1,
+      undefined,
+      (snapshot) => states.push(snapshot.state),
+      beforePaused,
+    );
+
+    expect(scheduler.pause()).toBe(true);
+    await vi.waitFor(() => expect(beforePaused).toHaveBeenCalledOnce());
+    expect(scheduler.snapshot().state).toBe('pausing');
+    expect(states).toEqual(['pausing']);
+
+    releaseCheckpoint?.();
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    expect(states).toEqual(['pausing', 'paused']);
+  });
+
+  it('does not publish paused when the durable checkpoint barrier fails', async () => {
+    const beforePaused = vi.fn(async () => {
+      throw new Error('checkpoint write failed');
+    });
+    const states: string[] = [];
+    const scheduler = new WorkflowDispatchScheduler(
+      1,
+      undefined,
+      (snapshot) => states.push(snapshot.state),
+      beforePaused,
+    );
+
+    expect(scheduler.pause()).toBe(true);
+    await vi.waitFor(() => expect(beforePaused).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(scheduler.snapshot().state).toBe('pausing');
+    expect(states).toEqual(['pausing']);
+  });
+
   it('stops dequeuing and holds a completed result gate until resume', async () => {
     const states: string[] = [];
     const scheduler = new WorkflowDispatchScheduler(1, undefined, (snapshot) =>

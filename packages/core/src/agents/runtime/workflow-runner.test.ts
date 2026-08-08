@@ -17,10 +17,14 @@ import { WorkflowRunner } from './workflow-runner.js';
 const {
   createProductionDispatchMock,
   logWorkflowRunMock,
+  readWorkflowManifestMock,
+  writeWorkflowManifestMock,
   writeWorkflowSnapshotMock,
 } = vi.hoisted(() => ({
   createProductionDispatchMock: vi.fn(),
   logWorkflowRunMock: vi.fn(),
+  readWorkflowManifestMock: vi.fn(),
+  writeWorkflowManifestMock: vi.fn().mockResolvedValue(undefined),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -29,6 +33,8 @@ vi.mock('../../telemetry/loggers.js', () => ({
 }));
 
 vi.mock('../workflow-snapshot.js', () => ({
+  readWorkflowManifest: readWorkflowManifestMock,
+  writeWorkflowManifest: writeWorkflowManifestMock,
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
 }));
 
@@ -79,6 +85,8 @@ describe('WorkflowRunner', () => {
   beforeEach(() => {
     createProductionDispatchMock.mockReset();
     logWorkflowRunMock.mockClear();
+    readWorkflowManifestMock.mockReset();
+    writeWorkflowManifestMock.mockClear();
     writeWorkflowSnapshotMock.mockClear();
   });
 
@@ -545,20 +553,19 @@ describe('WorkflowRunner', () => {
 
   it('rejects a concurrent resume while the original run is active', async () => {
     const { config, registry } = configWithRegistry();
-    const runId = 'wf_1234abcd';
     let resolveDispatch: ((value: string) => void) | undefined;
     const original = await WorkflowRunner.start({
       config,
       signal: new AbortController().signal,
       script: 'return await agent("original")',
       args: undefined,
-      resumeFromRunId: runId,
       runInBackground: true,
       dispatch: () =>
         new Promise<string>((resolve) => {
           resolveDispatch = resolve;
         }),
     });
+    const runId = original.runId;
     await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
     const replacementCaller = new AbortController();
     const replacementDispatch = vi.fn(async () => 'replacement');
