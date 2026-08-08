@@ -1709,6 +1709,16 @@ export class Session implements SessionContext {
         turn,
       );
     } catch (error) {
+      // `prompt()` can reject before reaching the try whose finally settles
+      // the turn -- `assertCanStartTurn` throwing 'Session is closing', or
+      // the recording write barrier throwing. The turn is already shifted
+      // off `goalQueue` at that point, so without settling here the runtime
+      // keeps `currentPermit` and `activity: 'running'` forever: no further
+      // continuations get scheduled, and every later prompt with an active
+      // goal hangs in `claimGoalTurn` behind the leaked permit. Settling is
+      // safe to repeat -- it no-ops once the permit is no longer current,
+      // and it swallows its own errors.
+      await this.#settleGoalTurn(turn, undefined, true);
       debugLogger.warn(
         `ACP Goal turn failed: ${
           error instanceof Error ? error.message : String(error)
@@ -1742,11 +1752,22 @@ export class Session implements SessionContext {
       const cancelledByUser =
         result?.stopReason === 'cancelled' &&
         turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
+      // A turn preempted by a newly arrived user prompt is a handoff, not a
+      // failure. `this.pendingPrompt` is the goal turn's own controller while
+      // a goal turn is in flight, so a new prompt aborts it with
+      // NEW_PROMPT_ABORT_REASON -- and whether that abort surfaced as a clean
+      // `cancelled` stop reason or as a throw from the model network await is
+      // pure timing. Without this, the same user action persists the goal as
+      // either active-with-handoff or paused depending on where the abort
+      // landed, and the paused branch silently stops the autonomous loop.
+      const supersededByNewPrompt =
+        turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON;
       const shouldPause =
-        failed ||
-        result?.stopReason === 'max_tokens' ||
-        cancelledByUser ||
-        turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON;
+        !supersededByNewPrompt &&
+        (failed ||
+          result?.stopReason === 'max_tokens' ||
+          cancelledByUser ||
+          turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON);
       if (shouldPause && runtime.getSnapshot().goal?.status === 'active') {
         await runtime.dispatch({
           action: 'pause',

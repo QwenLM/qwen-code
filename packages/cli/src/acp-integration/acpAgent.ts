@@ -92,6 +92,9 @@ import {
   refreshMemoryInstruction,
   extractDaemonTraceContext,
   withDaemonSpan,
+  GOAL_STATE_VERSION,
+  GoalPersistenceUnavailableError,
+  type GoalSnapshotV2,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -491,6 +494,18 @@ function mapSessionWriterRequestError(error: unknown): unknown {
         errorKind: writerError.errorKind,
       })
     : error;
+}
+
+/**
+ * What a session with no reachable Goal runtime looks like on the wire.
+ *
+ * `getGoalRuntimeReady()` rejects when goal persistence is unavailable —
+ * permanently, once a malformed transcript record has set a sticky recovery
+ * error. The honest answer for goal get/clear is "no goal", not a failed
+ * request: the caller asked what the goal is, and the answer is nothing.
+ */
+function emptyGoalSnapshot(): GoalSnapshotV2 {
+  return { v: GOAL_STATE_VERSION, goal: null, activity: 'idle' };
 }
 
 async function shutdownSessionConfig(config: Config): Promise<void> {
@@ -10215,7 +10230,24 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const runtime = await config.getGoalRuntimeReady();
+        let runtime;
+        try {
+          runtime = await config.getGoalRuntimeReady();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // No persistence means no goal to clear. Answering honestly beats
+          // failing the request: `general.chatRecording: false` is a config
+          // choice, and a sticky `recoveryError` from a malformed transcript
+          // record would otherwise break clear for this session forever.
+          debugLogger.info(
+            `sessionGoalClear sessionId=${sessionId} cleared=false (goal persistence unavailable)`,
+          );
+          return {
+            cleared: false,
+            condition: undefined,
+            snapshot: emptyGoalSnapshot(),
+          };
+        }
         const before = runtime.getSnapshot();
         const goal = before.goal;
         const response = goal
@@ -10243,9 +10275,19 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const snapshot = (
-          await session.getConfig().getGoalRuntimeReady()
-        ).getSnapshot();
+        let snapshot: GoalSnapshotV2;
+        try {
+          snapshot = (
+            await session.getConfig().getGoalRuntimeReady()
+          ).getSnapshot();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // A session that cannot persist goals has no goal, which is a
+          // perfectly describable state. Rejecting instead would make
+          // `GET /goals` drop this session on every poll and report it as
+          // unreachable, which reads as a wedged child rather than a config.
+          snapshot = emptyGoalSnapshot();
+        }
         const activeGoal =
           snapshot.goal?.status === 'active' ? snapshot.goal : null;
         return {

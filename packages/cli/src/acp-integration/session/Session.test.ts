@@ -447,6 +447,7 @@ describe('Session', () => {
     permitForTurn: ReturnType<typeof vi.fn>;
     getVerifierFeedback: ReturnType<typeof vi.fn>;
     finishTurn: ReturnType<typeof vi.fn>;
+    dispatch: ReturnType<typeof vi.fn>;
   };
   let boundGoalHost: core.GoalTurnHost | undefined;
 
@@ -645,6 +646,11 @@ describe('Session', () => {
       permitForTurn: vi.fn(),
       getVerifierFeedback: vi.fn(),
       finishTurn: vi.fn().mockResolvedValue(undefined),
+      // Present so settlement branches that pause the goal are assertable;
+      // without it a pause throws inside #settleGoalTurn and is swallowed.
+      dispatch: vi.fn().mockResolvedValue({
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      }),
     };
     boundGoalHost = undefined;
     mockFileHistoryService = {
@@ -13515,6 +13521,57 @@ describe('Session', () => {
         ).not.toHaveBeenCalled();
       });
 
+      it('releases the permit when the prompt rejects before the model starts', async () => {
+        // `prompt()` can reject before reaching the try whose finally settles
+        // the turn. The turn is already off `goalQueue` by then, so failing to
+        // settle here would strand the runtime's permit: `activity` stays
+        // 'running' forever and every later goal prompt hangs behind it.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-rejected',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-rejected' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(
+          new Error('Session is closing'),
+        );
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+            'goal-runtime:turn-rejected',
+          );
+        });
+        // The model never ran, so this is a release, not a completed turn.
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
       it('drains a queued Goal turn after a background notification settles', async () => {
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',
@@ -13741,6 +13798,120 @@ describe('Session', () => {
           automaticPermit,
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+      });
+
+      it('hands off a preempted Goal turn whose stream throws on abort', async () => {
+        // Same user action as the test above, but the preempted stream
+        // rejects out of the model network await instead of ending cleanly --
+        // which is what geminiChat actually does. Where the abort lands is
+        // pure timing, so both spellings have to settle the same way: a
+        // handoff via finishTurn, never a pause. Pausing here would persist
+        // the goal as paused and silently stop the autonomous loop.
+        session.dispose();
+        const automaticPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'automatic-turn',
+        };
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn',
+        };
+        let currentTurnKey = 'goal-runtime:automatic-turn';
+        let queuedTurnKey: string | undefined;
+        const listeners: Array<() => void> = [];
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.subscribe.mockImplementation((listener: () => void) => {
+          listeners.push(listener);
+          return () => {
+            const index = listeners.indexOf(listener);
+            if (index >= 0) listeners.splice(index, 1);
+          };
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === currentTurnKey
+            ? currentTurnKey.startsWith('goal-runtime:')
+              ? automaticPermit
+              : userPermit
+            : undefined,
+        );
+        mockGoalRuntime.beginTurn.mockImplementation((turnKey: string) => {
+          queuedTurnKey = turnKey;
+          return undefined;
+        });
+        mockGoalRuntime.finishTurn.mockImplementation(async (permit) => {
+          if (permit.turnId === automaticPermit.turnId) {
+            currentTurnKey = queuedTurnKey!;
+            queuedTurnKey = undefined;
+            for (const listener of [...listeners]) listener();
+          }
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            async (
+              _model,
+              request: { config: { abortSignal: AbortSignal } },
+            ) => {
+              if (!request.config.abortSignal.aborted) {
+                await new Promise<void>((resolve) =>
+                  request.config.abortSignal.addEventListener(
+                    'abort',
+                    () => resolve(),
+                    { once: true },
+                  ),
+                );
+              }
+              // The one difference from the sibling test: the abort lands
+              // inside the model network await, so geminiChat rejects instead
+              // of handing back a stream that ends cleanly.
+              throw Object.assign(new Error('The operation was aborted'), {
+                name: 'AbortError',
+              });
+            },
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit: automaticPermit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
+          automaticPermit,
+        );
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'pause' }),
+        );
       });
     });
 

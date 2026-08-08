@@ -191,6 +191,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       .parseInvocationContext,
   ),
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
+  GOAL_STATE_VERSION: 2,
+  // The real class: `acpAgent` narrows on it with `instanceof`, so a stand-in
+  // would make the goal get/clear fallbacks untestable.
+  GoalPersistenceUnavailableError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).GoalPersistenceUnavailableError,
   normalizeEventPayload: vi.fn((payload: unknown) =>
     typeof payload === 'object' &&
     payload !== null &&
@@ -860,6 +866,7 @@ import {
   mcpServerRequiresOAuth,
   APPROVAL_MODES,
   ToolNames,
+  GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { SESSION_SOURCE_META_KEY } from '@qwen-code/acp-bridge';
@@ -8835,6 +8842,113 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         lastReason: 'one test still fails',
       },
     });
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('answers goal get with an empty snapshot when persistence is unavailable', async () => {
+    // `general.chatRecording: false`, or a sticky recoveryError from a
+    // malformed transcript record, makes `getGoalRuntimeReady()` reject --
+    // permanently, in the latter case. Rejecting the request would make
+    // `GET /goals` drop this session on every poll and report it as
+    // unreachable, which reads as a wedged child rather than a config state.
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new GoalPersistenceUnavailableError()),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, { sessionId }),
+    ).resolves.toEqual({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+      active: null,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('answers goal clear with cleared=false when persistence is unavailable', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new GoalPersistenceUnavailableError()),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalClear, {
+        sessionId,
+      }),
+    ).resolves.toEqual({
+      cleared: false,
+      condition: undefined,
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still propagates a non-persistence failure from goal get', async () => {
+    // Only `GoalPersistenceUnavailableError` means "no goal to report". A
+    // different failure is a real fault and must not be flattened into an
+    // empty snapshot.
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new Error('journal disk failure')),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalGet, { sessionId }),
+    ).rejects.toThrow('journal disk failure');
+
     mockConnectionState.resolve();
     await agentPromise;
   });
