@@ -38,16 +38,21 @@ export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
 }
 
 /**
- * Pill label: prefer live running counts, then paused resumable agent counts;
+ * Pill label: prefer live running counts and active workflows, then paused resumable agent counts;
  * once everything is terminal, switch to a generic "done" form so the pill
  * still invites reopening the dialog to inspect final state.
  */
 export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (entries.length === 0) return '';
 
-  const running = entries.filter((e) => e.status === 'running');
-  if (running.length > 0) {
-    return groupAndFormat(running);
+  const live = entries.filter(
+    (e) =>
+      e.status === 'running' ||
+      (e.kind === 'workflow' &&
+        (e.status === 'pausing' || e.status === 'paused')),
+  );
+  if (live.length > 0) {
+    return groupAndFormat(live);
   }
   const pausedAgents = entries.filter(
     (e): e is Extract<DialogEntry, { kind: 'agent' }> =>

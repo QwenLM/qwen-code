@@ -54,7 +54,7 @@ function retryLoopSource() {
 
 // Drive the extracted loop with a stub qwen whose stream-json `result` event is
 // scripted per attempt, plus stub timeout/sleep so the test is instant.
-function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
+function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'review-retry-'));
   try {
     const bin = join(dir, 'bin');
@@ -71,9 +71,21 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
     // timeout: record the per-attempt duration (`$2`, e.g. `10800s`) so tests
     // can assert the budget each attempt was given, then drop
     // `--kill-after=Xs` and that duration and exec the rest.
+    // `timeout_kill` dies before the agent ever runs; `timeout_partial_line`
+    // lets it stream first and only then reports 124, which is what a real
+    // `--kill-after` SIGKILL looks like: output already on stdout, cut off
+    // mid-line.
     write(
       'timeout',
-      '#!/bin/bash\necho "$2" >> "$DUR"\nif [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi\nshift\nshift\nexec "$@"\n',
+      [
+        '#!/bin/bash',
+        'echo "$2" >> "$DUR"',
+        'if [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi',
+        'shift',
+        'shift',
+        'if [ "${SCENARIO:-}" = "timeout_partial_line" ]; then "$@"; exit 124; fi',
+        'exec "$@"',
+      ].join('\n') + '\n',
     );
     write('sleep', '#!/bin/bash\nexit 0\n');
     write(
@@ -97,6 +109,13 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         '  success_mentions_api_error) PAD=$(printf "x%.0s" $(seq 1 600)); r success false "This PR detects the [API Error: ...] pattern and routes to retry. quota and rate.?limit keywords cover the common messages. ${PAD} Review complete: COMMENT posted (0 Critical, 1 Suggestion inline)." ;;',
         '  success_quotes_status_code) PAD=$(printf "x%.0s" $(seq 1 700)); r success false "This PR adds retry for [API Error: 429 quota exceeded] and similar. ${PAD} Verdict: COMMENT, 0 Critical." ;;',
         '  success_ends_with_bracket) r success false "Review of [API Error: 429 quota exhausted] handling. Checklist: - [x]" ;;',
+        // A transcript that quotes a file containing a workflow command. The
+        // real case: reviewing a PR that touches actions/setup-node, the agent
+        // read that action's main.ts, which contains `##[add-matcher]...`.
+        '  workflow_command) printf \'{"type":"assistant","content":"90-    const matchersPath = ...\\n91-    core.info(`##[add-matcher]${path.join(matchersPath, \\x27tsc.json\\x27)}`);"}\\n\'; r success false "Review complete: COMMENT posted (0 Critical)." ;;',
+        // Killed mid-write: the last line reaches stdout WITHOUT its newline,
+        // so whatever the step prints next lands on the same line.
+        '  timeout_partial_line) printf \'{"type":"assistant","content":"90-    core.info(`##[add-matcher]x`);"}\\n{"type":"assistant","content":"91- trunc\' ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -106,7 +125,7 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
     const harness = [
       'set -euo pipefail',
       `QWEN_TIMEOUT=${timeoutMinutes}; MODEL_ARGS=(--model x); PROMPT="/review x"`,
-      `LOG_PATH="${join(dir, 'log')}"`,
+      `LOG_PATH="${logPath ?? join(dir, 'log')}"`,
       `GITHUB_OUTPUT="${join(dir, 'gho')}"; GITHUB_STEP_SUMMARY="${join(dir, 'gss')}"`,
       ': > "$GITHUB_OUTPUT"; : > "$GITHUB_STEP_SUMMARY"',
       'fail(){ echo "FAIL kind=[${3:-}] reason=[$1]"; exit "${2:-1}"; }',
@@ -140,6 +159,9 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
       .map((d) => Number.parseInt(d, 10));
     return {
       line,
+      // The whole transcript, so the stop-commands bracket around the agent
+      // can be checked in the order the runner would see it.
+      raw: stdout,
       attempts: Number(readFileSync(attemptFile, 'utf8').trim()),
       durations,
     };
@@ -147,6 +169,131 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe('qwen pr review workflow-command containment', () => {
+  // The agent streams its whole transcript to stdout and the runner scans every
+  // line for workflow commands, so a tool result that quotes a file containing
+  // one gets EXECUTED. Observed on run 31167034020 (PR #8681): the agent read
+  // actions/setup-node's main.ts, whose `core.info(\`##[add-matcher]...\`)`
+  // made the runner take the rest of the JSON line as a matcher path — three
+  // `Unable to process command` errors and 1h37m of review work discarded.
+  // The runner matches `::cmd::` at the start of a line only, so both ends of
+  // the bracket are located as WHOLE lines — a resume glued onto a partial
+  // transcript line is inert text, and finding it by substring would report a
+  // bracket the runner never closed.
+  const bracketOf = (raw) => {
+    const lines = raw.split('\n');
+    const stopIdx = lines.findIndex((l) => l.startsWith('::stop-commands::'));
+    const token =
+      stopIdx === -1
+        ? undefined
+        : lines[stopIdx].slice('::stop-commands::'.length);
+    return {
+      token,
+      lines,
+      stopAt: stopIdx === -1 ? -1 : raw.indexOf(lines[stopIdx]),
+      resumeAt: token ? raw.indexOf(`\n::${token}::\n`) : -1,
+    };
+  };
+
+  it('brackets the agent transcript so a quoted command is inert', () => {
+    const r = runScenario('workflow_command');
+    // The review still succeeds — containment must not change the outcome.
+    expect(r.line).toContain('OK outcome=success');
+
+    const { token, stopAt, resumeAt } = bracketOf(r.raw);
+    expect(token).toBeTruthy();
+    // A fixed token could be re-enabled by anything the agent chose to print.
+    expect(token).not.toBe('stop-commands');
+    expect(token.length).toBeGreaterThan(16);
+
+    // The dangerous line must land strictly INSIDE the bracket.
+    const injected = r.raw.indexOf('##[add-matcher]');
+    expect(injected).toBeGreaterThan(stopAt);
+    expect(resumeAt).toBeGreaterThan(injected);
+  });
+
+  it('resumes command parsing on every agent outcome', () => {
+    // Left off, the rest of the job goes silent: its own ::error:: and the
+    // fallback comment's diagnostics would stop reaching the log — turning one
+    // broken review into an unexplained one. The failure paths are the ones
+    // that matter, since they are what still needs to report.
+    for (const scenario of ['success', 'hardexit', 'timeout_kill']) {
+      const { token, resumeAt } = bracketOf(runScenario(scenario).raw);
+      expect(token, scenario).toBeTruthy();
+      expect(resumeAt, scenario).toBeGreaterThan(-1);
+    }
+  });
+
+  it('resumes on its own line when the agent is killed mid-write', () => {
+    // `--kill-after` SIGKILLs the agent, so its last stream-json line can reach
+    // stdout without a trailing newline. An `echo`d resume would be appended to
+    // that fragment, where the runner never sees it at a line start: parsing
+    // stays off for the remainder of the job — losing the retry `::warning::`
+    // and every later diagnostic — on the exact path the guard exists for.
+    const r = runScenario('timeout_partial_line');
+    expect(r.line).toContain('FAIL kind=[timeout]');
+
+    const { token, lines } = bracketOf(r.raw);
+    expect(token).toBeTruthy();
+    // The agent's truncated line really is truncated, or this proves nothing.
+    expect(lines.some((l) => l.endsWith('"91- trunc'))).toBe(true);
+    expect(lines).toContain(`::${token}::`);
+  });
+
+  it('resumes command parsing when the log write fails', () => {
+    // The tee-failure branch returns before every other check, so a resume
+    // relocated past it would leave parsing off exactly when the step still has
+    // to report why it failed.
+    const r = runScenario('success', {
+      logPath: join(sep, 'nonexistent-qwen-review-dir', 'log'),
+    });
+    expect(r.line).toContain('Failed to write qwen review log');
+    const { token, resumeAt } = bracketOf(r.raw);
+    expect(token).toBeTruthy();
+    expect(resumeAt).toBeGreaterThan(-1);
+  });
+
+  it('opens a fresh bracket for every attempt', () => {
+    // Hoisting the stop echo and token out of `run_review_once` would still
+    // pass every single-attempt test, but attempt 2 would then run unbracketed
+    // under a token the runner has already consumed.
+    const r = runScenario('transient_then_success');
+    expect(r.attempts).toBe(2);
+    const tokens = r.raw
+      .split('\n')
+      .filter((l) => l.startsWith('::stop-commands::'))
+      .map((l) => l.slice('::stop-commands::'.length));
+    expect(tokens).toHaveLength(2);
+    // Per-attempt randomness: a reused token is one the transcript has already
+    // had the chance to print.
+    expect(new Set(tokens).size).toBe(2);
+    for (const t of tokens) {
+      expect(r.raw.split('\n')).toContain(`::${t}::`);
+    }
+  });
+
+  it('reads the agent exit status before resuming', () => {
+    // `echo` clobbers PIPESTATUS, so a resume placed before the capture would
+    // read the echo's status instead of the agent's and report every timeout
+    // or crash as a clean run. Pinned on the source because the symptom is a
+    // silent misclassification, not a failure.
+    const run = runReviewStep();
+    const capture = run.indexOf('local ps=("${PIPESTATUS[@]}")');
+    const resume = run.indexOf('printf \'\\n::%s::\\n\' "$stop_token"');
+    const stop = run.indexOf('echo "::stop-commands::${stop_token}"');
+    const agent = run.indexOf('--output-format stream-json');
+    // Every anchor is asserted present: `indexOf` returns -1 when a line is
+    // deleted or reworded, and -1 satisfies every ordering comparison below.
+    expect(capture).toBeGreaterThan(-1);
+    expect(resume).toBeGreaterThan(-1);
+    expect(stop).toBeGreaterThan(-1);
+    expect(agent).toBeGreaterThan(-1);
+    expect(resume).toBeGreaterThan(capture);
+    // And the stop must come before the agent it is meant to contain.
+    expect(stop).toBeLessThan(agent);
+  });
+});
 
 describe('qwen pr review transient retry', () => {
   it('does not retry a clean success', () => {
