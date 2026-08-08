@@ -1758,6 +1758,12 @@ describe('handleAtCommand', () => {
         `[omission ${name}: ${reason}]`,
       formatDisclosureText: (name: string, disclosure: string) =>
         `[disclosure ${name}: ${disclosure}]`,
+      // Deterministic stand-in for the shared multi-output materializer:
+      // one marker part per extra. The real builder's output shape is
+      // covered by its core unit tests; these tests pin the wiring (that
+      // the funnel calls it and splices its parts after the primary slot).
+      buildAdditionalMediaParts: (name: string, extras?: unknown[]) =>
+        (extras ?? []).map((_, i) => ({ text: `[extra ${name} ${i}]` })),
       OmniObjectStore: class {
         getOmniRootDir() {
           return path.join(os.tmpdir(), 'omni-at-test');
@@ -1977,6 +1983,59 @@ describe('handleAtCommand', () => {
       expect(
         (result.toolDisplays![0] as { resultDisplay: string }).resultDisplay,
       ).toContain('(degraded by media policy)');
+    });
+
+    it('splices additionalMedia parts after the primary fileData part (multi-output policies)', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+        additionalMedia: [
+          { fileUri: 'oss://bucket/frame2', mimeType: 'image/jpeg' },
+          { fileUri: 'oss://bucket/frame3', mimeType: 'image/jpeg' },
+        ],
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 708,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const fileDataIdx = parts.findIndex((p) => 'fileData' in p);
+      expect(fileDataIdx).toBeGreaterThan(-1);
+      // The materialized extras follow the primary media part directly.
+      expect(parts[fileDataIdx + 1]).toEqual({ text: '[extra clip.mp4 0]' });
+      expect(parts[fileDataIdx + 2]).toEqual({ text: '[extra clip.mp4 1]' });
+    });
+
+    it('splices additionalMedia parts after the omission notice when the primary is withheld', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        omission: { reason: 'video exceeds the transport limit' },
+        additionalMedia: [
+          { fileUri: 'oss://bucket/frame2', mimeType: 'image/jpeg' },
+        ],
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 709,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const omissionIdx = parts.findIndex(
+        (p) =>
+          p['text'] ===
+          '[omission clip.mp4: video exceeds the transport limit]',
+      );
+      expect(omissionIdx).toBeGreaterThan(-1);
+      expect(parts[omissionIdx + 1]).toEqual({ text: '[extra clip.mp4 0]' });
     });
 
     it('ends the turn quietly (shouldProceed=false) on a user abort mid-download', async () => {

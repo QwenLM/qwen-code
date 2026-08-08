@@ -194,6 +194,69 @@ export interface OmniMediaDelivery {
    * after the media Part — or stand alone when the policies omitted the
    * media entirely (`fileUri` is empty and `omission` is absent). */
   transcripts?: Array<{ text: string; disclosure?: string }>;
+  /** Media deliverables beyond the primary one — present when a
+   * multi-output fixed policy (e.g. `omni_extract_keyframes`) produced
+   * more than one media derivative for this source (#8187 多产物投递).
+   * Each entry was uploaded through the same store/upload pipeline as
+   * the primary; an entry that violated the transport limits carries
+   * `omission` instead of a usable `fileUri` (policy design §10.2 —
+   * additional derivatives are already policy products, so a violating
+   * one is withheld rather than re-derived). Callers materialize each
+   * entry as [disclosure?, fileData] (or the omission notice) after the
+   * primary media Part and before any transcripts. */
+  additionalMedia?: OmniAdditionalMediaDelivery[];
+}
+
+/** One extra media deliverable of a multi-output fixed policy. */
+export interface OmniAdditionalMediaDelivery {
+  /** `oss://…` URL; empty iff `omission` is present. */
+  fileUri: string;
+  mimeType: string;
+  sha256: string;
+  /** Disclosure text that must immediately precede this media Part. */
+  disclosure?: string;
+  /** Present when the transport limits rejected this deliverable: it was
+   * NOT uploaded and an explicit-omission text Part stands in its place. */
+  omission?: { reason: string };
+}
+
+/** A Part materialized from an additional media deliverable. */
+export type OmniAdditionalMediaPart =
+  | { text: string }
+  | { fileData: { fileUri: string; mimeType: string; displayName: string } };
+
+/**
+ * Materialize `additionalMedia` as Parts — shared by every delivery
+ * consumer (fileUtils read results, tool-result funnels, the @url funnel)
+ * so the multi-output contract has a single shape: per extra
+ * [disclosure?, fileData] (or [disclosure?, omission text]), placed after
+ * the primary media Part (or its omission/transcript stand-in) and before
+ * any transcript Parts. D8 adjacency applies to each pair independently.
+ */
+export function buildAdditionalMediaParts(
+  displayName: string,
+  additionalMedia: OmniAdditionalMediaDelivery[] | undefined,
+): OmniAdditionalMediaPart[] {
+  const parts: OmniAdditionalMediaPart[] = [];
+  for (const extra of additionalMedia ?? []) {
+    if (extra.disclosure) {
+      parts.push({ text: formatDisclosureText(displayName, extra.disclosure) });
+    }
+    if (extra.omission) {
+      parts.push({
+        text: formatOmissionText(displayName, extra.omission.reason),
+      });
+    } else {
+      parts.push({
+        fileData: {
+          fileUri: extra.fileUri,
+          mimeType: extra.mimeType,
+          displayName,
+        },
+      });
+    }
+  }
+  return parts;
 }
 
 /** Thrown for omni pipeline failures. The pipeline fails closed: callers
@@ -404,6 +467,8 @@ export async function processMediaForOmniDelivery(
       }
     : undefined;
   let final: PolicyDeliveryResource = { filePath, recognized };
+  /** Media deliverables beyond the primary (multi-output fixed policies). */
+  let extraDeliveries: PolicyDeliveryResource[] = [];
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
   // across preprocessing and guard passes; threaded into every return.
   const transcripts: Array<{ text: string; disclosure?: string }> = [];
@@ -460,17 +525,158 @@ export async function processMediaForOmniDelivery(
         transcripts,
       };
     }
-    // The S4 delivery contract is one media Part per source (plus any
-    // transcript text Parts): every degradation tool is 1:1 with
-    // `source: omit`, so a differently-shaped media set means a
-    // configuration this stage does not support yet.
-    if (deliveries.length !== 1) {
+    // The S4 delivery contract keeps ONE primary media Part per source
+    // (plus any transcript text Parts); a multi-output fixed policy
+    // (e.g. omni_extract_keyframes) additionally yields extra media
+    // deliverables, carried in `additionalMedia` and materialized by the
+    // callers as [disclosure?, fileData] pairs after the primary Part
+    // (#8187 多产物投递). Zero media deliverables without transcripts
+    // remains a configuration error.
+    if (deliveries.length === 0) {
       throw new OmniDeliveryError(
-        `Fixed policies produced ${deliveries.length} media deliverables for ${displayName}; exactly one is supported.`,
+        `Fixed policies produced 0 media deliverables for ${displayName}; exactly one is supported.`,
       );
     }
     final = deliveries[0];
+    extraDeliveries = deliveries.slice(1);
   }
+
+  // Hash → upload-cache lookup → store promotion → upload. Shared by the
+  // primary deliverable and every additional media deliverable of a
+  // multi-output policy. Derivatives arrive with their promotion hash;
+  // sources are hashed at call time, after all guards.
+  const model = config.getModel();
+  const uploadResource = async (
+    item: PolicyDeliveryResource,
+    estimate: OmniTokenEstimate,
+  ): Promise<{
+    fileUri: string;
+    sha256: string;
+    deduped: boolean;
+    uploadCacheHit: boolean;
+  }> => {
+    let sha256: string;
+    try {
+      sha256 = item.sha256 ?? (await hashFileSha256(item.filePath, signal));
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw new OmniDeliveryError(
+        `Failed to hash media file ${displayName}: ${sanitizeErrorMessage(err, [item.filePath])}`,
+        { cause: err },
+      );
+    }
+
+    // Cache lookup BEFORE store promotion: a hit means the server already
+    // holds these bytes for this model+endpoint, so neither the local copy
+    // nor the upload is needed (zoom_image reads the original path, not the
+    // store). Checking after putFile would pay a full-file copy per hit.
+    const cachedUrl = await uploadCache.get(sha256, model);
+    if (cachedUrl) {
+      debugLogger.debug(
+        `omni upload cache hit: sha256=${sha256.slice(0, 12)}… model=${model}`,
+      );
+      // No new copy was made: the content is already known to the system
+      // (a prior delivery both stored and uploaded it).
+      return {
+        fileUri: cachedUrl,
+        sha256,
+        deduped: true,
+        uploadCacheHit: true,
+      };
+    }
+
+    const extension = extensionForMime(item.recognized.detectedMimeType);
+    let objectPath: string;
+    let deduped: boolean;
+    try {
+      const put = await store.putFile(item.filePath, sha256, extension, signal);
+      objectPath = put.objectPath;
+      deduped = put.deduped;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw new OmniDeliveryError(
+        `Failed to store media in the omni object store: ` +
+          `${sanitizeErrorMessage(err, [item.filePath, store.getOmniRootDir()])}`,
+        { cause: err },
+      );
+    }
+
+    const uploader = new DashScopeUploader({
+      apiKey: cgc.apiKey ?? '',
+      baseUrl: cgc.baseUrl,
+    });
+    let fileUri: string;
+    try {
+      fileUri = await uploader.uploadFile({
+        filePath: objectPath,
+        model,
+        mimeType: item.recognized.detectedMimeType,
+        signal,
+      });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      // Upload errors can embed the object-store path (spawn/fs failures) —
+      // sanitize with the concrete path AND the store root, since a path with
+      // a space in a segment defeats the pattern pass (segment classes break
+      // at whitespace) and only exact replacement is immune.
+      throw new OmniDeliveryError(
+        sanitizeErrorMessage(err, [objectPath, store.getOmniRootDir()]),
+        { cause: err },
+      );
+    }
+
+    debugLogger.debug(
+      `omni ${item.recognized.modality} delivered: sha256=${sha256.slice(0, 12)}… ` +
+        `size=${item.recognized.sizeBytes} est=${estimate.estimatedTokenCount}(${estimate.status}) ` +
+        `deduped=${deduped} degraded=${item.degraded === true} uri=${fileUri}`,
+    );
+    await uploadCache.put(sha256, model, fileUri);
+    return { fileUri, sha256, deduped, uploadCacheHit: false };
+  };
+
+  // Additional media deliverables (multi-output fixed policies, #8187
+  // 多产物投递): each is judged against the transport limits and uploaded
+  // through the same pipeline as the primary. A violating extra is
+  // explicitly omitted (policy design §10.2) rather than re-derived — it
+  // is already a policy product, and a second derivation pass over
+  // derivatives is out of scope for this stage. Deferred until the
+  // primary's own fate is decided (each return site below calls this
+  // exactly once): the primary uploads first, and a fail-closed throw on
+  // the primary never wastes extra uploads.
+  const processAdditionalMedia = async (): Promise<
+    OmniAdditionalMediaDelivery[] | undefined
+  > => {
+    if (extraDeliveries.length === 0) return undefined;
+    const extras: OmniAdditionalMediaDelivery[] = [];
+    for (const extra of extraDeliveries) {
+      const extraGuard = evaluateTransportLimits(
+        config,
+        extra.recognized,
+        displayName,
+      );
+      if (extraGuard.violation) {
+        debugLogger.debug(
+          `omni additional ${extra.recognized.modality} explicitly omitted (transport guard): ${extraGuard.violation}`,
+        );
+        extras.push({
+          fileUri: '',
+          mimeType: extra.recognized.detectedMimeType,
+          sha256: extra.sha256 ?? '',
+          disclosure: extra.disclosure,
+          omission: { reason: extraGuard.violation },
+        });
+        continue;
+      }
+      const uploaded = await uploadResource(extra, extraGuard.estimate);
+      extras.push({
+        fileUri: uploaded.fileUri,
+        mimeType: extra.recognized.detectedMimeType,
+        sha256: uploaded.sha256,
+        disclosure: extra.disclosure,
+      });
+    }
+    return extras;
+  };
 
   // Transport guard on the FINAL delivery set (decision D1): the bytes
   // and token estimate judged are the ones actually delivered. Stage B:
@@ -538,6 +744,7 @@ export async function processMediaForOmniDelivery(
           disclosure: final.disclosure,
           degraded: true,
           transcripts,
+          additionalMedia: await processAdditionalMedia(),
         };
       }
       if (deliveries.length !== 1) {
@@ -586,106 +793,23 @@ export async function processMediaForOmniDelivery(
       degraded: final.degraded,
       omission: { reason: guard.violation },
       transcripts: transcripts.length > 0 ? transcripts : undefined,
+      additionalMedia: await processAdditionalMedia(),
     };
   }
   const tokenEstimate = guard.estimate;
-
-  // Content hash: identity of the stored object. Derivatives arrive with
-  // their hash from promotion; sources are hashed here, after all guards.
-  let sha256: string;
-  try {
-    sha256 = final.sha256 ?? (await hashFileSha256(final.filePath, signal));
-  } catch (err) {
-    if (signal?.aborted) throw err;
-    throw new OmniDeliveryError(
-      `Failed to hash media file ${displayName}: ${sanitizeErrorMessage(err, [final.filePath])}`,
-      { cause: err },
-    );
-  }
-
-  // Cache lookup BEFORE store promotion: a hit means the server already
-  // holds these bytes for this model+endpoint, so neither the local copy
-  // nor the upload is needed (zoom_image reads the original path, not the
-  // store). Checking after putFile would pay a full-file copy per hit.
-  const model = config.getModel();
-  const cachedUrl = await uploadCache.get(sha256, model);
-  if (cachedUrl) {
-    debugLogger.debug(
-      `omni upload cache hit: sha256=${sha256.slice(0, 12)}… model=${model}`,
-    );
-    return {
-      fileUri: cachedUrl,
-      mimeType: final.recognized.detectedMimeType,
-      sha256,
-      recognized: final.recognized,
-      tokenEstimate,
-      // No new copy was made: the content is already known to the system
-      // (a prior delivery both stored and uploaded it).
-      deduped: true,
-      uploadCacheHit: true,
-      disclosure: final.disclosure,
-      degraded: final.degraded,
-      transcripts: transcripts.length > 0 ? transcripts : undefined,
-    };
-  }
-
-  const extension = extensionForMime(final.recognized.detectedMimeType);
-  let objectPath: string;
-  let deduped: boolean;
-  try {
-    const put = await store.putFile(final.filePath, sha256, extension, signal);
-    objectPath = put.objectPath;
-    deduped = put.deduped;
-  } catch (err) {
-    if (signal?.aborted) throw err;
-    throw new OmniDeliveryError(
-      `Failed to store media in the omni object store: ` +
-        `${sanitizeErrorMessage(err, [final.filePath, store.getOmniRootDir()])}`,
-      { cause: err },
-    );
-  }
-
-  const uploader = new DashScopeUploader({
-    apiKey: cgc.apiKey ?? '',
-    baseUrl: cgc.baseUrl,
-  });
-  let fileUri: string;
-  try {
-    fileUri = await uploader.uploadFile({
-      filePath: objectPath,
-      model,
-      mimeType: final.recognized.detectedMimeType,
-      signal,
-    });
-  } catch (err) {
-    if (signal?.aborted) throw err;
-    // Upload errors can embed the object-store path (spawn/fs failures) —
-    // sanitize with the concrete path AND the store root, since a path with
-    // a space in a segment defeats the pattern pass (segment classes break
-    // at whitespace) and only exact replacement is immune.
-    throw new OmniDeliveryError(
-      sanitizeErrorMessage(err, [objectPath, store.getOmniRootDir()]),
-      { cause: err },
-    );
-  }
-
-  debugLogger.debug(
-    `omni ${final.recognized.modality} delivered: sha256=${sha256.slice(0, 12)}… ` +
-      `size=${final.recognized.sizeBytes} est=${tokenEstimate.estimatedTokenCount}(${tokenEstimate.status}) ` +
-      `deduped=${deduped} degraded=${final.degraded === true} uri=${fileUri}`,
-  );
-  await uploadCache.put(sha256, model, fileUri);
+  const uploaded = await uploadResource(final, tokenEstimate);
   return {
-    fileUri,
+    fileUri: uploaded.fileUri,
     mimeType: final.recognized.detectedMimeType,
-    sha256,
+    sha256: uploaded.sha256,
     recognized: final.recognized,
     tokenEstimate,
-    deduped,
-    uploadCacheHit: false,
+    deduped: uploaded.deduped,
+    uploadCacheHit: uploaded.uploadCacheHit,
     disclosure: final.disclosure,
     degraded: final.degraded,
     transcripts: transcripts.length > 0 ? transcripts : undefined,
+    additionalMedia: await processAdditionalMedia(),
   };
 }
 
@@ -753,6 +877,12 @@ export async function readMediaViaOmniDelivery(params: {
       }
       transcriptParts.push({ text: formatTranscriptText(displayName, t.text) });
     }
+    // Additional media Parts (multi-output fixed policies): materialized
+    // right after the primary media slot in every branch below.
+    const additionalParts = buildAdditionalMediaParts(
+      displayName,
+      delivery.additionalMedia,
+    );
     if (delivery.omission) {
       // Explicit omission (policy design §10.2): the media is withheld and
       // the omission notice text stands in its place. Not an error — the
@@ -762,8 +892,8 @@ export async function readMediaViaOmniDelivery(params: {
       };
       return {
         llmContent:
-          transcriptParts.length > 0
-            ? [omissionPart, ...transcriptParts]
+          transcriptParts.length > 0 || additionalParts.length > 0
+            ? [omissionPart, ...additionalParts, ...transcriptParts]
             : omissionPart.text,
         returnDisplay: `Media omitted by the omni transport guard: ${relativePathForDisplay}`,
         tokenEstimate: delivery.tokenEstimate,
@@ -771,9 +901,10 @@ export async function readMediaViaOmniDelivery(params: {
     }
     if (!delivery.fileUri && transcriptParts.length > 0) {
       // Pure-transcript delivery (§6.2): the policies replaced the media
-      // with text-only deliverables — no media Part is emitted.
+      // with text-only deliverables — no media Part is emitted for the
+      // primary (additional media deliverables, if any, still are).
       return {
-        llmContent: transcriptParts,
+        llmContent: [...additionalParts, ...transcriptParts],
         returnDisplay: `Read ${delivery.recognized.modality} as transcript (omni policy): ${relativePathForDisplay}`,
         tokenEstimate: delivery.tokenEstimate,
       };
@@ -806,6 +937,7 @@ export async function readMediaViaOmniDelivery(params: {
       });
     }
     parts.push(fileDataPart);
+    parts.push(...additionalParts);
     parts.push(...transcriptParts);
     const llmContent = parts.length === 1 ? fileDataPart : parts;
     return {

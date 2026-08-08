@@ -1091,6 +1091,221 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     });
   });
 
+  // ── Multi-output fixed policies (#8187 多产物投递) ───────────────────
+  const FRAME_2_RECOGNIZED = {
+    modality: 'image',
+    detectedMimeType: 'image/jpeg',
+    sizeBytes: 120,
+    metadata: { width: 640, height: 360 },
+  };
+  const FRAME_3_RECOGNIZED = { ...FRAME_2_RECOGNIZED, sizeBytes: 130 };
+
+  function keyframeDeliveries(tmp: string) {
+    return [
+      {
+        filePath: path.join(tmp, 'objects', 'frame1.jpg'),
+        recognized: DEGRADED_RECOGNIZED,
+        sha256: 'b'.repeat(64),
+        disclosure: '帧 1/3',
+        degraded: true,
+      },
+      {
+        filePath: path.join(tmp, 'objects', 'frame2.jpg'),
+        recognized: FRAME_2_RECOGNIZED,
+        sha256: 'd'.repeat(64),
+        disclosure: '帧 2/3',
+        degraded: true,
+      },
+      {
+        filePath: path.join(tmp, 'objects', 'frame3.jpg'),
+        recognized: FRAME_3_RECOGNIZED,
+        sha256: 'e'.repeat(64),
+        disclosure: '帧 3/3',
+        degraded: true,
+      },
+    ];
+  }
+
+  it('uploads every deliverable of a multi-output policy and carries the extras in additionalMedia', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: keyframeDeliveries(tmpDir),
+      records: [],
+      fileDeliveries: [],
+    });
+    const { putFileMock, uploadFileMock, hashFileMock, mod } =
+      await armPipeline(runMock);
+    uploadFileMock
+      .mockResolvedValueOnce('oss://bucket/frame1')
+      .mockResolvedValueOnce('oss://bucket/frame2')
+      .mockResolvedValueOnce('oss://bucket/frame3');
+
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('vid.mp4'),
+      policyConfig(),
+    );
+
+    // Primary = first deliverable; the rest ride in additionalMedia, in
+    // orchestrator order, each with its own URL/hash/disclosure.
+    expect(result.fileUri).toBe('oss://bucket/frame1');
+    expect(result.sha256).toBe('b'.repeat(64));
+    expect(result.additionalMedia).toEqual([
+      {
+        fileUri: 'oss://bucket/frame2',
+        mimeType: 'image/jpeg',
+        sha256: 'd'.repeat(64),
+        disclosure: '帧 2/3',
+      },
+      {
+        fileUri: 'oss://bucket/frame3',
+        mimeType: 'image/jpeg',
+        sha256: 'e'.repeat(64),
+        disclosure: '帧 3/3',
+      },
+    ]);
+    // Every deliverable went through the SAME store→upload pipeline.
+    expect(putFileMock).toHaveBeenCalledTimes(3);
+    expect(uploadFileMock).toHaveBeenCalledTimes(3);
+    // All arrived with promotion hashes — nothing is re-hashed.
+    expect(hashFileMock).not.toHaveBeenCalled();
+  });
+
+  it('explicitly omits an over-cap ADDITIONAL deliverable while the rest deliver', async () => {
+    const deliveries = keyframeDeliveries(tmpDir);
+    deliveries[1] = {
+      ...deliveries[1],
+      recognized: { ...FRAME_2_RECOGNIZED, sizeBytes: 900 },
+    };
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries,
+      records: [],
+      fileDeliveries: [],
+    });
+    const { putFileMock, uploadFileMock, mod } = await armPipeline(runMock);
+
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('vid.mp4'),
+      policyConfig({ maxUploadFileBytes: 500 }),
+    );
+
+    // The violating extra becomes an explicit omission entry (policy
+    // design §10.2 — no re-derivation of derivatives); its neighbors and
+    // the primary are unaffected.
+    expect(result.fileUri).toBe('oss://bucket/degraded');
+    expect(result.additionalMedia).toHaveLength(2);
+    expect(result.additionalMedia![0]).toMatchObject({
+      fileUri: '',
+      sha256: 'd'.repeat(64),
+      disclosure: '帧 2/3',
+    });
+    expect(result.additionalMedia![0].omission?.reason).toContain(
+      '900 bytes > 500 bytes',
+    );
+    expect(result.additionalMedia![1]).toMatchObject({
+      fileUri: 'oss://bucket/degraded',
+      sha256: 'e'.repeat(64),
+    });
+    // The omitted extra never touched the store or the upload channel.
+    expect(putFileMock).toHaveBeenCalledTimes(2);
+    expect(uploadFileMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('readMediaViaOmniDelivery materializes extras as [disclosure, fileData] pairs after the primary and before transcripts', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: keyframeDeliveries(tmpDir),
+      records: [],
+      fileDeliveries: [
+        {
+          filePath: '/tmp/objects/t.txt',
+          role: 'transcript',
+          mimeType: 'text/plain',
+          text: '你好，世界',
+          sha256: 'c'.repeat(64),
+          sizeBytes: 15,
+        },
+      ],
+    });
+    const { uploadFileMock, mod } = await armPipeline(runMock);
+    uploadFileMock
+      .mockResolvedValueOnce('oss://bucket/frame1')
+      .mockResolvedValueOnce('oss://bucket/frame2')
+      .mockResolvedValueOnce('oss://bucket/frame3');
+
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('vid.mp4'),
+      config: policyConfig(),
+      displayName: 'vid.mp4',
+      relativePathForDisplay: 'vid.mp4',
+      expectedModality: 'video',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    // [zoom hint, primary disclosure, primary fileData,
+    //  extra1 disclosure, extra1 fileData, extra2 disclosure,
+    //  extra2 fileData, transcript] — D8 adjacency per pair, transcripts
+    // last.
+    expect(parts.map((p) => ('fileData' in p ? 'media' : 'text'))).toEqual([
+      'text',
+      'text',
+      'media',
+      'text',
+      'media',
+      'text',
+      'media',
+      'text',
+    ]);
+    expect(parts[3]!['text']).toBe('【媒体降质】vid.mp4：帧 2/3');
+    expect(parts[4]).toEqual({
+      fileData: {
+        fileUri: 'oss://bucket/frame2',
+        mimeType: 'image/jpeg',
+        displayName: 'vid.mp4',
+      },
+    });
+    expect(parts[5]!['text']).toBe('【媒体降质】vid.mp4：帧 3/3');
+    expect(parts[6]).toEqual({
+      fileData: {
+        fileUri: 'oss://bucket/frame3',
+        mimeType: 'image/jpeg',
+        displayName: 'vid.mp4',
+      },
+    });
+    expect(parts[7]!['text']).toBe('【媒体转写】vid.mp4：你好，世界');
+  });
+
+  it('readMediaViaOmniDelivery still materializes extras when the PRIMARY is omitted', async () => {
+    const deliveries = keyframeDeliveries(tmpDir).slice(0, 2);
+    deliveries[0] = {
+      ...deliveries[0],
+      recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+    };
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries,
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('vid.mp4'),
+      config: policyConfig({ maxUploadFileBytes: 500 }),
+      displayName: 'vid.mp4',
+      relativePathForDisplay: 'vid.mp4',
+      expectedModality: 'video',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(3);
+    expect(parts[0]!['text']).toContain('【媒体省略】vid.mp4');
+    expect(parts[1]!['text']).toBe('【媒体降质】vid.mp4：帧 2/3');
+    expect(parts[2]).toEqual({
+      fileData: {
+        fileUri: 'oss://bucket/degraded',
+        mimeType: 'image/jpeg',
+        displayName: 'vid.mp4',
+      },
+    });
+  });
+
   it('readMediaViaOmniDelivery places the disclosure immediately before the fileData part', async () => {
     const runMock = vi.fn().mockResolvedValue({
       deliveries: [

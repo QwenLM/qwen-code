@@ -10,7 +10,11 @@ import path from 'node:path';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { isOmniDeliveryActive, processMediaForOmniDelivery } from './index.js';
+import {
+  buildAdditionalMediaParts,
+  isOmniDeliveryActive,
+  processMediaForOmniDelivery,
+} from './index.js';
 import {
   formatDisclosureText,
   formatOmissionText,
@@ -128,6 +132,12 @@ export async function processToolResultOmniMedia(
           text: formatTranscriptText(displayName, t.text),
         });
       }
+      // Additional media Parts (multi-output fixed policies): follow the
+      // primary media slot in every branch below.
+      const additionalParts: Part[] = buildAdditionalMediaParts(
+        displayName,
+        delivery.additionalMedia,
+      );
       if (delivery.omission) {
         // Explicit omission (policy design §10.2): the transport guard
         // could not bring the part within limits even after the guard
@@ -136,15 +146,16 @@ export async function processToolResultOmniMedia(
         changed = true;
         return [
           { text: formatOmissionText(displayName, delivery.omission.reason) },
+          ...additionalParts,
           ...transcriptParts,
         ];
       }
       if (!delivery.fileUri && transcriptParts.length > 0) {
         // Pure-transcript delivery (§6.2): the policies replaced the media
-        // with text-only deliverables — nothing was uploaded, budgets are
-        // untouched.
+        // with text-only deliverables — nothing was uploaded for the
+        // primary, budgets are untouched.
         changed = true;
-        return transcriptParts;
+        return [...additionalParts, ...transcriptParts];
       }
       changed = true;
       uploadsRemaining--;
@@ -160,9 +171,10 @@ export async function processToolResultOmniMedia(
         ? [
             { text: formatDisclosureText(displayName, delivery.disclosure) },
             fileDataPart,
+            ...additionalParts,
             ...transcriptParts,
           ]
-        : [fileDataPart, ...transcriptParts];
+        : [fileDataPart, ...additionalParts, ...transcriptParts];
     } catch (err) {
       if (signal.aborted) throw err;
       if (err instanceof OmniTransportGuardError) {

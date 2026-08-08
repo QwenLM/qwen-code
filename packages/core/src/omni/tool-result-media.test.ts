@@ -21,7 +21,10 @@ import type { Config } from '../config/config.js';
 
 const deliverMock = vi.hoisted(() => vi.fn());
 const gateMock = vi.hoisted(() => vi.fn());
-vi.mock('./index.js', () => ({
+vi.mock('./index.js', async (importOriginal) => ({
+  // buildAdditionalMediaParts stays REAL: these tests pin the funnel's
+  // materialization of multi-output deliveries end to end.
+  ...(await importOriginal<typeof import('./index.js')>()),
   isOmniDeliveryActive: gateMock,
   processMediaForOmniDelivery: deliverMock,
 }));
@@ -328,6 +331,88 @@ describe('processToolResultOmniMedia', () => {
         expectedModality: 'image',
       }),
     );
+  });
+
+  it('materializes additionalMedia extras as [disclosure, fileData] pairs after the primary', async () => {
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/frame1',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      disclosure: '帧 1/3',
+      degraded: true,
+      additionalMedia: [
+        {
+          fileUri: 'oss://bucket/frame2',
+          mimeType: 'image/jpeg',
+          sha256: 'd'.repeat(64),
+          disclosure: '帧 2/3',
+        },
+        {
+          fileUri: '',
+          mimeType: 'image/jpeg',
+          sha256: 'e'.repeat(64),
+          disclosure: '帧 3/3',
+          omission: { reason: 'too big' },
+        },
+      ],
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    // [primary disclosure, primary fileData, extra disclosure, extra
+    // fileData, omitted-extra disclosure, omission notice] — D8 adjacency
+    // per pair; a violating extra is an explicit omission text Part.
+    expect(result).toHaveLength(6);
+    expect(result[0]!.text).toBe('【媒体降质】tool-media.image：帧 1/3');
+    expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/frame1');
+    expect(result[2]!.text).toBe('【媒体降质】tool-media.image：帧 2/3');
+    expect(result[3]!.fileData?.fileUri).toBe('oss://bucket/frame2');
+    expect(result[4]!.text).toBe('【媒体降质】tool-media.image：帧 3/3');
+    expect(result[5]!.text).toContain('【媒体省略】tool-media.image');
+    expect(result[5]!.text).toContain('too big');
+  });
+
+  it('materializes additionalMedia extras even when the primary has no disclosure', async () => {
+    // The undisclosed-primary branch is separate code from the disclosed
+    // one — both must splice the extras in.
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/frame1',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      additionalMedia: [
+        {
+          fileUri: 'oss://bucket/frame2',
+          mimeType: 'image/jpeg',
+          sha256: 'd'.repeat(64),
+        },
+      ],
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0]!.fileData?.fileUri).toBe('oss://bucket/frame1');
+    expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/frame2');
   });
 
   it('expands a disclosed delivery inside functionResponse.parts', async () => {

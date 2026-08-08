@@ -638,6 +638,12 @@ export async function resolveAtCommandQuery({
             text: core.formatTranscriptText(urlBase, t.text),
           });
         }
+        // Additional media Parts (multi-output fixed policies): follow the
+        // primary media slot in every branch below.
+        const additionalParts = core.buildAdditionalMediaParts(
+          urlBase,
+          delivery.additionalMedia,
+        );
         if (delivery.omission) {
           // Explicit omission (policy design §10.2): the media is withheld
           // and the omission notice text stands in its place — mirroring
@@ -646,6 +652,7 @@ export async function resolveAtCommandQuery({
           urlMediaParts.push({
             text: core.formatOmissionText(urlBase, delivery.omission.reason),
           });
+          urlMediaParts.push(...additionalParts);
           urlMediaParts.push(...transcriptParts);
           urlMediaLabels.push(ref.url);
           urlMediaDisplays.push({
@@ -660,7 +667,9 @@ export async function resolveAtCommandQuery({
         }
         if (!delivery.fileUri && transcriptParts.length > 0) {
           // Pure-transcript delivery (§6.2): the policies replaced the
-          // media with text-only deliverables — no media Part is emitted.
+          // media with text-only deliverables — no media Part is emitted
+          // for the primary (additional deliverables, if any, still are).
+          urlMediaParts.push(...additionalParts);
           urlMediaParts.push(...transcriptParts);
           urlMediaLabels.push(ref.url);
           urlMediaDisplays.push({
@@ -687,6 +696,7 @@ export async function resolveAtCommandQuery({
             displayName: urlBase,
           },
         });
+        urlMediaParts.push(...additionalParts);
         urlMediaParts.push(...transcriptParts);
         urlMediaLabels.push(ref.url);
         urlMediaDisplays.push({
