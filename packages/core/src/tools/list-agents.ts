@@ -5,6 +5,11 @@
  */
 
 import type { Config } from '../config/config.js';
+import {
+  formatPeerAddress,
+  listMessageablePeers,
+} from '../ipc/peer-directory.js';
+import { getOwnPeerIdentity } from '../ipc/peer-send.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   BaseDeclarativeTool,
@@ -51,16 +56,50 @@ class ListAgentsInvocation extends BaseToolInvocation<
           : {}),
       }));
 
-    if (agents.length === 0) {
-      const message = 'No background agents are available in this session.';
+    // Peer sessions are only listed once this session has an inbox of its
+    // own: without one a message could be sent but never answered, and
+    // advertising a one-way address invites exactly that.
+    const self = await getOwnPeerIdentity();
+    const peers = self
+      ? await listMessageablePeers().then((all) =>
+          all.filter((peer) => peer.ipcPath !== self.ipcPath),
+        )
+      : [];
+
+    const sessions = peers.map((peer) => ({
+      // The name IS the address. The ref is only appended when it has to
+      // be, so the common case stays a bare, typeable name.
+      to: formatPeerAddress(peer, peers),
+      name: peer.name,
+      ref: peer.ref,
+      cwd: peer.cwd,
+      started_at: new Date(peer.startedAt).toISOString(),
+    }));
+
+    if (agents.length === 0 && sessions.length === 0) {
+      const message =
+        'No background agents in this session, and no other reachable Qwen Code sessions.';
       return { llmContent: message, returnDisplay: message };
     }
 
+    const parts: string[] = [];
+    if (agents.length > 0) {
+      parts.push(
+        `${agents.length} background agent${agents.length === 1 ? '' : 's'}`,
+      );
+    }
+    if (sessions.length > 0) {
+      parts.push(
+        `${sessions.length} other session${sessions.length === 1 ? '' : 's'}`,
+      );
+    }
+
     return {
-      llmContent: JSON.stringify({ agents }),
-      returnDisplay: `Listed ${agents.length} background agent${
-        agents.length === 1 ? '' : 's'
-      }.`,
+      llmContent: JSON.stringify({
+        agents,
+        ...(sessions.length > 0 ? { sessions } : {}),
+      }),
+      returnDisplay: `Listed ${parts.join(' and ')}.`,
     };
   }
 }
@@ -75,9 +114,12 @@ export class ListAgentsTool extends BaseDeclarativeTool<
     super(
       ListAgentsTool.Name,
       ToolDisplayNames.LIST_AGENTS,
-      'List addressable background agents in the current session, including ' +
-        'agents restored from a prior session run. Use the returned task_id ' +
-        'with send_message to continue a running, paused, or completed agent.',
+      'List everything you can message: background agents in this session ' +
+        '(including ones restored from a prior run), and other Qwen Code ' +
+        "sessions running on this machine. Use an agent's task_id with " +
+        'send_message to continue it; use a session\'s "to" value verbatim ' +
+        'to message that session. Other sessions are peers, not your ' +
+        "workers — do not delegate this session's work to them.",
       Kind.Read,
       {
         type: 'object',
