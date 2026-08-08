@@ -13,7 +13,15 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
-import { readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createNonInteractivePromptId,
   main,
@@ -31,6 +39,7 @@ import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
@@ -103,6 +112,12 @@ vi.mock('./config/config.js', () => ({
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  // Mirrors SESSION_ID_REGEX in ./config/config.ts; keep them in sync.
+  isValidSessionId: vi.fn((value: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i.test(
+      value,
+    ),
+  ),
 }));
 
 vi.mock('read-package-up', () => ({
@@ -136,7 +151,7 @@ vi.mock('./utils/sandbox.js', () => ({
 vi.mock('./utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStderrLineSafe: vi.fn(),
-  writeStdoutLine: vi.fn(),
+  writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
 }));
 
@@ -2446,6 +2461,7 @@ describe('startInteractiveUI', () => {
     getProjectRoot: () => '/root',
     getScreenReader: () => false,
     isTelemetryInitializationDeferred: () => true,
+    getChatRecordingService: () => undefined,
   } as unknown as Config;
   const mockSettings = {
     merged: {
@@ -2937,6 +2953,179 @@ describe('startInteractiveUI', () => {
     expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('Rendering error'),
     );
+  });
+
+  // The quit screen's resume hint is drawn on the alternate screen in VP
+  // mode and discarded on teardown, so cleanup echoes the command to the
+  // main screen. Pin the echo's gate, message shape, and paste-safe ID gate.
+  describe('exit-time resume echo', () => {
+    async function runCleanup(config: Config): Promise<void> {
+      const unmount = vi.fn();
+      const { render } = await import('ink');
+      vi.mocked(render).mockReturnValue({ unmount } as never);
+      mockConsumeLastRenderError.mockReturnValue(undefined);
+
+      await startInteractiveUI(
+        config,
+        mockSettings,
+        mockStartupWarnings,
+        mockWorkspaceRoot,
+        {
+          authError: null,
+          themeError: null,
+          shouldOpenAuthDialog: false,
+          geminiMdFileCount: 0,
+        },
+      );
+
+      const { registerCleanup } = await import('./utils/cleanup.js');
+      const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+        | (() => Promise<void> | void)
+        | undefined;
+      expect(cleanupFn).toBeTypeOf('function');
+      await cleanupFn?.();
+    }
+
+    function makeRecordingConfig(sessionId: string, sessionFile: string) {
+      return {
+        ...mockConfig,
+        getChatRecordingService: () => ({}),
+        getSessionId: () => sessionId,
+        getTranscriptPath: () => sessionFile,
+      } as unknown as Config;
+    }
+
+    it.each([
+      ['a canonical session ID', 'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'],
+      // Arena's agent-suffixed IDs are also accepted by --resume.
+      [
+        'an agent-suffixed session ID',
+        'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d-agent-qwen',
+      ],
+    ])('echoes the resume command for %s', async (_, sessionId) => {
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '{"type":"message"}\n');
+
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
+
+        // Match only the locale-independent command part: earlier main()
+        // tests run the real initializeI18n('auto') and leave the machine
+        // locale's dictionary in the i18n module state.
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining(`qwen --resume ${sessionId}`),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when the transcript file is empty', async () => {
+      const sessionId = '99999999-8888-4777-a666-555555555555';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '');
+
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
+
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when the session file is missing', async () => {
+      const sessionId = '11111111-2222-4333-8444-555555555555';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
+
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    // The ID is echoed as paste-into-shell text, and resume reads session
+    // IDs from transcript contents, so a crafted transcript must not be
+    // able to smuggle extra commands or CLI flags past the echo.
+    it.each([
+      ['newline', 'evil\nrm -rf ~'],
+      ['escape sequence', 'evil\u001B]52;c;pwned\u0007session'],
+      ['leading dash', '-cafebabe0123456789abcdef01234567'],
+      ['non-UUID token', 'abc123'],
+    ])('does not echo a session ID with a %s', async (_, sessionId) => {
+      // Pair each hostile ID with a real non-empty transcript under a
+      // benign filename so only the ID gate can suppress the echo; a
+      // missing file would mask a regression of the gate itself.
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      const sessionFile = join(projectDir, 'chats', 'benign.jsonl');
+      writeFileSync(sessionFile, '{"type":"message"}\n');
+
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
+
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when chat recording is disabled', async () => {
+      const sessionId = 'aaaaaaaa-bbbb-4ccc-9ddd-eeeeeeeeeeee';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '{"type":"message"}\n');
+
+      try {
+        await runCleanup({
+          ...makeRecordingConfig(sessionId, sessionFile),
+          getChatRecordingService: () => undefined,
+        } as unknown as Config);
+
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when stdout is not a TTY', async () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      const sessionId = '0f0e0d0c-0b0a-4908-8706-050403020100';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '{"type":"message"}\n');
+
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
+
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('periodic memory-pressure check', () => {

@@ -2312,7 +2312,16 @@ export default {
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
   Running: '运行中',
+  Pausing: '暂停中',
   Paused: '已暂停',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '暂停是协作式的；在工作流暂停之前，进行中的工作可能会先完成。等待工具审批的 agent 调用会让运行保持在此状态，且在审批得到响应前仍会计入活跃时间上限。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '已暂停：不会启动新的 agent；agent 调用之间的脚本代码会继续运行。按 p 恢复。/clear、/branch 以及切换会话会取消已暂停的运行。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '暂停/恢复被拒绝；工作流状态已变化。请重试。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    '提示：使用 `/workflows p <runId>`，或在后台任务中按 p 协作暂停/恢复；使用 `/workflows <runId>` 查看详情。',
   Completed: '已完成',
   Failed: '失败',
   Stopped: '已停止',
