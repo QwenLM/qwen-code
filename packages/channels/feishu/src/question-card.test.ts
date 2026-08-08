@@ -265,6 +265,24 @@ describe('Feishu question cards', () => {
     });
   });
 
+  it('recovers a cancellation when Feishu omits the button value', () => {
+    expect(
+      parseQuestionAction({
+        context: { open_chat_id: 'oc_1', open_message_id: 'om_1' },
+        operator: { open_id: 'ou_1' },
+        action: {
+          name: 'qwen_ask_cancel_request-1',
+        },
+      }),
+    ).toEqual({
+      kind: 'cancel',
+      requestId: 'request-1',
+      operatorId: 'ou_1',
+      chatId: 'oc_1',
+      messageId: 'om_1',
+    });
+  });
+
   it('parses an action without optional correlation or operator fields', () => {
     expect(
       parseQuestionAction({
@@ -300,13 +318,6 @@ describe('Feishu question cards', () => {
       action: {
         name: 'qwen_ask_cancel_request-1',
         value: { action: 'stop', operation_id: 'request-1' },
-      },
-    },
-    {
-      // No value at all — the name-prefix recovery is submit-only, so a
-      // value-stripped cancel must stay fail-closed as unhandled.
-      action: {
-        name: 'qwen_ask_cancel_request-1',
       },
     },
     {

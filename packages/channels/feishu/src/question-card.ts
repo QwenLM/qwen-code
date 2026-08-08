@@ -143,6 +143,15 @@ export function parseQuestionAction(data: unknown): FeishuQuestionAction {
     actionId = requestId ? 'qwen_ask_submit' : undefined;
   }
 
+  if (
+    rawValue === undefined &&
+    typeof name === 'string' &&
+    name.startsWith('qwen_ask_cancel_')
+  ) {
+    requestId = nonEmptyString(name.slice('qwen_ask_cancel_'.length));
+    actionId = requestId ? 'qwen_ask_cancel' : undefined;
+  }
+
   if (!requestId || !actionId || typeof name !== 'string') {
     return { kind: 'unhandled' };
   }

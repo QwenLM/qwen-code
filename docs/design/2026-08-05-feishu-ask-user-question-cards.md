@@ -64,7 +64,7 @@ ask_user_question
 
 Each question uses its existing `answerKey` as the form field name. A single-select question renders `select_static`; a multi-select question renders `multi_select_static`. Option values are the existing option labels. The Submit button has `form_action_type: "submit"` and carries the request ID in both its `name` and `value.operation_id`. The Cancel button carries the same request ID without submitting the form.
 
-The parser requires an explicit request ID and never falls back to the latest question in a chat. It normally requires matching IDs in the button name and value. For form submissions only, it can recover the ID from the exact button-name prefix when Feishu omits the entire button value; a present but malformed or conflicting value is still rejected. It accepts the known Feishu multi-select representations: an array of strings or a JSON-encoded string array.
+The parser requires an explicit request ID and never falls back to the latest question in a chat. It normally requires matching IDs in the button name and value. When Feishu omits the entire button value, it can recover the ID from the exact button-name prefix for both submit and cancel; a present but malformed or conflicting value is still rejected. It accepts the known Feishu multi-select representations: an array of strings or a JSON-encoded string array.
 
 ### Question card controller
 
