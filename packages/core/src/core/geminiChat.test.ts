@@ -27,6 +27,8 @@ import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
+import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
+import { APIConnectionTimeoutError } from 'openai';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
@@ -9109,6 +9111,77 @@ describe('GeminiChat', async () => {
         }
       },
     );
+
+    it('retries an enhanced timeout before the first content chunk', async () => {
+      vi.useFakeTimers();
+      try {
+        // The OpenAI SDK's canonical timeout shape: bare, with no code,
+        // status, or cause (issue #8527).
+        const timeoutError = new APIConnectionTimeoutError();
+        const errorHandler = new EnhancedErrorHandler(() => true);
+        let enhancedTimeout: unknown;
+        try {
+          errorHandler.handle(
+            timeoutError,
+            {
+              model: 'test-model',
+              modalities: {},
+              startTime: Date.now() - 63_000,
+            },
+            { model: 'test-model', contents: [] },
+          );
+        } catch (error) {
+          enhancedTimeout = error;
+        }
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw enhancedTimeout;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered after enhanced timeout' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-enhanced-timeout-retry',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered after enhanced timeout',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
     it('retries a transport error whose code is on the error itself (no cause)', async () => {
       vi.useFakeTimers();

@@ -828,9 +828,10 @@ export class ContentGenerationPipeline {
         throw redactProxyError(error);
       }
 
-      // Bypass handleError: it strips `code` from timeout errors, which would
-      // prevent classifyRetryError from recognizing retryable ETIMEDOUT. Both
-      // stream guards share that code and the same retry path (issue #8597).
+      // Bypass handleError so callers retain the dedicated timeout type and
+      // its idle/chunk/lifetime metadata for retry telemetry and diagnostics.
+      // Both stream guards share the ETIMEDOUT code and the same retry path
+      // (issue #8597).
       // Hoisted above the thinking-tag check: a drip-fed gateway cutting the
       // model mid-`<think>` would otherwise surface the guard's ETIMEDOUT as a
       // PROTOCOL_TAG_LEAK and burn the tag-leak retry budget instead of the
