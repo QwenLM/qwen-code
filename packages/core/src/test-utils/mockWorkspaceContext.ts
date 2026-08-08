@@ -5,6 +5,8 @@
  */
 
 import { vi } from 'vitest';
+import { realpathNearestExisting } from '../utils/paths.js';
+import { isPathWithinRoot } from '../utils/workspaceContext.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 
 /**
@@ -18,16 +20,26 @@ export function createMockWorkspaceContext(
   additionalDirs: string[] = [],
 ): WorkspaceContext {
   const allDirs = [rootDir, ...additionalDirs];
+  const canonicalDirs = allDirs.map(canonicalizeForContainment);
 
   const mockWorkspaceContext = {
     addDirectory: vi.fn(),
     getDirectories: vi.fn().mockReturnValue(allDirs),
-    isPathWithinWorkspace: vi
-      .fn()
-      .mockImplementation((path: string) =>
-        allDirs.some((dir) => path.startsWith(dir)),
-      ),
+    isPathWithinWorkspace: vi.fn().mockImplementation((path: string) => {
+      const canonicalPath = canonicalizeForContainment(path);
+      return canonicalDirs.some((dir) => isPathWithinRoot(canonicalPath, dir));
+    }),
   } as unknown as WorkspaceContext;
 
   return mockWorkspaceContext;
+}
+
+function canonicalizeForContainment(inputPath: string): string {
+  try {
+    return realpathNearestExisting(inputPath);
+  } catch {
+    // Some tests stub filesystem stat calls; retain the old lexical behavior
+    // when canonicalization is unavailable in that mocked environment.
+    return inputPath;
+  }
 }
