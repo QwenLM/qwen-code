@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   isPidAlive,
   isSameProcess,
@@ -36,6 +37,29 @@ vi.mock('node:fs', async (importOriginal) => {
 
 /** A PID that is essentially certain not to be running. */
 const DEAD_PID = 0x7ffffffe;
+
+const delay = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/**
+ * Starts a child that idles until it is killed, resolving once it is
+ * actually spawned so `/proc/<pid>/stat` is readable.
+ */
+function spawnSleeper(): Promise<ChildProcess> {
+  const child = spawn(
+    process.execPath,
+    ['-e', 'setTimeout(() => {}, 60_000)'],
+    {
+      stdio: 'ignore',
+    },
+  );
+  return new Promise((resolve, reject) => {
+    child.once('spawn', () => resolve(child));
+    child.once('error', reject);
+  });
+}
 
 describe('isPidAlive', () => {
   it('reports the current process as alive', () => {
@@ -72,6 +96,36 @@ describe('readProcStartToken', () => {
 
   it('returns null for a dead pid', () => {
     expect(readProcStartToken(DEAD_PID)).toBeNull();
+  });
+
+  it('grows with start order, so a later process reads a larger token', async () => {
+    if (process.platform !== 'linux') return;
+    // Pins the *field index*, which every other assertion here tolerates
+    // being wrong: `starttime`'s neighbours in /proc/<pid>/stat are
+    // `itrealvalue` (hardcoded 0 on modern kernels) and `vsize` (equal for
+    // two copies of the same binary), and a constant cannot be strictly
+    // increasing. Without this, an off-by-one edit hands every process the
+    // same token, `isSameProcess` stops detecting PID recycling, and dead
+    // sessions resurrect under a reused PID.
+    //
+    // /proc reports `starttime` in clock ticks at a fixed USER_HZ of 100,
+    // i.e. 10ms per tick, so the gap below is several ticks wide.
+    const first = await spawnSleeper();
+    try {
+      await delay(80);
+      const second = await spawnSleeper();
+      try {
+        const firstToken = readProcStartToken(first.pid!);
+        const secondToken = readProcStartToken(second.pid!);
+        expect(firstToken).toMatch(/^\d+$/);
+        expect(secondToken).toMatch(/^\d+$/);
+        expect(Number(secondToken)).toBeGreaterThan(Number(firstToken));
+      } finally {
+        second.kill('SIGKILL');
+      }
+    } finally {
+      first.kill('SIGKILL');
+    }
   });
 });
 

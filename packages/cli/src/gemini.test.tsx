@@ -3088,4 +3088,82 @@ describe('startInteractiveUI', () => {
       expect(performCheck.mock.calls.length).toBe(afterCleanup);
     });
   });
+
+  describe('session registry announcement', () => {
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    /**
+     * Invokes every callback handed to `registerCleanup`. The teardown
+     * chain also unmounts Ink, pops the kitty protocol and stats the
+     * transcript — none of which is under test here — so per-callback
+     * failures are swallowed. The only question these tests ask is whether
+     * one of the registered cleanups unregisters the session.
+     */
+    async function runRegisteredCleanups() {
+      const { registerCleanup } = await import('./utils/cleanup.js');
+      for (const [callback] of vi.mocked(registerCleanup).mock.calls) {
+        try {
+          await (callback as () => Promise<void> | void)();
+        } catch {
+          // ignored: an unrelated teardown step, not what is asserted.
+        }
+      }
+    }
+
+    it('announces the session and unregisters it on exit', async () => {
+      const { registerSession, unregisterSession } = await import(
+        '@qwen-code/qwen-code-core'
+      );
+      vi.mocked(registerSession).mockResolvedValueOnce(true);
+
+      await startInteractiveUI(
+        mockConfig,
+        mockSettings,
+        mockStartupWarnings,
+        mockWorkspaceRoot,
+        mockInitializationResult,
+      );
+
+      expect(registerSession).toHaveBeenCalledTimes(1);
+      expect(registerSession).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        cwd: '/root',
+        kind: 'interactive',
+        qwenVersion: '1.0.0',
+      });
+
+      // Presence is what the registry sells, so the record must not
+      // outlive the process: exactly one cleanup has to unlink it.
+      expect(unregisterSession).not.toHaveBeenCalled();
+      await runRegisteredCleanups();
+      expect(unregisterSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the unregister cleanup when registration failed', async () => {
+      const { registerSession, unregisterSession } = await import(
+        '@qwen-code/qwen-code-core'
+      );
+      vi.mocked(registerSession).mockResolvedValueOnce(false);
+
+      await startInteractiveUI(
+        mockConfig,
+        mockSettings,
+        mockStartupWarnings,
+        mockWorkspaceRoot,
+        mockInitializationResult,
+      );
+
+      expect(registerSession).toHaveBeenCalledTimes(1);
+      // `unregisterSession()` defaults to this PID, so unlinking on behalf
+      // of a registration that never happened would delete whichever
+      // record a sibling tool wrote for the same PID.
+      await runRegisteredCleanups();
+      expect(unregisterSession).not.toHaveBeenCalled();
+    });
+  });
 });
