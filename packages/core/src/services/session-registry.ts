@@ -101,7 +101,7 @@ export interface RegisterSessionFields {
   cwd: string;
   kind: SessionKind;
   qwenVersion?: string | null;
-  /** Defaults to `process.pid`. Tests pass an explicit value. */
+  /** Defaults to `process.pid`. */
   pid?: number;
   /** Overrides the derived name. */
   name?: string;

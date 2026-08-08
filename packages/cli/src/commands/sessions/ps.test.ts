@@ -21,7 +21,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: (line: string) => stderr.push(line),
 }));
 
-const { psCommand, formatAge } = await import('./ps.js');
+const { psCommand, formatAge, NAME_COL } = await import('./ps.js');
 
 function record(
   over: Partial<SessionRegistryRecord> = {},
@@ -113,12 +113,12 @@ describe('qwen sessions ps', () => {
 
   it('neutralizes control sequences coming from another process record', async () => {
     listLiveSessions.mockResolvedValue([
-      record({ name: 'ev[31mil\r', cwd: '/w/a\nb' }),
+      record({ name: 'ev\x1b[31mil\r', cwd: '/w/a\nb' }),
     ]);
     await run({ json: false, all: false });
 
     const row = stdout[1];
-    expect(row).not.toContain('');
+    expect(row).not.toContain('\x1b');
     expect(row).not.toContain('\r');
     expect(row).not.toContain('\n');
   });
@@ -128,5 +128,37 @@ describe('qwen sessions ps', () => {
     await run({ json: false, all: false });
     expect(stdout[1]).toContain('...');
     expect(stdout[1]).toContain('4242');
+  });
+
+  it('cuts a multi-width name on a character boundary, not a column one', async () => {
+    // 15 full-width characters is 30 display columns against a 20-column
+    // budget. Subtracting the three columns "..." costs leaves 17: the
+    // eighth character ends at column 16, and a ninth would straddle the
+    // limit, so the cut lands at eight characters for a 19-column cell.
+    // Asserting the cell exactly is what pins the accumulation loop —
+    // "contains ..." survives a loop that copies nothing at all.
+    listLiveSessions.mockResolvedValue([record({ name: '中'.repeat(15) })]);
+    await run({ json: false, all: false });
+
+    const cell = '中'.repeat(8) + '...';
+    expect(stdout[1]).toBe(
+      cell + ' '.repeat(NAME_COL - 19) + '4242     ' + '1m        ' + '/w/app',
+    );
+  });
+
+  it('reports a registry read failure on stderr and exits non-zero', async () => {
+    listLiveSessions.mockRejectedValue(new Error('registry on fire'));
+    const exit = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+
+    await run({ json: false, all: false });
+
+    expect(stderr).toEqual([
+      'Error: failed to read the session registry: registry on fire',
+    ]);
+    expect(exit).toHaveBeenCalledWith(1);
+    // Nothing is printed once the listing failed — not even the header.
+    expect(stdout).toEqual([]);
   });
 });

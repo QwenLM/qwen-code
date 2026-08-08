@@ -18,6 +18,7 @@ import {
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
+import { readProcStartToken } from '../utils/process-liveness.js';
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/session-registry-test';
@@ -109,6 +110,32 @@ describe('registerSession', () => {
       qwenVersion: '1.2.3',
     });
     expect(live[0].name).toMatch(/^app-[0-9a-f]{2}$/);
+  });
+
+  it('records a start-time token so a recycled pid cannot resurrect it', async () => {
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      kind: 'interactive',
+    });
+
+    // Enumerate as a *different* process: the self-pid shortcut never
+    // calls isSameProcess, so it is the only path on which the recorded
+    // token is read at all. Without this, a regression writing
+    // `procStart: null` stays green here and, in production, degrades
+    // every sibling's check to bare liveness — the exact recycled-pid
+    // hole the token exists to close.
+    const live = await listLiveSessions({
+      selfPid: DEAD_PID,
+      sweepStale: false,
+    });
+    expect(live).toHaveLength(1);
+    if (process.platform === 'linux') {
+      expect(live[0].procStart).toBe(readProcStartToken(process.pid));
+      expect(live[0].procStart).toMatch(/^\d+$/);
+    } else {
+      expect(live[0].procStart).toBeNull();
+    }
   });
 
   it('creates the registry directory as 0700', async () => {
