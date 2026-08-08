@@ -75,6 +75,7 @@ import {
   CdWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
+  RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
@@ -96,6 +97,7 @@ import {
   PromptDeadlineExceededError,
   BridgeChannelQuarantinedError,
 } from './bridgeErrors.js';
+import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
 import { resolveSessionRestoreTimeoutMs } from './session-restore-timeout.js';
 import {
   canonicalizeWorkspace,
@@ -436,6 +438,25 @@ interface ChannelInfo {
    * session/workspace-control work drains.
    */
   emptyReapPending: boolean;
+  /**
+   * Session ids whose restore hit its public deadline and whose underlying
+   * ACP request has not settled yet. Non-empty means "this channel is still
+   * carrying hidden work we cannot cancel", which is a reason to reap once
+   * visible work drains — closing the transport is the only lever that breaks
+   * a permanently hung request. It clears on real settlement, so a channel
+   * whose late restore resolved cleanly returns to the configured idle
+   * policy instead of being condemned by a timeout it already recovered from.
+   */
+  unsettledAbandonedRestores: Set<string>;
+  /**
+   * Set when an abandoned restore has outlived its settlement grace period.
+   * Existing sessions keep working; fresh session work is refused so the
+   * channel can drain and be recycled, which is what finally closes the
+   * transport out from under the request we cannot cancel.
+   */
+  restoreSettlementOverdue: boolean;
+  /** Grace timers armed at restore abandonment, keyed by session id. */
+  restoreSettlementTimers: Map<string, NodeJS.Timeout>;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -1430,14 +1451,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   } else {
     maxSessions = opts.maxSessions;
   }
-  let quarantinedChannel: ChannelInfo | undefined;
-  const assertFreshSessionsAvailable = (): void => {
-    if (
-      quarantinedChannel?.isQuarantined === true &&
-      !quarantinedChannel.isDying
-    ) {
-      throw new BridgeChannelQuarantinedError();
+  // Two independent conditions close a channel to NEW session work while
+  // leaving its existing sessions usable: cleanup after a timed-out restore
+  // failed (we no longer know the child's state), or an abandoned restore
+  // blew past its settlement grace period (the child is holding work we
+  // cannot cancel or account for). Both want existing work to drain so the
+  // channel can be recycled, so they share one 503 shape and differ by
+  // `reason`. Scanned rather than tracked in a single variable, so a second
+  // condemned channel can never silently displace the first.
+  const freshSessionBlocker = ():
+    | { channel: ChannelInfo; reason: BridgeChannelUnavailableReason }
+    | undefined => {
+    for (const ci of aliveChannels) {
+      if (ci.isDying) continue;
+      if (ci.isQuarantined) {
+        return { channel: ci, reason: 'restore_cleanup_failed' };
+      }
+      if (ci.restoreSettlementOverdue) {
+        return { channel: ci, reason: 'restore_settlement_overdue' };
+      }
     }
+    return undefined;
+  };
+  const assertFreshSessionsAvailable = (): void => {
+    const blocker = freshSessionBlocker();
+    if (blocker) throw new BridgeChannelQuarantinedError(blocker.reason);
   };
   const reserveFreshSession = (
     context: BridgeFreshSessionAdmissionContext,
@@ -1522,6 +1560,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
   const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  // Retry hint for an id fenced behind an abandoned restore. The underlying
+  // ACP request already exceeded the full budget, so the next useful retry is
+  // at least a budget away; the cap keeps the advertised hint sane when an
+  // operator configures a very long restore deadline.
+  // How long after the public deadline an abandoned restore may keep holding
+  // its slot and fence before the channel stops taking fresh work. One further
+  // budget: the request already had that long and missed it once.
+  const restoreSettlementGraceMs = sessionRestoreTimeoutMs;
+  const abandonedRestoreRetryAfterSeconds = Math.min(
+    120,
+    Math.max(
+      RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
+      Math.ceil(sessionRestoreTimeoutMs / 1000),
+    ),
+  );
   // Bd1yh + Bd1z5: per-permission deadline + per-session pending cap.
   // Permission caps keep the legacy sentinel behavior; prompt caps are
   // stricter because they are an admission-control surface.
@@ -1772,8 +1825,61 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     workspaceMcpResourcesCache.delete(serverName);
   }
 
+  /**
+   * Whether this channel should be torn down once its visible work drains,
+   * rather than handed back to the idle-channel policy. Derived, not sticky:
+   * a channel is condemned only while a reason still holds.
+   */
+  function channelShouldReapWhenIdle(ci: ChannelInfo): boolean {
+    return (
+      ci.emptyReapPending ||
+      ci.unsettledAbandonedRestores.size > 0 ||
+      ci.isQuarantined
+    );
+  }
+
+  /**
+   * A restore that blew its public deadline is left running because the ACP
+   * request cannot be cancelled — but "cannot cancel" must not mean "wait
+   * forever". One further budget after abandonment, a still-unsettled restore
+   * closes the channel to NEW session work: it is holding an admission slot,
+   * an in-flight entry, and a session-id fence that nothing else can release.
+   * Existing sessions keep running, and once they drain the channel is reaped,
+   * which closes the transport and finally releases the hung request. We
+   * deliberately do NOT force-kill a channel that still has live siblings —
+   * that is the failure this whole change exists to remove.
+   */
+  function armRestoreSettlementGrace(
+    ci: ChannelInfo,
+    sessionId: string,
+    action: 'load' | 'resume',
+  ): void {
+    if (ci.restoreSettlementTimers.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      ci.restoreSettlementTimers.delete(sessionId);
+      if (!ci.unsettledAbandonedRestores.has(sessionId)) return;
+      if (ci.isDying || !aliveChannels.has(ci)) return;
+      ci.restoreSettlementOverdue = true;
+      writeStderrLine(
+        `qwen serve: abandoned session/${action} for ${JSON.stringify(sessionId)} has not settled ` +
+          `${restoreSettlementGraceMs}ms after its deadline; refusing fresh sessions on channel ${ci.id} until it drains`,
+      );
+      telemetry.event('session.restore.settlement_overdue', {
+        'qwen-code.daemon.session_restore.action': action,
+        'qwen-code.daemon.session_restore.timeout_ms': sessionRestoreTimeoutMs,
+        'qwen-code.daemon.session_restore.settlement_grace_ms':
+          restoreSettlementGraceMs,
+        'qwen-code.daemon.acp_channel.id': ci.id,
+        'session.id': sessionId,
+      });
+      void reapPendingEmptyChannel(ci);
+    }, restoreSettlementGraceMs);
+    timer.unref();
+    ci.restoreSettlementTimers.set(sessionId, timer);
+  }
+
   async function reapPendingEmptyChannel(ci: ChannelInfo): Promise<void> {
-    if (!ci.emptyReapPending || !hasNoChannelWork(ci)) return;
+    if (!channelShouldReapWhenIdle(ci) || !hasNoChannelWork(ci)) return;
     ci.emptyReapPending = false;
     ci.isDying = true;
     await ci.channel.kill().catch(() => {
@@ -2408,6 +2514,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceMcpAuthenticationServerNames: new Set(),
         workspaceMcpAuthenticationTimers: new Map(),
         emptyReapPending: false,
+        unsettledAbandonedRestores: new Set(),
+        restoreSettlementOverdue: false,
+        restoreSettlementTimers: new Map(),
         isDying: false,
         isQuarantined: false,
         handshakeComplete: false,
@@ -2461,8 +2570,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         info.workspaceMcpAuthenticationTimers.clear();
         info.workspaceMcpAuthenticationServerNames.clear();
+        for (const timer of info.restoreSettlementTimers.values()) {
+          clearTimeout(timer);
+        }
+        info.restoreSettlementTimers.clear();
         aliveChannels.delete(info);
-        if (quarantinedChannel === info) quarantinedChannel = undefined;
         if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
         info.sessionIds.clear();
@@ -4565,10 +4677,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         historyReplay !== inFlight.historyReplay ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
+        // An abandoned restore is fenced until the real ACP request and its
+        // cleanup settle, which takes at least as long as the budget the
+        // request already blew through. Hinting the ordinary 5s here would
+        // just spin the caller against a fence it cannot clear.
+        const abandoned = inFlight.lifecycle.phase === 'abandoned';
         throw new RestoreInProgressError(
           req.sessionId,
           inFlight.action,
           action,
+          abandoned
+            ? {
+                reason: 'awaiting_abandoned_cleanup',
+                retryAfterSeconds: abandonedRestoreRetryAfterSeconds,
+              }
+            : undefined,
         );
       }
       // Reserve the attach SYNCHRONOUSLY before awaiting so the spawn
@@ -4726,9 +4849,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             });
             return;
           }
+          // `isQuarantined` is itself both a reap-when-idle reason and a
+          // fresh-admission blocker, so there is no separate flag to set here.
           channel.isQuarantined = true;
-          quarantinedChannel = channel;
-          channel.emptyReapPending = true;
           writeStderrLine(
             `qwen serve: quarantining ACP channel after timed-out session/${action} cleanup failed for ${JSON.stringify(req.sessionId)}: ${extractErrorMessage(error)}`,
           );
@@ -4750,6 +4873,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       } finally {
         channel.client.markSessionClosed(req.sessionId);
+        // The hidden work is over. If nothing else condemns this channel it
+        // goes back to the normal idle policy; if the channel is quarantined
+        // or another abandoned restore is still outstanding, those reasons
+        // keep standing on their own.
+        channel.unsettledAbandonedRestores.delete(req.sessionId);
+        const graceTimer = channel.restoreSettlementTimers.get(req.sessionId);
+        if (graceTimer !== undefined) {
+          clearTimeout(graceTimer);
+          channel.restoreSettlementTimers.delete(req.sessionId);
+        }
+        // Only the last overdue restore lifts the admission block; a second
+        // one still outstanding keeps the channel closed to fresh work.
+        if (channel.unsettledAbandonedRestores.size === 0) {
+          channel.restoreSettlementOverdue = false;
+        }
         releaseAdmissionOnce();
         resolveSettlement();
       }
@@ -4854,7 +4992,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             restoreChannel.client.markRestoreAbandoned(req.sessionId);
             pendingRestoreEvents.delete(req.sessionId);
             restoreEvents.close();
-            restoreChannel.emptyReapPending = true;
+            // Condemn the channel only for as long as this restore is
+            // genuinely unresolved. `settleAbandonedRestore` clears the entry,
+            // so a late result that lands cleanly hands the channel back to
+            // the configured idle policy instead of forcing a cold respawn on
+            // the strength of a timeout it already recovered from.
+            restoreChannel.unsettledAbandonedRestores.add(req.sessionId);
             const channelWasEmpty = hasNoChannelWork(restoreChannel);
             telemetry.event('session.restore.public_result', {
               'qwen-code.daemon.session_restore.action': action,
@@ -4874,6 +5017,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 restoreChannel,
                 `timed-out session/${action} on empty channel`,
               );
+            } else {
+              armRestoreSettlementGrace(restoreChannel, req.sessionId, action);
             }
             reject(
               new SessionRestoreTimeoutError(

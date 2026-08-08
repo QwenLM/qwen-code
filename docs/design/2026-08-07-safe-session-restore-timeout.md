@@ -18,9 +18,10 @@ It does not stream the JSONL parser, add a transcript index or snapshot, guarant
 
 The server restore budget resolves in this order:
 
-1. `sessionRestoreTimeoutMs` / `--session-restore-timeout-ms`;
-2. an explicitly supplied `initializeTimeoutMs` / `--initialize-timeout-ms` for compatibility;
-3. 60,000 ms.
+1. `sessionRestoreTimeoutMs` / `--session-restore-timeout-ms`, which wins outright — including values below the default, for deployments that deliberately want restore to fail fast;
+2. otherwise 60,000 ms, raised to an explicitly supplied `initializeTimeoutMs` / `--initialize-timeout-ms` when that value is larger.
+
+A startup budget may raise the restore budget but never lower it. The two measure different work, and a deployment that tightened its child-initialize check must not silently inherit the sub-default restore deadline this change exists to remove.
 
 Server values must be positive integers no greater than `2^31-1`. The daemon publishes the effective value as optional v1 field `limits.sessionRestoreTimeoutMs` in both bootstrap and runtime capabilities.
 
@@ -34,21 +35,26 @@ The WebUI passes server budget plus 10 seconds to SDK load/resume and uses serve
 
 An explicit lifecycle flag arbitrates the deadline and ACP result. Whichever observes `active` first changes the public terminal state. This avoids relying on `Promise.race` callback ordering at an equal-time boundary.
 
-| State       | Meaning and allowed transition                                                                                                                                                                                                                            |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `active`    | Same-action, same-shape requests coalesce. ACP success may register the session; failure may return normally.                                                                                                                                             |
-| `abandoned` | The deadline won. The public caller receives a structured timeout. The id is removed from pending restore events and fenced against late child notifications. Same-id retries receive `restore_in_progress`.                                              |
-| cleanup     | A late ACP success or failure triggers exactly one child `qwen/control/session/close`. Resource-not-found is already clean.                                                                                                                               |
-| quarantined | Cleanup outcome is uncertain. Existing sessions and workspace control remain usable, but fresh spawn/load/resume/branch work is rejected until the channel drains.                                                                                        |
-| settled     | Close succeeded, the resource was absent, or the transport closed. Restore admission, the capacity slot, and the in-flight entry are released. The notification fence remains until a new explicit restore of that id supersedes it or the channel exits. |
+| State       | Meaning and allowed transition                                                                                                                                                                                                                                                                                                              |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `active`    | Same-action, same-shape requests coalesce. ACP success may register the session; failure may return normally.                                                                                                                                                                                                                               |
+| `abandoned` | The deadline won. The public caller receives a structured timeout. The id is removed from pending restore events and fenced against late child notifications. Same-id retries receive `restore_in_progress` with `reason: awaiting_abandoned_cleanup` and a retry hint of the restore budget rather than the ordinary 5 seconds.            |
+| overdue     | One further restore budget passed with no settlement. Existing sessions and workspace control remain usable, but fresh spawn/load/resume/branch work is rejected so the channel can drain — closing the transport is the only lever that releases a permanently hung request. The channel is never force-killed while live siblings remain. |
+| cleanup     | A late ACP success or failure triggers exactly one child `qwen/control/session/close`. Resource-not-found is already clean.                                                                                                                                                                                                                 |
+| quarantined | Cleanup outcome is uncertain. Existing sessions and workspace control remain usable, but fresh spawn/load/resume/branch work is rejected until the channel drains.                                                                                                                                                                          |
+| settled     | Close succeeded, the resource was absent, or the transport closed. Restore admission, the capacity slot, and the in-flight entry are released. The notification fence remains until a new explicit restore of that id supersedes it or the channel exits.                                                                                   |
+
+Abandonment retains ownership, but not indefinitely. `overdue` bounds the window in which a hung restore can hold an admission slot, an in-flight entry, and a session-id fence that nothing else can release: after the grace period the channel stops taking new work, and the ordinary drain path then recycles the child. Releasing capacity while the hidden work is still running would allow unbounded oversubscription, and force-killing a channel that still has live siblings would reintroduce exactly the failure this change removes — so neither is done.
 
 The abandoned notification fence lives for the channel lifecycle and has no TTL. The ordinary 60-second closed-session tombstone remains a separate defense for normal post-close notifications.
 
 ## Channel safety
 
-At timeout, the bridge removes the id from `pendingRestoreIds`, clears its early events, and marks the channel for empty reap. If the channel has no live sessions, pending spawn, other restore, or workspace-control operation, it is synchronously marked dying and its child is killed asynchronously; the 504 response does not wait for TERM/KILL escalation. The outer `qwen serve` process continues running.
+At timeout, the bridge removes the id from `pendingRestoreIds`, clears its early events, and records the id in the channel's `unsettledAbandonedRestores`. If the channel has no live sessions, pending spawn, other restore, or workspace-control operation, it is synchronously marked dying and its child is killed asynchronously; the 504 response does not wait for TERM/KILL escalation. The outer `qwen serve` process continues running.
 
 If any sibling work exists, the child remains alive. A late cleanup failure sets a distinct quarantine bit and does not set `isDying`, so sibling attach, prompt, close, and workspace control continue. Fresh work is rejected before capacity checks so the stable error is `acp_channel_unavailable` rather than a coincidental session-limit response. Once visible work drains, the child is recycled and a subsequent request can create a clean channel.
+
+Whether a channel is condemned is **derived, not sticky**. It is reaped once visible work drains while any of these still hold: an ordinary pending empty reap, a non-empty `unsettledAbandonedRestores`, or quarantine. Real settlement removes the id from that set, so a channel whose late restore landed and closed cleanly returns to the configured idle-channel policy rather than being forced into a cold respawn by a timeout it already recovered from. While a restore genuinely remains unresolved, draining is what closes the transport — the only lever that breaks a permanently hung request.
 
 Shutdown waits each real settlement promise, but every ACP request is raced with `channel.exited`. Killing the channel therefore releases shutdown even if the SDK request promise itself never settles. All abandoned-result handlers are rejection-safe.
 
@@ -56,7 +62,7 @@ Shutdown waits each real settlement promise, but every ACP request is raced with
 
 `SessionRestoreTimeoutError` subclasses `BridgeTimeoutError` but is classified first as `restore_timeout`. REST returns HTTP 504, `Retry-After: 5`, and the fields `code`, `errorKind`, `retryable`, `sessionId`, `action`, and `timeoutMs`. ACP HTTP and WebSocket return JSON-RPC `-32603` with the same data plus `httpStatus: 504`.
 
-Quarantine rejects fresh work with HTTP/ACP status 503, code and error kind `acp_channel_unavailable`, and `reason: restore_cleanup_failed`.
+A channel closed to fresh work rejects it with HTTP/ACP status 503 and code and error kind `acp_channel_unavailable`. `reason` distinguishes the two causes: `restore_cleanup_failed` (cleanup of a timed-out restore failed, so the child's state is unknown) and `restore_settlement_overdue` (an abandoned restore has still not settled one restore budget after its deadline).
 
 ## Observability
 

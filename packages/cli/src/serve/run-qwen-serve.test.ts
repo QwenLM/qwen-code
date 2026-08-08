@@ -2459,7 +2459,8 @@ describe('runQwenServe initializeTimeoutMs validation', () => {
         await handle.runtimeReady;
         expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
           initializeTimeoutMs: 30_000,
-          sessionRestoreTimeoutMs: 30_000,
+          // Below the restore default, so the restore budget holds at 60 s.
+          sessionRestoreTimeoutMs: 60_000,
         });
       } finally {
         await handle.close();

@@ -318,8 +318,9 @@ export interface ServeOptions {
    */
   initializeTimeoutMs?: number;
   /**
-   * ACP session load/resume timeout in ms. Falls back to an explicitly set
-   * initialize timeout, then 60000 (60 s).
+   * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
+   * to an explicitly set initialize timeout when that value is larger. An
+   * explicit value here wins outright, including below the default.
    */
   sessionRestoreTimeoutMs?: number;
   /**

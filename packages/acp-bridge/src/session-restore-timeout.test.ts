@@ -27,10 +27,18 @@ describe('resolveSessionRestoreTimeoutMs', () => {
     );
   });
 
-  it('keeps the explicit initialize timeout as a compatibility fallback', () => {
+  it('lets a longer initialize timeout raise the restore budget', () => {
     expect(
-      resolveSessionRestoreTimeoutMs({ initializeTimeoutMs: 25_000 }),
-    ).toBe(25_000);
+      resolveSessionRestoreTimeoutMs({ initializeTimeoutMs: 90_000 }),
+    ).toBe(90_000);
+  });
+
+  it('never lets an initialize timeout lower the restore budget', () => {
+    // Regression for #8678: a deployment that tightened the child startup
+    // check must not inherit a sub-default restore deadline.
+    expect(
+      resolveSessionRestoreTimeoutMs({ initializeTimeoutMs: 10_000 }),
+    ).toBe(DEFAULT_SESSION_RESTORE_TIMEOUT_MS);
   });
 
   it('prefers the explicit restore timeout', () => {
@@ -40,6 +48,15 @@ describe('resolveSessionRestoreTimeoutMs', () => {
         sessionRestoreTimeoutMs: 90_000,
       }),
     ).toBe(90_000);
+  });
+
+  it('honors an explicit restore timeout below the default', () => {
+    expect(
+      resolveSessionRestoreTimeoutMs({
+        initializeTimeoutMs: 90_000,
+        sessionRestoreTimeoutMs: 5_000,
+      }),
+    ).toBe(5_000);
   });
 
   it.each(INVALID_TIMEOUTS)(

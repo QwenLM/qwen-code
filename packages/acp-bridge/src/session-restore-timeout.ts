@@ -12,13 +12,7 @@ export interface SessionRestoreTimeoutOptions {
   initializeTimeoutMs?: number;
 }
 
-export function resolveSessionRestoreTimeoutMs(
-  opts: SessionRestoreTimeoutOptions,
-): number {
-  const timeoutMs =
-    opts.sessionRestoreTimeoutMs ??
-    opts.initializeTimeoutMs ??
-    DEFAULT_SESSION_RESTORE_TIMEOUT_MS;
+function assertValidTimeoutMs(field: string, timeoutMs: number): void {
   if (
     !Number.isFinite(timeoutMs) ||
     !Number.isInteger(timeoutMs) ||
@@ -26,8 +20,31 @@ export function resolveSessionRestoreTimeoutMs(
     timeoutMs > MAX_SESSION_RESTORE_TIMEOUT_MS
   ) {
     throw new TypeError(
-      `Invalid sessionRestoreTimeoutMs: ${timeoutMs}. Must be a positive integer no greater than ${MAX_SESSION_RESTORE_TIMEOUT_MS}.`,
+      `Invalid ${field}: ${timeoutMs}. Must be a positive integer no greater than ${MAX_SESSION_RESTORE_TIMEOUT_MS}.`,
     );
   }
-  return timeoutMs;
+}
+
+export function resolveSessionRestoreTimeoutMs(
+  opts: SessionRestoreTimeoutOptions,
+): number {
+  if (opts.sessionRestoreTimeoutMs !== undefined) {
+    assertValidTimeoutMs(
+      'sessionRestoreTimeoutMs',
+      opts.sessionRestoreTimeoutMs,
+    );
+    return opts.sessionRestoreTimeoutMs;
+  }
+  if (opts.initializeTimeoutMs !== undefined) {
+    assertValidTimeoutMs('initializeTimeoutMs', opts.initializeTimeoutMs);
+    // A startup budget may RAISE the restore budget but never lower it. The
+    // two measure different work — a strict child-initialize check must not
+    // silently reimpose the sub-default restore deadline that #8678 was
+    // filed against.
+    return Math.max(
+      opts.initializeTimeoutMs,
+      DEFAULT_SESSION_RESTORE_TIMEOUT_MS,
+    );
+  }
+  return DEFAULT_SESSION_RESTORE_TIMEOUT_MS;
 }

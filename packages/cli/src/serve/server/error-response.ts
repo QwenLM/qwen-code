@@ -589,14 +589,17 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof RestoreInProgressError) {
-    // Match `SessionLimitExceededError`'s 5s hint (above). A restore uses
-    // its dedicated budget and can remain fenced after a public timeout
-    // while the late ACP request is cleaned up, so shorter hints push clients
-    // into tight loops that keep hitting the same 409.
-    res.set('Retry-After', '5');
+    // An ordinary in-flight restore matches `SessionLimitExceededError`'s 5s
+    // hint (above). A fence left behind by a timed-out restore carries a much
+    // longer hint from the bridge, because the late ACP request has to settle
+    // before the id frees up — a 5s cadence there is a tight loop against a
+    // 409 the client cannot clear. `reason` lets clients tell the two apart.
+    res.set('Retry-After', String(err.retryAfterSeconds));
     res.status(409).json({
       error: err.message,
       code: 'restore_in_progress',
+      reason: err.reason,
+      retryable: true,
       sessionId: err.sessionId,
       activeAction: err.activeAction,
       requestedAction: err.requestedAction,

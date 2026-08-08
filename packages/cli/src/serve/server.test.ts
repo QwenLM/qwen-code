@@ -3474,18 +3474,29 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(defaultResponse.body.limits.sessionRestoreTimeoutMs).toBe(60_000);
 
-      const compatibilityResponse = await request(
+      const raisedResponse = await request(
         createServeApp(
-          { ...baseOpts, initializeTimeoutMs: 45_000 },
+          { ...baseOpts, initializeTimeoutMs: 120_000 },
           undefined,
           { bridge: fakeBridge() },
         ),
       )
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(compatibilityResponse.body.limits.sessionRestoreTimeoutMs).toBe(
-        45_000,
-      );
+      expect(raisedResponse.body.limits.sessionRestoreTimeoutMs).toBe(120_000);
+
+      // A tightened startup check must not advertise a sub-default restore
+      // budget — that is the #8678 regression.
+      const flooredResponse = await request(
+        createServeApp(
+          { ...baseOpts, initializeTimeoutMs: 10_000 },
+          undefined,
+          { bridge: fakeBridge() },
+        ),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(flooredResponse.body.limits.sessionRestoreTimeoutMs).toBe(60_000);
 
       const configuredResponse = await request(
         createServeApp(

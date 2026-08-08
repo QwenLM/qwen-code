@@ -5040,12 +5040,17 @@ describe('createAcpSessionBridge', () => {
       expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
       expect(handle.killed).toBe(false);
       expect(releaseAdmission).not.toHaveBeenCalled();
-      await expect(
-        bridge.loadSession({
+      const fenced = await bridge
+        .loadSession({
           sessionId: 'restore-timeout-shared',
           workspaceCwd: WS_A,
-        }),
-      ).rejects.toBeInstanceOf(RestoreInProgressError);
+        })
+        .catch((error: unknown) => error);
+      expect(fenced).toBeInstanceOf(RestoreInProgressError);
+      // The fence outlives the public deadline, so it must be distinguishable
+      // from an ordinary in-flight restore: a client that keeps retrying at
+      // the 5s cadence would spin against a 409 it cannot clear.
+      expect(fenced).toMatchObject({ reason: 'awaiting_abandoned_cleanup' });
       await expect(
         bridge.spawnOrAttach({
           workspaceCwd: WS_A,
@@ -5080,6 +5085,180 @@ describe('createAcpSessionBridge', () => {
         }),
       ).resolves.toMatchObject({ sessionId: 'restore-timeout-shared' });
     } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes a channel to fresh sessions when an abandoned restore outlives its grace', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelIdleTimeoutMs: 60_000,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'never-settles', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      // Inside the grace window the channel still takes fresh work.
+      const during = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.closeSession(during.sessionId);
+
+      // One further budget passes with no settlement.
+      await vi.advanceTimersByTimeAsync(20);
+
+      // Existing work keeps running...
+      await expect(
+        bridge.sendPrompt(sibling.sessionId, {
+          sessionId: sibling.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.killed).toBe(false);
+
+      // ...but the channel no longer admits fresh sessions, so it can drain.
+      const blocked = await bridge
+        .spawnOrAttach({ workspaceCwd: WS_A, sessionScope: 'thread' })
+        .catch((error: unknown) => error);
+      expect(blocked).toBeInstanceOf(BridgeChannelQuarantinedError);
+      expect(blocked).toMatchObject({ reason: 'restore_settlement_overdue' });
+
+      // Draining the last visible session closes the transport, which is the
+      // only thing that can release the request we cannot cancel.
+      await bridge.closeSession(sibling.sessionId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.killed).toBe(true);
+    } finally {
+      lateRestore.reject(new Error('channel torn down'));
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops condemning a channel once its abandoned restore settles cleanly', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 3,
+      sessionRestoreTimeoutMs: 20,
+      channelIdleTimeoutMs: 60_000,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'recovers', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(handle.killed).toBe(false);
+
+      // Late result lands and its cleanup close succeeds.
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Draining the last visible session must NOT tear the child down: the
+      // channel recovered, so it falls back to the configured idle policy
+      // rather than being condemned by a timeout that already resolved.
+      await bridge.closeSession(sibling.sessionId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.killed).toBe(false);
+
+      // The idle policy still owns it.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reaps a channel that drains while an abandoned restore is still unsettled', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 3,
+      sessionRestoreTimeoutMs: 20,
+      channelIdleTimeoutMs: 60_000,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'still-hung', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(handle.killed).toBe(false);
+
+      // The restore never settles. Closing the transport is the only lever
+      // that breaks it, so draining the last visible session reaps the child
+      // rather than waiting out the full idle timeout.
+      await bridge.closeSession(sibling.sessionId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.killed).toBe(true);
+    } finally {
+      lateRestore.reject(new Error('channel torn down'));
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('scales the abandoned-restore retry hint with the configured budget', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 2,
+      sessionRestoreTimeoutMs: 90_000,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      // Keep a sibling alive so the timed-out restore stays fenced instead of
+      // taking the empty-channel reap path.
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'restore-hint', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(90_000);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      const fenced = await bridge
+        .loadSession({ sessionId: 'restore-hint', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      expect(fenced).toMatchObject({
+        reason: 'awaiting_abandoned_cleanup',
+        // A budget away, not the ordinary 5s.
+        retryAfterSeconds: 90,
+      });
+    } finally {
+      lateRestore.reject(new Error('channel torn down'));
       await bridge.shutdown();
       vi.useRealTimers();
     }

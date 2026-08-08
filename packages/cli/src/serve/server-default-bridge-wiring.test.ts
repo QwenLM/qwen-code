@@ -178,13 +178,44 @@ describe('createServeApp default bridge wiring', () => {
       hostname: '127.0.0.1',
       mode: 'http-bridge',
       workspace: WS_BOUND,
-      initializeTimeoutMs: 45_000,
+      initializeTimeoutMs: 90_000,
     });
 
     expect(bridgeOptions).toHaveLength(1);
     expect(bridgeOptions[0]).toMatchObject({
-      initializeTimeoutMs: 45_000,
-      sessionRestoreTimeoutMs: 45_000,
+      initializeTimeoutMs: 90_000,
+      sessionRestoreTimeoutMs: 90_000,
+    });
+  });
+
+  it('does not let a short initialize timeout lower the restore budget', async () => {
+    const bridgeOptions: BridgeOptions[] = [];
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
+          bridgeOptions.push(opts);
+          return makeBridge();
+        }),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    createServeApp({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace: WS_BOUND,
+      initializeTimeoutMs: 10_000,
+    });
+
+    expect(bridgeOptions).toHaveLength(1);
+    expect(bridgeOptions[0]).toMatchObject({
+      initializeTimeoutMs: 10_000,
+      sessionRestoreTimeoutMs: 60_000,
     });
   });
 });
