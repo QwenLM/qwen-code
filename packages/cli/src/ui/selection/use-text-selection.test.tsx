@@ -208,6 +208,7 @@ describe('TextSelectionController', () => {
     selectHello(handler);
 
     handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1));
 
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
     expect(copyToClipboard).toHaveBeenLastCalledWith('hello');
@@ -220,6 +221,12 @@ describe('TextSelectionController', () => {
     const handler = mount();
     handler(makeEvent('left-press', 2)); // first click on "foo"
     handler(makeEvent('left-press', 2)); // double-click -> selects "foo"
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 2,
+      ey: 0,
+    });
     handler(makeEvent('move', 10)); // drag to "baz"
     handler(makeEvent('left-release', 10));
     nowSpy.mockRestore();
@@ -240,7 +247,9 @@ describe('TextSelectionController', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
     const handler = mount();
     handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
     handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1)); // double-click -> word "hello"
     handler(makeEvent('left-press', 2, 1)); // triple-click -> line 0
     handler(makeEvent('move', 3, 2)); // drag into the middle of line 1
     handler(makeEvent('left-release', 3, 2));
@@ -252,8 +261,7 @@ describe('TextSelectionController', () => {
       ex: 5,
       ey: 1,
     });
-    expect(copyToClipboard).toHaveBeenCalledWith('hello\nworld!');
-    expect(copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld!');
   });
 
   it('extends a triple-click line selection across multi-word lines', () => {
@@ -262,7 +270,9 @@ describe('TextSelectionController', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
     const handler = mount();
     handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
     handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1)); // double-click -> word "foo"
     handler(makeEvent('left-press', 2, 1)); // triple-click -> line 0
     handler(makeEvent('move', 2, 2)); // drag into 'baz' on line 1
     handler(makeEvent('left-release', 2, 2));
@@ -274,7 +284,7 @@ describe('TextSelectionController', () => {
       ex: 6,
       ey: 1,
     });
-    expect(copyToClipboard).toHaveBeenCalledWith('foo bar\nbaz qux');
+    expect(copyToClipboard).toHaveBeenLastCalledWith('foo bar\nbaz qux');
   });
 
   it('copies a single-character word on a no-drag double-click', () => {
@@ -296,6 +306,28 @@ describe('TextSelectionController', () => {
     });
     expect(copyToClipboard).toHaveBeenCalledWith('a');
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
+  });
+
+  it('copies a one-cell line on a no-drag triple-click', () => {
+    frame = makeFrame('x');
+    viewportRect = { x: 0, y: 0, width: 1, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1));
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1)); // double-click -> word "x"
+    handler(makeEvent('left-press', 1)); // triple-click -> line "x"
+    handler(makeEvent('left-release', 1));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 0,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('x');
   });
 
   it('extends a word drag to the release cell when no move event is emitted', () => {
@@ -343,7 +375,9 @@ describe('TextSelectionController', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
     const handler = mount();
     handler(makeEvent('left-press', 2, 2));
+    handler(makeEvent('left-release', 2, 2));
     handler(makeEvent('left-press', 2, 2));
+    handler(makeEvent('left-release', 2, 2)); // double-click -> word "world!"
     handler(makeEvent('left-press', 2, 2)); // triple-click -> line 1
     handler(makeEvent('move', 2, 1)); // drag up onto line 0
     handler(makeEvent('left-release', 2, 1));
@@ -355,7 +389,7 @@ describe('TextSelectionController', () => {
       ex: 5,
       ey: 1,
     });
-    expect(copyToClipboard).toHaveBeenCalledWith('hello\nworld!');
+    expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld!');
   });
 
   it('falls back to the cursor cell when a word drag lands on whitespace', () => {

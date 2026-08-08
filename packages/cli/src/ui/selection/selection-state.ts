@@ -70,6 +70,14 @@ export class SelectionState {
     );
   }
 
+  /**
+   * A collapsed range is a real single-cell span in word/line mode, but only a
+   * bare click in char mode.
+   */
+  get isBareClick(): boolean {
+    return this.isCollapsed && this.mode === 'char';
+  }
+
   /** Anchor/focus ordered into reading order, or null when empty. */
   normalized(): NormalizedSelection | null {
     if (!this.anchor || !this.focus) {

@@ -11,7 +11,11 @@ import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
-import { SelectionState, type NormalizedSelection } from './selection-state.js';
+import {
+  SelectionState,
+  type NormalizedSelection,
+  type SelectionMode,
+} from './selection-state.js';
 import { getSelectedText } from './selection-text.js';
 import { spanAtForMode } from './selection-span.js';
 import {
@@ -100,9 +104,11 @@ export function TextSelectionController(
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
   const baselineViewportRectRef = useRef<ViewportRect | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
-  // Anchor span of an active word/line drag; null for char drags. While
-  // non-null, the selection mode is the matching 'word' | 'line'.
-  const anchorSpanRef = useRef<NormalizedSelection | null>(null);
+  // Anchor span and mode of an active word/line drag; null for char drags.
+  const anchorSpanRef = useRef<{
+    span: NormalizedSelection;
+    mode: Exclude<SelectionMode, 'char'>;
+  } | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -127,11 +133,9 @@ export function TextSelectionController(
   const applyHighlight = useCallback(() => {
     const selection = selectionRef.current;
     const normalized = selection.normalized();
-    // Highlight whenever there is a real range; a word/line span of a single
-    // cell still highlights, but a bare char-mode click (collapsed) does not.
-    const shouldHighlight =
-      normalized && (!selection.isCollapsed || selection.mode !== 'char');
-    getBuffer()?.setSelection(shouldHighlight ? normalized : null);
+    getBuffer()?.setSelection(
+      normalized && !selection.isBareClick ? normalized : null,
+    );
   }, [getBuffer]);
 
   const recordBaseline = useCallback(() => {
@@ -192,22 +196,22 @@ export function TextSelectionController(
   // #8738). Falls back to a single cell when the cursor is over whitespace.
   const extendSpanDrag = useCallback(
     (point: { x: number; y: number }) => {
-      const anchorSpan = anchorSpanRef.current;
-      if (!anchorSpan) return;
+      const anchor = anchorSpanRef.current;
+      if (!anchor) return;
+      const { span, mode } = anchor;
       const selection = selectionRef.current;
       const frame = getBuffer()?.frame ?? null;
-      const current = spanAtForMode(frame, selection.mode, point) ?? {
+      const current = spanAtForMode(frame, mode, point) ?? {
         sx: point.x,
         sy: point.y,
         ex: point.x,
         ey: point.y,
       };
       const cursorAfter =
-        point.y > anchorSpan.ey ||
-        (point.y === anchorSpan.ey && point.x >= anchorSpan.ex);
+        point.y > span.ey || (point.y === span.ey && point.x >= span.ex);
       selection.anchor = cursorAfter
-        ? { x: anchorSpan.sx, y: anchorSpan.sy }
-        : { x: anchorSpan.ex, y: anchorSpan.ey };
+        ? { x: span.sx, y: span.sy }
+        : { x: span.ex, y: span.ey };
       selection.focus = cursorAfter
         ? { x: current.ex, y: current.ey }
         : { x: current.sx, y: current.sy };
@@ -271,7 +275,7 @@ export function TextSelectionController(
             // on release, matching char drags.
             selection.start({ x: span.sx, y: span.sy }, mode);
             selection.extend({ x: span.ex, y: span.ey });
-            anchorSpanRef.current = span;
+            anchorSpanRef.current = { span, mode };
             dragScrollTopRef.current =
               propsRef.current.getScrollState().scrollTop;
             recordBaseline();
@@ -326,12 +330,7 @@ export function TextSelectionController(
         // applies to a word/line drag when no move covered it.
         anchorSpanRef.current = null;
         selection.finish();
-        // A collapsed range is a real single-cell span in word/line mode,
-        // but only a bare click in char mode.
-        if (
-          selection.isEmpty ||
-          (selection.isCollapsed && selection.mode === 'char')
-        ) {
+        if (selection.isEmpty || selection.isBareClick) {
           clearSelection();
           return;
         }

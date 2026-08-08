@@ -80,7 +80,7 @@ export function lineSpanAt(
 /** Resolve the span at a point for a word/line selection mode. */
 export function spanAtForMode(
   frame: ReadonlyFrame | null,
-  mode: SelectionMode,
+  mode: Exclude<SelectionMode, 'char'>,
   point: Point,
 ): NormalizedSelection | null {
   return mode === 'word'
