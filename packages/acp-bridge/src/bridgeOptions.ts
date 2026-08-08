@@ -73,10 +73,19 @@ export type BridgeSessionLifecycle = (
  */
 export interface ExternalToolGuardPrepareRequest {
   readonly sessionId: string;
-  readonly promptId: string;
+  /**
+   * Runtime-owned active-prompt binding. Absent for context-less shell
+   * checks: subagent reasoning loops, cron turns, background notifications,
+   * and resumed background agents run without an invocation context by
+   * design. A host policy that requires a live prompt must fail closed when
+   * the binding is missing.
+   */
+  readonly promptId?: string;
   readonly toolCallId: string;
   readonly toolName: string;
   readonly arguments: Readonly<Record<string, unknown>>;
+  /** Daemon-owned current session working directory. */
+  readonly effectiveCwd?: string;
 }
 
 export type ExternalToolGuardPrepareResult =

@@ -1,0 +1,1624 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { realpath, readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import { parse } from 'shell-quote';
+import {
+  isWithinRoot,
+  realpathNearestExistingAsync,
+  splitCommands,
+} from '@qwen-code/qwen-code-core';
+import {
+  EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
+  SHELL_EXECUTING_TOOL_NAMES as SHELL_EXECUTING_TOOLS,
+} from '@qwen-code/acp-bridge/externalToolGuard';
+import type {
+  ExternalToolGuardHandler,
+  ExternalToolGuardPrepareRequest,
+  ExternalToolGuardPrepareResult,
+} from '@qwen-code/acp-bridge/bridgeOptions';
+
+// Git subcommands allowed even when relocated outside the session working
+// directory. Limited to subcommands verified to neither write files nor
+// execute programs configured by the target repository on the managed
+// (non-tty) output path. `diff`/`log`/`show`/`blame` are excluded: `--output`
+// writes files and textconv drivers run commands from target-repository
+// config. `grep` takes the same `--textconv` path, `status` refreshes the
+// target index and runs the target repository's core.fsmonitor, and
+// `describe --dirty`/`--broken` rewrite the target index whenever its stat
+// cache is stale (measured on git 2.47.3; a plain `describe` does not, but
+// the flag is one token away), so none of them is read-only here.
+const RELOCATED_READ_ONLY_GIT_SUBCOMMANDS = new Set([
+  'cat-file',
+  'ls-files',
+  'rev-parse',
+]);
+
+// Flags that break the invariant above wherever they appear: `--output`
+// writes a file, and `--textconv`/`--filters` run the *target* repository's
+// configured drivers (`git -C <outside> cat-file --textconv --path=f HEAD:f`
+// executes its `diff.<driver>.textconv` command). A subcommand from the set
+// above carrying one of these is treated as any other relocated command.
+const RELOCATED_READ_ONLY_DISQUALIFYING_FLAGS = new Set([
+  '--filters',
+  '--output',
+  '--textconv',
+]);
+
+// Git global options whose next argv entry is consumed as a value.
+// `--exec-path` and `--list-cmds` are deliberately absent: real git only
+// accepts their `=<value>` form (a bare `--exec-path` prints and exits), so
+// modelling them as value-taking would swallow the token that follows them.
+// An unmodelled value-taking option is not merely ignored: its value is read
+// as the subcommand, which ends option parsing and hides every relocation
+// after it (`git --shallow-file <p> -C <outside> reset --hard`).
+const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set([
+  '--attr-source',
+  '--namespace',
+  '--shallow-file',
+  '--super-prefix',
+]);
+
+// `-c`/`--config-env` keys whose values git executes through a shell. A
+// relocated mutation can be embedded in such a value with no relocation in
+// the outer argv, so these mark a mutating invocation unresolved. Git config
+// keys are case-insensitive, so these are matched against a lowercased key.
+const GIT_COMMAND_CONFIG_KEY_PATTERNS = [
+  /^alias\./,
+  /^core\.(askpass|editor|fsmonitor|pager|sshcommand)$/,
+  /^credential\.helper$/,
+  /^diff\..+\.(command|textconv)$/,
+  /^difftool\./,
+  /^filter\./,
+  /^gpg\.program$/,
+  /^merge\..+\.driver$/,
+  /^mergetool\./,
+  /^pager\./,
+  /^sequence\.editor$/,
+  /^uploadpack\.packobjectshook$/,
+];
+
+// Environment assignments that redirect git's repository selection (mirrors
+// core shell.ts GIT_ENV_SHIFTS_REPO).
+const GIT_DIR_ENV_KEYS = new Set(['GIT_COMMON_DIR', 'GIT_DIR']);
+const GIT_WORK_TREE_ENV_KEYS = new Set(['GIT_INDEX_FILE', 'GIT_WORK_TREE']);
+
+const SHELL_WRAPPER_PROGRAMS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
+const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
+
+// `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
+// argv entry as the payload. `-o`/`-O` take values, so either one earlier in
+// the bundle consumes the rest of it and `-c` is not present.
+function shellBundleRequestsCommand(flag: string): boolean {
+  if (!flag.startsWith('-') || flag.startsWith('--')) return false;
+  for (const character of flag.slice(1)) {
+    if (character === 'o' || character === 'O') return false;
+    if (character === 'c') return true;
+  }
+  return false;
+}
+
+const ENV_CHDIR_FLAGS = new Set(['-C', '--chdir']);
+const ENV_VALUE_FLAGS = new Set(['-S', '--split-string', '-u', '--unset']);
+const ENV_KNOWN_FLAG_ONLY = new Set(['-', '-0', '-i', '-v']);
+
+// Union of core shell-utils/shell.ts value-taking sudo options.
+const SUDO_VALUE_FLAGS = new Set([
+  '-C',
+  '-D',
+  '-T',
+  '-g',
+  '-h',
+  '-p',
+  '-r',
+  '-t',
+  '-u',
+  '--chdir',
+  '--close-from',
+  '--command-timeout',
+  '--group',
+  '--host',
+  '--prompt',
+  '--role',
+  '--type',
+  '--user',
+]);
+const SUDO_CHDIR_FLAGS = new Set(['-D', '--chdir']);
+
+const TIMEOUT_VALUE_FLAGS = new Set(['-k', '-s', '--kill-after', '--signal']);
+
+// Pinned to ToolNames.AGENT/WORKFLOW/CREATE_SUB_SESSION/SEND_MESSAGE in
+// @qwen-code/qwen-code-core. The literals keep this module free of a core
+// barrel import for this one set; daemon-git-worktree-guard.test.ts asserts
+// the values match so a rename cannot silently desync this set.
+const EXTERNAL_GUARD_UNSUPPORTED_TOOLS = new Set([
+  'agent',
+  'workflow',
+  'create_sub_session',
+  'send_message',
+]);
+
+const DYNAMIC_RELOCATION_DENIAL =
+  'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
+const UNPARSEABLE_COMMAND_DENIAL =
+  'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const UNRESOLVED_TARGET_DENIAL_PREFIX =
+  'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
+const OUTSIDE_TARGET_DENIAL_PREFIX =
+  'Daemon shell guard denied a mutating Git command outside the session working directory: ';
+const UNDECIDABLE_PAYLOAD_DENIAL =
+  'Daemon shell guard denied a shell command whose payload could not be resolved before execution.';
+const UNRECOGNIZED_PROGRAM_DENIAL =
+  'Daemon shell guard denied a shell command that may run a relocated Git command through an unrecognized program.';
+const PROMPTLESS_PROVIDER_DENIAL =
+  'Managed external tool guard cannot consult an external provider without an active prompt binding.';
+
+const MAX_PAYLOAD_RECURSION_DEPTH = 3;
+
+interface TrustedDaemonToolGuardRequest
+  extends ExternalToolGuardPrepareRequest {
+  readonly effectiveCwd: string;
+}
+
+interface GuardToken {
+  readonly text: string;
+  readonly dynamic: boolean;
+}
+
+interface GitEnvRelocation {
+  readonly target: string;
+  readonly kind: 'cwd' | 'git-dir' | 'work-tree';
+}
+
+interface PrefixState {
+  readonly relocations: GitEnvRelocation[];
+  unresolved: boolean;
+}
+
+type GuardDenial = { allowed: false; reason: string };
+
+function sanitizeDenialPath(value: string, prefix: string): string {
+  // Mirror containsUnsafeExternalToolGuardControlCharacter: control
+  // characters would convert a clean denial into an invalid guard result.
+  const stripped = [...value]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return (
+        code >= 0x20 &&
+        !(code >= 0x7f && code <= 0x9f) &&
+        code !== 0x2028 &&
+        code !== 0x2029
+      );
+    })
+    .join('');
+  const budget = EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS - prefix.length;
+  if (stripped.length <= budget) return stripped;
+  return `${stripped.slice(0, Math.max(1, budget - 1))}…`;
+}
+
+function denyDynamicRelocation(): GuardDenial {
+  return { allowed: false, reason: DYNAMIC_RELOCATION_DENIAL };
+}
+
+function denyTarget(prefix: string, target: string): GuardDenial {
+  return {
+    allowed: false,
+    reason: `${prefix}${sanitizeDenialPath(target, prefix)}`,
+  };
+}
+
+// `{a,b}` is expanded by the shell after this parse, so `git {-C,<outside>}
+// reset --hard` reaches git as a relocation the token scan never saw.
+const BRACE_EXPANSION_PATTERN = /\{[^{}]*,[^{}]*\}/;
+
+function isDynamicPathValue(token: GuardToken | undefined): boolean {
+  return (
+    token === undefined ||
+    token.dynamic ||
+    token.text.includes('`') ||
+    token.text.startsWith('~') ||
+    BRACE_EXPANSION_PATTERN.test(token.text)
+  );
+}
+
+// `+=` appends to whatever the variable already holds, so the resulting value
+// cannot be resolved from this token alone; it is reported like any other
+// assignment and `recordEnvAssignment` marks it unresolved.
+function leadingEnvAssignmentKey(token: string): string | null {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(token);
+  return match ? match[1]! : null;
+}
+
+function isAppendAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*\+=/.test(token);
+}
+
+function executableBaseName(token: GuardToken): string {
+  const base = token.text.split(/[\\/]/).pop() ?? token.text;
+  return base.toLowerCase().replace(/\.exe$/i, '');
+}
+
+const REDIRECT_OPERATORS = new Set([
+  '<',
+  '>',
+  '>>',
+  '<<',
+  '<<<',
+  '<>',
+  '>&',
+  '<&',
+  '>|',
+  '&>',
+  '&>>',
+]);
+
+function tokenizeSegment(segment: string): GuardToken[][] | null {
+  let parsed: ReturnType<typeof parse>;
+  try {
+    parsed = parse(segment, (key) => `$${key}`);
+  } catch {
+    return null;
+  }
+  const runs: GuardToken[][] = [[]];
+  for (let index = 0; index < parsed.length; index++) {
+    const token = parsed[index];
+    if (typeof token === 'string') {
+      // A `$(...)` substitution arrives as a string ending in `$` followed
+      // by an `(` operator. Consume the whole body as one opaque dynamic
+      // token so the assignment/flag it belongs to keeps its place instead
+      // of being severed into a separate run.
+      if (token.endsWith('$')) {
+        const next = parsed[index + 1];
+        if (
+          next !== null &&
+          typeof next === 'object' &&
+          'op' in next &&
+          next.op === '('
+        ) {
+          let depth = 0;
+          index++;
+          for (; index < parsed.length; index++) {
+            const inner = parsed[index];
+            if (inner !== null && typeof inner === 'object' && 'op' in inner) {
+              if (inner.op === '(') depth++;
+              else if (inner.op === ')') {
+                depth--;
+                if (depth === 0) break;
+              }
+            }
+          }
+          runs.at(-1)!.push({ text: token, dynamic: true });
+          continue;
+        }
+      }
+      runs.at(-1)!.push({
+        text: token,
+        dynamic: token.includes('$') || token.includes('`'),
+      });
+      continue;
+    }
+    if (token === null || typeof token !== 'object') return null;
+    if ('comment' in token) break;
+    if (!('op' in token)) return null;
+    const op = token.op;
+    if (op === 'glob') {
+      // Glob expansion is resolved by the shell at runtime; the daemon
+      // cannot evaluate it statically.
+      const pattern =
+        'pattern' in token && typeof token.pattern === 'string'
+          ? token.pattern
+          : '';
+      runs.at(-1)!.push({ text: pattern, dynamic: true });
+      continue;
+    }
+    if (op === '(' || op === ')') {
+      runs.push([]);
+      continue;
+    }
+    if (REDIRECT_OPERATORS.has(op)) {
+      // The operand stays in the run: a here-string (`sh <<< 'git -C … reset
+      // --hard'`) carries an executable payload, and an ordinary redirect
+      // target is inert text that no analysis step acts on.
+      continue;
+    }
+    runs.push([]);
+  }
+  return runs.filter((run) => run.length > 0);
+}
+
+function joinTokenTexts(tokens: GuardToken[]): string {
+  return tokens.map((token) => token.text).join(' ');
+}
+
+function hasGitRelocationMarker(tokens: GuardToken[]): boolean {
+  return tokens.some((token) => {
+    if (token.text === '-C' || token.text.startsWith('-C')) return true;
+    if (/^--(?:git-dir|work-tree)(?:=|$)/.test(token.text)) return true;
+    const key = leadingEnvAssignmentKey(token.text);
+    return (
+      key !== null &&
+      (GIT_DIR_ENV_KEYS.has(key) || GIT_WORK_TREE_ENV_KEYS.has(key))
+    );
+  });
+}
+
+// A static token scan cannot prove what an unrecognized program executes.
+// When the run still references git and carries a relocation marker —
+// possibly inside a quoted payload such as `su -c 'git -C ...'` — fail
+// closed instead of letting the program word short-circuit the analysis.
+// Case-insensitive because `executableBaseName` lowercases too, so on a
+// case-insensitive filesystem `nice GIT …` runs the same binary.
+const GIT_WORD_PATTERN = /\bgit\b/i;
+// A `cd`/`pushd` inside such a payload relocates the git that follows it just
+// as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
+const TEXT_RELOCATION_MARKER_PATTERN =
+  /(^|\s)(-C|--git-dir=?|--work-tree=?)|(^|\s)(cd|pushd)(\s|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)\+?=/;
+
+function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
+  const key = leadingEnvAssignmentKey(token.text);
+  if (key === null) return;
+  if (!GIT_DIR_ENV_KEYS.has(key) && !GIT_WORK_TREE_ENV_KEYS.has(key)) return;
+  const value = token.text.slice(token.text.indexOf('=') + 1);
+  if (
+    token.dynamic ||
+    isAppendAssignment(token.text) ||
+    isDynamicPathValue({ text: value, dynamic: false })
+  ) {
+    state.unresolved = true;
+    return;
+  }
+  state.relocations.push({
+    target: value,
+    // GIT_COMMON_DIR and GIT_INDEX_FILE cannot be mapped onto a repository
+    // root the way `--git-dir` targets are; checking the concrete path they
+    // name is the conservative approximation.
+    kind: GIT_WORK_TREE_ENV_KEYS.has(key) ? 'work-tree' : 'git-dir',
+  });
+}
+
+function attachedChdirValue(
+  flag: string,
+  set: ReadonlySet<string>,
+): string | undefined {
+  for (const candidate of set) {
+    if (candidate.startsWith('--') && flag.startsWith(`${candidate}=`)) {
+      return flag.slice(candidate.length + 1);
+    }
+    if (
+      candidate.length === 2 &&
+      flag.startsWith(candidate) &&
+      flag.length > candidate.length
+    ) {
+      return flag.slice(candidate.length);
+    }
+  }
+  return undefined;
+}
+
+function recordChdirValue(
+  value: GuardToken | undefined,
+  state: PrefixState,
+): void {
+  if (isDynamicPathValue(value)) {
+    state.unresolved = true;
+    return;
+  }
+  state.relocations.push({ target: value!.text, kind: 'cwd' });
+}
+
+interface WrapperScan {
+  next: number;
+  payload?: string;
+  undecidable?: boolean;
+}
+
+function consumeEnvWrapper(
+  run: GuardToken[],
+  start: number,
+  state: PrefixState,
+): WrapperScan {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.dynamic) {
+      state.unresolved = true;
+      index++;
+      continue;
+    }
+    if (token.text === '--') {
+      index++;
+      break;
+    }
+    if (ENV_KNOWN_FLAG_ONLY.has(token.text)) {
+      index++;
+      continue;
+    }
+    if (ENV_CHDIR_FLAGS.has(token.text)) {
+      recordChdirValue(run[index + 1], state);
+      index += 2;
+      continue;
+    }
+    const attached = attachedChdirValue(token.text, ENV_CHDIR_FLAGS);
+    if (attached !== undefined) {
+      recordChdirValue({ text: attached, dynamic: false }, state);
+      index++;
+      continue;
+    }
+    if (token.text === '-S' || token.text === '--split-string') {
+      const payloadToken = run[index + 1];
+      if (payloadToken === undefined) return { next: run.length };
+      // Mirrors the `-c` payload rule: a payload the daemon cannot read is
+      // undecidable, not absent.
+      if (payloadToken.dynamic) return { next: run.length, undecidable: true };
+      const rest = joinTokenTexts(run.slice(index + 2));
+      return {
+        next: run.length,
+        payload: rest ? `${payloadToken.text} ${rest}` : payloadToken.text,
+      };
+    }
+    // `env -S'cmd'` / `env -iS'cmd'`: the payload is fused into the flag
+    // token after the `S`, exactly as `sh -c'cmd'` fuses its own.
+    if (/^-[A-Za-z]*S/.test(token.text) && !token.text.startsWith('--')) {
+      const fused = token.text.slice(token.text.indexOf('S') + 1);
+      if (fused.length > 0) {
+        const rest = joinTokenTexts(run.slice(index + 1));
+        return {
+          next: run.length,
+          payload: rest ? `${fused} ${rest}` : fused,
+        };
+      }
+    }
+    if (ENV_VALUE_FLAGS.has(token.text)) {
+      index += 2;
+      continue;
+    }
+    if (leadingEnvAssignmentKey(token.text) !== null) {
+      recordEnvAssignment(token, state);
+      index++;
+      continue;
+    }
+    if (token.text.startsWith('-')) {
+      // Unrecognized env option before the program: fail closed rather than
+      // guess whether it consumes the next token.
+      state.unresolved = true;
+      index++;
+      continue;
+    }
+    break;
+  }
+  return { next: index };
+}
+
+function consumeSudoWrapper(
+  run: GuardToken[],
+  start: number,
+  state: PrefixState,
+): WrapperScan {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.dynamic) {
+      state.unresolved = true;
+      index++;
+      continue;
+    }
+    if (leadingEnvAssignmentKey(token.text) !== null) {
+      recordEnvAssignment(token, state);
+      index++;
+      continue;
+    }
+    if (!token.text.startsWith('-')) break;
+    if (SUDO_CHDIR_FLAGS.has(token.text)) {
+      recordChdirValue(run[index + 1], state);
+      index += 2;
+      continue;
+    }
+    const attached = attachedChdirValue(token.text, SUDO_CHDIR_FLAGS);
+    if (attached !== undefined) {
+      recordChdirValue({ text: attached, dynamic: false }, state);
+      index++;
+      continue;
+    }
+    if (SUDO_VALUE_FLAGS.has(token.text)) {
+      index += 2;
+      continue;
+    }
+    index++;
+  }
+  return { next: index };
+}
+
+function consumeTimeoutWrapper(run: GuardToken[], start: number): number {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (!token.text.startsWith('-')) break;
+    if (TIMEOUT_VALUE_FLAGS.has(token.text) && !token.text.includes('=')) {
+      index += 2;
+      continue;
+    }
+    index++;
+  }
+  // The duration operand.
+  if (index < run.length) index++;
+  return index;
+}
+
+type ShellWrapperScan =
+  | { kind: 'none' }
+  | { kind: 'static'; payload: string }
+  | { kind: 'dynamic' };
+
+function consumeShellWrapper(
+  run: GuardToken[],
+  start: number,
+): ShellWrapperScan {
+  let index = start + 1;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.text === '-c') {
+      const payloadToken = run[index + 1];
+      if (payloadToken === undefined) {
+        // `sh -c` with no payload executes nothing.
+        return { kind: 'static', payload: '' };
+      }
+      if (payloadToken.dynamic) return { kind: 'dynamic' };
+      return { kind: 'static', payload: payloadToken.text };
+    }
+    if (token.dynamic) {
+      // `bash -c$CMD`: the payload is fused into this token and unresolved.
+      return shellBundleRequestsCommand(token.text)
+        ? { kind: 'dynamic' }
+        : { kind: 'none' };
+    }
+    if (shellBundleRequestsCommand(token.text)) {
+      const fusedPayload = token.text.slice(token.text.indexOf('c') + 1);
+      if (fusedPayload.length > 0) {
+        // `bash -c'cmd'`: the payload is fused into the flag token after
+        // the `c`, not the next argv entry.
+        return { kind: 'static', payload: fusedPayload };
+      }
+      // `bash -lc 'cmd'`: `c` ends the bundle, so the payload is the next
+      // argv entry after all.
+      const payloadToken = run[index + 1];
+      if (payloadToken === undefined) {
+        return { kind: 'static', payload: '' };
+      }
+      if (payloadToken.dynamic) return { kind: 'dynamic' };
+      return { kind: 'static', payload: payloadToken.text };
+    }
+    if (token.text.startsWith('+')) {
+      index++;
+      continue;
+    }
+    if (!token.text.startsWith('-')) return { kind: 'none' };
+    if (token.text === '--') return { kind: 'none' };
+    index += SHELL_WRAPPER_VALUE_FLAGS.has(token.text) ? 2 : 1;
+  }
+  return { kind: 'none' };
+}
+
+type RunAnalysis =
+  | { kind: 'git'; tokens: GuardToken[]; state: PrefixState }
+  | {
+      kind: 'payload';
+      payload: string;
+      state: PrefixState;
+      propagatesCwd: boolean;
+    }
+  | {
+      kind: 'cd';
+      variant: 'cd' | 'popd' | 'pushd';
+      target?: GuardToken;
+      physical?: boolean;
+    }
+  | { kind: 'dynamic-program'; rest: GuardToken[]; state: PrefixState }
+  | { kind: 'export'; state: PrefixState; operands: GuardToken[] }
+  | { kind: 'all-export' }
+  | { kind: 'undecidable' }
+  | { kind: 'other'; state: PrefixState; assignmentsOnly: boolean };
+
+// Shell keywords that can lead a split segment without changing what
+// executes: `if true; then git ...` arrives as a `then git ...` segment
+// because the split happens on `;`/`&&`. Skipping them keeps the real
+// program under analysis; bare terminators (`fi`, `done`, ...) leave an
+// empty run that classifies as safe.
+const LEADING_SHELL_KEYWORDS = new Set([
+  '{',
+  '}',
+  '!',
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'for',
+  'do',
+  'done',
+  'while',
+  'until',
+  'in',
+  'case',
+  'esac',
+  'time',
+  'coproc',
+]);
+
+// Builtins that declare variables. `export`/`declare -x`/`typeset -x` put the
+// assignment in the environment of every later command in this shell, so a
+// GIT_* relocation declared here outlives its own run. `readonly`/`local` are
+// treated the same way: over-approximating an assignment as exported can only
+// deny, never allow.
+const EXPORT_BUILTINS = new Set([
+  'declare',
+  'export',
+  'local',
+  'readonly',
+  'typeset',
+]);
+
+// `cd`/`pushd` options that precede the directory operand. Consuming one as
+// the target would resolve containment against `<cwd>/-P` instead of the
+// directory the shell actually enters.
+const CHDIR_OPTION_PATTERN = /^-[LPe@qs]+$/;
+
+function findChdirTarget(
+  run: GuardToken[],
+  start: number,
+  variant: 'cd' | 'popd' | 'pushd',
+): GuardToken | undefined {
+  let index = start;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (token.text === '--') return run[index + 1];
+    if (variant === 'cd' && CHDIR_OPTION_PATTERN.test(token.text)) {
+      index++;
+      continue;
+    }
+    // `cd -` (previous directory), `pushd +N`/`-N` (stack rotation) and any
+    // unrecognized option land somewhere unresolvable: report no target so
+    // the caller drops the tracked cwd.
+    if (/^[-+]/.test(token.text)) return undefined;
+    return token;
+  }
+  return undefined;
+}
+
+// `set -a` / `set -o allexport` puts every later assignment in the
+// environment, so plain `GIT_DIR=…` runs stop being shell-local.
+function requestsAllExport(run: GuardToken[], start: number): boolean {
+  for (let index = start; index < run.length; index++) {
+    const token = run[index]!;
+    const text = token.text;
+    // `set -o $OPT` can request allexport without naming it.
+    if (token.dynamic) return true;
+    if (text === '-o' || text === '--') {
+      if (run[index + 1]?.text === 'allexport') return true;
+      continue;
+    }
+    if (text === 'allexport' || text === '--allexport') return true;
+    if (/^-[a-zA-Z]*a/.test(text)) return true;
+  }
+  return false;
+}
+
+function analyzeRun(run: GuardToken[]): RunAnalysis {
+  const state: PrefixState = { relocations: [], unresolved: false };
+  let index = 0;
+  let assignments = 0;
+  while (index < run.length && LEADING_SHELL_KEYWORDS.has(run[index]!.text)) {
+    index++;
+  }
+  while (index < run.length) {
+    const token = run[index]!;
+    if (leadingEnvAssignmentKey(token.text) !== null) {
+      recordEnvAssignment(token, state);
+      assignments++;
+      index++;
+      continue;
+    }
+    if (token.dynamic) {
+      return { kind: 'dynamic-program', rest: run.slice(index), state };
+    }
+    const program = executableBaseName(token);
+    // `command git …` and `builtin cd …` run the following word with the
+    // function/alias lookup suppressed; neither changes what executes.
+    if (program === 'command' || program === 'builtin') {
+      index++;
+      while (index < run.length && run[index]!.text.startsWith('-')) index++;
+      continue;
+    }
+    if (EXPORT_BUILTINS.has(program)) {
+      const operands = run.slice(index + 1);
+      for (const operand of operands) recordEnvAssignment(operand, state);
+      return { kind: 'export', state, operands };
+    }
+    if (program === 'set' && requestsAllExport(run, index + 1)) {
+      return { kind: 'all-export' };
+    }
+    if (program === 'env') {
+      const scan = consumeEnvWrapper(run, index, state);
+      if (scan.undecidable) return { kind: 'undecidable' };
+      if (scan.payload !== undefined) {
+        return {
+          kind: 'payload',
+          payload: scan.payload,
+          state,
+          propagatesCwd: false,
+        };
+      }
+      index = scan.next;
+      continue;
+    }
+    if (program === 'sudo') {
+      index = consumeSudoWrapper(run, index, state).next;
+      continue;
+    }
+    if (program === 'timeout') {
+      index = consumeTimeoutWrapper(run, index);
+      continue;
+    }
+    if (program === 'eval') {
+      const payloadTokens = run.slice(index + 1);
+      if (payloadTokens.some((payloadToken) => payloadToken.dynamic)) {
+        return { kind: 'undecidable' };
+      }
+      return {
+        kind: 'payload',
+        payload: joinTokenTexts(payloadTokens),
+        state,
+        // `eval` runs in the current shell, so a `cd` inside the payload
+        // relocates subsequent commands in this run's scope.
+        propagatesCwd: true,
+      };
+    }
+    if (SHELL_WRAPPER_PROGRAMS.has(program)) {
+      const scan = consumeShellWrapper(run, index);
+      if (scan.kind === 'none') {
+        return { kind: 'other', state, assignmentsOnly: false };
+      }
+      if (scan.kind === 'dynamic') return { kind: 'undecidable' };
+      return {
+        kind: 'payload',
+        payload: scan.payload,
+        state,
+        propagatesCwd: false,
+      };
+    }
+    if (program === 'nohup' || program === 'exec') {
+      index++;
+      continue;
+    }
+    if (program === 'git') {
+      return { kind: 'git', tokens: run.slice(index), state };
+    }
+    if (program === 'cd' || program === 'pushd' || program === 'popd') {
+      return {
+        kind: 'cd',
+        variant: program,
+        target: findChdirTarget(run, index + 1, program),
+        // `cd -P` resolves each component through its symlinks before
+        // applying `..`, which a lexical resolve cannot reproduce.
+        physical: run
+          .slice(index + 1)
+          .some((token) => /^-[A-Za-z]*P/.test(token.text)),
+      };
+    }
+    return { kind: 'other', state, assignmentsOnly: false };
+  }
+  return { kind: 'other', state, assignmentsOnly: assignments > 0 };
+}
+
+interface GitInvocation {
+  readonly cwdTargets: GuardToken[];
+  readonly gitDirTargets: GuardToken[];
+  readonly workTreeTargets: GuardToken[];
+  readonly subcommand?: string;
+  readonly unresolved: boolean;
+  readonly dangerousConfig: boolean;
+  readonly hasDisqualifyingFlag: boolean;
+}
+
+function readGitInvocation(tokens: GuardToken[]): GitInvocation {
+  const cwdTargets: GuardToken[] = [];
+  const gitDirTargets: GuardToken[] = [];
+  const workTreeTargets: GuardToken[] = [];
+  let subcommand: string | undefined;
+  let unresolved = false;
+  let dangerousConfig = false;
+
+  const recordConfigAssignment = (value: string): void => {
+    const separator = value.indexOf('=');
+    const key = (
+      separator >= 0 ? value.slice(0, separator) : value
+    ).toLowerCase();
+    const assignment = separator >= 0 ? value.slice(separator + 1) : '';
+    if (
+      GIT_COMMAND_CONFIG_KEY_PATTERNS.some((pattern) => pattern.test(key)) ||
+      assignment.trimStart().startsWith('!')
+    ) {
+      dangerousConfig = true;
+    }
+  };
+  const pushRelocation = (
+    kind: 'cwd' | 'git-dir' | 'work-tree',
+    value: GuardToken | undefined,
+    emptyIsNoop: boolean,
+  ): boolean => {
+    if (value === undefined) {
+      unresolved = true;
+      return false;
+    }
+    if (value.text === '' && !value.dynamic) {
+      if (emptyIsNoop) return true;
+      unresolved = true;
+      return false;
+    }
+    if (isDynamicPathValue(value)) {
+      unresolved = true;
+      return true;
+    }
+    if (kind === 'cwd') cwdTargets.push(value);
+    else if (kind === 'git-dir') gitDirTargets.push(value);
+    else workTreeTargets.push(value);
+    return true;
+  };
+
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token.dynamic || BRACE_EXPANSION_PATTERN.test(token.text)) {
+      unresolved = true;
+      index++;
+      continue;
+    }
+    if (token.text === '-C') {
+      // Git treats an empty `-C` value as a no-op chdir.
+      if (!pushRelocation('cwd', tokens[index + 1], true)) break;
+      index += 2;
+      continue;
+    }
+    if (token.text === '--git-dir' || token.text === '--work-tree') {
+      const kind = token.text === '--git-dir' ? 'git-dir' : 'work-tree';
+      if (!pushRelocation(kind, tokens[index + 1], false)) break;
+      index += 2;
+      continue;
+    }
+    if (token.text.length > 2 && token.text.startsWith('-C')) {
+      if (
+        !pushRelocation(
+          'cwd',
+          { text: token.text.slice(2), dynamic: false },
+          false,
+        )
+      ) {
+        break;
+      }
+      index++;
+      continue;
+    }
+    if (
+      token.text.startsWith('--git-dir=') ||
+      token.text.startsWith('--work-tree=')
+    ) {
+      const kind = token.text.startsWith('--git-dir=')
+        ? 'git-dir'
+        : 'work-tree';
+      const value = token.text.slice(token.text.indexOf('=') + 1);
+      if (!pushRelocation(kind, { text: value, dynamic: false }, false)) {
+        break;
+      }
+      index++;
+      continue;
+    }
+    if (token.text === '-c' || token.text === '--config-env') {
+      const value = tokens[index + 1];
+      if (value === undefined) break;
+      if (value.dynamic) dangerousConfig = true;
+      else recordConfigAssignment(value.text);
+      index += 2;
+      continue;
+    }
+    if (token.text.startsWith('--config-env=')) {
+      recordConfigAssignment(token.text.slice('--config-env='.length));
+      index++;
+      continue;
+    }
+    if (
+      token.text.length > 2 &&
+      token.text.startsWith('-c') &&
+      !token.text.startsWith('--')
+    ) {
+      recordConfigAssignment(token.text.slice(2));
+      index++;
+      continue;
+    }
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUES.has(token.text)) {
+      if (tokens[index + 1] === undefined) break;
+      index += 2;
+      continue;
+    }
+    if (token.text.startsWith('-')) {
+      index++;
+      continue;
+    }
+    subcommand = token.text;
+    break;
+  }
+
+  const hasDisqualifyingFlag = tokens.some((token) => {
+    const separator = token.text.indexOf('=');
+    const flag = separator >= 0 ? token.text.slice(0, separator) : token.text;
+    return RELOCATED_READ_ONLY_DISQUALIFYING_FLAGS.has(flag);
+  });
+  return {
+    cwdTargets,
+    gitDirTargets,
+    workTreeTargets,
+    subcommand,
+    unresolved,
+    dangerousConfig,
+    hasDisqualifyingFlag,
+  };
+}
+
+/**
+ * Resolve a `--git-dir`/`GIT_DIR` target to the repository git operates on,
+ * following git's own indirections: a `.git` gitfile redirect (`gitdir:`
+ * line) and per-worktree administrative directories (their `gitdir` file
+ * points at the linked worktree checkout). Canonicalization happens BEFORE
+ * any basename handling so a symlink named `.git` resolves to its real
+ * target. Throws when an indirection cannot be resolved.
+ */
+async function resolveGitDirRepository(
+  canonicalGitDir: string,
+): Promise<string> {
+  let current = canonicalGitDir;
+  for (let depth = 0; depth < 3; depth++) {
+    const stats = await stat(current);
+    if (stats.isFile()) {
+      const [firstLine] = (await readFile(current, 'utf8')).split(/\r?\n/);
+      const match = /^gitdir:\s*(.+)$/.exec(firstLine ?? '');
+      if (!match) throw new Error('unrecognized gitfile');
+      current = path.resolve(path.dirname(current), match[1]!.trim());
+      continue;
+    }
+    if (path.basename(current) === '.git') {
+      return path.dirname(current);
+    }
+    if (/[/\\]\.git[/\\]worktrees[/\\][^/\\]+$/.test(current)) {
+      const worktreeGitPointer = (
+        await readFile(path.join(current, 'gitdir'), 'utf8')
+      ).trim();
+      if (!worktreeGitPointer) throw new Error('empty worktree gitdir file');
+      return path.dirname(path.resolve(current, worktreeGitPointer));
+    }
+    return current;
+  }
+  throw new Error('gitdir indirection too deep');
+}
+
+/**
+ * Resolve a directory change the way `chdir(2)` does — following each
+ * component's symlinks before applying the next one. `git -C` and `cd -P` use
+ * it, so `-C <symlink>/..` lands in the parent of the symlink's real target,
+ * while a lexical `path.resolve` would collapse it back to the starting
+ * directory. Bash's default `cd` is logical and keeps the lexical behavior.
+ */
+async function resolvePhysicalPath(
+  base: string,
+  target: string,
+): Promise<string> {
+  let current = path.isAbsolute(target) ? path.parse(target).root : base;
+  for (const segment of target.split(/[\\/]+/)) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      current = path.dirname(await realpathNearestExistingAsync(current));
+      continue;
+    }
+    current = await realpathNearestExistingAsync(path.join(current, segment));
+  }
+  return current;
+}
+
+/**
+ * Git discovers its repository by walking up from the working directory, so a
+ * directory that is itself inside the boundary can still hand git an outside
+ * repository through a `.git` gitfile (`gitdir: <outside>/.git`). Resolve the
+ * first `.git` between the target and the boundary the same way `--git-dir`
+ * targets are resolved — which keeps a linked worktree working, because its
+ * own gitfile resolves back to that worktree's checkout. Returns undefined
+ * when nothing is discovered inside the boundary; throws when an indirection
+ * cannot be read.
+ */
+async function resolveDiscoveredRepository(
+  startDirectory: string,
+  boundary: string,
+): Promise<string | undefined> {
+  let current = startDirectory;
+  for (let depth = 0; depth < 64; depth++) {
+    const candidate = path.join(current, '.git');
+    let exists = true;
+    try {
+      await stat(candidate);
+    } catch {
+      exists = false;
+    }
+    if (exists) {
+      return resolveGitDirRepository(
+        await realpathNearestExistingAsync(candidate),
+      );
+    }
+    if (current === boundary) return undefined;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+  return undefined;
+}
+
+interface GuardEvaluationContext {
+  readonly canonicalEffectiveCwd: string;
+  readonly ambientRelocations: readonly GitEnvRelocation[];
+  readonly ambientUnresolved: boolean;
+}
+
+async function evaluateGitInvocation(
+  invocation: GitInvocation,
+  state: PrefixState,
+  basisCwd: string | undefined,
+  entryCwd: string | undefined,
+  context: GuardEvaluationContext,
+): Promise<GuardDenial | undefined> {
+  // Command-executing `-c` config and unresolvable relocations are checked
+  // BEFORE the read-only allowance: `git status` still runs the target
+  // repository's core.fsmonitor, so a read-only subcommand does not make an
+  // undecidable invocation safe.
+  if (
+    invocation.unresolved ||
+    invocation.dangerousConfig ||
+    state.unresolved ||
+    context.ambientUnresolved
+  ) {
+    return denyDynamicRelocation();
+  }
+  if (
+    RELOCATED_READ_ONLY_GIT_SUBCOMMANDS.has(invocation.subcommand ?? '') &&
+    !invocation.hasDisqualifyingFlag
+  ) {
+    return undefined;
+  }
+
+  const cwdRelocations: GitEnvRelocation[] = [];
+  const repositoryRelocations: GitEnvRelocation[] = [];
+  for (const relocation of [
+    ...context.ambientRelocations,
+    ...state.relocations,
+  ]) {
+    if (relocation.kind === 'cwd') cwdRelocations.push(relocation);
+    else repositoryRelocations.push(relocation);
+  }
+  for (const target of invocation.cwdTargets) {
+    cwdRelocations.push({ target: target.text, kind: 'cwd' });
+  }
+  for (const target of invocation.gitDirTargets) {
+    repositoryRelocations.push({ target: target.text, kind: 'git-dir' });
+  }
+  for (const target of invocation.workTreeTargets) {
+    repositoryRelocations.push({ target: target.text, kind: 'work-tree' });
+  }
+
+  // Ambient relocations recorded here are git-level relocations from an
+  // enclosing wrapper (e.g. `GIT_DIR=… sh -c '…'`); they make the payload
+  // invocation relocated even when the payload itself carries no flags.
+  const relocated =
+    basisCwd === undefined ||
+    basisCwd !== entryCwd ||
+    cwdRelocations.length > 0 ||
+    repositoryRelocations.length > 0;
+  if (!relocated) return undefined;
+
+  // `-C`, `env -C` and `sudo -D` all reach the kernel as a chdir, so each
+  // component resolves through its symlinks before the next one applies.
+  let gitCwd = basisCwd;
+  for (const relocation of cwdRelocations) {
+    if (gitCwd === undefined && !path.isAbsolute(relocation.target)) break;
+    gitCwd = await resolvePhysicalPath(gitCwd ?? '', relocation.target);
+  }
+  if (gitCwd === undefined) {
+    return denyDynamicRelocation();
+  }
+
+  // Git applies `-C` during option parsing and resolves relative
+  // `--git-dir`/`--work-tree` against the post-`-C` cwd, so every relative
+  // target resolves against the final cwd regardless of argv order.
+  const checkedTargets: Array<{
+    target: string;
+    kind: 'cwd' | 'git-dir' | 'work-tree';
+  }> = [];
+  for (const relocation of repositoryRelocations) {
+    checkedTargets.push({
+      target: path.isAbsolute(relocation.target)
+        ? relocation.target
+        : path.resolve(gitCwd, relocation.target),
+      kind: relocation.kind,
+    });
+  }
+  if (
+    basisCwd === undefined ||
+    basisCwd !== entryCwd ||
+    cwdRelocations.length > 0
+  ) {
+    checkedTargets.push({ target: gitCwd, kind: 'cwd' });
+  }
+
+  for (const { target, kind } of checkedTargets) {
+    const canonicalTarget = await realpathNearestExistingAsync(target);
+    let repositoryTarget: string;
+    if (kind === 'git-dir') {
+      try {
+        repositoryTarget = await resolveGitDirRepository(canonicalTarget);
+      } catch {
+        // Missing or unreadable indirection: containment cannot be proven
+        // before execution.
+        return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, canonicalTarget);
+      }
+    } else {
+      try {
+        // A target that does not fully exist at decision time may still be
+        // created as an outward symlink before git runs.
+        await realpath(canonicalTarget);
+        repositoryTarget = canonicalTarget;
+      } catch {
+        return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, canonicalTarget);
+      }
+    }
+    repositoryTarget = await realpathNearestExistingAsync(repositoryTarget);
+    if (!isWithinRoot(repositoryTarget, context.canonicalEffectiveCwd)) {
+      return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, repositoryTarget);
+    }
+    // The directory git runs in is inside the boundary, but the repository it
+    // discovers from there may not be.
+    if (kind === 'cwd') {
+      let discovered: string | undefined;
+      try {
+        discovered = await resolveDiscoveredRepository(
+          repositoryTarget,
+          context.canonicalEffectiveCwd,
+        );
+      } catch {
+        return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, repositoryTarget);
+      }
+      if (discovered !== undefined) {
+        const canonicalDiscovered =
+          await realpathNearestExistingAsync(discovered);
+        if (!isWithinRoot(canonicalDiscovered, context.canonicalEffectiveCwd)) {
+          return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, canonicalDiscovered);
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Extract the bodies of `$(…)` and backtick command substitutions from one
+ * segment. They execute before the command they are embedded in, so a
+ * relocated mutation hidden inside one (`echo $(git -C <outside> reset
+ * --hard)`) has to be analysed rather than folded into an opaque token.
+ * Returns null when a substitution is left unterminated.
+ */
+function extractCommandSubstitutions(segment: string): string[] | null {
+  const bodies: string[] = [];
+  let single = false;
+  let double = false;
+  let index = 0;
+  while (index < segment.length) {
+    const character = segment[index]!;
+    if (!single && character === '\\' && index + 1 < segment.length) {
+      index += 2;
+      continue;
+    }
+    if (!single && character === '$' && segment[index + 1] === '(') {
+      // `$((…))` is arithmetic, not a command. Stepping over the opening
+      // punctuation keeps any real substitution nested inside it visible.
+      if (segment[index + 2] === '(') {
+        index += 3;
+        continue;
+      }
+      const end = findSubstitutionEnd(segment, index + 2);
+      if (end === -1) return null;
+      bodies.push(segment.slice(index + 2, end));
+      index = end + 1;
+      continue;
+    }
+    if (!single && character === '`') {
+      let end = index + 1;
+      while (end < segment.length && segment[end] !== '`') {
+        if (segment[end] === '\\') end++;
+        end++;
+      }
+      if (end >= segment.length) return null;
+      bodies.push(segment.slice(index + 1, end));
+      index = end + 1;
+      continue;
+    }
+    if (character === "'" && !double) single = !single;
+    else if (character === '"' && !single) double = !double;
+    index++;
+  }
+  return bodies;
+}
+
+/** Index of the `)` closing a `$(` body opened at `start`, or -1. */
+function findSubstitutionEnd(segment: string, start: number): number {
+  let single = false;
+  let double = false;
+  let depth = 0;
+  for (let index = start; index < segment.length; index++) {
+    const character = segment[index]!;
+    if (!single && character === '\\') {
+      index++;
+      continue;
+    }
+    if (character === "'" && !double) {
+      single = !single;
+      continue;
+    }
+    if (character === '"' && !single) {
+      double = !double;
+      continue;
+    }
+    if (single || double) continue;
+    if (character === '(') depth++;
+    else if (character === ')') {
+      if (depth === 0) return index;
+      depth--;
+    }
+  }
+  return -1;
+}
+
+/**
+ * A run whose program word the daemon does not recognize can still run git:
+ * `nice git reset --hard`, `xargs git …`, `find -exec git …`. The static scan
+ * cannot prove what it executes, so deny whenever the run mentions git and the
+ * repository it would act on is not provably the session's own — either
+ * because a relocation is in play or because the shell has been moved out of
+ * the boundary by an earlier `cd`.
+ */
+async function evaluateUnrecognizedRun(
+  run: GuardToken[],
+  state: PrefixState,
+  basisCwd: string | undefined,
+  entryCwd: string | undefined,
+  context: GuardEvaluationContext,
+): Promise<GuardDenial | undefined> {
+  if (!run.some((token) => GIT_WORD_PATTERN.test(token.text))) return undefined;
+  if (
+    hasGitRelocationMarker(run) ||
+    run.some((token) => TEXT_RELOCATION_MARKER_PATTERN.test(token.text)) ||
+    state.relocations.length > 0 ||
+    state.unresolved ||
+    context.ambientRelocations.length > 0 ||
+    context.ambientUnresolved
+  ) {
+    return { allowed: false, reason: UNRECOGNIZED_PROGRAM_DENIAL };
+  }
+  if (basisCwd === undefined) {
+    return { allowed: false, reason: UNRECOGNIZED_PROGRAM_DENIAL };
+  }
+  if (basisCwd === entryCwd) return undefined;
+  const canonicalBasis = await realpathNearestExistingAsync(basisCwd);
+  if (!isWithinRoot(canonicalBasis, context.canonicalEffectiveCwd)) {
+    return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, canonicalBasis);
+  }
+  return undefined;
+}
+
+interface CommandEvaluation {
+  readonly denial?: GuardDenial;
+  readonly cwdAfter: string | undefined;
+  // Environment state the payload leaves behind. Only a construct that runs
+  // in the current shell (`eval`) propagates it back to the caller.
+  readonly exportedAfter?: PrefixState;
+  readonly allExportAfter?: boolean;
+}
+
+async function evaluateCommandWithCwd(
+  command: string,
+  startCwd: string | undefined,
+  entryCwd: string | undefined,
+  context: GuardEvaluationContext,
+  depth: number,
+): Promise<CommandEvaluation> {
+  let trackedCwd = startCwd;
+  // Assignments this command exported into the environment of everything that
+  // runs after them, and whether `set -a` made plain assignments exported.
+  const exported: PrefixState = { relocations: [], unresolved: false };
+  let allExport = false;
+  // GIT_* assignments made without `export`. They stay shell-local until a
+  // name-only `export GIT_DIR` promotes them into the environment.
+  const shellLocals = new Map<string, GuardToken>();
+  // Exported relocations reach every later command, including the ones nested
+  // inside a wrapper payload or a substitution body.
+  const activeContext = (): GuardEvaluationContext =>
+    exported.relocations.length > 0 || exported.unresolved
+      ? {
+          canonicalEffectiveCwd: context.canonicalEffectiveCwd,
+          ambientRelocations: [
+            ...context.ambientRelocations,
+            ...exported.relocations,
+          ],
+          ambientUnresolved: context.ambientUnresolved || exported.unresolved,
+        }
+      : context;
+  for (const segment of splitCommands(command)) {
+    const substitutions = extractCommandSubstitutions(segment);
+    const runs = substitutions === null ? null : tokenizeSegment(segment);
+    if (runs === null) {
+      return {
+        denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+        cwdAfter: trackedCwd,
+      };
+    }
+    // A substitution body executes before the command it is embedded in, in a
+    // subshell of the current directory, so its cwd changes do not escape it.
+    for (const body of substitutions!) {
+      if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
+        return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
+      }
+      const nested = await evaluateCommandWithCwd(
+        body,
+        trackedCwd,
+        entryCwd,
+        activeContext(),
+        depth + 1,
+      );
+      if (nested.denial) {
+        return { denial: nested.denial, cwdAfter: trackedCwd };
+      }
+    }
+    for (const run of runs) {
+      const analysis = analyzeRun(run);
+      switch (analysis.kind) {
+        case 'cd': {
+          const target = analysis.target;
+          if (analysis.variant === 'popd' || target === undefined) {
+            // `popd`, bare `cd` ($HOME), and dir-stack rotations land the
+            // shell somewhere the daemon cannot resolve statically.
+            trackedCwd = undefined;
+            break;
+          }
+          if (isDynamicPathValue(target)) {
+            trackedCwd = undefined;
+            break;
+          }
+          if (analysis.physical) {
+            // `cd -P` resolves each component through its symlinks, so
+            // `link/..` is the parent of the symlink's real target rather
+            // than the directory the link sits in.
+            trackedCwd =
+              trackedCwd === undefined && !path.isAbsolute(target.text)
+                ? undefined
+                : await resolvePhysicalPath(trackedCwd ?? '', target.text);
+            break;
+          }
+          if (path.isAbsolute(target.text)) {
+            trackedCwd = target.text;
+            break;
+          }
+          trackedCwd =
+            trackedCwd === undefined
+              ? undefined
+              : path.resolve(trackedCwd, target.text);
+          break;
+        }
+        case 'payload': {
+          if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
+            return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
+          }
+          const inherited = activeContext();
+          const ambient: GuardEvaluationContext = {
+            canonicalEffectiveCwd: inherited.canonicalEffectiveCwd,
+            ambientRelocations: [
+              ...inherited.ambientRelocations,
+              ...analysis.state.relocations,
+            ],
+            ambientUnresolved:
+              inherited.ambientUnresolved || analysis.state.unresolved,
+          };
+          // The payload keeps the outermost run's entry cwd as its
+          // containment basis: re-basing it to the tracked cwd would let a
+          // preceding `cd` disappear inside the wrapper.
+          const nested = await evaluateCommandWithCwd(
+            analysis.payload,
+            trackedCwd,
+            entryCwd,
+            ambient,
+            depth + 1,
+          );
+          if (nested.denial) {
+            return { denial: nested.denial, cwdAfter: trackedCwd };
+          }
+          if (analysis.propagatesCwd) {
+            // `eval` runs in the current shell, so everything it changed —
+            // the cwd, exported relocations and `set -a` — outlives it.
+            trackedCwd = nested.cwdAfter;
+            if (nested.exportedAfter) {
+              exported.relocations.push(...nested.exportedAfter.relocations);
+              if (nested.exportedAfter.unresolved) exported.unresolved = true;
+            }
+            if (nested.allExportAfter) allExport = true;
+          }
+          break;
+        }
+        case 'git': {
+          const invocation = readGitInvocation(analysis.tokens);
+          const denial = await evaluateGitInvocation(
+            invocation,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            activeContext(),
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
+          break;
+        }
+        case 'dynamic-program': {
+          const inherited = activeContext();
+          if (
+            analysis.state.unresolved ||
+            analysis.state.relocations.length > 0 ||
+            inherited.ambientUnresolved ||
+            inherited.ambientRelocations.length > 0 ||
+            hasGitRelocationMarker(analysis.rest)
+          ) {
+            return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
+          }
+          // A program word the daemon cannot read is at least as opaque as an
+          // unrecognized one, so it answers to the same containment rule.
+          const denial = await evaluateUnrecognizedRun(
+            analysis.rest,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            inherited,
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
+          break;
+        }
+        case 'undecidable':
+          return {
+            denial: { allowed: false, reason: UNDECIDABLE_PAYLOAD_DENIAL },
+            cwdAfter: trackedCwd,
+          };
+        case 'export': {
+          exported.relocations.push(...analysis.state.relocations);
+          if (analysis.state.unresolved) exported.unresolved = true;
+          // `export GIT_DIR` with no `=` exports whatever an earlier
+          // shell-local assignment left in that name.
+          for (const operand of analysis.operands) {
+            if (leadingEnvAssignmentKey(operand.text) !== null) continue;
+            const pending = shellLocals.get(operand.text);
+            if (pending) recordEnvAssignment(pending, exported);
+          }
+          const denial = await evaluateUnrecognizedRun(
+            run,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            activeContext(),
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
+          break;
+        }
+        case 'all-export':
+          allExport = true;
+          break;
+        case 'other': {
+          if (analysis.assignmentsOnly) {
+            if (allExport) {
+              // `set -a` turned this shell-local assignment into an exported
+              // one straight away.
+              exported.relocations.push(...analysis.state.relocations);
+              if (analysis.state.unresolved) exported.unresolved = true;
+            } else {
+              for (const token of run) {
+                const key = leadingEnvAssignmentKey(token.text);
+                if (key !== null) shellLocals.set(key, token);
+              }
+            }
+          }
+          const denial = await evaluateUnrecognizedRun(
+            run,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            activeContext(),
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
+          break;
+        }
+        default: {
+          const exhaustive: never = analysis;
+          void exhaustive;
+          break;
+        }
+      }
+    }
+  }
+  return {
+    cwdAfter: trackedCwd,
+    exportedAfter: exported,
+    allExportAfter: allExport,
+  };
+}
+
+async function evaluateBuiltInGuard(
+  request: TrustedDaemonToolGuardRequest,
+): Promise<ExternalToolGuardPrepareResult> {
+  if (!SHELL_EXECUTING_TOOLS.has(request.toolName)) return { allowed: true };
+  const command = request.arguments['command'];
+  if (typeof command !== 'string') return { allowed: true };
+
+  const canonicalEffectiveCwd = await realpathNearestExistingAsync(
+    request.effectiveCwd,
+  );
+
+  // A model-supplied `directory` becomes the containment basis, so it must
+  // itself stay inside the effective working directory before it is trusted.
+  let startDirectory = canonicalEffectiveCwd;
+  const startDirectoryValue = request.arguments['directory'];
+  if (typeof startDirectoryValue === 'string') {
+    startDirectory = await realpathNearestExistingAsync(
+      path.resolve(request.effectiveCwd, startDirectoryValue),
+    );
+    if (!isWithinRoot(startDirectory, canonicalEffectiveCwd)) {
+      return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, startDirectory);
+    }
+  }
+
+  const { denial } = await evaluateCommandWithCwd(
+    command,
+    startDirectory,
+    startDirectory,
+    {
+      canonicalEffectiveCwd,
+      ambientRelocations: [],
+      ambientUnresolved: false,
+    },
+    0,
+  );
+  return denial ?? { allowed: true };
+}
+
+export function createDaemonToolGuard(
+  externalGuard?: ExternalToolGuardHandler,
+): ExternalToolGuardHandler {
+  return async (request) => {
+    const trusted = request as TrustedDaemonToolGuardRequest;
+    if (typeof trusted.effectiveCwd !== 'string') {
+      throw new Error('Daemon tool guard requires trusted workspace context.');
+    }
+    const builtInDecision = await evaluateBuiltInGuard(trusted);
+    if (!builtInDecision.allowed || !externalGuard) return builtInDecision;
+    if (trusted.promptId === undefined) {
+      // Context-less shell checks carry only the built-in policy; the
+      // external provider is contracted to a live prompt.
+      return { allowed: false, reason: PROMPTLESS_PROVIDER_DENIAL };
+    }
+    if (EXTERNAL_GUARD_UNSUPPORTED_TOOLS.has(request.toolName)) {
+      return {
+        allowed: false,
+        reason:
+          'Managed external tool guard v1 does not support nested or delegated agent execution.',
+      };
+    }
+    return externalGuard(request);
+  };
+}

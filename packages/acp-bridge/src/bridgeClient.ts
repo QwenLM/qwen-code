@@ -602,6 +602,8 @@ function sliceLineRange(
  */
 export interface BridgeClientSessionEntry {
   sessionId: string;
+  workspaceCwd: string;
+  effectiveCwd: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
   recordingDegraded: boolean;
@@ -1283,8 +1285,8 @@ export class BridgeClient implements Client {
     if (
       typeof sessionId !== 'string' ||
       sessionId.length === 0 ||
-      typeof promptId !== 'string' ||
-      promptId.length === 0 ||
+      (promptId !== undefined &&
+        (typeof promptId !== 'string' || promptId.length === 0)) ||
       typeof toolCallId !== 'string' ||
       toolCallId.length === 0 ||
       typeof toolName !== 'string' ||
@@ -1296,6 +1298,11 @@ export class BridgeClient implements Client {
         'Invalid external tool guard request',
       );
     }
+    // Context-less shell checks (subagents, cron turns, resumed background
+    // agents) carry no prompt binding; they are validated by session
+    // ownership alone. The host handler decides whether its policy can run
+    // without a live prompt.
+    const promptScoped = promptId !== undefined;
     if (!this.ownsSession(sessionId)) {
       throw RequestError.invalidParams(
         undefined,
@@ -1303,7 +1310,11 @@ export class BridgeClient implements Client {
       );
     }
     const entry = this.resolveEntry(sessionId);
-    if (!entry || !entry.promptActive || entry.activePromptId !== promptId) {
+    if (
+      !entry ||
+      (promptScoped &&
+        (!entry.promptActive || entry.activePromptId !== promptId))
+    ) {
       throw RequestError.invalidParams(
         undefined,
         'External tool guard prompt is not the active prompt',
@@ -1311,17 +1322,19 @@ export class BridgeClient implements Client {
     }
     const decision: unknown = await this.externalToolGuard({
       sessionId: entry.sessionId,
-      promptId: entry.activePromptId,
+      ...(promptScoped ? { promptId } : {}),
       toolCallId,
       toolName,
       arguments: args,
+      effectiveCwd: entry.effectiveCwd,
     });
     const currentEntry = this.resolveEntry(sessionId);
     if (
       !this.ownsSession(sessionId) ||
       currentEntry !== entry ||
-      !currentEntry.promptActive ||
-      currentEntry.activePromptId !== promptId
+      (promptScoped &&
+        (!currentEntry.promptActive ||
+          currentEntry.activePromptId !== promptId))
     ) {
       throw RequestError.invalidParams(
         undefined,

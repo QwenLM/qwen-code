@@ -9912,6 +9912,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      sessionId: 'plan-shell-session',
     });
     expect(execute).not.toHaveBeenCalled();
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
@@ -9948,6 +9949,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      sessionId: 'plan-shell-session',
     });
     expect(execute).toHaveBeenCalledOnce();
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];

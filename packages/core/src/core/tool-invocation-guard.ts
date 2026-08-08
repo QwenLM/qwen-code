@@ -17,6 +17,13 @@ export interface ToolInvocationGuardContext {
    * have one; a host that requires it must fail closed when it is absent.
    */
   invocationContext?: Readonly<InvocationContextV1>;
+  /**
+   * Owning session id from the scheduler's session config. Present even when
+   * {@link invocationContext} is absent (subagents, cron turns, and resumed
+   * background agents run without one); a host whose policy only needs
+   * session scope may fall back to it instead of failing closed.
+   */
+  sessionId?: string;
 }
 
 export type ToolInvocationGuardDecision =
