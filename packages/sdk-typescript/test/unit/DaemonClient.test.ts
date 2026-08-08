@@ -2730,6 +2730,52 @@ describe('DaemonClient', () => {
       }
     });
 
+    it.each([-1, 1.5, Number.NaN])(
+      'rejects a per-request restore timeout of %s',
+      async (timeoutMs) => {
+        const fetch = vi.fn() as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.loadSession('slow-session', { timeoutMs }),
+        ).rejects.toThrow(TypeError);
+        expect(fetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it('disables the client timer for a per-request timeout past the ceiling', async () => {
+      // Not a rejection: an over-ceiling delay is treated as "no client timer",
+      // matching the derived-capability path. The hazard being defended is
+      // `setTimeout` compressing such a delay to about a millisecond, which
+      // would abort the restore immediately with a spurious TimeoutError.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const outcome = client
+          .loadSession('slow-session', { timeoutMs: 2_147_483_648 })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetch).toHaveBeenCalledOnce();
+        // No abort signal is attached at all — the request is left to the
+        // daemon's own deadline rather than a client timer that would fire in
+        // about a millisecond.
+        expect(signal).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(300_000);
+        void outcome;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('honors per-request timeout before an explicit global timeout', async () => {
       vi.useFakeTimers();
       try {

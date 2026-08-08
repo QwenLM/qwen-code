@@ -14475,6 +14475,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           attributes[`qwen-code.daemon.session_restore.${stage}_ms`],
         ).toEqual(expect.any(Number));
       }
+      // Mirror of the live-path test's `existence_check_ms` absence check.
+      // Hoisting `live_restore` out of its `if (liveSession)` guard would make
+      // cold loads report a stage that implies a live session existed,
+      // polluting restore-stage dashboards while every test stayed green.
+      expect(
+        attributes['qwen-code.daemon.session_restore.live_restore_ms'],
+      ).toBeUndefined();
 
       mockConnectionState.resolve();
       await agentPromise;

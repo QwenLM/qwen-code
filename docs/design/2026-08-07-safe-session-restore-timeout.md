@@ -14,6 +14,12 @@ This change gives restore a dedicated configurable deadline, makes timeout error
 
 It does not stream the JSONL parser, add a transcript index or snapshot, guarantee that every large transcript finishes within 60 seconds, or change the WebUI's detach-before-load transaction. Those are follow-up changes.
 
+Two deliberate gaps are worth stating rather than leaving to be rediscovered.
+
+**Transcript materialization is not separately attributable.** The child records `config_setup` as one stage, and the full JSONL read plus active-chain reconstruction both happen inside it — via `config.initialize()` on the load path and `loadCliConfig` on the resume path. So a restore that again exceeds its budget shows `config_setup_ms ≈ budget` without telling an operator whether the cost was the transcript or a regressed runtime setup, and the P1/P2 work cannot baseline the phase it exists to optimize from these traces alone. Issue #8678's P0 asks for transcript indexing/read and active-chain reconstruction as distinct phases; this change delivers the coarser split it claims (transcript/config work versus authentication, registration, and replay) and not that finer one. Closing it means instrumenting inside the core session loader — the same code P1/P2 restructures — so it is sequenced with that work. The contained version, if it is wanted sooner, is for the loader to record its own read duration on the resumed session data and for the child profiler to report it as a `transcript_read` stage under the existing attribute prefix.
+
+**Sibling latency during a large restore is unmeasured.** Siblings keep their sessions and stay logically usable, which is asserted; nothing establishes that they stay responsive while a multi-hundred-megabyte transcript is reconstructed on the shared child's event loop. The instrument already exists — the child runs an event-loop lag monitor whose snapshot carries mean, p50, p99, and max — so a fixture slow enough to cross the deadline would close this and the untested empty-channel budget increase in one run.
+
 ## Timeout contract
 
 The server restore budget resolves in this order:

@@ -122,6 +122,40 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+/**
+ * Captures `session.restore.*` events so the timeout path's observability
+ * contract is asserted rather than assumed. These events are the operator's
+ * only view of a kill_empty-vs-fence_shared decision and of how a late,
+ * non-cancellable restore was cleaned up, so renaming an attribute or dropping
+ * an emission has to fail a test.
+ */
+function recordRestoreEvents(): {
+  telemetry: BridgeTelemetry;
+  events: Array<{ name: string; attributes: Record<string, unknown> }>;
+  named: (suffix: string) => Array<Record<string, unknown>>;
+} {
+  const events: Array<{ name: string; attributes: Record<string, unknown> }> =
+    [];
+  return {
+    events,
+    named: (suffix) =>
+      events
+        .filter((event) => event.name === `session.restore.${suffix}`)
+        .map((event) => event.attributes),
+    telemetry: {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      event: (name, attributes) => {
+        if (name.startsWith('session.restore.')) {
+          events.push({ name, attributes: { ...attributes } });
+        }
+      },
+      injectPromptContext: (request) => request,
+    },
+  };
+}
+
 async function advanceRestoreDeadline(timeoutMs: number): Promise<void> {
   await vi.advanceTimersByTimeAsync(0);
   await vi.advanceTimersByTimeAsync(timeoutMs);
@@ -5530,9 +5564,11 @@ describe('createAcpSessionBridge', () => {
     });
     const second = makeChannel();
     const handles = [first, second];
+    const restoreEvents = recordRestoreEvents();
     const bridge = makeBridge({
       sessionRestoreTimeoutMs: 20,
       channelFactory: async () => handles.shift()!.channel,
+      telemetry: restoreEvents.telemetry,
     });
 
     try {
@@ -5550,6 +5586,19 @@ describe('createAcpSessionBridge', () => {
       } satisfies Partial<SessionRestoreTimeoutError>);
       await vi.advanceTimersByTimeAsync(0);
       expect(first.killed).toBe(true);
+
+      // The kill_empty decision has to be visible to operators, not just
+      // correct — this is the signal the next #8678-shaped incident is read
+      // through.
+      expect(restoreEvents.named('public_result')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.action': 'load',
+          'qwen-code.daemon.session_restore.result': 'timeout',
+          'qwen-code.daemon.session_restore.timeout_ms': 20,
+          'qwen-code.daemon.session_restore.channel_was_empty': true,
+          'session.id': 'restore-timeout-empty',
+        }),
+      ]);
 
       await expect(
         bridge.spawnOrAttach({ workspaceCwd: WS_A }),
@@ -5670,6 +5719,10 @@ describe('createAcpSessionBridge', () => {
     });
     const bridge = makeBridge({
       sessionRestoreTimeoutMs: 20,
+      // A positive idle budget matters here: with the default 0,
+      // `startIdleTimer` kills the channel outright, which would stand in for
+      // the reap junction this test is supposed to pin.
+      channelIdleTimeoutMs: 60_000,
       channelFactory: async () => handle.channel,
     });
     try {
@@ -5689,6 +5742,20 @@ describe('createAcpSessionBridge', () => {
       expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
       expect(handle.killed).toBe(false);
 
+      // The deferral is only half the contract. Draining the control call
+      // while the abandoned restore is still unsettled must actually fire the
+      // reap junction in `withWorkspaceControl`'s finally — otherwise the
+      // condemned channel lingers warm for the whole idle window, and on a
+      // permanently hung restore the transport close that would release it
+      // never happens.
+      workspaceControl.resolve({ available: true });
+      await expect(control).resolves.toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.killed).toBe(true);
+
+      // With the channel gone, the late arrival settles through transport
+      // close rather than a child round trip: no `session/close` is sent to a
+      // process that is already being torn down.
       lateRestore.resolve({});
       await vi.advanceTimersByTimeAsync(0);
       expect(
@@ -5697,9 +5764,7 @@ describe('createAcpSessionBridge', () => {
             call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
             call.params['sessionId'] === 'restore-timeout-workspace-control',
         ),
-      ).toHaveLength(1);
-      workspaceControl.resolve({ available: true });
-      await expect(control).resolves.toBe(true);
+      ).toHaveLength(0);
     } finally {
       await bridge.shutdown();
       vi.useRealTimers();
@@ -5713,11 +5778,13 @@ describe('createAcpSessionBridge', () => {
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
     });
+    const restoreEvents = recordRestoreEvents();
     const bridge = makeBridge({
       sessionScope: 'thread',
       maxSessions: 2,
       sessionRestoreTimeoutMs: 20,
       channelFactory: async () => handle.channel,
+      telemetry: restoreEvents.telemetry,
       freshSessionAdmission: (context) =>
         context.operation === 'load'
           ? { release: releaseAdmission }
@@ -5772,6 +5839,29 @@ describe('createAcpSessionBridge', () => {
       ).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(0);
       expect(releaseAdmission).toHaveBeenCalledOnce();
+
+      // The fence_shared decision, the late arrival, and how it was cleaned up
+      // are the trail an operator follows after a timeout; assert all three.
+      expect(restoreEvents.named('public_result')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.result': 'timeout',
+          'qwen-code.daemon.session_restore.channel_was_empty': false,
+          'session.id': 'restore-timeout-shared',
+        }),
+      ]);
+      expect(restoreEvents.named('late_result')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.result': 'success',
+          'session.id': 'restore-timeout-shared',
+        }),
+      ]);
+      expect(restoreEvents.named('cleanup')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.cleanup_result': 'closed',
+          'session.id': 'restore-timeout-shared',
+        }),
+      ]);
+
       await expect(
         bridge.loadSession({
           sessionId: 'restore-timeout-shared',
@@ -6254,6 +6344,45 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('cancels the deadline timer once a restore succeeds', async () => {
+    // Without `clearTimeout` on the success path the timer still fires one
+    // budget after a *successful* restore. The success path never flips the
+    // lifecycle out of `active`, so the callback would sail through its guard
+    // and abandon a live session: fencing every child frame for its id,
+    // closing the event bus the registered entry holds, and emitting a
+    // spurious `timeout` result. The session stays listed but goes inert.
+    vi.useFakeTimers();
+    const handle = makeChannel();
+    const restoreEvents = recordRestoreEvents();
+    const bridge = makeBridge({
+      sessionRestoreTimeoutMs: 1_000,
+      channelFactory: async () => handle.channel,
+      telemetry: restoreEvents.telemetry,
+    });
+    try {
+      const restored = await bridge.loadSession({
+        sessionId: 'restore-succeeds',
+        workspaceCwd: WS_A,
+      });
+      expect(restored.sessionId).toBe('restore-succeeds');
+      expect(restoreEvents.named('public_result')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.result': 'success',
+        }),
+      ]);
+
+      // Well past the deadline the restore already beat.
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      // No late timeout was published, and the session is still live.
+      expect(restoreEvents.named('public_result')).toHaveLength(1);
+      expect(() => bridge.getSessionSummary('restore-succeeds')).not.toThrow();
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not reap a timed-out restore while another restore is pending', async () => {
     vi.useFakeTimers();
     const firstRestore = deferred<LoadSessionResponse>();
@@ -6297,6 +6426,26 @@ describe('createAcpSessionBridge', () => {
         sessionId: 'restore-second',
       });
       expect(handle.killed).toBe(false);
+
+      // The abandoned restore must still settle while the sibling restore is
+      // in flight. Without this pin, deferring or skipping the late close ships
+      // green — and that leaves the timed-out session open in the child with
+      // its admission slot held and its id permanently fenced, which is the
+      // exact permanent-hold class this work exists to remove.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params['sessionId'] === 'restore-first',
+        ),
+      ).toHaveLength(1);
+      await expect(
+        bridge.loadSession({
+          sessionId: 'restore-first',
+          workspaceCwd: WS_A,
+        }),
+      ).resolves.toMatchObject({ sessionId: 'restore-first' });
     } finally {
       await bridge.shutdown();
       vi.useRealTimers();
@@ -6367,10 +6516,12 @@ describe('createAcpSessionBridge', () => {
     });
     const second = makeChannel();
     const channels = [first, second];
+    const restoreEvents = recordRestoreEvents();
     const bridge = makeBridge({
       sessionScope: 'thread',
       sessionRestoreTimeoutMs: 20,
       channelFactory: async () => channels.shift()!.channel,
+      telemetry: restoreEvents.telemetry,
     });
     try {
       const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -6391,6 +6542,14 @@ describe('createAcpSessionBridge', () => {
           drainTimeoutMs: 8_000,
         },
       });
+      // An uncertain cleanup is the outcome an operator most needs to see,
+      // because it is what turns fresh work away on this channel.
+      expect(restoreEvents.named('cleanup')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.cleanup_result': 'quarantined',
+          'session.id': 'restore-cleanup-fails',
+        }),
+      ]);
       expect(() =>
         bridge.recordHeartbeat(sibling.sessionId, {
           clientId: sibling.clientId,

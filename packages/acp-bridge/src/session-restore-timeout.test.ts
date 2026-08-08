@@ -21,6 +21,23 @@ const INVALID_TIMEOUTS = [
 ];
 
 describe('resolveSessionRestoreTimeoutMs', () => {
+  it('accepts exactly the maximum restore timeout', () => {
+    // The boundary is load-bearing, not decorative: `scheduled-task-keepalive`
+    // treats `ms === MAX` as still-timed and `server.ts` uses `MAX + 1` as its
+    // disable sentinel, so an off-by-one here would reject the largest legal
+    // `setTimeout` delay at boot.
+    expect(
+      resolveSessionRestoreTimeoutMs({
+        sessionRestoreTimeoutMs: MAX_SESSION_RESTORE_TIMEOUT_MS,
+      }),
+    ).toBe(MAX_SESSION_RESTORE_TIMEOUT_MS);
+    expect(
+      resolveSessionRestoreTimeoutMs({
+        initializeTimeoutMs: MAX_SESSION_RESTORE_TIMEOUT_MS,
+      }),
+    ).toBe(MAX_SESSION_RESTORE_TIMEOUT_MS);
+  });
+
   it('uses the restore default when no related timeout is configured', () => {
     expect(resolveSessionRestoreTimeoutMs({})).toBe(
       DEFAULT_SESSION_RESTORE_TIMEOUT_MS,

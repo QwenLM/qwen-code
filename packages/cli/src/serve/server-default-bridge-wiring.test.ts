@@ -14,6 +14,7 @@ import {
   type BridgeSessionSummary,
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 
 const WS_BOUND = path.resolve('/work/bound');
 
@@ -217,5 +218,75 @@ describe('createServeApp default bridge wiring', () => {
       initializeTimeoutMs: 10_000,
       sessionRestoreTimeoutMs: 60_000,
     });
+  });
+
+  it.each([
+    {
+      label: 'derives the scheduled-task budget from the restore budget',
+      sessionRestoreTimeoutMs: 90_000,
+      expected: 100_000,
+    },
+    {
+      label: 'passes the disable sentinel when the derived value overflows',
+      sessionRestoreTimeoutMs: MAX_SESSION_RESTORE_TIMEOUT_MS,
+      expected: MAX_SESSION_RESTORE_TIMEOUT_MS + 1,
+    },
+  ])('$label', async ({ sessionRestoreTimeoutMs, expected }) => {
+    // Without this, deleting the `loadTimeoutMs` / `reviveTimeoutMs` arguments
+    // ships green and both helpers silently fall back to their own 70s
+    // defaults — so boot rehydrate and keepalive revive would preempt a
+    // longer in-flight restore while the non-abortable bridge restore keeps
+    // running.
+    let rehydrateOpts: { loadTimeoutMs?: number } | undefined;
+    let keepaliveOpts: { reviveTimeoutMs?: number } | undefined;
+    vi.doMock('./scheduled-task-keepalive.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./scheduled-task-keepalive.js')
+      >('./scheduled-task-keepalive.js');
+      return {
+        ...actual,
+        rehydrateScheduledTaskSessions: vi.fn(
+          async (opts: { loadTimeoutMs?: number }) => {
+            rehydrateOpts = opts;
+            return { attempted: 0, restored: 0, failed: 0 };
+          },
+        ),
+        startScheduledTaskKeepalive: vi.fn(
+          (opts: { reviveTimeoutMs?: number }) => {
+            keepaliveOpts = opts;
+            return { stop: () => {} };
+          },
+        ),
+      };
+    });
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: WS_BOUND,
+        sessionRestoreTimeoutMs,
+      },
+      undefined,
+      // Keepalive and rehydrate only run when the daemon manages task sessions
+      // and the workspace is trusted.
+      { manageScheduledTaskSessions: true, primaryWorkspaceTrusted: true },
+    );
+    await vi.waitFor(() => expect(rehydrateOpts).toBeDefined());
+
+    expect(rehydrateOpts?.loadTimeoutMs).toBe(expected);
+    expect(keepaliveOpts?.reviveTimeoutMs).toBe(expected);
+    vi.doUnmock('./scheduled-task-keepalive.js');
   });
 });

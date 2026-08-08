@@ -529,7 +529,18 @@ describe('createDaemonSessionActions', () => {
         loadingTranscript: true,
       });
 
-      vi.advanceTimersByTime(75_000);
+      // Split the boundary, and observe pendingness rather than connection
+      // status — the status stays 'connecting' after a rejection, so asserting
+      // it would stay green for any watchdog ≤ 75s, including the 30s attach
+      // value. A 30s load watchdog abandons a load the daemon's 60s budget
+      // still completes, recreating the #8678 symptom in the browser.
+      let settledEarly = false;
+      void loadPromise.catch(() => {
+        settledEarly = true;
+      });
+      await vi.advanceTimersByTimeAsync(74_999);
+      expect(settledEarly).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
 
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
