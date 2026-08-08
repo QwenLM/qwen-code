@@ -31,7 +31,10 @@ function makeTeamConfig(opts?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<void>;
     requestShutdown?: (...args: unknown[]) => Promise<void>;
-    getTeamFile?: () => { members: Array<{ name: string }> };
+    getTeamFile?: () => {
+      members: Array<{ name: string }>;
+      leadAgentId?: string;
+    };
   } | null;
   approvalMode?: ApprovalMode;
 }) {
@@ -565,6 +568,56 @@ describe('SendMessageTool — peer mode', () => {
 
     await tool
       .build({ to: 'alice', message: 'hello' })
+      .execute(new AbortController().signal);
+
+    expect(sendMessage).toHaveBeenCalled();
+    expect(sendToPeer).not.toHaveBeenCalled();
+  });
+
+  // `members` excludes the leader, but the team prompt tells teammates to
+  // report with `to: "leader"` and TeamManager routes that name. Missing
+  // it from the in-process check let a peer named "leader-*" intercept a
+  // teammate's report.
+  it('prefers the team leader over a same-named peer session', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+          getTeamFile: () => ({
+            members: [{ name: 'alice' }],
+            leadAgentId: 'leader@squad',
+          }),
+        },
+      }),
+    );
+
+    await tool
+      .build({ to: 'leader', message: 'done with the tests' })
+      .execute(new AbortController().signal);
+
+    expect(sendMessage).toHaveBeenCalled();
+    expect(sendToPeer).not.toHaveBeenCalled();
+  });
+
+  it('prefers the lead agent id over a peer session', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+          getTeamFile: () => ({
+            members: [{ name: 'alice' }],
+            leadAgentId: 'leader@squad',
+          }),
+        },
+      }),
+    );
+
+    await tool
+      .build({ to: 'leader@squad', message: 'done with the tests' })
       .execute(new AbortController().signal);
 
     expect(sendMessage).toHaveBeenCalled();

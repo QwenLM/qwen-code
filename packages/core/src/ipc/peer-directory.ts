@@ -25,6 +25,7 @@ import {
   listLiveSessions,
   type SessionRegistryRecord,
 } from '../services/session-registry.js';
+import { isLocalIpcPath } from './socket-path.js';
 import { probePeerSocket } from './uds-client.js';
 
 /** A live session that can be sent to. */
@@ -88,8 +89,9 @@ export type PeerResolution =
   | { kind: 'ambiguous'; matches: PeerSessionInfo[] };
 
 /**
- * Parse `"name"`, `"name [ref]"`, or a bare ref, and match it against the
- * reachable peers.
+ * Parse `"name"`, `"name [ref]"`, a bare ref, or the socket path an
+ * inbound envelope advertises as its reply address, and match it against
+ * the reachable peers.
  *
  * An ambiguous bare name resolves to nothing and reports the matches
  * instead of picking one. Injecting a message into the wrong session is
@@ -104,6 +106,18 @@ export function resolvePeerTarget(
 ): PeerResolution {
   const trimmed = target.trim();
   if (trimmed.length === 0) return { kind: 'none' };
+
+  // The inbound envelope hands the model the sender's socket path as its
+  // reply address, so that exact string has to route back to the sender —
+  // otherwise the documented way to answer a peer fails for every input,
+  // and a frame whose sender name is missing or contested is unanswerable.
+  // Matched literally against the live list, so a path belonging to a
+  // session that has since exited falls through to 'none' rather than
+  // dialing whichever process inherited the pid.
+  if (isLocalIpcPath(trimmed)) {
+    const byPath = peers.find((peer) => peer.ipcPath === trimmed);
+    return byPath ? { kind: 'one', peer: byPath } : { kind: 'none' };
+  }
 
   // "name [ref]" — the form list_agents prints.
   const withRef = /^(.*?)\s*\[([0-9a-f]{4,12})\]$/i.exec(trimmed);

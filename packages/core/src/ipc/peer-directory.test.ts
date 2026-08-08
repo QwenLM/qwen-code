@@ -180,6 +180,28 @@ describe('resolvePeerTarget', () => {
   it('resolves nothing against an empty directory', () => {
     expect(resolvePeerTarget([], 'app-ab')).toEqual({ kind: 'none' });
   });
+
+  // The inbound envelope advertises the sender's socket path as the reply
+  // address, so it has to route back even when the name is contested or
+  // the frame carried no name at all.
+  it.skipIf(process.platform === 'win32')(
+    'resolves the socket path an envelope hands back as its reply address',
+    () => {
+      expect(resolvePeerTarget([a, b, c], b.ipcPath)).toEqual({
+        kind: 'one',
+        peer: b,
+      });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not fall back to a name match when the socket path is stale',
+    () => {
+      expect(resolvePeerTarget([a, c], '/tmp/gone.sock')).toEqual({
+        kind: 'none',
+      });
+    },
+  );
 });
 
 describe('formatPeerAddress', () => {

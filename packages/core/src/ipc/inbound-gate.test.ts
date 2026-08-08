@@ -309,6 +309,44 @@ describe('onHeldChange', () => {
     expect(h.heldChanges).toBe(2);
   });
 
+  // The UI announces new holds. Without a way to tell an add from a
+  // removal, approving three held messages would print two more "held a
+  // message" notices as the set walks back down.
+  it('reports the added message only when the change parked one', () => {
+    const seen: Array<string | undefined> = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      deliver: () => {},
+      onHeldChange: (_held, added) => seen.push(added?.frame.msgId),
+    });
+
+    const first = frame();
+    const second = frame();
+    gate.admit(first);
+    gate.admit(second);
+    gate.decide(first.msgId, 'approve');
+    gate.decide(second.msgId, 'approve');
+
+    expect(seen).toEqual([first.msgId, second.msgId, undefined, undefined]);
+  });
+
+  it('reports no added message when shutdown clears the set', () => {
+    const seen: Array<string | undefined> = [];
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => undefined,
+      deliver: () => {},
+      onHeldChange: (_held, added) => seen.push(added?.frame.msgId),
+    });
+
+    const f = frame();
+    gate.admit(f);
+    gate.shutdown();
+
+    expect(seen).toEqual([f.msgId, undefined]);
+  });
+
   it('does not let a throwing observer break the gate', () => {
     const deliver = vi.fn();
     const gate = new InboundGate({
