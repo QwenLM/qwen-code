@@ -579,12 +579,19 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  it('leaves ordinary in-boundary Git alone after an unrelated copy', async () => {
+  // Only an invocation that resolves a path is affected: renaming files and
+  // then staging them is everyday work, not a relocation.
+  it('leaves path-free Git alone after a rename', async () => {
     const guard = createDaemonToolGuard();
 
-    await expect(guard(request('cp a b && git commit -m x'))).resolves.toEqual({
-      allowed: true,
-    });
+    for (const command of [
+      'cp a b && git commit -m x',
+      'mv old new && git add -A',
+      'mv old new && git add -A && git commit -m x',
+      'ln -s a b && git status',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
   });
 
   it('follows gitfile redirects before the containment check', async () => {

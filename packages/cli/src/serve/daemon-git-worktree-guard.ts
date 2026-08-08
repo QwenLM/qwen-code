@@ -1598,8 +1598,16 @@ async function evaluateCommandWithCwd(
         }
         case 'git': {
           const invocation = readGitInvocation(analysis.tokens);
-          if (relinkedPaths && analysis.tokens.length > 1) {
-            // Anything this command relinked defeats a path check made now.
+          // A path this command relinked defeats a containment check made
+          // afterwards — but only for an invocation that resolves a path.
+          // `mv old new && git add -A` targets nothing and stays allowed.
+          if (
+            relinkedPaths &&
+            (invocation.cwdTargets.length > 0 ||
+              invocation.gitDirTargets.length > 0 ||
+              invocation.workTreeTargets.length > 0 ||
+              trackedCwd !== entryCwd)
+          ) {
             return {
               denial: denyDynamicRelocation(),
               cwdAfter: trackedCwd,
