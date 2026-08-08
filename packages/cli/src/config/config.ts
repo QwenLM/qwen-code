@@ -69,6 +69,7 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
+import { auditCommand } from '../commands/audit.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
@@ -1097,6 +1098,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
+    // Register /audit skill helpers (audit planning, brief printing)
+    .command(auditCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
@@ -1127,6 +1130,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
+      result._[0] === 'audit' ||
       result._[0] === 'sessions' ||
       result._[0] === 'update')
   ) {

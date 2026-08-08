@@ -31,6 +31,10 @@ type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
+  [
+    'audit <command>',
+    'Helpers used by the /audit skill (argument parsing, audit planning, brief printing, run-state captures)',
+  ],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],

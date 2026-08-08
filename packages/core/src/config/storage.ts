@@ -335,6 +335,22 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), ARENA_DIR_NAME);
   }
 
+  /**
+   * Outside-repo landing for /audit reports and sidecars when the audited
+   * repository's ignore state cannot keep them out of version control.
+   * Per-user and per-project, honoring the QWEN_HOME override; 0700 so the
+   * quoted (possibly exploitable) module content stays private to the user.
+   */
+  static getAuditFallbackDir(projectRoot: string): string {
+    const dir = path.join(
+      Storage.getGlobalQwenDir(),
+      'audits',
+      getProjectHash(projectRoot),
+    );
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return dir;
+  }
+
   getQwenDir(): string {
     return path.join(this.targetDir, QWEN_DIR);
   }
