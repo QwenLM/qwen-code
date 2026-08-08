@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonEvent,
   NonBlockingPromptAccepted,
+  DaemonSseConnectReason,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonUiSessionActions,
@@ -98,6 +99,7 @@ interface MockSession {
   events: (opts?: {
     signal?: AbortSignal;
     maxQueued?: number;
+    sseConnectReason?: DaemonSseConnectReason;
   }) => AsyncGenerator<DaemonEvent, void, unknown>;
 }
 
@@ -2045,6 +2047,9 @@ describe('DaemonSessionProvider', () => {
       await secondSubscriptionStarted.promise;
     });
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'prompt_restart',
+    });
     expect(eventSignals[0]?.aborted).toBe(true);
     expect(eventSignals[1]?.aborted).toBe(false);
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
@@ -2139,6 +2144,9 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'prompt_restart',
+    });
     expect(eventSignals[0]?.aborted).toBe(true);
     expect(eventSignals[1]?.aborted).toBe(false);
     expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(providersCalls);
@@ -3658,6 +3666,9 @@ describe('DaemonSessionProvider', () => {
 
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'stream_end',
+    });
     expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
@@ -5763,12 +5774,16 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'transport_error',
+    });
     expect(promptStatus).not.toBe('idle');
   });
 
   it('keeps restored active prompts streaming after resync requests', async () => {
     const resyncSeen = createDeferred<void>();
     const reloaded = createDeferred<void>();
+    const reloadedEvents = vi.fn(createPendingEvents(reloaded));
     const session = createMockSession({
       sessionId: 'session-restored-resync',
       hasActivePrompt: true,
@@ -5785,7 +5800,7 @@ describe('DaemonSessionProvider', () => {
     const reloadedSession = createMockSession({
       sessionId: 'session-restored-resync',
       hasActivePrompt: true,
-      events: createPendingEvents(reloaded),
+      events: reloadedEvents,
     });
     sdkMocks.sessions.push(session, reloadedSession);
     let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
@@ -5807,6 +5822,9 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(promptStatus).toBe('streaming');
+    expect(reloadedEvents.mock.calls[0]?.[0]).toMatchObject({
+      sseConnectReason: 'state_resync',
+    });
   });
 
   it('does not infer active prompts from replayed user turns without terminal events', async () => {

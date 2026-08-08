@@ -174,6 +174,54 @@ describe('readTranscripts — defensive parsing', () => {
     const [rec] = readTranscripts(undefined, ENV);
     expect(rec.successfulToolCalls).toBe(0);
   });
+
+  it('separates read_file calls from other tools that merely name a path', () => {
+    // successfulReadFileArgs backs the checks where NAMING a path is not
+    // OPENING it: a search over the findings file carries the same
+    // stringified path in its args without reading a line of it.
+    const b = { agentId: 'a1', agentName: 'general-purpose', sessionId: 'S1' };
+    const pairs: object[] = [];
+    for (const [name, args] of [
+      ['read_file', { file_path: '/r/f.findings.md' }],
+      ['search_file_content', { path: '/r/f.findings.md', pattern: 'Crit' }],
+    ]) {
+      pairs.push(
+        {
+          ...b,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [{ functionCall: { name, args } }],
+          },
+        },
+        {
+          ...b,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [{ functionResponse: { name, response: { output: 'ok' } } }],
+          },
+        },
+      );
+    }
+    file(
+      'agent-a1.jsonl',
+      [
+        JSON.stringify({
+          ...b,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'chunk 1 of 1' }] },
+        }),
+        ...pairs.map((r) => JSON.stringify(r)),
+      ].join('\n') + '\n',
+    );
+    const [rec] = readTranscripts(undefined, ENV);
+    expect(rec.successfulToolCalls).toBe(2);
+    expect(rec.successfulCallArgs).toHaveLength(2);
+    expect(rec.successfulReadFileArgs).toHaveLength(1);
+    expect(rec.successfulReadFileArgs[0]).toContain('/r/f.findings.md');
+    expect(rec.successfulReadFileArgs[0]).not.toContain('search_file_content');
+  });
 });
 
 describe('wasGivenTheDiff', () => {
@@ -185,6 +233,7 @@ describe('wasGivenTheDiff', () => {
     diffToolCalls: 0,
     diffReads: [],
     successfulCallArgs: [],
+    successfulReadFileArgs: [],
     finalText: '',
     mtimeMs: 0,
   });

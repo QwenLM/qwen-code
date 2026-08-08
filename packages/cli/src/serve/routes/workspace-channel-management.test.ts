@@ -57,15 +57,24 @@ function service(): ChannelManagementService {
       approved: {
         senderId: 'sender-1',
         senderName: 'Alice',
+        subject: {
+          type: 'user' as const,
+          id: 'sender-1',
+          name: 'Alice',
+        },
         code,
         createdAt: 1,
       },
       requests: [],
     })),
-    pairingApprovals: vi.fn(async () => ({ senderIds: ['sender-1'] })),
-    revokePairingApproval: vi.fn(async (_name, senderId) => ({
-      revoked: senderId,
+    pairingApprovals: vi.fn(async () => ({
+      senderIds: ['sender-1'],
+      groupIds: ['group-1'],
+    })),
+    revokePairingApproval: vi.fn(async (_name, subject) => ({
+      revoked: subject.id,
       senderIds: [],
+      groupIds: [],
     })),
   };
 }
@@ -167,6 +176,45 @@ describe('workspace Channel management routes', () => {
         expect.objectContaining({ type: 'dingtalk', manageable: true }),
       ]),
     );
+  });
+
+  it('advertises the exact nested object descriptor shape on the wire', async () => {
+    const { app } = mount();
+
+    const response = await request(app).get('/workspace/channel-types');
+
+    expect(response.status).toBe(200);
+    const dingtalk = (
+      response.body as Array<{ type: string; fields: unknown[] }>
+    ).find((entry) => entry.type === 'dingtalk');
+    expect(dingtalk?.fields).toContainEqual({
+      key: 'interactiveCards',
+      label: 'Interactive Cards',
+      kind: 'object',
+      properties: [
+        { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+        {
+          key: 'statusCard',
+          label: 'Status Card',
+          kind: 'object',
+          properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
+        },
+        {
+          key: 'questionCard',
+          label: 'Question Card',
+          kind: 'object',
+          properties: [
+            { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+            {
+              key: 'timeoutMs',
+              label: 'Timeout (ms)',
+              kind: 'number',
+              exclusiveMinimum: 0,
+            },
+          ],
+        },
+      ],
+    });
   });
 
   it('routes strict CRUD and lifecycle mutations to the primary service', async () => {
@@ -324,22 +372,42 @@ describe('workspace Channel management routes', () => {
 
     expect(pairingRequests.status).toBe(200);
     expect(pairingRequests.headers['cache-control']).toBe('no-store');
+    expect(pairingRequests.body).toEqual({ requests: [] });
     expect(approval.status).toBe(200);
     expect(approval.headers['cache-control']).toBe('no-store');
+    expect(approval.body).toEqual({
+      approved: {
+        senderId: 'sender-1',
+        senderName: 'Alice',
+        subject: { type: 'user', id: 'sender-1', name: 'Alice' },
+        code: 'ABCDEFGH',
+        createdAt: 1,
+      },
+      requests: [],
+    });
     expect(approvals.status).toBe(200);
     expect(approvals.headers['cache-control']).toBe('no-store');
+    expect(approvals.body).toEqual({
+      senderIds: ['sender-1'],
+      groupIds: ['group-1'],
+    });
     expect(revocation.status).toBe(200);
     expect(revocation.headers['cache-control']).toBe('no-store');
+    expect(revocation.body).toEqual({
+      revoked: 'sender-1',
+      senderIds: [],
+      groupIds: [],
+    });
     expect(secondaryService.pairingRequests).toHaveBeenCalledWith('bot');
     expect(secondaryService.approvePairing).toHaveBeenCalledWith(
       'bot',
       'ABCDEFGH',
     );
     expect(secondaryService.pairingApprovals).toHaveBeenCalledWith('bot');
-    expect(secondaryService.revokePairingApproval).toHaveBeenCalledWith(
-      'bot',
-      'sender-1',
-    );
+    expect(secondaryService.revokePairingApproval).toHaveBeenCalledWith('bot', {
+      type: 'user',
+      id: 'sender-1',
+    });
     expect(primaryService.pairingRequests).not.toHaveBeenCalled();
     expect(primaryService.pairingApprovals).not.toHaveBeenCalled();
 
@@ -348,6 +416,27 @@ describe('workspace Channel management routes', () => {
     );
     expect(primaryPairingRequests.status).toBe(200);
     expect(primaryService.pairingRequests).toHaveBeenCalledWith('bot');
+  });
+
+  it('revokes a group pairing approval by stable group ID', async () => {
+    const { app, secondaryService } = mount();
+
+    const response = await auth(
+      request(app)
+        .delete('/workspaces/secondary/channels/bot/pairing-approvals')
+        .send({ groupId: 'group-1' }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      revoked: 'group-1',
+      senderIds: [],
+      groupIds: [],
+    });
+    expect(secondaryService.revokePairingApproval).toHaveBeenCalledWith('bot', {
+      type: 'group',
+      id: 'group-1',
+    });
   });
 
   it('returns 404 when a pairing approval no longer exists', async () => {
@@ -485,6 +574,19 @@ describe('workspace Channel management routes', () => {
         .delete('/workspace/channels/bot/pairing-approvals')
         .send({ senderId: '' }),
     );
+    const invalidGroupId = await auth(
+      request(app)
+        .delete('/workspace/channels/bot/pairing-approvals')
+        .send({ groupId: '' }),
+    );
+    const ambiguousSubject = await auth(
+      request(app)
+        .delete('/workspace/channels/bot/pairing-approvals')
+        .send({ senderId: 'sender-1', groupId: 'group-1' }),
+    );
+    const missingSubject = await auth(
+      request(app).delete('/workspace/channels/bot/pairing-approvals').send({}),
+    );
 
     expect(invalidName.body.code).toBe('invalid_channel_instance_name');
     expect(unsafeName.status).toBe(400);
@@ -495,6 +597,10 @@ describe('workspace Channel management routes', () => {
     expect(invalidSecret.body.code).toBe('channel_settings_invalid_secret');
     expect(invalidPairing.body.code).toBe('invalid_channel_pairing_code');
     expect(invalidSenderId.body.code).toBe('invalid_channel_pairing_sender_id');
+    expect(invalidGroupId.body.code).toBe('invalid_channel_pairing_group_id');
+    expect(ambiguousSubject.body.code).toBe('invalid_channel_pairing_subject');
+    expect(missingSubject.status).toBe(400);
+    expect(missingSubject.body.code).toBe('invalid_channel_pairing_subject');
     expect(primaryService.upsert).toHaveBeenCalledOnce();
     expect(primaryService.start).not.toHaveBeenCalled();
     expect(primaryService.approvePairing).not.toHaveBeenCalled();

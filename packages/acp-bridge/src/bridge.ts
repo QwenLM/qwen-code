@@ -1394,6 +1394,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   let liveTaskToolRequestHandler: LiveTaskToolRequestHandler | undefined;
   let liveSpeakToUserHandler: LiveSpeakToUserHandler | undefined;
   const defaultSessionScope = opts.sessionScope ?? 'single';
+  // Resolved once beside the other option defaults: this default is
+  // load-bearing for every non-daemon consumer, and reading `?? true` inline
+  // would let a second `initialize` site drift away from it.
+  const delegateReadTextFileToClient =
+    opts.delegateReadTextFileToClient ?? true;
   // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
@@ -2542,7 +2547,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
                 },
                 clientCapabilities: {
-                  fs: { readTextFile: true, writeTextFile: true },
+                  fs: {
+                    readTextFile: delegateReadTextFileToClient,
+                    writeTextFile: true,
+                  },
                 },
                 clientInfo: { name: 'qwen-serve-bridge', version: '0' },
               }),
@@ -3577,19 +3585,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
   const getChildResourceSnapshot = ():
-    | { rssBytes: number; cpuPercent: number }
+    | { rssBytes: number; cpuPercent: number; ageMs: number }
     | undefined => {
     const info = liveChannelInfo();
     if (!info || info.childResourceAt === undefined) return undefined;
     // Staleness: a child that goes unresponsive without a channel swap would
     // otherwise show its last-good rss/cpu forever (a zombie looking healthy).
     // Drop the reading once it ages past the window so the chart reads 0.
-    if (Date.now() - info.childResourceAt > STALE_CHILD_RESOURCE_MS) {
+    const ageMs = Date.now() - info.childResourceAt;
+    if (ageMs > STALE_CHILD_RESOURCE_MS) {
       return undefined;
     }
     return {
       rssBytes: info.childRssBytes ?? 0,
       cpuPercent: info.childCpuPercent ?? 0,
+      // Bounded by the guard above, so a caller summing several children's
+      // readings can say how far apart they were taken. Without it a sum of
+      // readings up to `STALE_CHILD_RESOURCE_MS` apart looks instantaneous.
+      ageMs,
     };
   };
 
