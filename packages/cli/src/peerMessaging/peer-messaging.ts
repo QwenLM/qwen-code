@@ -86,6 +86,18 @@ export class PeerMessaging {
       onHeldChange: (held, added) => messaging.emitHeldChange(held, added),
     });
 
+    // Publish the gate *before* binding. `startPeerInbox` keeps awaiting
+    // (chmod, orphan sweep) after `listen()` resolves, and the server is
+    // already accepting by then, so a frame can reach `onFrame` while this
+    // method is still suspended. Assigning the gate afterwards left that
+    // frame hitting `this.gate?.admit(...)` with a null gate — dropped with
+    // no delivery, no hold and no receipt, while the sender's `sendToPeer`
+    // had already reported `{ kind: 'sent' }`. Everything the gate reaches
+    // in this window tolerates a half-built `messaging`: `deliver` buffers
+    // until `setSubmitFn`, `reportStatus` sends `from: undefined`, and no
+    // held-change listener is registered yet.
+    messaging.gate = gate;
+
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
@@ -95,7 +107,6 @@ export class PeerMessaging {
     if (!inbox) return null;
 
     messaging.inbox = inbox;
-    messaging.gate = gate;
 
     // Advertise the address only once the socket is actually accepting.
     // Publishing it earlier would hand peers an address that refuses

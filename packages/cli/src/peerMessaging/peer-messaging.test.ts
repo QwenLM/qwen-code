@@ -9,7 +9,7 @@
  * of the gate and lands in the submit function, wrapped and attributed.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,6 +21,27 @@ import {
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
+/**
+ * Runs inside `PeerMessaging.start`'s `await startPeerInbox(...)`, after the
+ * socket is accepting but before `start` resumes — the exact window in which
+ * the server can hand a frame to a not-yet-fully-built `PeerMessaging`. Only
+ * the test that needs that window sets it.
+ */
+let duringInboxStart: ((inbox: PeerInbox) => Promise<void>) | null = null;
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    startPeerInbox: async (options: Parameters<typeof startPeerInbox>[0]) => {
+      const inbox = await actual.startPeerInbox(options);
+      if (inbox && duringInboxStart) await duringInboxStart(inbox);
+      return inbox;
+    },
+  };
+});
+
 import { PeerMessaging } from './peer-messaging.js';
 
 const isWindows = process.platform === 'win32';
@@ -34,9 +55,11 @@ let receipts: PeerFrame[];
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
   receipts = [];
+  duringInboxStart = null;
 });
 
 afterEach(async () => {
+  duringInboxStart = null;
   await messaging?.close();
   messaging = null;
   await senderInbox?.close();
@@ -146,6 +169,34 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     started.setSubmitFn((modelText) => submitted.push(modelText));
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toContain('early bird');
+  });
+
+  it('admits a frame that arrives before start() has finished binding', async () => {
+    // `startPeerInbox` keeps awaiting after `listen()` resolves (chmod, then
+    // the orphan sweep this PR adds), and the server accepts throughout. A
+    // frame landing there used to reach `onFrame` with `gate` still null and
+    // be dropped outright, even though the sender was told `{kind:'sent'}`.
+    const sender = await startSenderInbox();
+    const selfSocketPath = path.join(tmpDir, 'socks', 'self.sock');
+    duringInboxStart = async () => {
+      await sendPeerFrame(
+        selfSocketPath,
+        buildUserFrame({
+          content: 'raced the bind',
+          from: sender.socketPath,
+        }),
+      );
+      await settle();
+    };
+
+    const { submitted } = await start(ApprovalMode.DEFAULT);
+    await settle();
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain('raced the bind');
+    // Not merely retained — the sender is told what became of it.
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ type: 'control', status: 'delivered' });
   });
 
   it('sends a delivery receipt back to the sender', async () => {
