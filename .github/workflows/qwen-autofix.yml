@@ -117,12 +117,15 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
-  # Suggestions may improve a PR, but continuing to implement them after ten
+  # Suggestions may improve a PR, but continuing to implement them after five
   # change-producing rounds expands the diff and creates fresh review churn.
-  # From round 11 onward, only Critical findings, formally requested changes,
+  # From round 6 onward, only Critical findings, formally requested changes,
   # failed checks, and base conflicts may drive code changes; lower-severity
-  # feedback is recorded and left open.
-  CRITICAL_ONLY_AFTER_ROUND: '10'
+  # feedback is recorded and left open. Lowered from 10: at 10 the threshold
+  # only ever bound takeover PRs (the strict cap discards a plain PR at round
+  # 10 before Critical-only could engage), so long-running managed PRs spent
+  # ten rounds growing their diff on suggestions before the brake applied.
+  CRITICAL_ONLY_AFTER_ROUND: '5'
   # Per-author tail budget inside Critical-only mode. An account is an
   # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
   # reviewer loop with the exact regeneration property the review bot has
