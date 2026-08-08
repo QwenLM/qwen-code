@@ -62,9 +62,7 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
-  hasGitConfigOverridingEnv,
   hasShellSubstitution,
-  isDirectoryChangeSegment,
   SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
   type ShellType,
@@ -2038,20 +2036,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return 'ask';
     }
 
-    // A git-overriding env prefix (GIT_DIR=…, GIT_CONFIG_COUNT=…) survives
-    // the wrapper unwrap below and still applies to the inner script,
-    // while the probe would only see the stripped command's cwd — the
-    // compound would auto-execute against attacker-chosen config (#8575).
-    if (hasGitConfigOverridingEnv(this.params.command)) {
-      return 'ask';
-    }
-
     const command = stripShellWrapper(this.params.command);
 
     // AST-based read-only detection
     try {
-      const cwd = this.params.directory || this.config.getTargetDir();
-      const isReadOnly = await isShellCommandReadOnlyAST(command, { cwd });
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
         return 'allow';
       }
@@ -2119,39 +2108,28 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
-    // Split compound command and filter out already-allowed (read-only)
-    // sub-commands. After a directory-changing segment the per-sub-command
-    // probe would classify against the pre-cd cwd and silently drop the git
-    // sub-command that triggered this confirmation, so everything after it
-    // stays in scope (#8575).
+    // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
-    let sawDirectoryChange = false;
     for (const sub of subCommands) {
-      const changesDirectory = isDirectoryChangeSegment(sub);
-      const filterable = !sawDirectoryChange;
-      if (changesDirectory) sawDirectoryChange = true;
+      let isReadOnly = false;
+      try {
+        isReadOnly = await isShellCommandReadOnlyAST(sub);
+      } catch {
+        // conservative: treat unknown commands as requiring confirmation
+      }
 
-      if (filterable) {
-        let isReadOnly = false;
+      if (isReadOnly) {
+        continue;
+      }
+
+      if (pm) {
         try {
-          isReadOnly = await isShellCommandReadOnlyAST(sub, { cwd });
-        } catch {
-          // conservative: treat unknown commands as requiring confirmation
-        }
-
-        if (isReadOnly) {
-          continue;
-        }
-
-        if (pm) {
-          try {
-            if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
-              continue;
-            }
-          } catch (e) {
-            debugLogger.warn('PermissionManager command check failed:', e);
+          if ((await pm.isCommandAllowed(sub, cwd)) === 'allow') {
+            continue;
           }
+        } catch (e) {
+          debugLogger.warn('PermissionManager command check failed:', e);
         }
       }
 

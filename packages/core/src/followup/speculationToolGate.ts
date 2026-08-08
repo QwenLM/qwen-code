@@ -61,10 +61,6 @@ const BOUNDARY_TOOLS = new Set<string>([
  * @param args - The tool call arguments
  * @param overlayFs - The overlay filesystem for path rewriting
  * @param approvalMode - The user's current approval mode
- * @param cwd - Execution directory for shell commands; lets the classifier
- *   downgrade git commands whose repo-local config executes programs
- *   (#8575). Speculation bypasses the permission flow, so this gate is the
- *   only place that check can happen for speculated shell calls.
  * @returns Gate result: allow, redirect, or boundary
  */
 export async function evaluateToolCall(
@@ -72,7 +68,6 @@ export async function evaluateToolCall(
   args: Record<string, unknown>,
   overlayFs: OverlayFs,
   approvalMode: ApprovalMode,
-  cwd?: string,
 ): Promise<ToolGateResult> {
   // Safe read-only tools — allow, but resolve paths through overlay
   if (SAFE_READ_ONLY_TOOLS.has(toolName)) {
@@ -100,16 +95,9 @@ export async function evaluateToolCall(
   // Shell — use AST parser for accurate read-only detection
   if (toolName === ToolNames.SHELL) {
     const command = typeof args['command'] === 'string' ? args['command'] : '';
-    const directory =
-      typeof args['directory'] === 'string' && args['directory']
-        ? args['directory']
-        : cwd;
     if (
       command &&
-      (await classifyShellCommandSafety(
-        command,
-        directory ? { cwd: directory } : undefined,
-      )) === 'read-only'
+      (await classifyShellCommandSafety(command)) === 'read-only'
     ) {
       return { action: 'allow' };
     }

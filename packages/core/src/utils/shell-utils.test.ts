@@ -15,12 +15,10 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
-  hasGitConfigOverridingEnv,
   hasNonFinalTopLevelBackgroundOperator,
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
-  isDirectoryChangeSegment,
   normalizeMonitorCommand,
   splitCommands,
   stripTrailingBackgroundAmp,
@@ -1423,61 +1421,5 @@ describe('splitCommands', () => {
     ])('splits %s', (command, expected) => {
       expect(splitCommands(command)).toEqual(expected);
     });
-  });
-});
-
-describe('isDirectoryChangeSegment (#8575)', () => {
-  it('matches bare cd / pushd / popd segments', () => {
-    expect(isDirectoryChangeSegment('cd /tmp/repo')).toBe(true);
-    expect(isDirectoryChangeSegment('pushd /tmp/repo')).toBe(true);
-    expect(isDirectoryChangeSegment('popd')).toBe(true);
-    expect(isDirectoryChangeSegment('(cd /tmp/repo)')).toBe(true);
-  });
-
-  it('matches disguised directory-change forms', () => {
-    // All of these genuinely change the directory in bash.
-    expect(isDirectoryChangeSegment('builtin cd /tmp/repo')).toBe(true);
-    expect(isDirectoryChangeSegment('command cd /tmp/repo')).toBe(true);
-    expect(isDirectoryChangeSegment('"cd" /tmp/repo')).toBe(true);
-    expect(isDirectoryChangeSegment("'cd' /tmp/repo")).toBe(true);
-    expect(isDirectoryChangeSegment('\\cd /tmp/repo')).toBe(true);
-    expect(isDirectoryChangeSegment('FOO=x cd /tmp/repo')).toBe(true);
-  });
-
-  it('does not match non-directory-change segments', () => {
-    expect(isDirectoryChangeSegment('ls -la')).toBe(false);
-    expect(isDirectoryChangeSegment('git status')).toBe(false);
-    expect(isDirectoryChangeSegment('command -v cd')).toBe(false);
-    expect(isDirectoryChangeSegment('cdr /tmp/repo')).toBe(false);
-  });
-});
-
-describe('hasGitConfigOverridingEnv (#8575)', () => {
-  it('detects git discovery/config overrides in leading env assignments', () => {
-    expect(hasGitConfigOverridingEnv('GIT_DIR=/planted/.git git status')).toBe(
-      true,
-    );
-    expect(hasGitConfigOverridingEnv('GIT_WORK_TREE=/x git status')).toBe(true);
-    expect(hasGitConfigOverridingEnv('GIT_COMMON_DIR=/x git status')).toBe(
-      true,
-    );
-    expect(
-      hasGitConfigOverridingEnv(
-        'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=evil git status',
-      ),
-    ).toBe(true);
-    expect(
-      hasGitConfigOverridingEnv("FOO=1 GIT_DIR=/x bash -c 'git status'"),
-    ).toBe(true);
-  });
-
-  it('ignores unrelated env assignments and non-env commands', () => {
-    expect(hasGitConfigOverridingEnv('FOO=bar git status')).toBe(false);
-    expect(hasGitConfigOverridingEnv('GIT_TERMINAL_PROMPT=0 git status')).toBe(
-      false,
-    );
-    expect(hasGitConfigOverridingEnv('git status')).toBe(false);
-    // The override must be a LEADING env assignment, not an argument.
-    expect(hasGitConfigOverridingEnv('env GIT_DIR=/x')).toBe(false);
   });
 });

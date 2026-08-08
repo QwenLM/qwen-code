@@ -197,26 +197,14 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
   }
 }
 
-/** A command segment plus the control operator that terminated it. */
-export interface CommandSegment {
-  command: string;
-  /** Terminating operator (`&&`, `||`, `;`, `|`, `&`, newline) — `null` for the last segment. */
-  separator: string | null;
-}
-
 /**
- * Splits a shell command into segments, respecting quotes, and records the
- * control operator terminating each segment. @see splitCommands for the
- * separator-free variant.
+ * Splits a shell command into a list of individual commands, respecting quotes.
+ * This is used to separate chained commands (e.g., using &&, ||, ;).
+ * @param command The shell command string to parse
+ * @returns An array of individual command strings
  */
-export function splitCommandsWithSeparators(command: string): CommandSegment[] {
-  const commands: CommandSegment[] = [];
-  const push = (segment: string, separator: string | null): void => {
-    const trimmed = segment.trim();
-    if (trimmed) {
-      commands.push({ command: trimmed, separator });
-    }
-  };
+export function splitCommands(command: string): string[] {
+  const commands: string[] = [];
   let currentCommand = '';
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
@@ -312,18 +300,18 @@ export function splitCommandsWithSeparators(command: string): CommandSegment[] {
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
-        push(currentCommand, char + nextChar);
+        commands.push(currentCommand.trim());
         currentCommand = '';
         i++; // Skip the next character
       } else if (char === ';') {
-        push(currentCommand, ';');
+        commands.push(currentCommand.trim());
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
         if (prevChar === '>' || prevChar === '<') {
           currentCommand += char;
         } else {
-          push(currentCommand, '&');
+          commands.push(currentCommand.trim());
           currentCommand = '';
         }
       } else if (char === '|') {
@@ -331,17 +319,17 @@ export function splitCommandsWithSeparators(command: string): CommandSegment[] {
         if (prevChar === '>') {
           currentCommand += char;
         } else {
-          push(currentCommand, '|');
+          commands.push(currentCommand.trim());
           currentCommand = '';
         }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
-        push(currentCommand, '\n');
+        commands.push(currentCommand.trim());
         currentCommand = '';
         i++; // Skip the \n
       } else if (char === '\n') {
         // Unix-style \n newline - treat as command separator
-        push(currentCommand, '\n');
+        commands.push(currentCommand.trim());
         currentCommand = '';
       } else {
         currentCommand += char;
@@ -352,52 +340,11 @@ export function splitCommandsWithSeparators(command: string): CommandSegment[] {
     i++;
   }
 
-  push(currentCommand, null);
-
-  return commands;
-}
-
-/**
- * Splits a shell command into a list of individual commands, respecting quotes.
- * This is used to separate chained commands (e.g., using &&, ||, ;).
- * @param command The shell command string to parse
- * @returns An array of individual command strings
- */
-export function splitCommands(command: string): string[] {
-  return splitCommandsWithSeparators(command).map((entry) => entry.command);
-}
-
-/** True when a split segment changes the working directory. */
-const DIRECTORY_CHANGE_SEGMENT = /^\(*\s*(?:cd|pushd|popd)(?:[\s);]|$)/;
-const DIRECTORY_CHANGE_COMMANDS = new Set(['cd', 'pushd', 'popd']);
-const DIRECTORY_CHANGE_PREFIXES = new Set(['builtin', 'command']);
-
-export function isDirectoryChangeSegment(segment: string): boolean {
-  // Parse with shell-quote so disguised forms are recognized too:
-  // `builtin cd` / `command cd`, env-prefixed cds (`FOO=x cd /dir`), and
-  // quoted or escaped roots (`"cd"`, `'cd'`, `\cd`) all change the
-  // directory in bash. Over-detecting only widens the confirmation scope;
-  // under-detecting would drop the git segments after the cd from it
-  // (#8575).
-  try {
-    const tokens = parse(segment).filter(
-      (token): token is string => typeof token === 'string',
-    );
-    let index = 0;
-    while (index < tokens.length && ENV_ASSIGNMENT_REGEX.test(tokens[index]!)) {
-      index++;
-    }
-    if (
-      index < tokens.length &&
-      DIRECTORY_CHANGE_PREFIXES.has(tokens[index]!)
-    ) {
-      index++;
-    }
-    const root = tokens[index];
-    return root !== undefined && DIRECTORY_CHANGE_COMMANDS.has(root);
-  } catch {
-    return DIRECTORY_CHANGE_SEGMENT.test(segment.trim());
+  if (currentCommand.trim()) {
+    commands.push(currentCommand.trim());
   }
+
+  return commands.filter(Boolean); // Filter out any empty strings
 }
 
 /**
@@ -510,31 +457,6 @@ export function getCommandRoots(command: string): string[] {
   return splitCommands(command)
     .map((c) => getCommandRoot(c))
     .filter((c): c is string => !!c);
-}
-
-const GIT_CONFIG_OVERRIDING_ENV = /^GIT_(?:DIR|WORK_TREE|COMMON_DIR|CONFIG)/;
-
-/**
- * True when the command's leading env assignments override git's
- * repository discovery (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR) or inject
- * config (GIT_CONFIG_COUNT and GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n).
- * Such assignments survive
- * `stripShellWrapper`'s wrapper unwrap and still apply to the inner
- * script, so classifying the stripped command alone would probe the wrong
- * repository (#8575).
- */
-export function hasGitConfigOverridingEnv(command: string): boolean {
-  let rest = command;
-  while (true) {
-    const token = takeLeadingToken(rest);
-    if (!token || !isEnvAssignmentToken(token.token)) return false;
-    if (
-      GIT_CONFIG_OVERRIDING_ENV.test(stripSymmetricQuotes(token.token).value)
-    ) {
-      return true;
-    }
-    rest = token.rest;
-  }
 }
 
 export function stripShellWrapper(command: string): string {

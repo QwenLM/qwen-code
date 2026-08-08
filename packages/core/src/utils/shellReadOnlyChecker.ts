@@ -11,11 +11,9 @@
  */
 
 import { parse } from 'shell-quote';
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   detectCommandSubstitution,
-  splitCommandsWithSeparators,
+  splitCommands,
   stripShellWrapper,
 } from './shell-utils.js';
 import {
@@ -23,10 +21,6 @@ import {
   classifySedCommandSafety,
   hasShellBraceExpansion,
 } from './shell-safety-rules.js';
-import {
-  gitConfigMayExecutePrograms,
-  type ShellReadOnlyCheckOptions,
-} from './git-config-safety.js';
 
 const READ_ONLY_ROOT_COMMANDS = new Set([
   'awk',
@@ -220,10 +214,7 @@ function evaluateGitBranchArgs(args: string[]): boolean {
   return args.length === 0 || (args.length === 1 && args[0] === '--list');
 }
 
-function evaluateGitCommand(
-  tokens: string[],
-  checkOptions?: ShellReadOnlyCheckOptions,
-): boolean {
+function evaluateGitCommand(tokens: string[]): boolean {
   let index = 1;
   while (index < tokens.length && tokens[index]!.startsWith('-')) {
     const flag = tokens[index++]!.toLowerCase();
@@ -251,33 +242,21 @@ function evaluateGitCommand(
     return false;
   if (options.some((arg) => /^(?:--help|--version)$/i.test(arg))) return false;
 
-  let allowed: boolean;
   if (subcommand === 'remote') {
-    allowed = evaluateGitRemoteArgs(args);
-  } else if (subcommand === 'branch') {
-    allowed = evaluateGitBranchArgs(args);
-  } else if (['blame', 'diff', 'log', 'show'].includes(subcommand)) {
-    allowed = !options.some((arg) => /^--output(?:=|$)/.test(arg));
-  } else {
-    allowed = true;
+    return evaluateGitRemoteArgs(args);
   }
 
-  // A whitelisted sub-command can still execute programs configured in the
-  // repository-local `.git/config` (diff.external, core.fsmonitor, pagers,
-  // credential/ssh helpers). Require confirmation when such keys are
-  // present, or when the effective directory after an unresolvable `cd` is
-  // unknown. See issue #8575.
-  return (
-    allowed &&
-    !checkOptions?.unknownDir &&
-    !(checkOptions?.cwd && gitConfigMayExecutePrograms(checkOptions.cwd))
-  );
+  if (subcommand === 'branch') {
+    return evaluateGitBranchArgs(args);
+  }
+
+  if (['blame', 'diff', 'log', 'show'].includes(subcommand)) {
+    return !options.some((arg) => /^--output(?:=|$)/.test(arg));
+  }
+  return true;
 }
 
-function evaluateShellSegment(
-  segment: string,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): boolean {
+function evaluateShellSegment(segment: string): boolean {
   if (!segment.trim()) {
     return true;
   }
@@ -345,102 +324,18 @@ function evaluateShellSegment(
   }
 
   if (normalizedRoot === 'git') {
-    return evaluateGitCommand([normalizedRoot, ...args], checkOptions);
+    return evaluateGitCommand([normalizedRoot, ...args]);
   }
 
   return true;
 }
 
 /**
- * Update the tracked execution directory across compound segments. `cd`
- * with a statically resolvable target moves the probe's base directory;
- * anything unresolvable (`cd` alone, `cd -`, flag-only forms, multi-arg
- * forms, expansions, a subshell-wrapped cd) marks the directory as unknown
- * so later git segments are downgraded (#8575). `pushd`/`popd` never reach
- * this function — they are not whitelisted read-only roots, so their
- * segments are rejected before tracking runs.
- */
-const CD_COMMAND = /^cd(?:[)\s]|$)/;
-
-function trackDirectoryChange(
-  segment: string,
-  currentCwd: string | undefined,
-): { currentCwd?: string; unknownDir: boolean } {
-  const trimmed = segment.trim();
-  const wrapped = trimmed.startsWith('(');
-  const bare = wrapped ? trimmed.replace(/^\(+\s*/, '') : trimmed;
-  if (!CD_COMMAND.test(bare)) {
-    // A disguised cd still changes the directory in bash even though the
-    // raw text misses the bare-cd regex: quoted or escaped roots (`"cd"`,
-    // `'cd'`, `\cd`) are unquoted before command lookup, and a glued
-    // input redirection (`cd<file dir`) is a separate token. When the
-    // segment parses to a cd root, fail closed so the following git
-    // segments are downgraded instead of probed at the pre-cd cwd (#8575).
-    const { root } = skipEnvironmentAssignments(normalizeTokens(bare));
-    if (root === 'cd' || root === 'pushd' || root === 'popd') {
-      return { currentCwd: undefined, unknownDir: true };
-    }
-    return { currentCwd, unknownDir: false };
-  }
-  if (wrapped) {
-    // cd inside a subshell: its effect on the segments that follow the
-    // flattened split cannot be determined — fail closed.
-    return { currentCwd: undefined, unknownDir: true };
-  }
-  const unknown = { currentCwd: undefined, unknownDir: true };
-  const tokens = bare.split(/\s+/).slice(1);
-  const operands: string[] = [];
-  for (const token of tokens) {
-    if (token === '-') return unknown; // `cd -` goes to OLDPWD
-    if (token.startsWith('-')) continue; // -P/-L/-e/-- are flags, not targets
-    operands.push(token);
-  }
-  // No operand cds to $HOME; more than one is rejected by bash (`cd: too
-  // many arguments`) or rewrites $PWD (`cd old new`) — neither resolvable.
-  if (operands.length !== 1) return unknown;
-  let target = operands[0]!;
-  // Mirror the AST classifier: a fully quoted target resolves to its
-  // literal content — single quotes are fully literal, and double quotes
-  // are literal unless they hold an expansion or escape (#8575).
-  if (/^'[^']*'$/.test(target)) {
-    target = target.slice(1, -1);
-    if (target.startsWith('~')) return unknown;
-  } else if (/^"[^"]*"$/.test(target)) {
-    const inner = target.slice(1, -1);
-    if (/[\\"$`]/.test(inner) || inner.startsWith('~')) return unknown;
-    target = inner;
-  } else if (target.startsWith('~') || /[$`'"\\*?[\]{}()<>|;&]/.test(target)) {
-    return unknown;
-  }
-  const resolved = path.isAbsolute(target)
-    ? target
-    : currentCwd
-      ? path.resolve(currentCwd, target)
-      : undefined;
-  if (!resolved) return unknown;
-  // bash refuses to enter a missing target or a non-directory and stays
-  // put; fail closed regardless — the target can appear before execution.
-  try {
-    if (!fs.statSync(resolved).isDirectory()) return unknown;
-  } catch {
-    return unknown;
-  }
-  return { currentCwd: resolved, unknownDir: false };
-}
-
-/**
  * @deprecated Use `isShellCommandReadOnlyAST` from `./shellAstParser.js` instead.
  * This function uses regex + shell-quote for command parsing with known edge-case
  * limitations. The AST-based replacement provides accurate parsing via tree-sitter-bash.
- *
- * @param command - The shell command string to evaluate.
- * @param checkOptions - Optional `cwd` so git commands can be downgraded when
- *   the repository-local config contains program-executing keys (#8575).
  */
-export function isShellCommandReadOnly(
-  command: string,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): boolean {
+export function isShellCommandReadOnly(command: string): boolean {
   if (typeof command !== 'string' || !command.trim()) {
     return false;
   }
@@ -451,64 +346,11 @@ export function isShellCommandReadOnly(
   )
     return false;
 
-  const segments = splitCommandsWithSeparators(command);
+  const segments = splitCommands(command);
 
-  let currentCwd = checkOptions?.cwd;
-  let unknownDir = checkOptions?.unknownDir === true;
-  let dirChanged = false;
-  let diverged = false;
-
-  for (let index = 0; index < segments.length; index++) {
-    const segment = segments[index]!.command;
-    const incoming = index > 0 ? segments[index - 1]!.separator : null;
-    // A segment after a non-`&&` operator (`;`, `||`, `|`, newline, `&`)
-    // also runs when a preceding cd did not take effect, so the tracked
-    // directory no longer applies once one was involved (#8575).
-    if (incoming !== null && incoming !== '&&' && dirChanged) {
-      diverged = true;
-    }
-    if (diverged) {
-      unknownDir = true;
-      currentCwd = undefined;
-    }
-    const segmentOptions: ShellReadOnlyCheckOptions | undefined = unknownDir
-      ? { cwd: undefined, unknownDir: true }
-      : currentCwd
-        ? { cwd: currentCwd }
-        : undefined;
-    if (!evaluateShellSegment(segment, segmentOptions)) {
+  for (const segment of segments) {
+    if (!evaluateShellSegment(segment)) {
       return false;
-    }
-    if (diverged) continue;
-    // Every pipeline member runs in a subshell — a cd there never moves
-    // the directory the following segments execute in (#8575).
-    if (incoming === '|' || incoming === '|&') continue;
-    // A `&` backgrounds the segment the same way: a cd there runs in a
-    // subshell and leaves the tracked directory alone (#8575).
-    if (segments[index]!.separator === '&') continue;
-    const tracked = trackDirectoryChange(segment, currentCwd);
-    if (tracked.unknownDir) {
-      unknownDir = true;
-      currentCwd = undefined;
-      dirChanged = true;
-    } else if (
-      tracked.currentCwd !== undefined &&
-      tracked.currentCwd !== currentCwd
-    ) {
-      // A cd joined by `||` may be skipped entirely (the preceding
-      // segment succeeded), in which case the following segments run in
-      // the prior directory — it must be clean too (#8575).
-      if (
-        incoming === '||' &&
-        currentCwd !== undefined &&
-        gitConfigMayExecutePrograms(currentCwd)
-      ) {
-        unknownDir = true;
-        currentCwd = undefined;
-      } else {
-        currentCwd = tracked.currentCwd;
-      }
-      dirChanged = true;
     }
   }
 

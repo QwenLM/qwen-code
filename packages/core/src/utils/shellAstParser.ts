@@ -25,10 +25,6 @@ import {
   classifySedCommandSafety,
   hasShellPatternExpansion,
 } from './shell-safety-rules.js';
-import {
-  gitConfigMayExecutePrograms,
-  type ShellReadOnlyCheckOptions,
-} from './git-config-safety.js';
 
 export type ShellCommandSafety = 'read-only' | 'write' | 'unknown';
 type Safety = ShellCommandSafety;
@@ -676,7 +672,8 @@ type SyntaxNode = Parser.SyntaxNode;
 const SHELL_EXPANSION_TYPES = new Set(
   'simple_expansion expansion arithmetic_expansion'.split(' '),
 );
-const CHILD_STATEMENT = /^(?:pipeline|negated_command)$/;
+const CHILD_STATEMENT =
+  /^(?:pipeline|list|subshell|compound_statement|negated_command)$/;
 /** Collect all descendant nodes of given types. */
 function collectDescendants(
   node: SyntaxNode,
@@ -961,10 +958,7 @@ function processSafety(root: string, args: string[]): Safety {
   return 'write';
 }
 
-function evaluateSubstitutions(
-  node: SyntaxNode,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): ShellCommandSafety {
+function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
   const substitutions = collectDescendants(
     node,
     new Set(['command_substitution', 'process_substitution']),
@@ -975,14 +969,11 @@ function evaluateSubstitutions(
     'unknown',
     ...substitutions
       .flatMap((substitution) => substitution.namedChildren)
-      .map((child) => evaluateStatementSafety(child, checkOptions)),
+      .map(evaluateStatementSafety),
   );
 }
 
-function evaluateCommandSafety(
-  commandNode: SyntaxNode,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): ShellCommandSafety {
+function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   const rawRoot = commandNode.childForFieldName('name')?.text;
   const root = getCommandName(commandNode);
   const argNodes = getArgumentNodes(commandNode);
@@ -994,25 +985,8 @@ function evaluateCommandSafety(
     result = hasHelp(args) ? 'unknown' : 'write';
   } else if (/^(kill|killall|pkill)$/.test(root)) {
     result = processSafety(root, args);
-  } else if (root === 'git') {
-    result = evaluateGitSafety(args);
-    // Whitelisted read-only sub-commands can still execute programs
-    // configured in the repository-local `.git/config` (diff.external,
-    // core.fsmonitor, pagers, credential/ssh helpers). Require confirmation
-    // when such keys are present, or when the effective directory after an
-    // unresolvable `cd` is unknown. Bare `git`, `git --version` and
-    // `git --help` are left as-is: they do not run repo-config programs.
-    // See issue #8575.
-    if (
-      result === 'read-only' &&
-      args.length > 0 &&
-      !args[0]!.startsWith('-') &&
-      (checkOptions?.unknownDir ||
-        (checkOptions?.cwd && gitConfigMayExecutePrograms(checkOptions.cwd)))
-    ) {
-      result = 'unknown';
-    }
-  } else if (root === 'find') result = evaluateFindSafety(args);
+  } else if (root === 'git') result = evaluateGitSafety(args);
+  else if (root === 'find') result = evaluateFindSafety(args);
   else if (root === 'sed') result = evaluateSedSafety(args);
   else if (root === 'awk') result = evaluateAwkSafety(args);
   else if (root === 'sort' || root === 'tree') {
@@ -1072,7 +1046,7 @@ function evaluateCommandSafety(
     evaluateRedirectionSafety(commandNode),
     ...commandNode.namedChildren
       .filter((child) => !child.type.endsWith('_redirect'))
-      .map((child) => evaluateSubstitutions(child, checkOptions)),
+      .map(evaluateSubstitutions),
   );
 }
 
@@ -1101,315 +1075,44 @@ function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
   return result;
 }
 
-function childrenSafety(
-  node: SyntaxNode,
-  floor: Safety = 'read-only',
-  checkOptions?: ShellReadOnlyCheckOptions,
-): Safety {
-  return mergeSafety(
-    floor,
-    ...node.namedChildren.map((child) =>
-      evaluateStatementSafety(child, checkOptions),
-    ),
-  );
+function childrenSafety(node: SyntaxNode, floor: Safety = 'read-only'): Safety {
+  return mergeSafety(floor, ...node.namedChildren.map(evaluateStatementSafety));
 }
 
-/**
- * Statements in a sequence run one after another (`;` or newline
- * separators at program/brace-group level), and `cd`/`pushd` change the
- * directory later statements execute in. Track the directory so the
- * git-config probe is applied to the repository each git statement
- * actually reaches (#8575).
- */
-function evaluateSequenceSafety(
-  node: SyntaxNode,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): ShellCommandSafety {
-  let context = checkOptions;
-  let result: ShellCommandSafety = 'read-only';
-  const children = node.children;
-  for (let index = 0; index < children.length; index++) {
-    const child = children[index]!;
-    if (!child.isNamed) continue;
-    result = mergeSafety(result, evaluateStatementSafety(child, context));
-    // A `&` terminator backgrounds the statement: it runs in a subshell,
-    // so its directory changes never reach the statements that follow
-    // (#8575). (`&` is a terminator between statements, never inside a
-    // `list` node.)
-    const terminator = children[index + 1];
-    context =
-      terminator && !terminator.isNamed && terminator.type === '&'
-        ? context
-        : contextAfterStatement(child, context);
-  }
-  return result;
-}
-
-/**
- * Flatten a `list` node into (statement, joining-operator) pairs. Nested
- * lists are inlined so `a && b && c` — which tree-sitter may nest — is
- * traversed as one chain with its operators intact.
- */
-function* iterateListStatements(
-  node: SyntaxNode,
-  leadingOperator?: string,
-): Generator<{ statement: SyntaxNode; operator?: string }> {
-  let operator = leadingOperator;
-  for (const child of node.children) {
-    if (!child.isNamed) {
-      // `&` never appears inside a `list` node — it terminates the list
-      // at program/compound level, where evaluateSequenceSafety handles
-      // it — so only `&&`/`||` join list members.
-      if (child.type === '&&' || child.type === '||') {
-        operator = child.type;
-      }
-      continue;
-    }
-    if (child.type === 'list') {
-      yield* iterateListStatements(child, operator);
-    } else {
-      yield { statement: child, operator };
-    }
-    operator = undefined;
-  }
-}
-
-/**
- * Evaluate a `list` (`&&`/`||` chain), tracking directory changes across
- * the segments (#8575). cd state only propagates across `&&`: the segment
- * after `||` (or `&`) runs precisely when the preceding chain did not
- * complete (or runs in a background subshell), so once a cd was tracked
- * the effective directory for everything after a non-`&&` operator is
- * unknown.
- */
-function evaluateListSafety(
-  node: SyntaxNode,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): ShellCommandSafety {
-  let context = checkOptions;
-  let diverged = false;
-  let directoryTracked = false;
-  let result: ShellCommandSafety = 'read-only';
-
-  for (const { statement, operator } of iterateListStatements(node)) {
-    if (operator && operator !== '&&' && directoryTracked) {
-      diverged = true;
-    }
-    if (diverged) {
-      result = mergeSafety(
-        result,
-        evaluateStatementSafety(statement, {
-          cwd: undefined,
-          unknownDir: true,
-        }),
-      );
-      continue;
-    }
-    result = mergeSafety(result, evaluateStatementSafety(statement, context));
-    // A cd joined by `||` may be skipped entirely (the preceding segment
-    // succeeded), so the following segments can also run in the prior
-    // directory — pass `certain=false` so contextAfterCd applies its
-    // prior-directory check (#8575).
-    const next = contextAfterStatement(statement, context, operator !== '||');
-    if (next !== context) {
-      context = next;
-      directoryTracked = true;
-    }
-  }
-  return result;
-}
-
-/**
- * The execution-directory context after `node` finishes, for the benefit
- * of the statements that follow it. Returns the SAME object when the node
- * cannot change the directory. `certain` means the next statement only
- * runs when this one succeeded (`&&` chaining); otherwise the next
- * statement also runs when a cd fails and bash stays put.
- */
-function contextAfterStatement(
-  node: SyntaxNode,
-  context?: ShellReadOnlyCheckOptions,
-  certain = false,
-): ShellReadOnlyCheckOptions | undefined {
-  if (node.type === 'redirected_statement') {
-    // Redirection still runs the body in the current shell.
-    const body = node.namedChildren[0];
-    return body
-      ? contextAfterStatement(body, context, certain)
-      : { ...context, cwd: undefined, unknownDir: true };
-  }
-  if (node.type === 'negated_command') {
-    // `! cd X && …` continues the chain precisely when the cd FAILED —
-    // the resolved target would point at a directory git never reaches.
-    return containsCurrentShellCd(node)
-      ? { ...context, cwd: undefined, unknownDir: true }
-      : context;
-  }
-  if (node.type === 'command') {
-    const name = getCommandName(node);
-    if (name === 'cd' || name === 'pushd') {
-      return contextAfterCd(node, context, certain);
-    }
-    if (name === 'popd') {
-      return { ...context, cwd: undefined, unknownDir: true };
-    }
-    return context;
-  }
-  if (node.type === 'compound_statement') {
-    // Brace groups run in the current shell — fold the net effect of
-    // the group's `;`/newline-separated body.
-    let ctx = context;
-    for (const child of node.namedChildren) {
-      ctx = contextAfterStatement(child, ctx);
-    }
-    return ctx;
-  }
-  if (node.type === 'subshell') {
-    // Child process — directory changes stay inside.
-    return context;
-  }
-  // if/for/while/case/function bodies run in the current shell but only
-  // conditionally — a cd inside leaves the following directory unknown.
-  return containsCurrentShellCd(node)
-    ? { ...context, cwd: undefined, unknownDir: true }
-    : context;
-}
-
-function contextAfterCd(
-  commandNode: SyntaxNode,
-  context?: ShellReadOnlyCheckOptions,
-  certain = false,
-): ShellReadOnlyCheckOptions {
-  const resolved = resolveCdContext(commandNode, context);
-  if (!resolved.cwd || resolved.unknownDir) {
-    return { ...context, cwd: undefined, unknownDir: true };
-  }
-  if (certain) return resolved;
-  // The following statement also runs when the cd fails (bash stays in
-  // the prior directory), so the prior directory must be clean too before
-  // the resolved target can be trusted.
-  const priorMayExecute =
-    context?.unknownDir === true ||
-    (!!context?.cwd && gitConfigMayExecutePrograms(context.cwd));
-  return priorMayExecute
-    ? { ...context, cwd: undefined, unknownDir: true }
-    : resolved;
-}
-
-/** True when a cd/pushd/popd runs in the current shell below `node`. */
-function containsCurrentShellCd(node: SyntaxNode): boolean {
-  if (
-    node.type === 'subshell' ||
-    node.type === 'command_substitution' ||
-    node.type === 'process_substitution'
-  ) {
-    return false; // child process
-  }
-  if (node.type === 'command') {
-    const name = getCommandName(node);
-    if (name === 'cd' || name === 'pushd' || name === 'popd') return true;
-  }
-  return node.namedChildren.some((child) => containsCurrentShellCd(child));
-}
-
-/**
- * The directory a cd/pushd argument points to, when it can be resolved
- * statically. Anything else (concatenated quote segments, ANSI-C quoting,
- * backslash escapes, expansions) is unresolvable — the probe would inspect
- * a fabricated path while bash cds to the real one.
- */
-function staticallyResolvableCdTarget(node: SyntaxNode): string | undefined {
-  const { text } = node;
-  if (node.type === 'raw_string') return text.slice(1, -1);
-  if (node.type === 'string') {
-    const inner = text.slice(1, -1);
-    return /[\\"$`]/.test(inner) ? undefined : inner;
-  }
-  if (node.type === 'word') {
-    return /[\\"'$`]/.test(text) ? undefined : text;
-  }
-  return undefined;
-}
-
-function resolveCdContext(
-  commandNode: SyntaxNode,
-  context?: ShellReadOnlyCheckOptions,
-): ShellReadOnlyCheckOptions {
-  const unknown = { ...context, cwd: undefined, unknownDir: true };
-  const argNodes = getArgumentNodes(commandNode);
-  if (argNodes.some((arg) => hasShellExpansion(arg))) return unknown;
-  const operands: SyntaxNode[] = [];
-  for (const arg of argNodes) {
-    if (arg.text === '-') return unknown; // `cd -` goes to OLDPWD
-    if (arg.text.startsWith('-')) continue; // -P/-L/-e/-- are flags, not targets
-    operands.push(arg);
-  }
-  // No operand cds to $HOME; more than one is rejected by bash (`cd: too
-  // many arguments`) or rewrites $PWD (`cd old new`) — neither resolvable.
-  if (operands.length !== 1) return unknown;
-  const target = staticallyResolvableCdTarget(operands[0]!);
-  if (target === undefined || target.startsWith('~')) return unknown;
-  const resolved = path.isAbsolute(target)
-    ? target
-    : context?.cwd
-      ? path.resolve(context.cwd, target)
-      : undefined;
-  if (!resolved) return unknown;
-  // bash refuses to enter a missing target or a non-directory and stays
-  // put; fail closed regardless — the target can appear before execution.
-  try {
-    if (!fs.statSync(resolved).isDirectory()) return unknown;
-  } catch {
-    return unknown;
-  }
-  return { ...context, cwd: resolved, unknownDir: false };
-}
-
-function evaluateStatementSafety(
-  node: SyntaxNode,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): ShellCommandSafety {
-  if (node.type === 'command') return evaluateCommandSafety(node, checkOptions);
-  if (node.type === 'list') return evaluateListSafety(node, checkOptions);
-  if (node.type === 'compound_statement' || node.type === 'subshell')
-    return evaluateSequenceSafety(node, checkOptions);
-  if (CHILD_STATEMENT.test(node.type))
-    return childrenSafety(node, 'read-only', checkOptions);
+function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
+  if (node.type === 'command') return evaluateCommandSafety(node);
+  if (CHILD_STATEMENT.test(node.type)) return childrenSafety(node);
   if (node.type === 'redirected_statement')
     return mergeSafety(
       ...node.namedChildren
         .filter((child) => !child.type.endsWith('_redirect'))
-        .map((child) => evaluateStatementSafety(child, checkOptions)),
+        .map((child) => evaluateStatementSafety(child)),
       evaluateRedirectionSafety(node),
     );
   if (/^variable_assignments?$/.test(node.type))
     return mergeSafety(
       node.parent?.namedChildCount === 1 ? 'read-only' : 'unknown',
-      evaluateSubstitutions(node, checkOptions),
+      evaluateSubstitutions(node),
     );
   if (node.type === 'function_definition') return 'unknown';
-  return childrenSafety(node, 'unknown', checkOptions);
+  return childrenSafety(node, 'unknown');
 }
 
-async function classifyInternal(
-  command: string,
-  checkOptions?: ShellReadOnlyCheckOptions,
-): Promise<Safety> {
+async function classifyInternal(command: string): Promise<Safety> {
   const tree = await parseShellCommand(command);
   try {
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
-    return evaluateSequenceSafety(root, checkOptions);
+    return mergeSafety(...root.namedChildren.map(evaluateStatementSafety));
   } finally {
     tree.delete();
   }
 }
 export async function classifyShellCommandSafety(
   command: string,
-  checkOptions?: ShellReadOnlyCheckOptions,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command, checkOptions).catch(() => 'unknown');
+  return classifyInternal(command).catch(() => 'unknown');
 }
 
 /**
@@ -1423,13 +1126,10 @@ export async function classifyShellCommandSafety(
  *   - Sub-shells, heredocs, etc.
  *
  * @param command - The shell command string to evaluate.
- * @param checkOptions - Optional `cwd` so git commands can be downgraded when
- *   the repository-local config contains program-executing keys (#8575).
  * @returns `true` if the command only performs read-only operations.
  */
 export async function isShellCommandReadOnlyAST(
   command: string,
-  checkOptions?: ShellReadOnlyCheckOptions,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
 
@@ -1437,15 +1137,15 @@ export async function isShellCommandReadOnlyAST(
   // after a symlinked install), fall back to the regex-based checker so the
   // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
-    return isShellCommandReadOnly(command, checkOptions);
+    return isShellCommandReadOnly(command);
   }
 
   try {
-    return (await classifyInternal(command, checkOptions)) === 'read-only';
+    return (await classifyInternal(command)) === 'read-only';
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.
-    return isShellCommandReadOnly(command, checkOptions);
+    return isShellCommandReadOnly(command);
   }
 }
 

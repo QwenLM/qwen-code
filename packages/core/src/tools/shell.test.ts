@@ -37,10 +37,6 @@ vi.mock('../utils/debugLogger.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
-const mockGitConfigMayExecutePrograms = vi.hoisted(() => vi.fn(() => false));
-vi.mock('../utils/git-config-safety.js', () => ({
-  gitConfigMayExecutePrograms: mockGitConfigMayExecutePrograms,
-}));
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import {
@@ -7078,108 +7074,6 @@ describe('ShellTool', () => {
       const permission = await invocation.getDefaultPermission();
 
       expect(permission).toBe('allow');
-    });
-
-    // Regression coverage for issue #8575: whitelisted read-only git
-    // sub-commands execute programs configured in the repository-local
-    // `.git/config` (diff.external, core.fsmonitor, pagers, credential/ssh
-    // helpers). When such keys are present the command must be confirmed
-    // instead of auto-approved.
-    it('asks for read-only git commands when repo config executes programs (#8575)', async () => {
-      mockGitConfigMayExecutePrograms.mockReturnValue(true);
-      const invocation = shellTool.build({
-        command: 'git status',
-        is_background: false,
-      });
-
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-      expect(mockGitConfigMayExecutePrograms).toHaveBeenCalledWith('/test/dir');
-    });
-
-    it('still allows read-only git commands when repo config is clean', async () => {
-      mockGitConfigMayExecutePrograms.mockReturnValue(false);
-      const invocation = shellTool.build({
-        command: 'git status',
-        is_background: false,
-      });
-
-      expect(await invocation.getDefaultPermission()).toBe('allow');
-    });
-
-    it('keeps probed git sub-commands in the confirmation scope (#8575)', async () => {
-      // The confirmation-scope filter must pass the cwd to the classifier:
-      // without it the probe never runs and the git sub-command that
-      // triggered the confirmation is silently filtered out of the dialog.
-      mockGitConfigMayExecutePrograms.mockReturnValue(true);
-      const invocation = shellTool.build({
-        command: 'git status && rm x',
-        is_background: false,
-      });
-
-      const details = (await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      )) as { rootCommand: string };
-
-      expect(details.rootCommand).toContain('git');
-      mockGitConfigMayExecutePrograms.mockReturnValue(false);
-    });
-
-    it('keeps sub-commands after a cd in the confirmation scope (#8575)', async () => {
-      mockGitConfigMayExecutePrograms.mockReturnValue(false);
-      const invocation = shellTool.build({
-        command: 'cd /tmp/repo && git status && rm x',
-        is_background: false,
-      });
-
-      const details = (await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      )) as { rootCommand: string };
-
-      // The git segment runs after the cd, so classifying it against the
-      // pre-cd cwd is unsound — it must stay in the confirmation scope.
-      expect(details.rootCommand).toContain('git');
-      expect(details.rootCommand).toContain('rm');
-    });
-
-    it('keeps sub-commands after a disguised cd in the confirmation scope (#8575)', async () => {
-      mockGitConfigMayExecutePrograms.mockReturnValue(false);
-      const invocation = shellTool.build({
-        command: 'builtin cd /tmp/repo && git status && rm x',
-        is_background: false,
-      });
-
-      const details = (await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      )) as { rootCommand: string };
-
-      // `builtin cd` genuinely changes the directory in bash, so the git
-      // segment must not be filtered out of the dialog.
-      expect(details.rootCommand).toContain('git');
-      expect(details.rootCommand).toContain('rm');
-    });
-
-    it('asks when a git-overriding env prefix precedes a shell wrapper (#8575)', async () => {
-      // GIT_DIR survives the wrapper unwrap and applies to the inner
-      // script; without the guard the stripped `git status` probes the
-      // clean execution cwd and auto-executes against the planted repo.
-      const invocation = shellTool.build({
-        command: `GIT_DIR=/planted/.git bash -c 'git status'`,
-        is_background: false,
-      });
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-
-      const configInjection = shellTool.build({
-        command: `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=evil bash -c 'git status'`,
-        is_background: false,
-      });
-      expect(await configInjection.getDefaultPermission()).toBe('ask');
-
-      // Unrelated env prefixes keep their normal classification.
-      const unrelated = shellTool.build({
-        command: `FOO=bar bash -c 'ls -la'`,
-        is_background: false,
-      });
-      expect(await unrelated.getDefaultPermission()).toBe('allow');
     });
 
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the
