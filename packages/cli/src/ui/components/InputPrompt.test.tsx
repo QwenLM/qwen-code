@@ -2707,6 +2707,13 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(switchCategory).not.toHaveBeenCalled();
+    // The arrows must still reach the buffer so the caret stays movable.
+    expect(mockBuffer.handleInput).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'right' }),
+    );
+    expect(mockBuffer.handleInput).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'left' }),
+    );
     unmount();
   });
 
@@ -2735,6 +2742,13 @@ describe('InputPrompt', () => {
     // With only 2 entries (all + one real category) the tab bar is hidden,
     // so the arrows must not trigger category switching.
     expect(switchCategory).not.toHaveBeenCalled();
+    // The arrows must still reach the buffer so the caret stays movable.
+    expect(mockBuffer.handleInput).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'right' }),
+    );
+    expect(mockBuffer.handleInput).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'left' }),
+    );
     unmount();
   });
 
