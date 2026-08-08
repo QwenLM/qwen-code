@@ -135,6 +135,7 @@ vi.mock('./utils/sandbox.js', () => ({
 
 vi.mock('./utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: vi.fn(),
   writeStdoutLine: vi.fn(),
   clearScreen: vi.fn(),
 }));

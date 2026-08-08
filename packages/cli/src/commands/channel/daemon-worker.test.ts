@@ -219,6 +219,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: vi.fn(),
   writeStdoutLine: mockWriteStdoutLine,
 }));
 
