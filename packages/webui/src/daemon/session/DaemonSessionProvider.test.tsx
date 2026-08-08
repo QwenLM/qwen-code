@@ -1700,7 +1700,10 @@ describe('DaemonSessionProvider', () => {
           signal: controller.signal,
           optimisticUserMessage: false,
         }),
-      ).rejects.toMatchObject({ name: 'AbortError' });
+      ).resolves.toEqual({
+        promptId: 'pending-1',
+        removedAfterAbort: true,
+      });
     });
 
     expect(removePendingPrompt).toHaveBeenCalledWith('pending-1');
@@ -1735,7 +1738,10 @@ describe('DaemonSessionProvider', () => {
           signal: controller.signal,
           optimisticUserMessage: false,
         }),
-      ).rejects.toMatchObject({ name: 'AbortError' });
+      ).resolves.toEqual({
+        promptId: 'pending-1',
+        removedAfterAbort: true,
+      });
     });
 
     expect(removePendingPrompt).toHaveBeenCalledWith('pending-1');
