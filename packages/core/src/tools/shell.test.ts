@@ -21,6 +21,8 @@ const mockDebugLogger = vi.hoisted(() => ({
 }));
 vi.mock('../services/shellExecutionService.js', () => ({
   ShellExecutionService: { execute: mockShellExecutionService },
+  isSignalTermination: (signal: number | NodeJS.Signals | null) =>
+    signal !== null && signal !== 0,
   getShellAbortReasonKind: (reason: unknown) =>
     typeof reason === 'object' &&
     reason !== null &&
@@ -2878,6 +2880,92 @@ describe('ShellTool', () => {
       expect(result.error?.message).toContain('failed output');
     });
 
+    it('reports a foreground signal termination as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'signal-terminated-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: null,
+        signal: 15,
+        error: null,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Signal: 15'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+      expect(result.returnDisplay).toContain(
+        'Command terminated by signal: 15',
+      );
+    });
+
+    it('keeps a successful PTY exit code successful with signal 0 metadata', async () => {
+      const invocation = shellTool.build({
+        command: 'pty-cleanup-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'completed',
+        exitCode: 0,
+        signal: 0,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Output: completed');
+    });
+
+    it('reports a PTY signal termination as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'pty-signal-terminated-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 0,
+        signal: 15,
+        error: null,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Signal: 15'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+    });
+
+    it('does not report a user-cancelled signal as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'cancelled-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: null,
+        signal: 15,
+        error: null,
+        aborted: true,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Command was cancelled');
+    });
+
     it.each([
       'grep pattern file',
       'rg pattern file',
@@ -3209,6 +3297,23 @@ describe('ShellTool', () => {
         // Falls through to the normal result formatter (non-aborted).
         expect(result.llmContent).toContain('Signal: 15');
         expect(result.llmContent).not.toContain('foreground command ran for');
+      });
+
+      it('appends the hint when PTY reports a clean exit with signal 0', async () => {
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({
+          output: 'hi',
+          exitCode: 0,
+          signal: 0,
+          aborted: false,
+        });
+        const result = await promise;
+        expect(result.llmContent).toContain('foreground command ran for 60s');
       });
 
       it('off-by-one: omits the hint at threshold − 1ms', async () => {
@@ -5990,9 +6095,10 @@ describe('ShellTool', () => {
         );
       });
 
-      it('natural child exit transitions the registry entry to "completed" (exitCode 0)', async () => {
+      it('clean PTY exit transitions the registry entry to "completed" (exitCode 0, signal 0)', async () => {
         // Pin the PR-2.5 settle path: after promote, when the
-        // service's post-promote exit listener fires with exitCode=0,
+        // service's post-promote exit listener fires with exitCode=0 and
+        // node-pty's clean-exit signal=0,
         // `registry.complete(shellId, 0, ...)` is called and the
         // stream closes.
         const writeStreamMock = {
@@ -6037,7 +6143,7 @@ describe('ShellTool', () => {
           postPromote?: {
             onSettle?: (info: {
               exitCode: number | null;
-              signal: number | null;
+              signal: number | NodeJS.Signals | null;
               error?: Error;
               endTime: number;
             }) => void;
@@ -6046,7 +6152,7 @@ describe('ShellTool', () => {
         expect(opts?.postPromote?.onSettle).toBeDefined();
         opts.postPromote!.onSettle!({
           exitCode: 0,
-          signal: null,
+          signal: 0,
           endTime: 1700000000000,
         });
 
@@ -6083,7 +6189,7 @@ describe('ShellTool', () => {
             postPromote: {
               onSettle: (info: {
                 exitCode: number | null;
-                signal: number | null;
+                signal: number | NodeJS.Signals | null;
                 error?: Error;
                 endTime: number;
               }) => void;
@@ -6108,6 +6214,14 @@ describe('ShellTool', () => {
           2,
         );
 
+        // node-pty can preserve exitCode 0 alongside a non-zero signal.
+        onSettle({ exitCode: 0, signal: 15, endTime: 2.5 });
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Terminated by signal 15',
+          2.5,
+        );
+
         // Spawn-side error → fail with err.message.
         onSettle({
           exitCode: null,
@@ -6116,6 +6230,100 @@ describe('ShellTool', () => {
           endTime: 3,
         });
         expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
+      });
+
+      it('treats a child-process signal string as a failed settle', async () => {
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 33334,
+        });
+        await promise;
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const onSettle = (
+          serviceCall[6] as {
+            postPromote: {
+              onSettle: (info: {
+                exitCode: number | null;
+                signal: number | NodeJS.Signals | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            };
+          }
+        ).postPromote.onSettle;
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        onSettle({ exitCode: null, signal: 'SIGTERM', endTime: 3.5 });
+
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Terminated by signal SIGTERM',
+          3.5,
+        );
+      });
+
+      it('keeps a task_stop cancellation from being reclassified as a signal failure', async () => {
+        vi.useFakeTimers();
+        const processKillSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(() => true);
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const invocation = shellTool.build({
+            command: 'sleep 1',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 12345,
+          });
+          await promise;
+
+          const serviceCall = mockShellExecutionService.mock.calls[0];
+          const onSettle = (
+            serviceCall[6] as {
+              postPromote: {
+                onSettle: (info: {
+                  exitCode: number | null;
+                  signal: number | NodeJS.Signals | null;
+                  error?: Error;
+                  endTime: number;
+                }) => void;
+              };
+            }
+          ).postPromote.onSettle;
+          const entry = (registry.register as Mock).mock.calls[0][0];
+
+          // `task_stop` aborts the fresh registry controller before the
+          // child reports its SIGTERM/SIGKILL settle event.
+          entry.abortController.abort();
+          await Promise.resolve();
+          expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+          await vi.advanceTimersByTimeAsync(250);
+          expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
+          onSettle({ exitCode: 0, signal: 15, endTime: 4 });
+
+          expect(registry.cancel).toHaveBeenCalledWith(entry.shellId, 4);
+          expect(registry.fail).not.toHaveBeenCalled();
+        } finally {
+          processKillSpy.mockRestore();
+          vi.useRealTimers();
+        }
       });
 
       it('queued-settle race: onSettle fires BEFORE handlePromotedForeground completes — entry settles + llmContent reflects final status', async () => {

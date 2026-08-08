@@ -237,7 +237,7 @@ export function SuggestionsDisplay({
                 : { flexShrink: 1 as const })}
             >
               <Box>
-                {labelElement}
+                <Box flexShrink={0}>{labelElement}</Box>
                 {suggestion.argumentHint && (
                   <Text color={theme.text.secondary}>
                     {' '}

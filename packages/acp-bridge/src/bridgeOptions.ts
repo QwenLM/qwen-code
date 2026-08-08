@@ -373,19 +373,23 @@ export interface BridgeOptions {
   telemetry?: BridgeTelemetry;
 
   /**
-   * Optional fs injection seam. When provided, `BridgeClient.readTextFile` and
-   * `BridgeClient.writeTextFile` delegate every ACP fs call to this
-   * implementation instead of using BridgeClient's inline
-   * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.
+   * Whether ACP text reads are delegated to the client filesystem service.
+   * Defaults to true for generic ACP, IDE, remote, and virtual-filesystem
+   * compatibility. Same-host runtimes may set false so the child uses its
+   * regular CLI filesystem service for every `FileSystemService.readTextFile`
+   * consumer. Final ACP text writes remain delegated independently.
+   */
+  delegateReadTextFileToClient?: boolean;
+
+  /**
+   * Optional fs injection seam. When provided, the enabled
+   * `BridgeClient.readTextFile` / `BridgeClient.writeTextFile` callbacks
+   * delegate ACP fs calls to this implementation instead of using
+   * BridgeClient's inline `fs.realpath` / `fs.writeFile` / `fs.readFile`
+   * proxy.
    *
-   * The immediate F1 follow-up will land a serve-side adapter that
-   * wraps its `WorkspaceFileSystem` and a `runQwenServe` wiring
-   * patch so production `qwen serve` writes pick up its TOCTOU +
-   * symlink-substitution + trust-gate + `.gitignore` + audit
-   * machinery — closing the follow-up thread about
-   * `BridgeClient`'s inline fs proxy bypassing `WorkspaceFileSystem`
-   * (originally raised in code review). Until that lands, BridgeClient's inline
-   * proxy continues to handle writes (current behavior preserved).
+   * Production `qwen serve` injects a `WorkspaceFileSystem` adapter for final
+   * text writes and for defensive handling of unexpected delegated reads.
    *
    * When omitted (tests, Mode A in-process consumers, channels /
    * IDE companion using the bridge directly), BridgeClient's inline
