@@ -17,6 +17,7 @@ vi.mock('node:child_process', () => ({
 
 import {
   ghEnv,
+  resolveGhHost,
   setGhHost,
   parseNdjson,
   gh,
@@ -58,6 +59,22 @@ describe('setGhHost / ghEnv', () => {
     expect(() => setGhHost('ghe.internal; rm -rf /')).toThrow(/--host/);
     expect(() => setGhHost('bad host')).toThrow(/--host/);
     expect(() => setGhHost('https://ghe.internal')).toThrow(/--host/);
+  });
+});
+
+describe('resolveGhHost precedence', () => {
+  it('an explicit --host wins over an operator-exported GH_HOST', () => {
+    // Load-bearing for the gates: a GHE operator who exports GH_HOST and
+    // reviews a github.com PR must resolve to github.com, or the matcher
+    // exits 6 and the write-side gates bind the wrong host.
+    const savedGhHost = process.env['GH_HOST'];
+    process.env['GH_HOST'] = 'ghe.example.com';
+    try {
+      expect(resolveGhHost('github.com')).toBe('github.com');
+    } finally {
+      if (savedGhHost === undefined) delete process.env['GH_HOST'];
+      else process.env['GH_HOST'] = savedGhHost;
+    }
   });
 });
 

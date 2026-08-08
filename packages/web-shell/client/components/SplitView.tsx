@@ -9,7 +9,6 @@ import {
   DaemonSessionProvider,
   useConnection,
   type DaemonSessionActions,
-  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionArtifact,
@@ -67,7 +66,6 @@ export interface SplitViewProps {
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
   /**

@@ -11,7 +11,11 @@ import {
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
-import type { DaemonTransport } from './DaemonTransport.js';
+import type {
+  DaemonSseConnectReason,
+  DaemonTransport,
+} from './DaemonTransport.js';
+export type { DaemonSseConnectReason } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
@@ -171,6 +175,7 @@ import type {
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
   ExtensionCatalog,
@@ -461,6 +466,8 @@ export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
 
+export const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
+
 export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   return (
     typeof error === 'object' &&
@@ -604,6 +611,17 @@ export interface SubscribeOptions {
    * frames don't trip the warn / eviction path on the first publish.
    */
   maxQueued?: number;
+  /** Client identity forwarded on REST/SSE subscriptions. */
+  clientId?: string;
+  /** Diagnostic-only reason for opening this REST/SSE connection. */
+  sseConnectReason?: DaemonSseConnectReason;
+  /** Diagnostic-only predecessor of this REST/SSE connection. */
+  previousSseStreamId?: string;
+  /**
+   * Called after a REST/SSE handshake is accepted. The id is undefined when
+   * an older daemon or intermediary omits a valid stream-id response header.
+   */
+  onSseStreamAccepted?: (streamId: string | undefined) => void;
 }
 
 export class DaemonClient {
@@ -1360,6 +1378,38 @@ export class DaemonClient {
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
       { method: 'POST', body: params, clientId, mode: 'rest' },
+    );
+  }
+
+  async installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    const query = new URLSearchParams({
+      filename: params.filename,
+      consent: String(params.consent === true),
+    });
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/extensions/install-archive?${query}`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/octet-stream' },
+          clientId,
+        ),
+        body: params.archive,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/extensions/install-archive',
+          );
+        }
+        return (await res.json()) as ExtensionInstallResponse;
+      },
+      EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
+      'rest',
     );
   }
 
@@ -4263,6 +4313,10 @@ export class DaemonClient {
       epoch: opts.epoch,
       onEpoch: opts.onEpoch,
       maxQueued: opts.maxQueued,
+      clientId: opts.clientId,
+      sseConnectReason: opts.sseConnectReason,
+      previousSseStreamId: opts.previousSseStreamId,
+      onSseStreamAccepted: opts.onSseStreamAccepted,
       signal: opts.signal,
       connectTimeoutMs: this.fetchTimeoutMs || undefined,
     });

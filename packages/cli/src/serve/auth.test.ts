@@ -353,7 +353,7 @@ describe('allowOriginCors (T2.4 #4514)', () => {
     );
     expect(res.headers.get('access-control-max-age')).toBe('86400');
     expect(res.headers.get('access-control-expose-headers')).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id',
     );
   });
 
