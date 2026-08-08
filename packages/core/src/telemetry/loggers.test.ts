@@ -354,35 +354,9 @@ describe('loggers', () => {
     // Distinct session ids per case: emitSessionStart is idempotent per id,
     // and the module-level guard persists across tests in this file.
     it('logStartSession emits the standard session.start record with lineage', () => {
-      const mockConfig = {
-        getSessionId: () => 'lifecycle-start-session',
-        getModel: () => 'test-model',
-        getSandbox: () => true,
-        getCoreTools: () => ['ls', 'read-file'],
-        getApprovalMode: () => 'default',
-        getTruncateToolOutputThreshold: () => 25000,
-        getTruncateToolOutputLines: () => 1000,
-        getTelemetryEnabled: () => true,
-        getUsageStatisticsEnabled: () => true,
-        getTelemetryLogPromptsEnabled: () => true,
-        getFileFilteringRespectGitIgnore: () => true,
-        getFileFilteringAllowBuildArtifacts: () => false,
-        getDebugMode: () => true,
-        getMcpServers: () => ({
-          'test-server': {
-            command: 'test-command',
-          },
-        }),
-        getQuestion: () => 'test-question',
-        getTargetDir: () => 'target-dir',
-        getProxy: () => 'http://test.proxy.com:8080',
-        getOutputFormat: () => OutputFormat.JSON,
-        getToolRegistry: () => undefined,
-        getChatRecordingService: () => undefined,
-        getHookSystem: () => undefined,
-        getIdeMode: () => false,
-        getShouldUseNodePtyShell: () => true,
-      } as unknown as Config;
+      const mockConfig = makeFakeConfig({
+        sessionId: 'lifecycle-start-session',
+      });
 
       logStartSession(
         mockConfig,
@@ -402,9 +376,9 @@ describe('loggers', () => {
     });
 
     it('logSessionEnd emits the standard session.end record', () => {
-      const mockConfig = {
-        getSessionId: () => 'lifecycle-end-session',
-      } as unknown as Config;
+      const mockConfig = makeFakeConfig({
+        sessionId: 'lifecycle-end-session',
+      });
 
       logSessionEnd(mockConfig);
 

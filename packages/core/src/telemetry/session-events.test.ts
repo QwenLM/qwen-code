@@ -50,6 +50,14 @@ describe('session lifecycle events', () => {
     expect(emit).toHaveBeenCalledTimes(1);
   });
 
+  it('emits session.start again for an id that was ended', () => {
+    emitSessionStart('session-a');
+    emitSessionEnd('session-a');
+    emitSessionStart('session-a', 'session-b');
+
+    expect(emit).toHaveBeenCalledTimes(3);
+  });
+
   it('emits the required attributes for session.end', () => {
     emitSessionEnd('session-1');
 

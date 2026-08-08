@@ -1851,11 +1851,13 @@ describe('runQwenServe telemetry validation', () => {
       const runtimeConfig = initializeTelemetry.mock.calls[0]?.[0] as {
         getSessionId(): string;
         getTelemetryResourceAttributes(): Record<string, unknown>;
+        isTelemetryInitializationDeferred(): boolean;
       };
       expect(runtimeConfig.getSessionId()).toBe(`daemon:${process.pid}`);
       expect(runtimeConfig.getTelemetryResourceAttributes()).toMatchObject({
         'service.instance.id': `daemon:${process.pid}`,
       });
+      expect(runtimeConfig.isTelemetryInitializationDeferred()).toBe(true);
     } finally {
       await handle.close();
     }

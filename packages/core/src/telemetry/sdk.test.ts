@@ -205,6 +205,11 @@ describe('Telemetry SDK', () => {
       await initializeTelemetry(deferredConfig);
 
       expect(emitSessionStart).toHaveBeenCalledWith('test-session');
+      expect(
+        vi.mocked(emitSessionStart).mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        vi.mocked(NodeSDK.prototype.start).mock.invocationCallOrder[0],
+      );
     });
 
     it('clears the in-flight promise so a failed init can be retried', async () => {
