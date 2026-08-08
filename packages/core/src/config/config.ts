@@ -212,6 +212,10 @@ import {
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
+  deriveSessionName,
+  patchSessionRecord,
+} from '../services/session-registry.js';
+import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
@@ -3851,24 +3855,50 @@ export class Config {
     // so handling the swap centrally covers every same-PID session
     // transition. Best-effort: must never block /clear or /resume.
     //
-    // Only refresh when THIS process established its own sidecar at
+    // Only refresh the sidecar when THIS process established its own at
     // startup (interactive UI). A non-interactive `/clear` (e.g.
     // qwen --prompt-interactive) must not delete a sibling shell's
     // sidecar that happens to share the outgoing session id
     // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
-    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
+    if (previousSessionId !== this.sessionId) {
+      const refreshSidecar = this.runtimeStatusEnabled;
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
       const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
       const cliVersion = this.cliVersion ?? null;
       const workDir = this.targetDir;
       const newSessionId = this.sessionId;
       this.queueRuntimeStatusWrite(async () => {
-        await clearRuntimeStatus(oldPath);
-        await writeRuntimeStatus(newPath, {
+        if (refreshSidecar) {
+          try {
+            await clearRuntimeStatus(oldPath);
+            await writeRuntimeStatus(newPath, {
+              sessionId: newSessionId,
+              workDir,
+              qwenVersion: cliVersion,
+            });
+          } catch {
+            // A sidecar that could not be rewritten (unwritable chats
+            // dir, full disk) must not take the registry patch below
+            // down with it: the two records fail independently, and a
+            // registry entry left pointing at the previous transcript
+            // is the more visible of the two failures.
+          }
+        }
+        // Keep the machine-wide session registry in step for the same
+        // reason: this PID's record would otherwise point discovery at
+        // the previous transcript. The record is keyed by PID, so a
+        // swap is a patch, not a delete-and-rewrite — and it no-ops
+        // when this process never registered. That makes the sidecar
+        // ownership rule above irrelevant here: unlike
+        // clearRuntimeStatus, this cannot trample a sibling's record,
+        // so gating it on runtimeStatusEnabled would only let the two
+        // ownership signals drift apart when the startup sidecar write
+        // failed but registration succeeded.
+        await patchSessionRecord({
           sessionId: newSessionId,
-          workDir,
-          qwenVersion: cliVersion,
+          cwd: workDir,
+          name: deriveSessionName(workDir, newSessionId),
         });
       });
     }

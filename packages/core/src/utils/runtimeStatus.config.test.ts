@@ -14,10 +14,51 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SessionRegistryRecord } from '../services/session-registry.js';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtimeStatus.js';
+
+/** Lets one test make the sidecar half of the swap fail. */
+const failSidecarWrite = vi.hoisted(() => ({ value: false }));
+
+/**
+ * Records what the swap asked the machine-wide registry to do. Stubbed
+ * rather than exercised for real: `patchSessionRecord` writes under the
+ * developer's actual `~/.qwen/sessions`, and it no-ops when this PID has
+ * no record — so a real call would both pollute the home directory and
+ * silently pass no matter what the swap did.
+ */
+const patchCalls = vi.hoisted(
+  () => [] as Array<Partial<SessionRegistryRecord>>,
+);
+
+vi.mock('./runtimeStatus.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./runtimeStatus.js')>();
+  return {
+    ...actual,
+    writeRuntimeStatus: async (
+      ...args: Parameters<typeof actual.writeRuntimeStatus>
+    ) => {
+      if (failSidecarWrite.value) {
+        throw new Error('chats dir is read-only');
+      }
+      return actual.writeRuntimeStatus(...args);
+    },
+  };
+});
+
+vi.mock('../services/session-registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../services/session-registry.js')>();
+  return {
+    ...actual,
+    patchSessionRecord: async (patch: Partial<SessionRegistryRecord>) => {
+      patchCalls.push(patch);
+    },
+  };
+});
 
 let tmpDir: string;
 let runtimeDir: string;
@@ -28,6 +69,8 @@ beforeEach(async () => {
   runtimeDir = path.join(tmpDir, 'runtime');
   prevRuntimeEnv = process.env['QWEN_RUNTIME_DIR'];
   process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+  patchCalls.length = 0;
+  failSidecarWrite.value = false;
 });
 
 afterEach(async () => {
@@ -147,6 +190,80 @@ describe('Config.startNewSession runtime.json swap', () => {
     expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
       `${sessionA}.runtime.json`,
     ]);
+  });
+});
+
+describe('Config.startNewSession session-registry swap', () => {
+  const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+  const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
+
+  /** Resolves once the fire-and-forget swap has reached the registry. */
+  const waitForPatch = () =>
+    waitFor(async () => (patchCalls.length > 0 ? patchCalls[0] : null));
+
+  it('repoints the record for this PID at the new session', async () => {
+    const config = makeConfig(sessionA);
+    const aPath = config.storage.getRuntimeStatusPath(sessionA);
+    await writeRuntimeStatus(aPath, {
+      sessionId: sessionA,
+      workDir: tmpDir,
+      qwenVersion: '0.0.0-test',
+    });
+    config.markRuntimeStatusEnabled();
+
+    config.startNewSession(sessionB);
+
+    const patch = await waitForPatch();
+    expect(patch).not.toBeNull();
+    expect(patch).toMatchObject({ sessionId: sessionB, cwd: tmpDir });
+    expect(patch!.name).toMatch(/^[\w.-]+$/);
+  });
+
+  it('patches the record even when this process never bootstrapped a sidecar', async () => {
+    // Registration and the sidecar are separate signals: a startup where
+    // the sidecar write failed but registerSession() succeeded leaves
+    // runtimeStatusEnabled off with a live record still on disk. Gating
+    // the patch on the sidecar flag would strand that record on the old
+    // session id for the rest of the process's life. Unlike
+    // clearRuntimeStatus, the patch is keyed by PID and cannot touch a
+    // sibling's record, so it needs no ownership gate of its own.
+    const config = makeConfig(sessionA);
+
+    config.startNewSession(sessionB);
+
+    expect(await waitForPatch()).toMatchObject({ sessionId: sessionB });
+    // ...and the sibling sidecar rule above still holds: nothing written.
+    const bPath = config.storage.getRuntimeStatusPath(sessionB);
+    expect(await readRuntimeStatus(bPath)).toBeNull();
+  });
+
+  it('patches the record even when the sidecar half of the swap throws', async () => {
+    const config = makeConfig(sessionA);
+    const aPath = config.storage.getRuntimeStatusPath(sessionA);
+    await writeRuntimeStatus(aPath, {
+      sessionId: sessionA,
+      workDir: tmpDir,
+      qwenVersion: '0.0.0-test',
+    });
+    config.markRuntimeStatusEnabled();
+
+    // Full disk, or a chats/ directory that went read-only after startup.
+    failSidecarWrite.value = true;
+    config.startNewSession(sessionB);
+
+    // The queue swallows the rejection, so without isolating the two
+    // halves the patch is simply never reached and nothing reports it.
+    expect(await waitForPatch()).toMatchObject({ sessionId: sessionB });
+  });
+
+  it('does not touch the record when the session id does not change', async () => {
+    const config = makeConfig(sessionA);
+    config.markRuntimeStatusEnabled();
+
+    config.startNewSession(sessionA);
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(patchCalls).toEqual([]);
   });
 });
 
