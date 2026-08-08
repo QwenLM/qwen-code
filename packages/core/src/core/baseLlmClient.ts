@@ -639,6 +639,7 @@ export class BaseLlmClient {
     const allAuthTypes: AuthType[] = [
       AuthType.QWEN_OAUTH,
       AuthType.USE_OPENAI,
+      AuthType.USE_DASHSCOPE,
       AuthType.USE_VERTEX_AI,
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,

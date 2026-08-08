@@ -22,6 +22,12 @@ describe('GenAI provider resolution', () => {
     ).toBe('dashscope');
   });
 
+  it('identifies env-only native DashScope configuration', () => {
+    expect(resolveGenAiProviderName({ authType: 'dashscope' })).toBe(
+      'dashscope',
+    );
+  });
+
   it.each([
     ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'dashscope'],
     ['https://DASHSCOPE-INTL.ALIYUNCS.COM/v1/', 'dashscope'],
@@ -143,6 +149,7 @@ describe('GenAI provider resolution', () => {
   it.each([
     ['openai', 'openai'],
     ['anthropic', 'anthropic'],
+    ['dashscope', 'dashscope'],
     ['gemini', 'gcp.gemini'],
     ['vertex-ai', 'gcp.vertex_ai'],
   ] as const)(

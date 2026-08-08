@@ -86,6 +86,10 @@ def test_rejects_invalid_auth_type() -> None:
         validate_query_options(QueryOptions.from_mapping({"auth_type": "custom"}))
 
 
+def test_accepts_dashscope_auth_type() -> None:
+    validate_query_options(QueryOptions(auth_type="dashscope"))
+
+
 def test_from_mapping_rejects_non_callable_can_use_tool() -> None:
     with pytest.raises(TypeError, match="can_use_tool must be callable"):
         QueryOptions.from_mapping({"can_use_tool": "bad"})

@@ -292,6 +292,31 @@ function openAiPart(value: unknown): PartWithRole | undefined {
   return part ? { part } : undefined;
 }
 
+function dashScopePart(value: unknown): PartWithRole | undefined {
+  if (typeof value === 'string') {
+    return { part: { type: 'text', content: value } };
+  }
+  const item = record(value);
+  if (!item) return undefined;
+  const text = string(item['text']);
+  if (text !== undefined) {
+    return { part: { type: 'text', content: text } };
+  }
+  for (const [key, contentModality] of [
+    ['image', 'image'],
+    ['video', 'video'],
+    ['audio', 'audio'],
+    ['file', 'document'],
+  ] as const) {
+    const uri = string(item[key]);
+    if (!uri) continue;
+    const blob = dataUriBlob(uri, contentModality, null);
+    if (isDataUri(uri) && !blob) return undefined;
+    return { part: blob ?? uriPart(uri, contentModality) };
+  }
+  return undefined;
+}
+
 function anthropicPart(value: unknown): PartWithRole | undefined {
   if (typeof value === 'string') {
     return { part: { type: 'text', content: value } };
@@ -913,6 +938,24 @@ export function extractOpenAiContent(request: object): GenAiContentAttributes {
     toolDefinitions: Object.hasOwn(value, 'tools')
       ? openAiTools(value['tools'])
       : undefined,
+  };
+}
+
+export function extractDashScopeContent(
+  request: object,
+): GenAiContentAttributes {
+  const value = request as Record<string, unknown>;
+  const input = record(value['input']);
+  const parameters = record(value['parameters']);
+  return {
+    inputMessages:
+      input && Object.hasOwn(input, 'messages')
+        ? messages(input['messages'], dashScopePart, (role) => role)
+        : undefined,
+    toolDefinitions:
+      parameters && Object.hasOwn(parameters, 'tools')
+        ? openAiTools(parameters['tools'])
+        : undefined,
   };
 }
 

@@ -26,13 +26,14 @@ Below are comprehensive configuration examples for different authentication type
 
 The `modelProviders` object keys must be valid `authType` values. Currently supported auth types are:
 
-| Auth Type    | Description                                                                                                                                     |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openai`     | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama)                                                         |
-| `anthropic`  | Anthropic Claude API                                                                                                                            |
-| `gemini`     | Google Gemini API                                                                                                                               |
-| `qwen-oauth` | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
-| `vertex-ai`  | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`) |
+| Auth Type    | Description                                                                                                                                                                                           |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openai`     | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama)                                                                                                               |
+| `anthropic`  | Anthropic Claude API                                                                                                                                                                                  |
+| `gemini`     | Google Gemini API                                                                                                                                                                                     |
+| `qwen-oauth` | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                                                                                     |
+| `vertex-ai`  | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`)                                                       |
+| `dashscope`  | Alibaba ModelStudio's native DashScope generation API (not OpenAI-compatible) — see [Alibaba ModelStudio — Native DashScope API](#alibaba-modelstudio--native-dashscope-api-dashscope-protocol) below |
 
 > [!warning]
 > A provider id that is neither a built-in protocol nor mapped via `providerProtocol` (e.g. a typo like `"openai-custom"`) cannot be routed, so its whole entry is **skipped** with a warning — its models simply won't appear in the `/model` picker. Use one of the supported auth type values above for built-in providers, or add a [`providerProtocol`](#custom-provider-ids-providerprotocol) mapping for a custom id.
@@ -70,6 +71,7 @@ Qwen Code uses the following official SDKs to send requests to each provider:
 | `anthropic`  | [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) - Official Anthropic SDK |
 | `gemini`     | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK      |
 | `qwen-oauth` | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)    |
+| `dashscope`  | Built-in `fetch`-based transport speaking DashScope's native wire format directly (no SDK)      |
 
 This means the `baseUrl` you configure should be compatible with the corresponding SDK's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
 
@@ -203,6 +205,94 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
   }
 }
 ```
+
+### Alibaba ModelStudio — Native DashScope API (`dashscope` protocol)
+
+`dashscope` is a separate auth type from `openai`: instead of going through the
+OpenAI-compatible `/compatible-mode/v1` endpoint, it speaks Alibaba ModelStudio's
+**native** DashScope generation API
+(`/api/v1/services/aigc/multimodal-generation/generation`) directly. It currently
+supports the `qwen3.8-max` model.
+
+Prefer `dashscope` over the OpenAI-compatible `openai` protocol (with a DashScope
+`baseUrl`) when you want:
+
+- **Explicit prompt caching** with separate cache-read and cache-creation token counts
+  reported in usage — cached input is billed at roughly 0.1x, cache writes at roughly
+  1.25x. Cache markers are placed automatically; disable them per model with
+  `generationConfig.enableCacheControl: false`.
+- **Raw `reasoning_content` streaming** — thinking output arrives in its own field, with
+  no `<think>` tag scraping.
+- **Native parallel tool calls.**
+
+Both `dashscope` and the OpenAI-compatible `openai` protocol (pointed at a DashScope
+`baseUrl`) read the same `DASHSCOPE_API_KEY` — only the wire protocol differs.
+
+#### Regions
+
+| Region              | `baseUrl`                                    |
+| ------------------- | -------------------------------------------- |
+| Singapore (default) | `https://dashscope-intl.aliyuncs.com/api/v1` |
+| Beijing             | `https://dashscope.aliyuncs.com/api/v1`      |
+| US (Virginia)       | `https://dashscope-us.aliyuncs.com/api/v1`   |
+
+#### Settings example
+
+```json
+{
+  "security": { "auth": { "selectedType": "dashscope" } },
+  "model": { "name": "qwen3.8-max" },
+  "modelProviders": {
+    "dashscope": [
+      {
+        "id": "qwen3.8-max",
+        "name": "[ModelStudio Native] qwen3.8-max",
+        "baseUrl": "https://dashscope-intl.aliyuncs.com/api/v1",
+        "envKey": "DASHSCOPE_API_KEY",
+        "generationConfig": {
+          "contextWindowSize": 1000000,
+          "reasoning": { "effort": "medium" }
+        }
+      }
+    ]
+  }
+}
+```
+
+#### Headless / CI recipe
+
+```bash
+export DASHSCOPE_API_KEY="sk-..."
+export DASHSCOPE_MODEL="qwen3.8-max"
+qwen --auth-type=dashscope -p "your prompt"
+```
+
+Optionally set `DASHSCOPE_BASE_URL` to pick a different region than the Singapore
+default.
+
+#### Thinking control
+
+`generationConfig.reasoning` maps to the native `reasoning_effort` parameter:
+
+- `reasoning: { "effort": "low" | "medium" | "xhigh" }` sets
+  `reasoning_effort` to that native tier. Effort controls reject `high` and
+  `max`; if either remains in persisted configuration, request conversion
+  clamps it to `xhigh`.
+- `reasoning: false` disables thinking (`reasoning_effort: "none"`).
+
+Native-only knobs not covered by `reasoning` — e.g. `thinking_budget`,
+`max_completion_tokens`, `enable_search` — can be passed through via
+`generationConfig.extra_body`.
+
+#### Caveats
+
+- Forcing a tool choice (function-calling mode `ANY` / a specific function name) disables
+  thinking for that request — this is a native DashScope API constraint, not a qwen-code
+  limitation.
+- Embeddings are not supported on this protocol; use the OpenAI-compatible `openai`
+  protocol against a DashScope embeddings endpoint instead.
+- Multimodal input currently supports images. Video/PDF/audio content blocks are passed
+  through but not yet battle-tested.
 
 ### Google Gemini (`gemini`)
 

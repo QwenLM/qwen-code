@@ -157,12 +157,28 @@ The key concept is **Model Providers** (`modelProviders`): Qwen Code supports mu
 
 #### Supported protocols
 
-| Protocol          | `modelProviders` key | Environment variables                                                                                | Providers                                                                                             |
-| ----------------- | -------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` (alias: `QWEN_MODEL`)                            | OpenAI, Azure OpenAI, OpenRouter, Requesty, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
-| Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`                                         | Anthropic Claude                                                                                      |
-| Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                                                                     | Google Gemini                                                                                         |
-| Vertex AI         | `vertex-ai`          | `GOOGLE_API_KEY`, `GOOGLE_MODEL` (sets `GOOGLE_GENAI_USE_VERTEXAI=true`; uses the `gemini` protocol) | Google Vertex AI                                                                                      |
+| Protocol           | `modelProviders` key | Environment variables                                                                                | Providers                                                                                             |
+| ------------------ | -------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| OpenAI-compatible  | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` (alias: `QWEN_MODEL`)                            | OpenAI, Azure OpenAI, OpenRouter, Requesty, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
+| Anthropic          | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`                                         | Anthropic Claude                                                                                      |
+| Google GenAI       | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                                                                     | Google Gemini                                                                                         |
+| Vertex AI          | `vertex-ai`          | `GOOGLE_API_KEY`, `GOOGLE_MODEL` (sets `GOOGLE_GENAI_USE_VERTEXAI=true`; uses the `gemini` protocol) | Google Vertex AI                                                                                      |
+| DashScope (native) | `dashscope`          | `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, `DASHSCOPE_MODEL`                                         | Alibaba ModelStudio's native DashScope API (`qwen3.8-max`)                                            |
+
+#### DashScope (native API)
+
+`dashscope` connects to Alibaba ModelStudio's native DashScope generation API instead of
+the OpenAI-compatible endpoint used by the `openai` protocol above. Get an API key from
+[Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/), then either:
+
+- Run `/auth`, select **Alibaba ModelStudio**, then choose **Native DashScope API** from
+  the sub-menu, or
+- Set `DASHSCOPE_API_KEY` and run `qwen --auth-type=dashscope`.
+
+`dashscope` uses the exact same API key as the ModelStudio **Standard API Key** option
+(the `openai`-protocol, OpenAI-compatible setup) — only the wire protocol differs. See
+[Alibaba ModelStudio — Native DashScope API](model-providers.md#alibaba-modelstudio--native-dashscope-api-dashscope-protocol)
+for prompt caching, thinking control, and full `modelProviders` configuration details.
 
 #### Step 1: Configure models and providers in `~/.qwen/settings.json`
 
