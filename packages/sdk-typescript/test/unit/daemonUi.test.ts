@@ -103,6 +103,29 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('silences config_option_update instead of dumping the options as debug JSON', () => {
+    // Option changes are connection-state updates (cached reasoning
+    // controls), not transcript content; the debug fallback would render
+    // the raw payload in the transcript on every model/effort/thinking
+    // switch.
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            { id: 'thinking', currentValue: 'on' },
+            { id: 'effort', currentValue: 'xhigh' },
+          ],
+        },
+      },
+    });
+
+    expect(events).toEqual([]);
+  });
+
   it('preserves the initial tool title when a later update only has a tool name', () => {
     const initial = normalizeDaemonEvent({
       v: 1,

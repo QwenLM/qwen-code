@@ -63,13 +63,17 @@ const MODEL_REASONING_CONTROLS = defineModelReasoningControls({
 export function getModelReasoningControls(
   baseModelId: string | undefined,
 ): ModelReasoningControlRegistration | undefined {
+  // Match case-insensitively, mirroring the wire-model family detection in
+  // modalityDefaults: a mixed-case id is qwen-family everywhere else, so it
+  // must also hit the registry's controls and clamping.
+  const key = baseModelId?.toLowerCase();
   // Own-property check: model ids are opaque user-configured strings, and a
   // bare bracket lookup would return inherited Object.prototype members
   // ('constructor', 'toString', ...) for unregistered ids colliding with them.
-  if (!baseModelId || !Object.hasOwn(MODEL_REASONING_CONTROLS, baseModelId)) {
+  if (!key || !Object.hasOwn(MODEL_REASONING_CONTROLS, key)) {
     return undefined;
   }
-  return MODEL_REASONING_CONTROLS[baseModelId];
+  return MODEL_REASONING_CONTROLS[key];
 }
 
 export function normalizeModelReasoningEffort(

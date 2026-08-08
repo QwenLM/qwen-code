@@ -671,7 +671,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       },
     );
 
-    it('does not apply the stable mapping to a differently-cased model id', () => {
+    it('applies the stable mapping to a differently-cased model id too', () => {
       const generator = new DashScopeOpenAICompatibleProvider(
         {
           ...mockContentGeneratorConfig,
@@ -684,7 +684,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         { ...baseRequest, model: 'Qwen3.8-Max' },
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
-      expect(result['reasoning_effort']).toBe('high');
+      expect(result['reasoning_effort']).toBe('xhigh');
     });
 
     it('lets extra_body override qwen3.8-max reasoning_effort', () => {

@@ -14,9 +14,11 @@ import {
 } from './model-reasoning-controls.js';
 
 describe('model reasoning controls', () => {
-  it('matches only the exact registered base model id', () => {
-    expect(getModelReasoningControls('qwen3.8-max')).toBeDefined();
-    expect(getModelReasoningControls('Qwen3.8-Max')).toBeUndefined();
+  it('matches the registered base model id case-insensitively', () => {
+    const registration = getModelReasoningControls('qwen3.8-max');
+    expect(registration).toBeDefined();
+    expect(getModelReasoningControls('Qwen3.8-Max')).toEqual(registration);
+    expect(getModelReasoningControls('QWEN3.8-MAX')).toEqual(registration);
     expect(getModelReasoningControls('qwen3.8-max-preview')).toBeUndefined();
     expect(getModelReasoningControls('qwen3.8-max-latest')).toBeUndefined();
     expect(getModelReasoningControls('qwen3.8-max-2026-01-15')).toBeUndefined();

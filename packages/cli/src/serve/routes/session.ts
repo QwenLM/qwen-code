@@ -4611,6 +4611,9 @@ export function registerSessionRoutes(
             });
             return;
           }
+          // `effort` is deliberately accepted while thinking is off — the UI
+          // disables the tier picker in that state, and the stored tier is what
+          // must be restored when thinking is re-enabled.
           const response = await runtime.bridge.setSessionConfigOption(
             sessionId,
             { sessionId, configId, value },
