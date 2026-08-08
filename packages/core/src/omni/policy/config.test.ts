@@ -97,83 +97,16 @@ describe('normalizeOmniProcessingConfig', () => {
         omni_downsample_audio: new audio.OmniDownsampleAudioTool({}),
       };
       const config = normalize({}, real);
-      expect(config.fixedPolicies).toHaveLength(3);
+      expect(config.fixedPolicies).toHaveLength(0);
       expect(config.transportGuardPolicies).toHaveLength(3);
     });
 
-    it('produces the three default fixed policies with when-thresholds', () => {
+    it('registers no default fixed policies: zero config → zero preprocessing (D7)', () => {
+      // The upstream design gives fixedPolicies pure user-experiment
+      // semantics: with no configuration, NOTHING may trigger below
+      // transport limits. Only the transport guard is always-on.
       const config = normalize();
-      expect(config.fixedPolicies.map((p) => p.id).sort()).toEqual([
-        'audio-downsample',
-        'image-downsample',
-        'video-downscale',
-      ]);
-      const image = config.fixedPolicies.find(
-        (p) => p.id === 'image-downsample',
-      );
-      expect(image).toEqual({
-        id: 'image-downsample',
-        priority: 0,
-        mediaTypes: ['image'],
-        origins: ['user', 'tool'],
-        when: {
-          any: [
-            {
-              left: { field: 'resource.width' },
-              operator: 'gt',
-              right: { value: 1568 },
-            },
-            {
-              left: { field: 'resource.height' },
-              operator: 'gt',
-              right: { value: 1568 },
-            },
-          ],
-        },
-        onConditionUnavailable: 'skip',
-        toolName: 'omni_downsample_image',
-        arguments: {},
-        maxRunsPerLineage: 1,
-        onFailure: 'continue',
-        output: { reprocessMedia: false, source: 'omit' },
-        stage: 'preprocessing',
-      });
-      const video = config.fixedPolicies.find(
-        (p) => p.id === 'video-downscale',
-      );
-      expect(video?.toolName).toBe('omni_downscale_video');
-      expect(video?.when).toEqual({
-        any: [
-          {
-            left: { field: 'resource.height' },
-            operator: 'gt',
-            right: { value: 480 },
-          },
-          {
-            left: { field: 'resource.sizeBytes' },
-            operator: 'gt',
-            right: { value: 209715200 },
-          },
-        ],
-      });
-      const audio = config.fixedPolicies.find(
-        (p) => p.id === 'audio-downsample',
-      );
-      expect(audio?.toolName).toBe('omni_downsample_audio');
-      expect(audio?.when).toEqual({
-        any: [
-          {
-            left: { field: 'resource.bitRate' },
-            operator: 'gt',
-            right: { value: 96000 },
-          },
-          {
-            left: { field: 'resource.sampleRateHz' },
-            operator: 'gt',
-            right: { value: 24000 },
-          },
-        ],
-      });
+      expect(config.fixedPolicies).toEqual([]);
     });
 
     it('produces the three default guard policies without when, stage transport_guard', () => {
@@ -205,17 +138,14 @@ describe('normalizeOmniProcessingConfig', () => {
   });
 
   describe('id-merge semantics', () => {
-    it('removes a default fixed policy on null tombstone', () => {
+    it('accepts a null tombstone with no matching entry (no fixed defaults exist)', () => {
       const config = normalize({
         fixedPolicies: { 'image-downsample': null },
       });
-      expect(config.fixedPolicies.map((p) => p.id).sort()).toEqual([
-        'audio-downsample',
-        'video-downscale',
-      ]);
+      expect(config.fixedPolicies).toEqual([]);
     });
 
-    it('replaces a default entry wholesale (no field-level merge)', () => {
+    it('normalizes a user fixed policy with full defaults applied', () => {
       const config = normalize({
         fixedPolicies: {
           'image-downsample': {
@@ -228,12 +158,52 @@ describe('normalizeOmniProcessingConfig', () => {
       const image = config.fixedPolicies.find(
         (p) => p.id === 'image-downsample',
       );
-      // The default's `when` does NOT survive: whole-entry replacement.
-      expect(image?.when).toBeUndefined();
+      expect(image).toEqual({
+        id: 'image-downsample',
+        priority: 0,
+        mediaTypes: ['image'],
+        origins: ['user', 'tool'],
+        when: undefined,
+        onConditionUnavailable: 'skip',
+        toolName: 'omni_downsample_image',
+        arguments: { maxDimension: 1024 },
+        maxRunsPerLineage: 1,
+        onFailure: 'continue',
+        output: { reprocessMedia: false, source: 'omit' },
+        stage: 'preprocessing',
+      });
+    });
+
+    it('replaces a default guard entry wholesale (no field-level merge)', () => {
+      // Whole-entry replacement: the override does NOT inherit the
+      // default's toolName, so omitting it must be a validation error —
+      // a field-level merge would inherit it and pass.
+      expect(() =>
+        normalize({
+          transportGuardPolicies: {
+            'image-downsample': { mediaTypes: ['image'] },
+          },
+        }),
+      ).toThrow(
+        'omni.processing.transportGuard.policies.image-downsample.toolName: ' +
+          'must be a non-empty string',
+      );
+      const config = normalize({
+        transportGuardPolicies: {
+          'image-downsample': {
+            mediaTypes: ['image'],
+            toolName: 'omni_downsample_image',
+            arguments: { maxDimension: 1024 },
+          },
+        },
+      });
+      const image = config.transportGuardPolicies.find(
+        (p) => p.id === 'image-downsample',
+      );
       expect(image?.arguments).toEqual({ maxDimension: 1024 });
     });
 
-    it('accepts additional user policies alongside defaults', () => {
+    it('accepts user fixed policies (the only preprocessing source)', () => {
       const config = normalize({
         fixedPolicies: {
           'my-policy': {
@@ -243,7 +213,7 @@ describe('normalizeOmniProcessingConfig', () => {
           },
         },
       });
-      expect(config.fixedPolicies).toHaveLength(4);
+      expect(config.fixedPolicies).toHaveLength(1);
       const mine = config.fixedPolicies.find((p) => p.id === 'my-policy');
       expect(mine?.priority).toBe(5);
       expect(mine?.stage).toBe('preprocessing');

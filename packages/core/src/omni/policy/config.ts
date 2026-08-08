@@ -77,96 +77,35 @@ const RESERVED_ARGUMENT_KEYS = ['inputPath', 'outputDir', 'resourceId'];
  * conservative token charset. */
 const POLICY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-const DEFAULT_WHEN_IMAGE: FixedPolicyCondition = {
-  any: [
-    {
-      left: { field: 'resource.width' },
-      operator: 'gt',
-      right: { value: 1568 },
-    },
-    {
-      left: { field: 'resource.height' },
-      operator: 'gt',
-      right: { value: 1568 },
-    },
-  ],
-};
-const DEFAULT_WHEN_VIDEO: FixedPolicyCondition = {
-  any: [
-    {
-      left: { field: 'resource.height' },
-      operator: 'gt',
-      right: { value: 480 },
-    },
-    {
-      left: { field: 'resource.sizeBytes' },
-      operator: 'gt',
-      right: { value: 200 * 1024 * 1024 },
-    },
-  ],
-};
-const DEFAULT_WHEN_AUDIO: FixedPolicyCondition = {
-  any: [
-    {
-      left: { field: 'resource.bitRate' },
-      operator: 'gt',
-      right: { value: 96_000 },
-    },
-    {
-      left: { field: 'resource.sampleRateHz' },
-      operator: 'gt',
-      right: { value: 24_000 },
-    },
-  ],
-};
-
 interface SystemDefaultPolicy {
   mediaTypes: OmniModality[];
   toolName: string;
-  when: FixedPolicyCondition;
 }
 
 const SYSTEM_DEFAULT_POLICY_BASES: Record<string, SystemDefaultPolicy> = {
   'image-downsample': {
     mediaTypes: ['image'],
     toolName: 'omni_downsample_image',
-    when: DEFAULT_WHEN_IMAGE,
   },
   'video-downscale': {
     mediaTypes: ['video'],
     toolName: 'omni_downscale_video',
-    when: DEFAULT_WHEN_VIDEO,
   },
   'audio-downsample': {
     mediaTypes: ['audio'],
     toolName: 'omni_downsample_audio',
-    when: DEFAULT_WHEN_AUDIO,
   },
 };
 
 /**
- * System default policies, registered twice (decision D7): as
- * `fixedPolicies` WITH when-thresholds (preprocessing — degrade before the
- * guard ever sees the media) and as `transportGuard.policies` WITHOUT
- * `when` (guard stage runs them only when the final delivery set still
- * exceeds transport limits). One tool set covers both duties and satisfies
- * the guard's three-modality coverage requirement out of the box.
+ * System default policies, registered ONLY as `transportGuard.policies`
+ * (decision D7, revised): no `when`, so the guard stage runs them exactly
+ * when the final delivery set still exceeds transport limits. This
+ * satisfies the mandatory non-empty + three-modality-coverage validation
+ * (policy design §10.1). There are NO system-default `fixedPolicies` —
+ * preprocessing is pure user-experiment semantics, and a zero-config
+ * setup must never trigger a policy below transport limits.
  */
-export function systemDefaultFixedPolicies(): Record<
-  string,
-  Record<string, unknown>
-> {
-  const entries: Record<string, Record<string, unknown>> = {};
-  for (const [id, base] of Object.entries(SYSTEM_DEFAULT_POLICY_BASES)) {
-    entries[id] = {
-      mediaTypes: base.mediaTypes,
-      toolName: base.toolName,
-      when: base.when,
-    };
-  }
-  return entries;
-}
-
 export function systemDefaultTransportGuardPolicies(): Record<
   string,
   Record<string, unknown>
@@ -678,8 +617,10 @@ export function normalizeOmniProcessingConfig(
   const limits = normalizeLimits(raw.limits);
   validatePolicyTools(raw.policyTools, tools);
 
+  // No system defaults on the fixedPolicies side (D7 revised): with no
+  // configuration, preprocessing has zero policies and never runs.
   const fixedMap = mergePolicyMaps(
-    systemDefaultFixedPolicies(),
+    {},
     raw.fixedPolicies,
     'omni.processing.fixedPolicies',
     { allowTombstones: true },
