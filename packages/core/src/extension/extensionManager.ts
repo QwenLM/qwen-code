@@ -1824,6 +1824,7 @@ export class ExtensionManager {
         }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
+        installMetadata.externalContent = externalContent;
         if (externalContent) {
           // The commit recorded above belongs to the outer clone (e.g. the
           // marketplace repo), not plugin content fetched from a nested

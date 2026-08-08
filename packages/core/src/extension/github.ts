@@ -428,6 +428,14 @@ export async function checkForExtensionUpdate(
   ) {
     return ExtensionUpdateState.NOT_UPDATABLE;
   }
+  if (
+    installMetadata.externalContent === true ||
+    (installMetadata.externalContent === undefined &&
+      installMetadata.originSource === 'Claude' &&
+      installMetadata.pluginName !== undefined)
+  ) {
+    return ExtensionUpdateState.NOT_UPDATABLE;
+  }
   try {
     if (installMetadata.type === 'git') {
       const { simpleGit } = await loadSimpleGit();

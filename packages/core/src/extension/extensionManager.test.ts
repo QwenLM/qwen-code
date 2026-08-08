@@ -930,6 +930,7 @@ describe('extension tests', () => {
       expect(extension.name).toBe('sample-plugin');
       expect(extension.installMetadata?.originSource).toBe('Claude');
       expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
+      expect(extension.installMetadata?.externalContent).toBe(false);
     });
 
     it('should drop the recorded commit when a marketplace plugin resolves from an external source', async () => {
@@ -983,6 +984,69 @@ describe('extension tests', () => {
 
       expect(extension.name).toBe('sample-plugin');
       expect(extension.installMetadata?.originSource).toBe('Claude');
+      expect(extension.installMetadata?.gitCommit).toBeUndefined();
+      expect(extension.installMetadata?.externalContent).toBe(true);
+    });
+
+    it('should mark external marketplace content downloaded from a GitHub release as not independently updatable', async () => {
+      const { downloadFromGitHubRelease } = await import('./github.js');
+      vi.mocked(downloadFromGitHubRelease).mockImplementationOnce(
+        async (_metadata, destination) => {
+          fs.mkdirSync(path.join(destination, '.claude-plugin'), {
+            recursive: true,
+          });
+          fs.writeFileSync(
+            path.join(destination, '.claude-plugin', 'marketplace.json'),
+            JSON.stringify({
+              name: 'sample-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [
+                {
+                  name: 'sample-plugin',
+                  source: { source: 'github', repo: 'example/nested-plugin' },
+                },
+              ],
+            }),
+          );
+          return { type: 'github-release', tagName: 'v1.0.0' };
+        },
+      );
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(sourcePath, '.claude-plugin', 'plugin.json'),
+          JSON.stringify({ name: 'sample-plugin', version: '1.0.0' }),
+        );
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/nested-plugin' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-marketplace',
+          pluginName: 'sample-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.installMetadata).toMatchObject({
+        type: 'github-release',
+        releaseTag: 'v1.0.0',
+        originSource: 'Claude',
+        externalContent: true,
+      });
       expect(extension.installMetadata?.gitCommit).toBeUndefined();
     });
 

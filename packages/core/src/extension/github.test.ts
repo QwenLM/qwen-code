@@ -649,6 +649,73 @@ describe('git extension helpers', () => {
       },
     );
 
+    it.each(['git', 'github-release'] as const)(
+      'does not update-check external marketplace content installed through %s',
+      async (type) => {
+        const extension = createExtension({
+          installMetadata: {
+            type,
+            source: 'https://github.com/example/sample-marketplace',
+            originSource: 'Claude',
+            releaseTag: 'v1.0.0',
+            externalContent: true,
+          },
+        });
+
+        const result = await checkForExtensionUpdate(
+          extension,
+          mockExtensionManager,
+        );
+
+        expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+        expect(mockGit.getRemotes).not.toHaveBeenCalled();
+        expect(mockGit.listRemote).not.toHaveBeenCalled();
+        expect(mockHttpsGet).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not update-check legacy Claude marketplace releases without content provenance', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'github-release',
+          source: 'https://github.com/example/sample-marketplace',
+          originSource: 'Claude',
+          pluginName: 'sample-plugin',
+          releaseTag: 'v1.0.0',
+        },
+      });
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockHttpsGet).not.toHaveBeenCalled();
+    });
+
+    it('update-checks marketplace releases with confirmed repository content', async () => {
+      mockHttpsResponses(JSON.stringify({ tag_name: 'v2.0.0' }));
+      const extension = createExtension({
+        installMetadata: {
+          type: 'github-release',
+          source: 'https://github.com/example/sample-marketplace',
+          originSource: 'Claude',
+          pluginName: 'sample-plugin',
+          releaseTag: 'v1.0.0',
+          externalContent: false,
+        },
+      });
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      expect(mockHttpsGet).toHaveBeenCalledOnce();
+    });
+
     it('pins public Git update checks and disables redirects and proxies', async () => {
       vi.spyOn(dns, 'lookup').mockResolvedValue([
         { address: '8.8.8.8', family: 4 },

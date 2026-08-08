@@ -681,6 +681,7 @@ export interface ExtensionInstallMetadata {
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
   gitCommit?: string; // Commit recorded when the installation source was cloned.
+  externalContent?: boolean; // Installed content came from a source nested outside the recorded source.
   registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
