@@ -17,6 +17,12 @@ capabilities. An effort registration contains its ordered supported tiers and
 default. The first registration is `qwen3.8-max`: Thinking defaults on and
 Effort supports `low`, `medium`, and `xhigh`, defaulting to `xhigh`.
 
+These defaults are not UI-only. When a registered model has no stored
+preference and no provider-provided reasoning state, resolution writes the
+defaults into the generation config, so every surface (CLI, daemon, ACP,
+channels) sends `reasoning: { effort: 'xhigh' }` to `qwen3.8-max` instead of
+omitting the field and leaving the tier to the server's default.
+
 The ACP session `configOptions` snapshot is the source of truth for live
 sessions. The agent dynamically advertises the registered `thought_level`
 options for the active model:
