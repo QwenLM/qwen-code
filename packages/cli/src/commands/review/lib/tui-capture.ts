@@ -73,6 +73,19 @@ export function tmuxSupportsCaptureN(versionLine: string): boolean | undefined {
   return minor >= 1;
 }
 
+/** Whether a `tmux -V` line names a tmux whose `capture-pane` takes `-T`
+ * ("ignore trailing positions that do not contain a character"), which
+ * landed in 3.4. Undefined when the version does not parse — the caller
+ * treats that as "no -T", the behaviour every pre-3.4 tmux needs anyway. */
+export function tmuxSupportsCaptureT(versionLine: string): boolean | undefined {
+  const m = /(\d+)\.(\d+)([a-z]*)/i.exec(versionLine);
+  if (!m) return undefined;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  if (major !== 3) return major > 3;
+  return minor >= 4;
+}
+
 /**
  * How far the capture got, in evidence terms.
  *
@@ -129,6 +142,10 @@ export function tmuxPlan(opts: {
   rows: number;
   command: string;
   cwd: string;
+  /** Whether this tmux takes `capture-pane -T` (3.4+) — see the capture
+   * argv below. False on older versions, which need no trimming and reject
+   * the flag. */
+  captureTrim?: boolean;
   /** Absolute path the holder touches AFTER its trap is installed — the
    * command layer sends no key until this file exists, closing the race
    * where a --keys C-c lands before the holder's first line has run
@@ -187,9 +204,13 @@ export function tmuxPlan(opts: {
   // gate) made the `-c` element a command boundary, failing with a
   // misleading socket error. `\;` is tmux's escape and round-trips (verified:
   // pane_current_path came back `/tmp/foo;`); a mid-string `;` is literal
-  // already, and one that is ALREADY escaped stays as the caller wrote it.
+  // already. EVERY trailing `;` is escaped, including one already preceded
+  // by a backslash: tmux CONSUMES that backslash (measured: the token
+  // `x\;` types `x;`, `x\\;` types `x\;`), and nothing escapes these
+  // values before they reach here — so treating `\;` as already-escaped
+  // silently corrupted a cwd or key token that legitimately ends in it.
   const escapeTrailingSemicolon = (s: string): string =>
-    /(^|[^\\]);$/.test(s) ? `${s.slice(0, -1)}\\;` : s;
+    s.endsWith(';') ? `${s.slice(0, -1)}\\;` : s;
   // readyFile is user-derived (--out) and re-parsed by the holder shell —
   // it gets its own esc() (an apostrophe in --out broke the quoting and
   // burned the full sentinel deadline, measured). And the hold is a LOOP,
@@ -246,7 +267,14 @@ export function tmuxPlan(opts: {
       '-y',
       String(opts.rows),
       '-c',
-      escapeTrailingSemicolon(opts.cwd),
+      // BOTH escapes, in this order: `#` doubles first (tmux
+      // format-expands the start-directory — measured on 3.3a and 3.4, a
+      // real directory named `/tmp/fmt/#{session_name}` started the pane in
+      // `/tmp/fmt`, the PARENT, with exit 0 and the manifest recording the
+      // literal path the gate had stat()ed), then the trailing `;` for the
+      // client's command splitter. `##` round-trips to a literal `#`, so a
+      // plain `#` in a dirname is unaffected (measured both ways).
+      escapeTrailingSemicolon(opts.cwd.replaceAll('#', '##')),
       // `--` ends option parsing: a command that happens to start with `-`
       // must reach the shell, not tmux's getopt (measured: without it,
       // send-keys silently ate `-l` as its literal flag — exit 0, nothing
@@ -261,12 +289,42 @@ export function tmuxPlan(opts: {
     // with -J the smoke capture showed one long unwrapped line, erasing the
     // very clipping it was capturing). -N keeps column claims honest — a
     // clipped right edge is trailing-space significant.
-    capture: [...scope, 'capture-pane', '-p', '-e', '-N', '-t', opts.session],
+    capture: [
+      ...scope,
+      'capture-pane',
+      '-p',
+      '-e',
+      '-N',
+      // -N alone pads each line out to the grid line's ALLOCATED cell count,
+      // not what it rendered: measured on tmux 3.4, a row that had held 24
+      // characters and was then erased and rewritten with `BBB` came back as
+      // `BBB` plus four phantom spaces, so a verdict about column position,
+      // clipping or trailing-space significance would judge allocation
+      // history instead of rendering. -T drops those unwritten trailing
+      // positions while -N keeps the REAL trailing spaces. The flag landed
+      // in 3.4 and the same probe on 3.3a shows no padding to remove, so
+      // older versions are correct without it — and passing it there would
+      // fail the call outright ("unknown flag -T", measured).
+      ...(opts.captureTrim ? ['-T'] : []),
+      '-t',
+      opts.session,
+    ],
     // The MATCHING view for --until: `-J` joins wrapped lines and no `-e`
     // keeps escapes out, so a marker that spans a wrap boundary or an SGR
     // attribute change still matches (measured: both miss forever on the
     // physical view). The physical frame above stays what `.ans` records.
-    captureText: [...scope, 'capture-pane', '-p', '-J', '-t', opts.session],
+    captureText: [
+      ...scope,
+      'capture-pane',
+      '-p',
+      '-J',
+      // Same padding hazard, and worse here: -J JOINS wrapped lines, so
+      // phantom trailing cells would be spliced into the middle of the text
+      // a --until/--ready marker is matched against.
+      ...(opts.captureTrim ? ['-T'] : []),
+      '-t',
+      opts.session,
+    ],
     // kill-server, not kill-session: the server is ours alone (private -L),
     // and killing it reaps every process the capture started — no orphaned
     // TUI keeps running after the review.

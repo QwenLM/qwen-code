@@ -59,6 +59,7 @@ import {
   freezePlan,
   tmuxPlan,
   tmuxSupportsCaptureN,
+  tmuxSupportsCaptureT,
   validGeometry,
   type CaptureManifest,
 } from './lib/tui-capture.js';
@@ -270,10 +271,43 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
   const holderReadyPath = `${outBase}.holder-ready`;
-  let pngPreExisted = true;
-  // Whether a png this run did NOT write was already sitting at <out>.png
-  // after the clear phase — see the snapshot below. Defaults to true so a
-  // refusal taken before the snapshot can never authorize a delete.
+  // What sat at each artifact path after the clear phase, by identity.
+  // `changed` answers the one question the evidence rung and every cleanup
+  // both ask: did THIS run put it there?
+  interface Stamp {
+    existed: boolean;
+    size: number;
+    mtimeMs: number;
+    ino: number;
+  }
+  const stampOf = (path: string): Stamp => {
+    try {
+      const st = statSync(path);
+      return { existed: true, size: st.size, mtimeMs: st.mtimeMs, ino: st.ino };
+    } catch {
+      return { existed: false, size: 0, mtimeMs: 0, ino: 0 };
+    }
+  };
+  const changed = (path: string, stamp: Stamp): boolean => {
+    if (!stamp.existed) return existsSync(path);
+    try {
+      const st = statSync(path);
+      return (
+        st.ino !== stamp.ino ||
+        st.size !== stamp.size ||
+        st.mtimeMs !== stamp.mtimeMs
+      );
+    } catch {
+      // Gone, or unstattable: nothing of ours to credit or remove.
+      return false;
+    }
+  };
+  // Default to "already there, untouched" so anything taken before the
+  // stamps exist can neither claim an evidence rung nor authorize a delete.
+  const untouched: Stamp = { existed: true, size: -1, mtimeMs: -1, ino: -1 };
+  let ansStamp: Stamp = untouched;
+  let pngStamp: Stamp = untouched;
+  let manifestStamp: Stamp = untouched;
   try {
     // Clears FIRST — before even mkdir and before the directory-shaped
     // --out refusal below: under fd exhaustion (EMFILE, measured on macOS)
@@ -342,15 +376,18 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // a user's — recursive removal would destroy it on every run (measured:
     // a seeded content-bearing directory deleted even by successful runs).
     rmSync(holderReadyPath, { force: true });
-    // A png still sitting here is one this run did not write and did not
-    // clear (the signature check found no capture manifest, so it may be
-    // the user's). The torn-png cleanup consults this: freeze can fail
-    // without its spawn ever opening the output, and a SUCCEEDING run then
-    // deleted a file it never touched (measured). The .ans and .json need
-    // no such snapshot — the probe below refuses up front when either is
-    // unwritable, so a failure at THEIR writes is this run's own partial
-    // output.
-    pngPreExisted = existsSync(pngPath);
+    // Anything still sitting at an artifact path is something this run did
+    // not write and did not clear (an unverifiable manifest, an unrelated
+    // file the signature check spared). Stamp all three BY IDENTITY: the
+    // write probe proves only that a path was writable BEFORE the capture
+    // window, and a write can still fail at open() — under the fd
+    // exhaustion this file names three times as measured — having
+    // truncated nothing, leaving the previous file whole. Deleting then
+    // destroys a file this run never touched; crediting one as this run's
+    // rendering evidence is worse still.
+    ansStamp = stampOf(ansPath);
+    pngStamp = stampOf(pngPath);
+    manifestStamp = stampOf(manifestPath);
     mkdirSync(dirname(outBase), { recursive: true });
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
@@ -584,6 +621,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     rows: args.rows,
     command: args.command,
     cwd: resolvedCwd,
+    // Only 3.4+ has the flag; older versions have nothing to trim.
+    captureTrim: tmuxSupportsCaptureT(tmuxVersion) === true,
     readyFile: holderReadyPath,
   });
 
@@ -845,13 +884,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // persist undescribed.
     try {
       // Plain, never recursive: this run wrote a FILE (or nothing); a
-      // directory at the path is not ours to delete. Unconditional, though:
-      // the artifact-path probe already refused every shape that fails
-      // WITHOUT touching the file (a directory, a read-only or foreign file)
-      // before the capture window opened, so a failure here is a partial
-      // write of this run's own — and a truncated .ans left undescribed is
-      // the harm this catch exists for.
-      rmSync(ansPath, { force: true });
+      // directory at the path is not ours to delete. And only if the file
+      // actually CHANGED: a write that failed at open() truncated nothing,
+      // and the previous file — which the clear phase may have deliberately
+      // spared as unrelated — must survive the refusal. A partial write
+      // does change it, and that truncated .ans left undescribed is the
+      // harm this catch exists for.
+      if (changed(ansPath, ansStamp)) rmSync(ansPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
@@ -919,7 +958,18 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       killSignal: 'SIGKILL',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (r.status === 0 && existsSync(pngPath) && statSync(pngPath).size > 0) {
+    if (
+      r.status === 0 &&
+      existsSync(pngPath) &&
+      statSync(pngPath).size > 0 &&
+      // ...and THIS run is what put those bytes there. Existence alone
+      // credited a file the clear phase deliberately spared — an unrelated
+      // <out>.png with no capture manifest beside it — as this run's
+      // rendering evidence whenever freeze exited 0 without writing
+      // (measured end to end: success JSON with evidence 'png', pngPath
+      // pointing at the user's untouched file, no degradation recorded).
+      changed(pngPath, pngStamp)
+    ) {
       // Exit code alone is not evidence: a freeze that exits 0 without
       // writing the file — or leaving a 0-byte/truncated one (ENOSPC
       // mid-write, the shape the .ans write guard's comment names) — would
@@ -962,7 +1012,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // run then silently deleted a user's untouched png and reported
       // ans-only (measured).
       try {
-        if (!pngPreExisted) rmSync(pngPath, { force: true });
+        if (changed(pngPath, pngStamp)) rmSync(pngPath, { force: true });
       } catch {
         // The degradation entry above is the primary signal.
       }
@@ -1010,16 +1060,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     try {
       // Plain, never recursive — same rationale as the .ans catch above —
       // and each path only if this run put it there. Reaching here, the
-      // .ans write SUCCEEDED, so the .ans is this run's own output. The
-      // png is ours only when this run's render produced one — a png the
-      // clear phase protected and freeze never opened must survive.
-      rmSync(ansPath, { force: true });
-      if (png !== null) rmSync(pngPath, { force: true });
-      // The failed write itself can leave a PARTIAL manifest at the path —
-      // worse than none: it parses or half-parses as evidence description.
-      // Unconditional for the same reason as the .ans: the probe refused
-      // an unwritable .json before the capture ran.
-      rmSync(manifestPath, { force: true });
+      // Each path only if THIS run changed it: the .ans write succeeded so
+      // it is ours, the png is ours only when the render actually produced
+      // one, and a manifest write that failed at open() left the previous
+      // file whole. A PARTIAL manifest is worse than none — it parses or
+      // half-parses as an evidence description — and it, having changed,
+      // is removed.
+      if (changed(ansPath, ansStamp)) rmSync(ansPath, { force: true });
+      if (changed(pngPath, pngStamp)) rmSync(pngPath, { force: true });
+      if (changed(manifestPath, manifestStamp)) {
+        rmSync(manifestPath, { force: true });
+      }
     } catch {
       // The refusal reason below is the primary signal either way.
     }

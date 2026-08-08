@@ -10,6 +10,7 @@ import {
   freezePlan,
   tmuxPlan,
   tmuxSupportsCaptureN,
+  tmuxSupportsCaptureT,
   validGeometry,
 } from './tui-capture.js';
 
@@ -164,10 +165,13 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // `\;` round-trips (pane_current_path came back `/tmp/foo;`).
     expect(plan.sendKeys('x;').at(-1)).toBe('x\\;');
     expect(plan.sendKeys(';').at(-1)).toBe('\\;');
-    // Mid-string is literal to tmux already, and an ALREADY-escaped token
-    // stays exactly as the caller wrote it — no double-escaping.
+    // Mid-string is literal to tmux already and passes through.
     expect(plan.sendKeys('a;b').at(-1)).toBe('a;b');
-    expect(plan.sendKeys('q\\;').at(-1)).toBe('q\\;');
+    // A token that ALREADY ends in `\;` still gets escaped: tmux consumes
+    // that backslash (measured on 3.3a — the token `x\;` types `x;`, and
+    // `x\\;` types `x\;`), and nothing escapes these values upstream, so
+    // treating it as already-escaped silently typed the wrong keys.
+    expect(plan.sendKeys('q\\;').at(-1)).toBe('q\\\\;');
     const withCwd = tmuxPlan({
       server: 'srv',
       session: 'cap',
@@ -178,6 +182,71 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       readyFile: '/tmp/out.holder-ready',
     });
     expect(withCwd.start[withCwd.start.indexOf('-c') + 1]).toBe('/tmp/foo\\;');
+  });
+
+  it('escapes `#` in the cwd — the start-directory is FORMAT-EXPANDED', () => {
+    // Measured on tmux 3.3a and 3.4: a real directory named
+    // `/tmp/fmt/#{session_name}` passed the usability gate, and the pane
+    // started in `/tmp/fmt` — the PARENT — with exit 0 and the manifest
+    // recording the literal path. `##` round-trips to a literal `#`
+    // (verified), so a plain `#` in a dirname survives the doubling.
+    const fmt = tmuxPlan({
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: 'node cli.js',
+      cwd: '/tmp/fmt/#{session_name}',
+      readyFile: '/tmp/out.holder-ready',
+    });
+    expect(fmt.start[fmt.start.indexOf('-c') + 1]).toBe(
+      '/tmp/fmt/##{session_name}',
+    );
+    const plainHash = tmuxPlan({
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: 'node cli.js',
+      cwd: '/tmp/d/a#b',
+      readyFile: '/tmp/out.holder-ready',
+    });
+    expect(plainHash.start[plainHash.start.indexOf('-c') + 1]).toBe(
+      '/tmp/d/a##b',
+    );
+  });
+
+  it('adds capture-pane -T only when the tmux has it (3.4+)', () => {
+    // -N alone pads a line out to its grid line's ALLOCATED cells: measured
+    // on 3.4, a row that had held 24 characters and was erased and rewritten
+    // with `BBB` came back as `BBB` plus four phantom spaces, so a column or
+    // clipping verdict would judge allocation history. -T drops exactly
+    // those unwritten positions. The same probe on 3.3a shows no padding —
+    // and passing -T there fails the call ('unknown flag -T', measured), so
+    // the flag must follow the version.
+    const opts = {
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: 'node cli.js',
+      cwd: '/work',
+      readyFile: '/ready',
+    };
+    const trimmed = tmuxPlan({ ...opts, captureTrim: true });
+    expect(trimmed.capture).toContain('-T');
+    expect(trimmed.captureText).toContain('-T');
+    // -N stays: the REAL trailing spaces are the evidence.
+    expect(trimmed.capture).toContain('-N');
+    const old = tmuxPlan({ ...opts, captureTrim: false });
+    expect(old.capture).not.toContain('-T');
+    expect(old.captureText).not.toContain('-T');
+    expect(tmuxSupportsCaptureT('tmux 3.4')).toBe(true);
+    expect(tmuxSupportsCaptureT('tmux 3.5a')).toBe(true);
+    expect(tmuxSupportsCaptureT('tmux 4.0')).toBe(true);
+    expect(tmuxSupportsCaptureT('tmux 3.3a')).toBe(false);
+    expect(tmuxSupportsCaptureT('tmux 3.1')).toBe(false);
+    expect(tmuxSupportsCaptureT('tmux next')).toBeUndefined();
   });
 
   it('starts the command behind `--` so a dash-leading command is not getopt fodder', () => {

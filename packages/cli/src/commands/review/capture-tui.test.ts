@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import {
   captureTuiCommand,
@@ -775,7 +776,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       writeFileSync(
         driver,
         [
-          `const mod = await import(${JSON.stringify(captureTuiTs)});`,
+          `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
           `mod.probes.tmux = () => ({ status: 'absent' }) as never;`,
           `// Give the pipe a beat to be closed by the parent first.`,
           `await new Promise((r) => setTimeout(r, 300));`,
@@ -1908,6 +1909,83 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
   });
 
+  it.skipIf(!hasTmux)(
+    'keeps a pre-existing .ans when its write fails at OPEN — nothing truncated',
+    async () => {
+      // The artifact-path probe proves a path writable BEFORE the capture
+      // window; the write can still fail at open() afterwards — EMFILE
+      // under the concurrent captures this tool's briefs encourage — having
+      // truncated NOTHING. Deleting then destroys a file the clear phase
+      // deliberately spared (no capture manifest beside it). Driven from a
+      // child whose preload makes exactly that write fail: the module takes
+      // writeFileSync as a named import, and patching the builtin before
+      // the import reaches it (verified).
+      let captureTuiTs = join(
+        process.cwd(),
+        'src/commands/review/capture-tui.ts',
+      );
+      if (!existsSync(captureTuiTs)) {
+        captureTuiTs = join(
+          process.cwd(),
+          'packages/cli/src/commands/review/capture-tui.ts',
+        );
+      }
+      const seeded = 'a user file the clear phase spared';
+      writeFileSync(join(dir, 'cap.ans'), seeded);
+      const patch = join(dir, 'patch.cjs');
+      writeFileSync(
+        patch,
+        [
+          "const fs = require('node:fs');",
+          'const orig = fs.writeFileSync;',
+          'fs.writeFileSync = function (p, ...rest) {',
+          "  if (typeof p === 'string' && p.endsWith('cap.ans')) {",
+          "    throw Object.assign(new Error('EMFILE: too many open files, open'), { code: 'EMFILE' });",
+          '  }',
+          '  return orig.call(this, p, ...rest);',
+          '};',
+        ].join('\n'),
+      );
+      const driver = join(dir, 'driver-ansfail.mts');
+      writeFileSync(
+        driver,
+        [
+          `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
+          `mod.probes.freeze = () => ({ status: 'absent' });`,
+          `await mod.runCaptureTui({ command: 'printf "READY\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'READY', keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 20_000 } as never);`,
+        ].join('\n'),
+      );
+      const { spawn } = await import('node:child_process');
+      const child = spawn(
+        process.execPath,
+        ['--require', patch, '--import', 'tsx', driver],
+        { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      const code = await new Promise<number | null>((resolve) =>
+        child.once('exit', (c) => resolve(c)),
+      );
+      // The refusal contract holds...
+      expect(code).toBe(3);
+      // ...and the file this run never wrote is byte-for-byte the user's.
+      expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(seeded);
+    },
+    60_000,
+  );
+
+  it('never CREDITS a png the clear phase protected as this run evidence', async () => {
+    // A freeze that exits 0 without writing leaves the user's untouched
+    // file at <out>.png. Existence alone credited it: success JSON with
+    // evidence 'png' pointing at bytes this run never produced, and a
+    // verifier would publish an unrelated image as the rendering.
+    writeFileSync(join(dir, 'cap.png'), 'the user file');
+    await withFakeFreeze('#!/bin/sh\nexit 0\n', () => run());
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(manifest.degradedBecause).toBeTruthy();
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('the user file');
+  });
+
   it('never deletes a png the clear phase PROTECTED when the render fails', async () => {
     // shaped=false (no capture manifest) deliberately leaves whatever sits
     // at <out>.png alone as possibly the user's. The torn-png cleanup then
@@ -2431,7 +2509,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         writeFileSync(
           driver,
           [
-            `const { runCaptureTui } = await import(${JSON.stringify(captureTuiTs)});`,
+            `const { runCaptureTui } = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
             `await runCaptureTui({ command: 'sleep 300', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'NEVER-MATCHES', keys: undefined, out: ${JSON.stringify(outBase)}, timeoutMs: 60_000 } as never);`,
           ].join('\n'),
         );
@@ -2517,7 +2595,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     writeFileSync(
       driver,
       [
-        `const mod = await import(${JSON.stringify(captureTuiTs)});`,
+        `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
         `mod.probes.freeze = () => ({ status: 'ok', out: '' });`,
         `mod.freezeRender.bin = ${JSON.stringify(slowFreeze)};`,
         `await mod.runCaptureTui({ command: 'printf "RSIG\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'RSIG', keys: undefined, out: ${JSON.stringify(join(dir, 'rsig'))}, timeoutMs: 30_000 } as never);`,
