@@ -23,9 +23,9 @@ Keep the existing single-result recall lifecycle and model-primary selection.
   budget expires.
 - Preserve the existing cancellation and exactly-once terminal telemetry paths.
 
-The 100 ms budget stays internal. It leaves margin under the RFC's 150 ms
-initial-turn overhead target while telemetry can show whether a later change is
-justified.
+The 100 ms budget stays internal, per RFC #7040's direction of a small fixed
+internal budget determined by benchmark rather than exposed as public
+configuration; telemetry can show whether a later change is justified.
 
 Improve only the existing failure fallback:
 

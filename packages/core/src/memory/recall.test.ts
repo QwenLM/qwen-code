@@ -189,6 +189,13 @@ const multilingualDocs: ScannedAutoMemoryDocument[] = [
     'Miscellaneous guidance',
     'Emergency rollback procedures require owner approval.',
   ),
+  memoryDoc(
+    'ja-hiragana.md',
+    'user',
+    'よくあるしつもん',
+    'ひらがなだけでかいたあんない',
+    'ひらがなのとうこにそなえたきろく。',
+  ),
 ];
 
 const multilingualRecallCases: Array<
@@ -204,6 +211,7 @@ const multilingualRecallCases: Array<
   ['Japanese prolonged sound mark', 'ユーザー', 'ja-auth.md'],
   ['Japanese Katakana title', 'デプロイ手順', 'ja-deploy.md'],
   ['Japanese release description', 'リリース運用', 'ja-deploy.md'],
+  ['Japanese Hiragana-only query', 'よくあるしつもん', 'ja-hiragana.md'],
   ['Korean title', '배포 절차', 'ko-deploy.md'],
   ['Korean description', '릴리스 체크', 'ko-deploy.md'],
   ['Korean auth title', '인증 설정', 'ko-auth.md'],
@@ -285,28 +293,32 @@ describe('auto-memory relevant recall', () => {
   });
 
   it('applies type boosts only after a lexical match', () => {
-    const projectDoc = memoryDoc(
-      'project-release.md',
-      'project',
-      'Release cadence',
+    const userDoc = memoryDoc(
+      'user-cadence.md',
+      'user',
+      'Cadence summary',
       '',
       '',
     );
-    const userDoc = memoryDoc(
-      'user-release.md',
-      'user',
-      'Release cadence',
+    const projectDoc = memoryDoc(
+      'project-cadence.md',
+      'project',
+      'Cadence summary',
       '',
       '',
     );
 
-    const selected = selectRelevantAutoMemoryDocuments('project release', [
-      userDoc,
+    // Both docs tie on lexical score for 'cadence'; the 'preference' token
+    // boosts only the user-typed doc, so it must win. Without the boost the
+    // alphabetical type tie-break would surface the project doc instead.
+    const selected = selectRelevantAutoMemoryDocuments('cadence preference', [
       projectDoc,
+      userDoc,
     ]);
 
-    expect(selected[0]?.filename).toBe('project-release.md');
-    expect(selectRelevantAutoMemoryDocuments('project', [projectDoc])).toEqual(
+    expect(selected[0]?.filename).toBe('user-cadence.md');
+    // Type keywords alone never surface a doc without a lexical match.
+    expect(selectRelevantAutoMemoryDocuments('preference', [userDoc])).toEqual(
       [],
     );
   });
