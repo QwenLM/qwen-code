@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url';
 
 const OWNERS_FILE = '.github/issue-owners.json';
 const WRITE_PERMISSIONS = new Set(['admin', 'maintain', 'write']);
-const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 
 function isStringArray(value) {
   return Array.isArray(value) && value.every((v) => typeof v === 'string');
@@ -25,11 +25,17 @@ export function loadPolicy(raw) {
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
     throw new Error(`${OWNERS_FILE}: not an object`);
   }
+  // An empty label entry can never match; in requireLabels it would silently
+  // skip every issue on a green run, so reject it like other malformed config.
   if (
     !isStringArray(policy.requireLabels) ||
-    !isStringArray(policy.skipLabels)
+    !isStringArray(policy.skipLabels) ||
+    policy.requireLabels.some((label) => label.length === 0) ||
+    policy.skipLabels.some((label) => label.length === 0)
   ) {
-    throw new Error(`${OWNERS_FILE}: requireLabels/skipLabels must be strings`);
+    throw new Error(
+      `${OWNERS_FILE}: requireLabels/skipLabels must be non-empty strings`,
+    );
   }
   if (!Array.isArray(policy.areas) || policy.areas.length === 0) {
     throw new Error(`${OWNERS_FILE}: areas must be a non-empty array`);
@@ -44,7 +50,11 @@ export function loadPolicy(raw) {
       throw new Error(`${OWNERS_FILE}: duplicate area ${area.name}`);
     }
     areaNames.add(area.name);
-    if (!isStringArray(area.labels) || area.labels.length === 0) {
+    if (
+      !isStringArray(area.labels) ||
+      area.labels.length === 0 ||
+      area.labels.some((label) => label.length === 0)
+    ) {
       throw new Error(`${OWNERS_FILE}: area ${area.name} needs labels`);
     }
     if (!Array.isArray(area.owners) || area.owners.length === 0) {

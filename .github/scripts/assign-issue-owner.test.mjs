@@ -70,9 +70,33 @@ describe('assign-issue-owner: owner map', () => {
   });
 
   it('rejects a malformed login rather than passing it to gh', () => {
-    const broken = JSON.parse(ownersRaw);
-    broken.areas[0].owners = ['not a login'];
-    assert.throws(() => loadPolicy(JSON.stringify(broken)), /invalid login/);
+    // GitHub logins cannot start or end with a hyphen; a trailing-hyphen typo
+    // would 404 on the permission check and be silently dropped at runtime.
+    for (const login of ['not a login', 'alice-', '-alice']) {
+      const broken = JSON.parse(ownersRaw);
+      broken.areas[0].owners = [login];
+      assert.throws(() => loadPolicy(JSON.stringify(broken)), /invalid login/);
+    }
+  });
+
+  it('rejects an empty label entry that could never match', () => {
+    const requireBroken = JSON.parse(ownersRaw);
+    requireBroken.requireLabels = [''];
+    assert.throws(
+      () => loadPolicy(JSON.stringify(requireBroken)),
+      /non-empty strings/,
+    );
+
+    const skipBroken = JSON.parse(ownersRaw);
+    skipBroken.skipLabels = ['welcome-pr', ''];
+    assert.throws(
+      () => loadPolicy(JSON.stringify(skipBroken)),
+      /non-empty strings/,
+    );
+
+    const areaBroken = JSON.parse(ownersRaw);
+    areaBroken.areas[0].labels = [''];
+    assert.throws(() => loadPolicy(JSON.stringify(areaBroken)), /needs labels/);
   });
 
   it('rejects an area with no labels', () => {

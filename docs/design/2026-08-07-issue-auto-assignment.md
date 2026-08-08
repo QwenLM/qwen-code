@@ -16,14 +16,14 @@ job). All of that machinery exists only because the model chose the login.
 The model does not choose. Assignment is a pure function of the issue's labels.
 
 Triage already applies labels from the repository's existing taxonomy. A separate
-workflow triggers on `issues: labeled`, reads the label names, and maps them to
-owners via `.github/issue-owners.json`. The assignment script never reads issue
-title, body, or comments, so issue text cannot influence the outcome — not
-because it is filtered, but because it is never in scope.
+workflow triggers on `issues: labeled` and `issues: unlabeled`, reads the label
+names, and maps them to owners via `.github/issue-owners.json`. The assignment
+script never reads issue title, body, or comments, so issue text cannot influence
+the outcome — not because it is filtered, but because it is never in scope.
 
 ```
-issues: labeled ──► assign-issue-owner.mjs ──► labels → area → owner
-                    (no model, no plan, no schema)
+issues: labeled/unlabeled ──► assign-issue-owner.mjs ──► labels → area → owner
+                              (no model, no plan, no schema)
 ```
 
 `.github/issue-owners.json` holds three things:
@@ -84,16 +84,18 @@ The trigger _is_ the state change, which removes the reasons a split would exist
 
 ## Trigger dependency
 
-`issues: labeled` only fires for label writes made with a PAT — writes made with
-the default `GITHUB_TOKEN` do not trigger downstream workflow runs. The triage
-agent labels with `QWEN_CODE_BOT_TOKEN`/`CI_BOT_PAT`, so the chain holds. If
-triage ever falls back to `GITHUB_TOKEN` for labelling, this workflow must be
-rehung on `workflow_run` of the triage workflow. This is noted in the workflow
-header where it would be needed.
+`issues: labeled` and `issues: unlabeled` only fire for label writes made with
+a PAT — writes made with the default `GITHUB_TOKEN` do not trigger downstream
+workflow runs. The triage agent labels with `QWEN_CODE_BOT_TOKEN`/`CI_BOT_PAT`,
+so the chain holds. If triage ever falls back to `GITHUB_TOKEN` for labelling,
+this workflow must be rehung on `workflow_run` of the triage workflow. This is
+noted in the workflow header where it would be needed.
 
-`labeled` fires once per label, so one triage run queues several runs. Each is
-idempotent — every run after the first sees an assignee and stops — and a
-per-issue concurrency group serialises them.
+Label events fire once per label change, so one triage run that applies several
+labels queues several runs. Each is idempotent — every run after the first sees
+an assignee and stops — and a per-issue concurrency group serialises them.
+Because `unlabeled` is also a trigger, removing a skip label from an already
+labelled issue can make it newly eligible for assignment.
 
 ## Failure behavior
 
