@@ -78,6 +78,15 @@ jobs:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
     # Authorization is delegated to the `authorize` job (write+ permission);
     # this `if` only matches the /review command shape.
+    #
+    # The command may be followed by a newline and a body, so the shape match
+    # accepts that — via fromJSON, because expression string literals are NOT
+    # escape-processed: '\n' there is a literal backslash + n, and the branch
+    # written that way never matched anything. fromJSON('"\n"') is JSON, which
+    # IS escape-processed, so it yields a real newline. Both line endings are
+    # listed: the API sends LF, the web UI sends CRLF, and startsWith with an
+    # LF pattern does not match a CRLF body. Measured on a live runner, not
+    # assumed — see the PR that introduced this.
     needs: ['authorize']
     if: |-
       !cancelled() &&
@@ -87,17 +96,20 @@ jobs:
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))) ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))) ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
-         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n')))))
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))))
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
@@ -315,7 +327,8 @@ jobs:
     # review_requested events check the requester and skip delay):
     # - opened/synchronize uses delay-automatic-review
     # - reopened/ready_for_review runs immediately
-    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
+    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches) —
+    # including the fromJSON newline/CR pair, explained there.
     if: |-
       !cancelled() &&
       ((github.event_name == 'workflow_dispatch' &&
@@ -335,19 +348,22 @@ jobs:
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
-         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true'))
     # The per-review budget auto-scales to QWEN_REVIEW_MAX_TIMEOUT_MINUTES
     # for any non-small PR (see "Run review"), and the shared retry budget
@@ -450,7 +466,13 @@ jobs:
           # review" is an explicit ask (authorize write-permission-checks the
           # requester for exactly that action), so it is excluded below.
           AUTO_REVIEW=false
+          # First line only, then drop a trailing CR: comments written in the
+          # GitHub web UI arrive CRLF-terminated, so without this the command
+          # line keeps a `\r`. That rides through word splitting (IFS has no
+          # CR) into tokens like `--timeout=300<CR>`, which then fails the
+          # numeric check for no visible reason.
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
+          TRIGGER_COMMAND="${TRIGGER_COMMAND%$'\r'}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
@@ -748,6 +770,16 @@ jobs:
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
           QWEN_HOME: '${{ runner.temp }}/qwen-home'
+          # KEEP THE `run` BODY BELOW FREE OF `${{ }}`. A run block containing
+          # one is evaluated as a single expression template, capped at 21000
+          # characters — and this script is far past that. Every value it needs
+          # from the workflow context is passed as an environment variable, so
+          # the body is plain bash the runner never templates. See the
+          # workflow-expression-length test in
+          # scripts/tests/qwen-pr-review-workflow.test.js.
+          EVENT_NAME: '${{ github.event_name }}'
+          EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
         run: |-
           set -euo pipefail
           fail() {
@@ -960,7 +992,7 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+          MAX_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
           if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then
             fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"
           fi
@@ -989,7 +1021,7 @@ jobs:
               if [ "$PR_SIZE_LINES" -le 300 ]; then
                 EFFECTIVE_TIMEOUT_MINUTES=180
               else
-                EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+                EFFECTIVE_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
               fi
               echo "PR #${PR_NUMBER} changed ${PR_SIZE_LINES} lines; auto timeout ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
             else
@@ -1056,8 +1088,7 @@ jobs:
             exit 0
           fi
           EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
             if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then
               echo "Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current (current head ${CURRENT_HEAD_SHA})." | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
@@ -1595,6 +1626,8 @@ jobs:
 
   resolve-pr:
     needs: ['authorize']
+    # The /resolve shape match uses the same fromJSON newline/CR pair as
+    # ack-review-request.if, and for the same reason — see the note there.
     if: |-
       !cancelled() &&
       github.repository == 'QwenLM/qwen-code' &&
@@ -1607,7 +1640,8 @@ jobs:
          github.event.issue.state == 'open' &&
          (github.event.comment.body == '@qwen-code /resolve' ||
           startsWith(github.event.comment.body, '@qwen-code /resolve ') ||
-          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', '\n'))))
+          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\n"'))) ||
+          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\r"')))))
       )
     # Pinned to an ephemeral hosted runner. The conflict-resolution agent step
     # runs with `sandbox: true`, which on Linux needs docker or podman to launch
