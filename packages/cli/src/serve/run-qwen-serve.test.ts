@@ -833,10 +833,12 @@ describe('workspace skill settings persistence', () => {
       'setValues',
     );
 
+    const generationGuard = vi.fn();
     const result = await persistDisabledSkillsBatch!(
       workspace,
       ['review', 'alpha', 'locked-skill'],
       false,
+      generationGuard,
     );
 
     expect(result.outcomes).toHaveLength(3);
@@ -859,6 +861,12 @@ describe('workspace skill settings persistence', () => {
       },
     ]);
     expect(setValues).toHaveBeenCalledOnce();
+    expect(
+      generationGuard.mock.invocationCallOrder.filter(
+        (order) => order < setValues.mock.invocationCallOrder[0]!,
+      ),
+    ).toHaveLength(2);
+    expect(setValues.mock.calls[0]?.[2]).toBe(generationGuard);
 
     const savedAfterDisable = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
@@ -901,6 +909,17 @@ describe('workspace skill settings persistence', () => {
       'alpha',
     ]);
     expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
+
+    const unchanged = await persistDisabledSkillsBatch!(
+      workspace,
+      ['review'],
+      false,
+    );
+    expect(unchanged).toEqual({
+      outcomes: [{ skillName: 'review', changed: false }],
+      settingsChanges: [],
+    });
+    expect(setValues).toHaveBeenCalledTimes(2);
   });
 });
 

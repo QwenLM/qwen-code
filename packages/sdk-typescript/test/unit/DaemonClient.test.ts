@@ -4042,14 +4042,14 @@ describe('DaemonClient', () => {
 
   describe('setWorkspaceSkillsEnabled', () => {
     const response = {
-      enabled: false,
+      enabled: true,
       activation: 'applied',
       sessionsRefreshed: 2,
       sessionsFailed: 0,
       results: [
         {
           skillName: 'review',
-          enabled: false,
+          enabled: true,
           changed: true,
         },
       ],
@@ -4063,7 +4063,7 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
       await expect(
-        client.setWorkspaceSkillsEnabled(['review', 'deploy'], false, {
+        client.setWorkspaceSkillsEnabled(['review', 'deploy'], true, {
           clientId: 'client-1',
         }),
       ).resolves.toEqual(response);
@@ -4072,7 +4072,7 @@ describe('DaemonClient', () => {
         method: 'POST',
         body: JSON.stringify({
           skillNames: ['review', 'deploy'],
-          enabled: false,
+          enabled: true,
         }),
       });
       expect(calls[0]?.headers['content-type']).toBe('application/json');
@@ -4087,7 +4087,7 @@ describe('DaemonClient', () => {
 
       await client
         .workspaceByCwd('/tmp/work space')
-        .setWorkspaceSkillsEnabled(['review', 'deploy'], false, {
+        .setWorkspaceSkillsEnabled(['review', 'deploy'], true, {
           clientId: 'client-2',
         });
 
@@ -4096,7 +4096,7 @@ describe('DaemonClient', () => {
         method: 'POST',
         body: JSON.stringify({
           skillNames: ['review', 'deploy'],
-          enabled: false,
+          enabled: true,
         }),
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-2');

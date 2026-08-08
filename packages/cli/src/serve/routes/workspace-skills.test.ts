@@ -11,7 +11,10 @@ import { WorkspaceSkillManagementError } from '../workspace-skill-management.js'
 import type { WorkspaceSkillBatchToggleResult } from '../workspace-service/types.js';
 import { registerWorkspaceSkillsRoutes } from './workspace-skills.js';
 
-function createHarness() {
+function createHarness(options?: {
+  trusted?: boolean;
+  rejectClientId?: boolean;
+}) {
   const installWorkspaceSkill = vi.fn().mockResolvedValue({
     skillName: 'demo-skill',
     scope: 'workspace',
@@ -55,7 +58,7 @@ function createHarness() {
   registerWorkspaceSkillsRoutes(app, {
     workspaceRuntime: {
       workspaceCwd: '/workspace',
-      trusted: true,
+      trusted: options?.trusted ?? true,
       workspaceService: {
         installWorkspaceSkill,
         deleteWorkspaceSkill,
@@ -66,7 +69,16 @@ function createHarness() {
     mutate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
     safeBody: (req) => req.body as Record<string, unknown>,
     sendBridgeError,
-    parseAndValidateClientId: () => 'client-1',
+    parseAndValidateClientId: (_req, res) => {
+      if (options?.rejectClientId) {
+        res.status(400).json({
+          error: 'Invalid client id',
+          code: 'invalid_client_id',
+        });
+        return null;
+      }
+      return 'client-1';
+    },
   });
   return {
     app,
@@ -248,6 +260,9 @@ describe('workspace Skill management routes', () => {
     const empty = await request(harness.app)
       .post('/workspace/skills/enable')
       .send({ skillNames: [], enabled: false });
+    const nonArray = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ skillNames: 'review', enabled: false });
     const tooMany = await request(harness.app)
       .post('/workspace/skills/enable')
       .send({
@@ -275,6 +290,8 @@ describe('workspace Skill management routes', () => {
 
     expect(empty.status).toBe(400);
     expect(empty.body.code).toBe('invalid_skill_names');
+    expect(nonArray.status).toBe(400);
+    expect(nonArray.body.code).toBe('invalid_skill_names');
     expect(tooMany.status).toBe(400);
     expect(tooMany.body.code).toBe('invalid_skill_names');
     expect(blank.status).toBe(400);
@@ -287,6 +304,30 @@ describe('workspace Skill management routes', () => {
     expect(tooLong.body.code).toBe('invalid_skill_name');
     expect(exactLimit.status).toBe(200);
     expect(harness.setWorkspaceSkillsEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  it('trust-gates Skill batches before parsing or resolving the client id', async () => {
+    const harness = createHarness({ trusted: false });
+
+    const response = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ skillNames: ['review'], enabled: false });
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('untrusted_workspace');
+    expect(harness.setWorkspaceSkillsEnabled).not.toHaveBeenCalled();
+  });
+
+  it('stops Skill batches when client-id validation rejects the request', async () => {
+    const harness = createHarness({ rejectClientId: true });
+
+    const response = await request(harness.app)
+      .post('/workspace/skills/enable')
+      .send({ skillNames: ['review'], enabled: false });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_client_id');
+    expect(harness.setWorkspaceSkillsEnabled).not.toHaveBeenCalled();
   });
 
   it('fails the whole batch when the workspace generation closes', async () => {

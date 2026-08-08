@@ -2107,7 +2107,7 @@ describe('createDaemonWorkspaceService', () => {
       });
       const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
         outcomes: [
-          { skillName: 'review', changed: true },
+          { skillName: 'deploy', changed: false },
           {
             skillName: 'locked',
             error: new WorkspaceSkillNotToggleableError(
@@ -2116,11 +2116,9 @@ describe('createDaemonWorkspaceService', () => {
               'user',
             ),
           },
-          { skillName: 'deploy', changed: true },
+          { skillName: 'review', changed: true },
         ],
-        settingsChanges: [
-          { key: 'skills.disabled', value: ['review', 'deploy'] },
-        ],
+        settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
       });
       const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
         sessionsRefreshed: 2,
@@ -2163,7 +2161,7 @@ describe('createDaemonWorkspaceService', () => {
         sessionsFailed: 0,
         results: [
           { skillName: 'review', enabled: false, changed: true },
-          { skillName: 'deploy', enabled: false, changed: true },
+          { skillName: 'deploy', enabled: false, changed: false },
         ],
         errors: [
           {
@@ -2197,7 +2195,7 @@ describe('createDaemonWorkspaceService', () => {
         type: 'settings_changed',
         data: {
           key: 'skills.disabled',
-          value: ['review', 'deploy'],
+          value: ['review'],
           scope: 'workspace',
         },
         originatorClientId: 'client-1',
@@ -2289,6 +2287,107 @@ describe('createDaemonWorkspaceService', () => {
         ],
       });
       expect(persistDisabledSkillsBatch).not.toHaveBeenCalled();
+    });
+
+    it('allows enabling a legacy extension skill disabled by settings', async () => {
+      await withIsolatedWorkspace(async ({ workspace }) => {
+        await writeJson(
+          path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+          { skills: { disabled: ['legacy-inactive'] } },
+        );
+        const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+          outcomes: [{ skillName: 'legacy-inactive', changed: true }],
+          settingsChanges: [{ key: 'skills.disabled', value: undefined }],
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            queryWorkspaceStatus: vi.fn().mockResolvedValue({
+              v: 1,
+              workspaceCwd: workspace,
+              initialized: true,
+              skills,
+            }),
+            persistDisabledSkillsBatch,
+            isChannelLive: () => false,
+          }),
+        );
+
+        await expect(
+          svc.setWorkspaceSkillsEnabled(makeCtx(), ['legacy-inactive'], true),
+        ).resolves.toMatchObject({
+          enabled: true,
+          results: [
+            { skillName: 'legacy-inactive', enabled: true, changed: true },
+          ],
+          errors: [],
+        });
+        expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+          workspace,
+          ['legacy-inactive'],
+          true,
+          undefined,
+        );
+      });
+    });
+
+    it('publishes both setting changes from an enabling batch', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [
+              { skillName: 'review', changed: true },
+              { skillName: 'deploy', changed: true },
+            ],
+            settingsChanges: [
+              { key: 'skills.disabled', value: undefined },
+              { key: 'skills.enabled', value: ['deploy'] },
+            ],
+          }),
+          publishWorkspaceEvent,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(
+          makeCtx({ originatorClientId: 'client-1' }),
+          ['review', 'deploy'],
+          true,
+        ),
+      ).resolves.toMatchObject({
+        enabled: true,
+        results: [
+          { skillName: 'review', enabled: true, changed: true },
+          { skillName: 'deploy', enabled: true, changed: true },
+        ],
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2);
+      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(1, {
+        type: 'settings_changed',
+        data: {
+          key: 'skills.disabled',
+          value: undefined,
+          scope: 'workspace',
+        },
+        originatorClientId: 'client-1',
+      });
+      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(2, {
+        type: 'settings_changed',
+        data: {
+          key: 'skills.enabled',
+          value: ['deploy'],
+          scope: 'workspace',
+        },
+        originatorClientId: 'client-1',
+      });
     });
 
     it('reports partial activation when the shared batch refresh fails', async () => {

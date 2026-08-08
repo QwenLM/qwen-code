@@ -989,22 +989,22 @@ describe('workspace-qualified core REST', () => {
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-1')
         .set('Host', host())
-        .send({ skillNames: ['review', 'deploy'], enabled: false });
+        .send({ skillNames: ['review', 'deploy'], enabled: true });
       expect(batch.status).toBe(200);
       expect(batch.body).toEqual({
-        enabled: false,
+        enabled: true,
         activation: 'deferred',
         sessionsRefreshed: 0,
         sessionsFailed: 0,
         results: [
           {
             skillName: 'review',
-            enabled: false,
+            enabled: true,
             changed: true,
           },
           {
             skillName: 'deploy',
-            enabled: false,
+            enabled: true,
             changed: true,
           },
         ],
@@ -1018,8 +1018,34 @@ describe('workspace-qualified core REST', () => {
           originatorClientId: 'client-1',
         }),
         ['review', 'deploy'],
-        false,
+        true,
       );
+
+      const invalidBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ skillNames: 'review', enabled: true });
+      expect(invalidBatch.status).toBe(400);
+      expect(invalidBatch.body.code).toBe('invalid_skill_names');
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).toHaveBeenCalledTimes(1);
+
+      vi.mocked(
+        h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
+      ).mockRejectedValueOnce(
+        Object.assign(new Error('closed'), {
+          code: 'workspace_generation_closed',
+        }),
+      );
+      const failedBatch = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ skillNames: ['review'], enabled: true });
+      expect(failedBatch.status).toBe(503);
+      expect(failedBatch.body.code).toBe('workspace_runtime_unavailable');
 
       vi.mocked(
         h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
@@ -1055,7 +1081,7 @@ describe('workspace-qualified core REST', () => {
       expect(invalidBatchClient.body.code).toBe('invalid_client_id');
       expect(
         h.secondaryWorkspaceService.setWorkspaceSkillsEnabled,
-      ).toHaveBeenCalledTimes(1);
+      ).toHaveBeenCalledTimes(2);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
