@@ -13404,7 +13404,7 @@ describe('createAcpSessionBridge', () => {
       );
     });
 
-    it('publishes session_update events to subscribers when the agent sends them', async () => {
+    it('publishes ACP usage updates to subscribers unchanged', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
         // Build a channel pair where we capture the agent-side connection
@@ -13434,8 +13434,9 @@ describe('createAcpSessionBridge', () => {
       void capturedConn!.sessionUpdate({
         sessionId: session.sessionId,
         update: {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'hi' },
+          sessionUpdate: 'usage_update',
+          used: 42,
+          size: 128_000,
         },
       });
 
@@ -13446,6 +13447,14 @@ describe('createAcpSessionBridge', () => {
       }
       expect(collected[0]?.type).toBe('session_update');
       expect(collected[0]?.id).toBe(1);
+      expect(collected[0]?.data).toMatchObject({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 42,
+          size: 128_000,
+        },
+      });
 
       abort.abort();
       await bridge.shutdown();
@@ -19920,6 +19929,44 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
       await vi.waitFor(() => expect(wrCalls()).toBe(2));
       release?.();
       await p3;
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('ages the snapshot, and drops it entirely once past the staleness window', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceResource
+          ? { rssBytes: 4096, cpuPercent: 7 }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.refreshChildResource!();
+
+      const fresh = bridge.getChildResourceSnapshot!();
+      expect(fresh).toMatchObject({ rssBytes: 4096, cpuPercent: 7 });
+      // A reading just taken is not in the future and not already expired.
+      expect(fresh!.ageMs).toBeGreaterThanOrEqual(0);
+      expect(fresh!.ageMs).toBeLessThan(30_000);
+
+      // Walk the clock past the cliff. `STALE_CHILD_RESOURCE_MS` is a const
+      // inside the bridge factory closure, not an export, so drive the
+      // boundary with the clock rather than exporting it for a test.
+      // `vi.spyOn` rather than assigning `Date.now` directly: the restore is
+      // registered with the test runner, so it survives an assertion throwing
+      // between here and a `finally`, and it is what the rest of the repo uses.
+      const staleAt = Date.now() + 30_001;
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(staleAt);
+      try {
+        // Dropped, not returned-and-stale: a zombie child must not read as
+        // healthy just because its last good value is still in the cache.
+        expect(bridge.getChildResourceSnapshot!()).toBeUndefined();
+      } finally {
+        nowSpy.mockRestore();
+      }
     } finally {
       await bridge.shutdown();
     }

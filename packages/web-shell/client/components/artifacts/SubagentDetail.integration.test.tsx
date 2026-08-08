@@ -125,6 +125,8 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     title: string;
     turnId: string;
     changes: [];
+    workspaceCwd: string;
+    workspaceId: string;
   }) => void;
   act(() => {
     openOutput({
@@ -133,6 +135,8 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
       title: 'Review',
       turnId: 'turn-1',
       changes: [],
+      workspaceCwd: '/work/project',
+      workspaceId: 'project-id',
     });
   });
 
@@ -143,6 +147,7 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     turnId: 'turn-1',
     changes: [],
     sourceSessionId: 'subagent-session',
-    workspaceActions,
+    workspaceCwd: '/work/project',
+    workspaceId: 'project-id',
   });
 });

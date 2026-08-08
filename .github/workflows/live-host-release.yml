@@ -148,8 +148,9 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
           identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
           if [ -z "$identity" ]; then echo '::error::Developer ID Application identity was not found.'; exit 1; fi
+          identity_name="${identity#Developer ID Application: }"
           {
-            echo "CSC_NAME=$identity"
+            echo "CSC_NAME=$identity_name"
             echo 'CSC_IDENTITY_AUTO_DISCOVERY=true'
           } >> "$GITHUB_ENV"
 

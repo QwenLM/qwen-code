@@ -20,6 +20,7 @@ import {
   NonSSEResponseError,
   StreamContentError,
   StreamInactivityTimeoutError,
+  StreamLifetimeExceededError,
 } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
@@ -31,8 +32,10 @@ import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-  MAX_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_STREAM_MAX_LIFETIME_MS,
+  MAX_STREAM_GUARD_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
 } from './constants.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import {
@@ -40,6 +43,8 @@ import {
   setGenAiUsageProvenance,
 } from '../../telemetry/gen-ai-usage.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
+import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 
 // Mock dependencies
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
@@ -4349,6 +4354,335 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('adds an official OpenAI session cache key to regular requests', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.5';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.5',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        },
+        'prompt-id',
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123',
+          messages,
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('partitions official OpenAI cache keys for concurrent subagents', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello from a subagent' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await runWithAgentContext('Explore-a1b2c3d4', () =>
+        pipeline.execute(
+          {
+            model: 'gpt-5.6',
+            contents: [
+              { role: 'user', parts: [{ text: 'Hello from a subagent' }] },
+            ],
+          },
+          'prompt-id',
+        ),
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123:Explore-a1b2c3d4',
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('preserves the session cache key for forked agents', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello from a fork' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await runInForkContext(() =>
+        runWithAgentContext('fork-a1b2c3d4', () =>
+          pipeline.execute(
+            {
+              model: 'gpt-5.6',
+              contents: [
+                { role: 'user', parts: [{ text: 'Hello from a fork' }] },
+              ],
+            },
+            'prompt-id',
+          ),
+        ),
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123',
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('does not add explicit cache fields to regular GPT-5.6 requests', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'user', content: 'First question' },
+        { role: 'assistant', content: 'First answer' },
+        { role: 'user', content: 'Follow-up question' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: unknown;
+      };
+      expect(sent.prompt_cache_key).toBe('qwen-code:session-123');
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages).toEqual(messages);
+    });
+
+    it('does not add official OpenAI cache fields when cache control is disabled', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockContentGeneratorConfig.enableCacheControl = false;
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as Record<string, unknown>;
+      expect(sent['prompt_cache_key']).toBeUndefined();
+      expect(sent['prompt_cache_options']).toBeUndefined();
+    });
+
+    it('does not add official OpenAI cache fields to third-party compatible endpoints', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.deepseek.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: unknown;
+      };
+      expect(sent.prompt_cache_key).toBeUndefined();
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages).toEqual(messages);
+    });
+
+    it('marks the stable official OpenAI prefix for GPT-5.6 compression', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: { mode?: string };
+      };
+      expect(sent.prompt_cache_key).toBe('qwen-code:session-123');
+      expect(sent.prompt_cache_options).toEqual({ mode: 'explicit' });
+      expect(sent.messages[1]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'main request',
+          prompt_cache_breakpoint: { mode: 'explicit' },
+        },
+      ]);
+      expect(sent.messages.at(-1)?.content).toBe('compression directive');
+    });
+
+    it('does not add official OpenAI cache fields when baseUrl is unset', async () => {
+      mockContentGeneratorConfig.baseUrl = undefined;
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: { mode?: string };
+      };
+      expect(sent.prompt_cache_key).toBeUndefined();
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages[1]?.content).toBe('main request');
+    });
+
     it('should pass arbitrary samplingParams keys through verbatim when the window has room (e.g. max_completion_tokens for GPT-5)', async () => {
       // Arrange: user sets a GPT-5 / o-series shape in samplingParams.
       // None of these are typed fields; all must appear on the wire because
@@ -4999,10 +5333,14 @@ describe('ContentGenerationPipeline', () => {
       } as GenerateContentParameters;
     }
 
-    function buildPipeline(streamIdleTimeoutMs?: number) {
+    function buildPipeline(
+      streamIdleTimeoutMs?: number,
+      streamMaxLifetimeMs?: number,
+    ) {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
+        ...(streamMaxLifetimeMs !== undefined ? { streamMaxLifetimeMs } : {}),
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,
@@ -5022,10 +5360,12 @@ describe('ContentGenerationPipeline', () => {
           return r;
         },
       );
-      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS from the
-      // dev/CI shell so the default-timeout tests aren't silently overridden.
-      // Env-specific tests re-stub it; afterEach unstubs everything.
+      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS /
+      // QWEN_STREAM_MAX_LIFETIME_MS from the dev/CI shell so the
+      // default-timeout tests aren't silently overridden. Env-specific tests
+      // re-stub them; afterEach unstubs everything.
       vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
       vi.useFakeTimers();
     });
     afterEach(() => {
@@ -5538,7 +5878,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1); // oversized config
+      const p = buildPipeline(MAX_STREAM_GUARD_TIMEOUT_MS + 1); // oversized config
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -5556,14 +5896,14 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(true); // trips at the default (config rejected)
     });
 
-    it('accepts the exact MAX_STREAM_IDLE_TIMEOUT_MS boundary value', async () => {
+    it('accepts the exact MAX_STREAM_GUARD_TIMEOUT_MS boundary value', async () => {
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
       // The exact ceiling must be accepted (not rejected as out-of-range).
       // Guards against an off-by-one changing `<=` to `<`.
-      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS);
+      const p = buildPipeline(MAX_STREAM_GUARD_TIMEOUT_MS);
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -5588,7 +5928,7 @@ describe('ContentGenerationPipeline', () => {
         gated.stream,
       );
       // Config is oversized → rejected; env = 4000 → used (not default).
-      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
+      const p = buildPipeline(MAX_STREAM_GUARD_TIMEOUT_MS + 1);
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -5656,6 +5996,405 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(false);
       gated.end();
       await consume;
+    });
+
+    it('caps the total stream lifetime even when chunks keep resetting the idle watchdog (issue #8597)', async () => {
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000); // idle 1s, lifetime 3s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // A chunk every 500ms: every drip resets the 1s idle watchdog, so it can
+      // never fire — the CI hang shape. The 3s lifetime cap does not reset.
+      for (let i = 0; i < 5; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=3500 — past the cap
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect(error).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+      expect((error as StreamLifetimeExceededError).chunksReceived).toBe(5);
+      expect((error as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+      expect(gated.wasReturned()).toBe(true);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('does not interrupt a drip-fed stream that completes within the lifetime cap', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      let done = false;
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      gated.push(chunk('a'));
+      await vi.advanceTimersByTimeAsync(500);
+      gated.push(chunk('b'));
+      await vi.advanceTimersByTimeAsync(500);
+      gated.end(); // completes at t=1000, well under the 3s cap
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+    });
+
+    it('does not charge the cap for a wall-clock jump — the accounting is monotonic', async () => {
+      // The guard accounts on `performance.now()`, not `Date.now()`: an NTP
+      // step forward (or a laptop waking from a long sleep) must not kill a
+      // healthy stream, and a backward step must not disable the cap. The
+      // jump lands while `it.next()` is pending, so a wall-clock deadline
+      // charged it as upstream wait and threw at the next iteration; the
+      // monotonic clock sees only the 500ms the model actually took.
+      const gated = gatedStream(); // silent until pushed
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000); // idle 1s, lifetime 3s
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      let done = false;
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      await vi.advanceTimersByTimeAsync(500); // next() pending, t=500
+      // The wall clock leaps 20 minutes while monotonic time does not.
+      const dateNow = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.now() + 1_200_000);
+      gated.push(chunk('a')); // ends the wait 500ms in by the monotonic clock
+      await vi.advanceTimersByTimeAsync(0);
+      gated.push(chunk('b'));
+      await vi.advanceTimersByTimeAsync(500);
+      gated.end(); // completes at monotonic t=1000, well under the 3s cap
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      dateNow.mockRestore();
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+    });
+
+    it('honours QWEN_STREAM_MAX_LIFETIME_MS when no explicit config is set', async () => {
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '4000');
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000); // idle 1s; lifetime from the env
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      for (let i = 0; i < 7; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=4500 — past the 4s env cap
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(4000);
+    });
+
+    it('lets an explicit streamMaxLifetimeMs config take precedence over the env', async () => {
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '1000');
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(500, 3000); // config 3s wins over env 1s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      for (let i = 0; i < 4; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(400);
+      }
+      // t=1600: past the env value (1s) — must NOT have tripped yet.
+      expect(error).toBeUndefined();
+      for (let i = 0; i < 4; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(400);
+      }
+      // t=3200: past the 3s config cap.
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+    });
+
+    it('ignores a malformed QWEN_STREAM_MAX_LIFETIME_MS and falls back to the default', async () => {
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, 'not-a-number');
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000); // idle 1s (never reached); lifetime env invalid
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // The effective cap must be the default: not tripped before it (a
+      // malformed value did not become 0/disabled or fire immediately), and
+      // tripped at it (the default — not some other value — is used).
+      const drips = Math.ceil(DEFAULT_STREAM_MAX_LIFETIME_MS / 500);
+      for (let i = 0; i < drips - 1; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      expect(error).toBeUndefined(); // not before the default
+      gated.push(chunk('x'));
+      await vi.advanceTimersByTimeAsync(500); // trips at the default
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
+    });
+
+    it('uses the default lifetime cap when nothing overrides it', async () => {
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000); // idle 1s; lifetime default 900s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // Drip at 500ms intervals all the way to the default cap: the idle
+      // watchdog never fires, the 15-minute lifetime cap does.
+      const drips = Math.ceil(DEFAULT_STREAM_MAX_LIFETIME_MS / 500);
+      for (let i = 0; i < drips; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
+    });
+
+    it('keeps the idle guard answering when the lifetime cap is disabled', async () => {
+      // The guards are independent: disabling the lifetime cap must not
+      // disable the idle watchdog with it. (The disable itself is pinned by
+      // the both-guards-0 tests below — a silent stream with the idle guard
+      // active would trip the idle timer at 1s for ANY lifetime value, so it
+      // cannot distinguish a working disable.)
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 0); // lifetime disabled; idle 1s active
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      await consume;
+      // The idle guard still answers for a silent stream; no lifetime error.
+      expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+    });
+
+    it('caps the lifetime even when the idle watchdog is disabled', async () => {
+      // The wrap condition's other half: idle off, lifetime on. Deployments
+      // that set QWEN_STREAM_IDLE_TIMEOUT_MS=0 rely on the cap as their only
+      // remaining guard, so the cap must still wrap the stream for them.
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(0, 3000); // idle disabled; lifetime 3s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      for (let i = 0; i < 5; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=3500 — past the 3s cap
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('disables both guards when both are 0 — no wrap, no cap, no idle abort', async () => {
+      // Pins the both-guards-off OUTCOME: with neither guard positive the
+      // stream passes through untouched and is never aborted — however far the
+      // fake clock runs past both defaults. That outcome is now doubly
+      // provided (the caller's `idleMs > 0 || maxLifetimeMs > 0` skip, plus the
+      // in-function both-off early return), so this test pins the behaviour,
+      // not which mechanism supplies it — an always-wrap refactor of the CALLER
+      // is caught by the function's early return, which is exactly why this
+      // stream does not die to `setTimeout(Infinity)` clamping to ~1ms.
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(0, 0); // both guards off
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // Well past the default idle window AND the default lifetime cap.
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_MAX_LIFETIME_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end(); // unblock so the test doesn't leak a pending stream
+      await consume;
+    });
+
+    it('disables both guards when both env knobs are 0', async () => {
+      // The env-`0` twin of the test above: a `0` on either deployment knob
+      // must reach the guard, not fall through to the default.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0');
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '0');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; both env knobs 0 → both off
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_MAX_LIFETIME_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('does not cap a buffered, already-complete stream for a slow consumer — consumer time is not upstream wait', async () => {
+      // The lifetime cap charges only the time the loop is BLOCKED on
+      // `it.next()` (upstream latency), never the time the consumer spends
+      // after a yield. An upstream that already finished and buffered
+      // everything owes nothing, however slowly the consumer drains — so all
+      // ten pre-buffered chunks are delivered and the stream completes, even
+      // with the wall clock racing 2s per chunk past the 3s cap. (The prior
+      // shape — charging the deadline check at the top of the loop — cut this
+      // healthy stream at 2 chunks for the consumer's slowness.)
+      const gated = gatedStream();
+      for (let i = 0; i < 10; i++) gated.push(chunk('x')); // all pre-buffered
+      gated.end();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000); // idle 1s, lifetime 3s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const received: GenerateContentResponse[] = [];
+      let error: unknown;
+      const consume = (async () => {
+        for await (const r of gen) {
+          received.push(r);
+          // A slow consumer: the wall clock jumps 2s per chunk (20s total,
+          // far past the cap) while every next() stays a microtask — no
+          // upstream wait is charged, so nothing fires.
+          await vi.advanceTimersByTimeAsync(2000);
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      await consume;
+      expect(error).toBeUndefined();
+      expect(received).toHaveLength(10); // all delivered, none discarded
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
   });
 });

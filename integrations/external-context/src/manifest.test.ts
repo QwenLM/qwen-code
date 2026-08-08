@@ -109,6 +109,112 @@ describe('extension manifest', () => {
     );
     expect(settings.hooks).toBeUndefined();
   });
+
+  it.each([
+    {
+      platform: 'posix',
+      command:
+        "exec '/absolute/path/to/node' '/administrator/path/to/qwen-code/integrations/external-context/dist/write-confirmation.js'",
+      shell: undefined,
+    },
+    {
+      platform: 'windows',
+      command:
+        "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\administrator\\qwen-code\\integrations\\external-context\\dist\\write-confirmation.js'",
+      shell: 'powershell',
+    },
+  ])(
+    'pins the managed Mem0 write $platform confirmation Hook',
+    async ({ platform, command, shell }) => {
+      const settings = await readJson(
+        `../examples/managed-mem0-write-user-settings-${platform}.json`,
+      );
+      const events = Object.keys(settings.hooks ?? {});
+      const groups = settings.hooks?.PreToolUse ?? [];
+      const group = groups[0];
+      const hooks = group?.hooks ?? [];
+      const hook = hooks[0];
+
+      expect(settings.$version).toBe(4);
+      expect(events).toEqual(['PreToolUse']);
+      expect(groups).toHaveLength(1);
+      expect(group?.matcher).toBe('mcp__external-context__context_remember');
+      expect(hooks).toHaveLength(1);
+      expect(hook).toEqual({
+        type: 'command',
+        command,
+        ...(shell === undefined ? {} : { shell }),
+        timeout: 8000,
+        name: 'external-context-memory-write-confirmation',
+        statusMessage: 'Confirming external memory write',
+      });
+    },
+  );
+
+  it('keeps the managed Mem0 write MCP surface narrow', async () => {
+    const mcp = await readJson('../examples/managed-mem0-write-mcp.json');
+    const server = mcp.mcpServers?.['external-context'];
+
+    expect(Object.keys(mcp.mcpServers ?? {})).toEqual(['external-context']);
+    expect(server).toEqual({
+      command: '/absolute/path/to/node',
+      args: [
+        '/administrator/path/to/qwen-code/integrations/external-context/dist/main.js',
+      ],
+      cwd: '/administrator/path/to/qwen-code/integrations/external-context',
+      includeTools: ['context_search', 'context_remember'],
+    });
+  });
+
+  it('uses strict v1 Mem0 configuration for managed writes', async () => {
+    const config = await readJson('../examples/mem0-write.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      write: { enabled: true },
+      provider: {
+        type: 'mem0-platform-v3',
+        apiKeyEnv: 'MEM0_API_KEY',
+        appId: 'repository-memory',
+      },
+    });
+  });
+
+  it('pins write confirmation and disables local persistence', async () => {
+    const settings = await readJson(
+      '../examples/managed-mem0-write-system-settings.json',
+    );
+
+    expect(settings).toMatchObject({
+      $version: 4,
+      disableAllHooks: false,
+      general: { chatRecording: false },
+      ui: { enableSpeculation: false },
+      memory: {
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
+        enableAutoSkill: false,
+      },
+      tools: { approvalMode: 'default', autoAccept: false },
+      permissions: {
+        allow: ['mcp__external-context__context_search'],
+        ask: ['mcp__external-context__context_remember'],
+      },
+      privacy: { usageStatisticsEnabled: false },
+      telemetry: {
+        enabled: false,
+        logPrompts: false,
+        includeSensitiveSpanAttributes: false,
+      },
+    });
+    expect(settings.slashCommands?.disabled).toEqual(
+      expect.arrayContaining(['memory', 'remember', 'forget', 'dream', 'cd']),
+    );
+    expect(settings.hooks).toBeUndefined();
+  });
 });
 
 async function readJson(relativePath: string) {

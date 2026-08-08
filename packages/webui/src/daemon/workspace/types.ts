@@ -17,6 +17,7 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
@@ -206,7 +207,7 @@ export interface DaemonChannelPairingActions {
   approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
   revoke(
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ): Promise<DaemonChannelPairingRevocationResult>;
 }
 

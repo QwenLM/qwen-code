@@ -53,6 +53,7 @@ describe('createServeApp default bridge wiring', () => {
 
   it('wires the internally-created bridge lifecycle into the workspace registry', async () => {
     let sessionLifecycle: BridgeOptions['sessionLifecycle'];
+    let bridgeOptions: BridgeOptions | undefined;
     const liveSessionIds = new Set<string>();
     const bridge = makeBridge(0, liveSessionIds);
     vi.doMock('./acp-session-bridge.js', async () => {
@@ -62,6 +63,7 @@ describe('createServeApp default bridge wiring', () => {
       return {
         ...actual,
         createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
+          bridgeOptions = opts;
           sessionLifecycle = opts.sessionLifecycle;
           return bridge;
         }),
@@ -80,6 +82,9 @@ describe('createServeApp default bridge wiring', () => {
     const locals = app.locals as { workspaceRegistry?: WorkspaceRegistry };
 
     expect(sessionLifecycle).toBeDefined();
+    expect(bridgeOptions).toMatchObject({
+      delegateReadTextFileToClient: false,
+    });
     liveSessionIds.add('session-indexed');
     sessionLifecycle!({
       type: 'registered',
