@@ -27,6 +27,7 @@ import { replayTranscriptRecordPage } from '../acp-integration/session/history-r
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const PREFIX = 'subagent.';
+const MAX_VIRTUAL_SESSION_ID_LENGTH = 2_000;
 const POLL_INTERVAL_MS = 250;
 const TARGET_RETENTION_MS = 60_000;
 
@@ -204,8 +205,16 @@ function decodePart(value: string): string | undefined {
   }
 }
 
-function isValidVirtualSessionPart(value: string): boolean {
+function isValidVirtualParentSessionId(value: string): boolean {
   return /^[a-zA-Z0-9_-]{1,500}$/.test(value);
+}
+
+function isValidVirtualAgentId(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 500 &&
+    decodePart(encodePart(value)) === value
+  );
 }
 
 export function createVirtualSubagentSessionId(
@@ -213,18 +222,25 @@ export function createVirtualSubagentSessionId(
   agentId: string,
 ): string {
   if (
-    !isValidVirtualSessionPart(parentSessionId) ||
-    !isValidVirtualSessionPart(agentId)
+    !isValidVirtualParentSessionId(parentSessionId) ||
+    !isValidVirtualAgentId(agentId)
   ) {
     throw new Error('Virtual subagent session ids require valid id parts');
   }
-  return `${PREFIX}${encodePart(parentSessionId)}.${encodePart(agentId)}`;
+  const sessionId = `${PREFIX}${encodePart(parentSessionId)}.${encodePart(agentId)}`;
+  if (sessionId.length > MAX_VIRTUAL_SESSION_ID_LENGTH) {
+    throw new Error('Virtual subagent session ids require valid id parts');
+  }
+  return sessionId;
 }
 
 export function parseVirtualSubagentSessionId(
   sessionId: string,
 ): VirtualSubagentSessionKey | undefined {
-  if (!sessionId.startsWith(PREFIX) || sessionId.length > 2_000) {
+  if (
+    !sessionId.startsWith(PREFIX) ||
+    sessionId.length > MAX_VIRTUAL_SESSION_ID_LENGTH
+  ) {
     return undefined;
   }
   const parts = sessionId.slice(PREFIX.length).split('.');
@@ -234,8 +250,8 @@ export function parseVirtualSubagentSessionId(
   if (
     !parentSessionId ||
     !agentId ||
-    !isValidVirtualSessionPart(parentSessionId) ||
-    !isValidVirtualSessionPart(agentId)
+    !isValidVirtualParentSessionId(parentSessionId) ||
+    !isValidVirtualAgentId(agentId)
   ) {
     return undefined;
   }
