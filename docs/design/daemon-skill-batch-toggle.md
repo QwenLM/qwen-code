@@ -58,6 +58,10 @@ persistence and runtime-generation failures fail the whole request.
 }
 ```
 
+`results` and `errors` each preserve request order within their own array;
+the response does not reconstruct the original mixed ordering, so clients
+re-match targets by `skillName`.
+
 Malformed requests still fail as a whole with HTTP 400. Workspace trust,
 authentication, client identity, and generation ownership use the same gates
 as the single-Skill route.
@@ -67,4 +71,6 @@ as the single-Skill route.
 Advertise `workspace_skill_batch_toggle` separately from
 `workspace_skill_toggle`. Clients must pre-flight the new capability before
 calling the collection route. The existing single-Skill route and response
-remain unchanged.
+remain unchanged. The collection routes are HTTP-only: the ACP
+`_qwen/workspace/skills` dispatch surface stays read-only, matching the
+single-Skill toggle.
