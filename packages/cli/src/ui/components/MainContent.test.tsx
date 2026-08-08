@@ -16,7 +16,10 @@ import {
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
-import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import {
+  ThoughtExpandedProvider,
+  PENDING_THOUGHT_HEAD_ID,
+} from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
@@ -265,6 +268,24 @@ const renderMainContent = (uiState: UIState) =>
       </UIActionsContext.Provider>
     </AppContext.Provider>,
   );
+
+// Reads the recorded HistoryItemDisplay props back out of the spy and asserts
+// a match exists, so tests can inspect fields without re-deriving the spy
+// plumbing.
+const findHistoryItemDisplayProps = (
+  predicate: (props: {
+    isPending: boolean;
+    item: { id: number; type: string };
+    thoughtHeadId?: number;
+    fullDetail?: boolean;
+  }) => boolean,
+) => {
+  const props = historyItemDisplayPropsSpy.mock.calls
+    .map((c) => c[0])
+    .find(predicate);
+  expect(props).toBeDefined();
+  return props;
+};
 
 describe('<MainContent />', () => {
   it('renders AppHeader inside Static at the top of the static content', () => {
@@ -684,11 +705,14 @@ describe('<MainContent />', () => {
     const renderWithThoughtExpanded = (
       history: UIState['history'],
       allExpanded: boolean,
+      overrides: Partial<UIState> = {},
     ) =>
       render(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
           <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider value={createUIState({ history })}>
+            <UIStateContext.Provider
+              value={createUIState({ history, ...overrides })}
+            >
               <OverflowProvider>
                 <ThoughtExpandedProvider
                   value={{
@@ -710,9 +734,7 @@ describe('<MainContent />', () => {
 
       renderWithThoughtExpanded(toolGroupHistory, true);
 
-      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
-      const toolGroup = calls.find((c) => c?.item?.id === 1);
-      expect(toolGroup).toBeDefined();
+      const toolGroup = findHistoryItemDisplayProps((c) => c.item.id === 1);
       // MainContent reads allExpanded from context and must forward it to
       // every HistoryItemDisplay as fullDetail — the wiring the deleted
       // TranscriptView used to be the sole producer of.
@@ -724,10 +746,24 @@ describe('<MainContent />', () => {
 
       renderWithThoughtExpanded(toolGroupHistory, false);
 
-      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
-      const toolGroup = calls.find((c) => c?.item?.id === 1);
-      expect(toolGroup).toBeDefined();
+      const toolGroup = findHistoryItemDisplayProps((c) => c.item.id === 1);
       expect(toolGroup.fullDetail).toBe(false);
+    });
+
+    describe.each([{ vp: false }, { vp: true }])('vp=$vp', ({ vp }) => {
+      it('forwards fullDetail to pending thoughts', () => {
+        historyItemDisplayPropsSpy.mockClear();
+
+        renderWithThoughtExpanded([], true, {
+          useTerminalBuffer: vp,
+          pendingHistoryItems: [{ type: 'gemini_thought', text: 'reasoning…' }],
+        });
+
+        const pending = findHistoryItemDisplayProps((c) => c.isPending);
+        // Pending thoughts are clickable while streaming; fullDetail must
+        // reach them so those clicks are suppressed.
+        expect(pending.fullDetail).toBe(true);
+      });
     });
   });
 
@@ -1232,5 +1268,166 @@ describe('<MainContent />', () => {
     expect(
       wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
     ).toBe(true);
+  });
+
+  describe('pending thought expansion keying', () => {
+    it('keys a committed thought head off its own id (Static path)', () => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          history: [{ id: 42, type: 'gemini_thought', text: 'done' }],
+        }),
+      );
+      const committed = findHistoryItemDisplayProps((c) => c.item.id === 42);
+      expect(committed.thoughtHeadId).toBe(42);
+    });
+
+    // The Static (<Static>) and VP (ScrollableList) render paths must key
+    // pending thought expansion identically, so each scenario runs twice.
+    describe.each([{ vp: false }, { vp: true }])('vp=$vp', ({ vp }) => {
+      it('keys a pending thought head off the pending sentinel, not the shared item id', () => {
+        historyItemDisplayPropsSpy.mockClear();
+        renderMainContent(
+          createUIState({
+            useTerminalBuffer: vp,
+            pendingHistoryItems: [
+              { type: 'gemini_thought', text: 'reasoning…' },
+            ],
+          }),
+        );
+        const pendingThought = findHistoryItemDisplayProps(
+          (c) => c.isPending && c.item.type === 'gemini_thought',
+        );
+        // Pending items render with the shared item id 0; the expansion key
+        // must be the dedicated sentinel, not that shared id.
+        expect(pendingThought.item.id).toBe(0);
+        expect(pendingThought.thoughtHeadId).toBe(PENDING_THOUGHT_HEAD_ID);
+      });
+
+      it('keys a pending thought head off the sentinel even when committed heads exist', () => {
+        historyItemDisplayPropsSpy.mockClear();
+        renderMainContent(
+          createUIState({
+            useTerminalBuffer: vp,
+            history: [{ id: 42, type: 'gemini_thought', text: 'earlier head' }],
+            pendingHistoryItems: [
+              { type: 'gemini_thought', text: 'reasoning…' },
+            ],
+          }),
+        );
+        const pendingThought = findHistoryItemDisplayProps(
+          (c) => c.isPending && c.item.type === 'gemini_thought',
+        );
+        // From the second thought of a session onward the sentinel must win
+        // over the last committed head id, else the click would toggle the
+        // previous thought group and the commit-time migration finds nothing.
+        expect(pendingThought.thoughtHeadId).toBe(PENDING_THOUGHT_HEAD_ID);
+      });
+
+      it('keys a split pending tail off the committed head id', () => {
+        historyItemDisplayPropsSpy.mockClear();
+        renderMainContent(
+          createUIState({
+            useTerminalBuffer: vp,
+            history: [{ id: 42, type: 'gemini_thought', text: 'head chunk' }],
+            pendingHistoryItems: [
+              { type: 'gemini_thought_content', text: 'streaming tail…' },
+            ],
+          }),
+        );
+        const pendingTail = findHistoryItemDisplayProps(
+          (c) => c.isPending && c.item.type === 'gemini_thought_content',
+        );
+        expect(pendingTail.thoughtHeadId).toBe(42);
+      });
+
+      it('keys a split pending tail off the most recent committed head, not the first', () => {
+        historyItemDisplayPropsSpy.mockClear();
+        renderMainContent(
+          createUIState({
+            useTerminalBuffer: vp,
+            history: [
+              { id: 41, type: 'gemini_thought', text: 'first head' },
+              { id: 42, type: 'gemini_thought', text: 'second head' },
+            ],
+            pendingHistoryItems: [
+              { type: 'gemini_thought_content', text: 'streaming tail…' },
+            ],
+          }),
+        );
+        const pendingTail = findHistoryItemDisplayProps(
+          (c) => c.isPending && c.item.type === 'gemini_thought_content',
+        );
+        expect(pendingTail.thoughtHeadId).toBe(42);
+      });
+
+      it('keys a split pending tail off the committed head, not a committed tail (double-split)', () => {
+        historyItemDisplayPropsSpy.mockClear();
+        renderMainContent(
+          createUIState({
+            useTerminalBuffer: vp,
+            history: [
+              { id: 42, type: 'gemini_thought', text: 'head chunk' },
+              {
+                id: 43,
+                type: 'gemini_thought_content',
+                text: 'committed tail',
+              },
+            ],
+            pendingHistoryItems: [
+              { type: 'gemini_thought_content', text: 'streaming tail…' },
+            ],
+          }),
+        );
+        const pendingTail = findHistoryItemDisplayProps(
+          (c) => c.isPending && c.item.type === 'gemini_thought_content',
+        );
+        // A thought longer than 2x the pending-size cap splits twice: the
+        // already-committed tail item must not steal the key — the pending
+        // tail belongs to the head, so toggling the head expands it too.
+        expect(pendingTail.thoughtHeadId).toBe(42);
+      });
+    });
+
+    it('keeps the VP tail keyed to the head that commits mid-stream (ref freshness)', () => {
+      historyItemDisplayPropsSpy.mockClear();
+      const { rerender } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [{ type: 'gemini_thought', text: 'reasoning…' }],
+        }),
+      );
+
+      // The head commits (id 42) while the reasoning keeps streaming as a
+      // `gemini_thought_content` tail. renderItem reads the committed head id
+      // via ref, so the re-render must refresh it — a stale ref leaves the
+      // tail un-keyed.
+      rerender(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                history: [
+                  { id: 42, type: 'gemini_thought', text: 'head chunk' },
+                ],
+                pendingHistoryItems: [
+                  { type: 'gemini_thought_content', text: 'streaming tail…' },
+                ],
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      const pendingTail = findHistoryItemDisplayProps(
+        (c) => c.isPending && c.item.type === 'gemini_thought_content',
+      );
+      expect(pendingTail.thoughtHeadId).toBe(42);
+    });
   });
 });

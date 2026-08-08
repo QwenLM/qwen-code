@@ -113,6 +113,7 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
+  forcedOpen: boolean;
   onToggle: () => void;
 }> = ({
   text,
@@ -121,6 +122,7 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight,
   contentWidth,
   durationMs,
+  forcedOpen,
   onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
@@ -128,10 +130,14 @@ const ClickableThinkMessage: React.FC<{
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
+  // A thought whose expansion is pinned — Ctrl+O full-detail or the
+  // `thoughtExpanded` prop (SessionPreview) — can never change on click, so
+  // don't advertise a click target that would be ignored. This single check
+  // gates both the hint text and the mouse subscription.
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
-    mouseTrackingEnabled;
-  const isActive = !isPending;
+    mouseTrackingEnabled &&
+    !forcedOpen;
 
   useMouseEvents(
     useCallback(
@@ -173,11 +179,13 @@ const ClickableThinkMessage: React.FC<{
       },
       [onToggle, terminalHeight],
     ),
-    { isActive },
+    // Stays armed while pending too: clicking a streaming thought expands it
+    // so the reasoning can be watched live (and collapsed again).
+    { isActive: clickable },
   );
 
   return (
-    <Box ref={isActive ? ref : undefined}>
+    <Box ref={ref}>
       <ThinkMessage
         text={text}
         isPending={isPending}
@@ -259,6 +267,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     fullDetail ||
     (thoughtExpanded ??
       (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
+  // fullDetail, Ctrl+O full-detail (`allExpanded`), and any explicit
+  // `thoughtExpanded` prop pin the thought's expansion state (open or
+  // closed), so a click could never change it — ClickableThinkMessage
+  // disarms itself. `allExpanded` matters on surfaces that don't forward it
+  // as `fullDetail` (e.g. AgentChatContent).
+  const forcedOpen = fullDetail || allExpanded || thoughtExpanded !== undefined;
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -334,6 +348,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
+          forcedOpen={forcedOpen}
           onToggle={() => toggleThought(thoughtGroupHeadId)}
         />
       )}

@@ -64,14 +64,20 @@ interface AssistantMessageContentProps {
 interface ThinkMessageProps {
   text: string;
   isPending: boolean;
-  /** When committed (not pending), whether to show the full reasoning. */
+  /**
+   * Whether to show the full reasoning. Applies to both pending (streaming)
+   * and committed thoughts; a collapsed thought renders only the header hint
+   * line.
+   */
   expanded?: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
   /**
-   * VP mode only: the collapsed line is mouse-clickable, so the hint advertises
-   * "click" in addition to the keyboard toggle. Non-VP has no click handler.
+   * VP mode only: the header line is mouse-clickable, so the hints
+   * advertise "click" — the expand hint alongside the keyboard toggle, the
+   * collapse hint on its own (ctrl+o cannot collapse a click-expanded
+   * thought). Non-VP has no click handler.
    */
   clickable?: boolean;
 }
@@ -383,32 +389,37 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
       : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
         ? t('Thought briefly')
         : `${t('Thought for')} ${formatDuration(durationMs)}`;
+  const headerIcon = isPending ? THINKING_ICON_PENDING : THINKING_ICON;
+  const pendingLabel = `${t('Thinking')}…${durationSuffix}`;
 
-  if (!isPending && !expanded) {
-    const label = completedLabel ?? t('Thinking');
+  if (!expanded) {
+    const label = isPending ? pendingLabel : (completedLabel ?? t('Thinking'));
     const hint = clickable
       ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
       : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
     return (
       <Text dimColor italic>
-        {THINKING_ICON}
+        {headerIcon}
         {label} {hint}
       </Text>
     );
   }
 
   const label = isPending
-    ? `${t('Thinking')}…${durationSuffix}`
+    ? pendingLabel
     : (completedLabel ?? `${t('Thinking')}…`);
-  const collapseHint =
-    !isPending && expanded
-      ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
-      : '';
+  // When clickable, expansion can only have come from the per-head click
+  // set (the pinned-open routes disarm `clickable`), and ctrl+o cannot
+  // collapse a click-expanded thought — it is the app-wide full-detail
+  // switch — so the hint must not advertise it.
+  const collapseHint = clickable
+    ? ` ${t('(click to collapse)')}`
+    : ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`;
 
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {headerIcon}
         {label}
         {collapseHint}
       </Text>

@@ -146,7 +146,10 @@ import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
-import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
+import {
+  ThoughtExpandedProvider,
+  settlePendingExpansion,
+} from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -783,6 +786,14 @@ export const AppContainer = (props: AppContainerProps) => {
       return next;
     });
   }, []);
+  const settlePendingThoughtExpansion = useCallback(
+    (committedHeadId: number | null) => {
+      setExpandedThoughtHeadIds((prev) =>
+        settlePendingExpansion(prev, committedHeadId),
+      );
+    },
+    [],
+  );
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -2090,6 +2101,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    settlePendingThoughtExpansion,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;

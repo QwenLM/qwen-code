@@ -84,7 +84,7 @@ qwen-code 当前把 **Ctrl+O 绑定为 `TOGGLE_COMPACT_MODE`**：一个**全局�
 
 | 块类型                                                          | 默认基线渲染（#5661 type-based partition 模型）                                                                                                                                                                 | 是否在 transcript 才看全         |
 | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| 思考（gemini_thought / \_content）                              | 单行摘要 `✻ Thought for 3s (ctrl+o to expand)`；streaming 中实时显示，落定后收成摘要                                                                                                                            | 是                               |
+| 思考（gemini_thought / \_content）                              | 单行摘要 `✻ Thought for 3s (ctrl+o to expand)`（VP 鼠标模式下点击摘要行亦可展开/收起）；streaming 中同样收成 `Thinking…` 摘要行，可点击展开实时观看；落定后收成摘要，streaming 中的展开状态迁移保留             | 是                               |
 | **collapsible 工具**（read/search/list，非 force）              | 经 `isCollapsibleTool(name)` 归入 `collapsibleTools`，**折叠**成 `CompactToolGroupDisplay` **分区摘要行**（按 `CATEGORY_ORDER` 聚合，如 `Read 3 files, edited 2 files, ran 1 command`）                         | 逐个工具的明细在 transcript 看全 |
 | **non-collapsible 工具**（edit/write/command/agent / Canceled） | 归入 `nonCollapsibleTools`，**始终逐个** `ToolMessage` 完整渲染（其输出本身就是答案）——即使整组已完成也不折叠成摘要                                                                                             | ——                               |
 | 混合组（collapsible + non-collapsible 并存）                    | **摘要行 + 逐个工具并存**：collapsible 部分 → 一行 `CompactToolGroupDisplay` 摘要；non-collapsible 部分 → 逐个 `ToolMessage`。**不是整组折叠**                                                                  | 部分                             |
@@ -120,11 +120,11 @@ qwen-code 当前把 **Ctrl+O 绑定为 `TOGGLE_COMPACT_MODE`**：一个**全局�
 
 下列两张为本分支构建（`node dist/cli.js --yolo`）在固定虚拟终端（1400×900 / FontSize 14）下、对同一会话先后捕获的 before/after，经 `qwen-code-mac-autotest` skill 录制（`session.tape` 可复现）。会话提示为：列文件 → 读 `README.md` → grep `export` → 一句话总结，触发 list/read/grep 三个**可折叠**工具。
 
-**主视图（默认基线，§3.1）**——三个 read/search/list 工具折叠为单行分区摘要 `✔ Searched 1 pattern, read 1 file, listed 1 directory`，思考块折叠为 `Thought for Ns (option+t to expand)`：
+**主视图（默认基线，§3.1）**——三个 read/search/list 工具折叠为单行分区摘要 `✔ Searched 1 pattern, read 1 file, listed 1 directory`，思考块折叠为 `Thought for Ns (ctrl+o to expand)`：
 
 ![主视图：工具折叠为单行摘要](assets/main-view-collapsed.png)
 
-**Ctrl+O Transcript 屏（§3.2 + §4.5 `fullDetail`）**——alt-screen 全屏，header「完整记录」、footer「Esc/q 关闭 ↑↓ 滚动 PgUp/PgDn Ctrl+Home/End」；同一会话下三个工具从主视图的**单行合并摘要**拆为**各自独立的行**，思考块解除折叠（`option+t to collapse`）并显示全文：
+**Ctrl+O Transcript 屏（§3.2 + §4.5 `fullDetail`）**——alt-screen 全屏，header「完整记录」、footer「Esc/q 关闭 ↑↓ 滚动 PgUp/PgDn Ctrl+Home/End」；同一会话下三个工具从主视图的**单行合并摘要**拆为**各自独立的行**，思考块解除折叠（`ctrl+o to collapse`）并显示全文：
 
 ![Ctrl+O Transcript：逐工具展开（§4.9 实现前）](assets/ctrl-o-transcript-expanded.png)
 
