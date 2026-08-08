@@ -662,7 +662,8 @@ function setupAcpTest(
       ).rejects.toMatchObject({
         response: {
           code: -32602,
-          message: 'Invalid params: Unknown reasoning effort: ultra',
+          message:
+            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
         },
       });
     } catch (e) {

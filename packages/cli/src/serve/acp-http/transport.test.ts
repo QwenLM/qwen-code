@@ -4749,7 +4749,31 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       error: { code: number; message: string };
     }>;
     expect(frame.error.code).toBe(-32602);
-    expect(frame.error.message).toContain('Unknown configId: reasoning_effort');
+    expect(frame.error.message).toContain(
+      'ConfigId not supported by this transport: reasoning_effort',
+    );
+    expect(frame.error.message).toContain('(supported: model, mode)');
+    expect(bridge.lastSetModel).toBeUndefined();
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/set_config_option without an id writes no response for an unroutable configId', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'sess-1',
+        configId: 'reasoning_effort',
+        value: 'high',
+      },
+    });
+    expect(ack.status).toBe(202);
+    const frames = await takeFrames(sessStream, 1, 300);
+    expect(frames).toHaveLength(0);
     expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
   });

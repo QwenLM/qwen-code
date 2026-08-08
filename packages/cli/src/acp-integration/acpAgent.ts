@@ -5192,7 +5192,7 @@ class QwenAgent implements Agent {
         if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
           throw RequestError.invalidParams(
             undefined,
-            `Unknown reasoning effort: ${value}`,
+            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
           );
         }
         if (!applyReasoningEffort(session.getConfig(), effort)) {

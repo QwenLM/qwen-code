@@ -6305,7 +6305,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           configId: 'reasoning_effort',
           value: 'ultra',
         }),
-      ).rejects.toThrow('Unknown reasoning effort: ultra');
+      ).rejects.toThrow(
+        'Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+      );
       expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
 
       innerConfig.setReasoningEffort.mockImplementation(() => {});
