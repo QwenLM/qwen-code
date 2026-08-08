@@ -111,6 +111,18 @@ describe('assign-issue-owner: skip policy', () => {
     );
   });
 
+  it('leaves autofix-owned issues to autofix', () => {
+    for (const label of ['autofix/approved', 'autofix/in-progress']) {
+      assert.equal(
+        skipReason(policy, {
+          ...coreIssue,
+          labels: [...coreIssue.labels, { name: label }],
+        }),
+        `carries ${label}`,
+      );
+    }
+  });
+
   it('waits for every required label', () => {
     assert.match(
       skipReason(policy, { ...coreIssue, labels: [{ name: 'category/core' }] }),
@@ -276,7 +288,7 @@ describe('assign-issue-owner: workflow invariants', () => {
       undefined,
       'job-level env exposes GH_TOKEN to every step',
     );
-    assert.ok(assignStep.env.GH_TOKEN.includes('QWEN_CODE_BOT_TOKEN'));
+    assert.equal(assignStep.env.GH_TOKEN, '${{ github.token }}');
     assert.equal(checkoutStep.with['persist-credentials'], false);
   });
 
@@ -289,7 +301,7 @@ describe('assign-issue-owner: workflow invariants', () => {
   });
 
   it('fires on label changes without cancelling an in-flight assignment', () => {
-    assert.deepEqual(doc.on.issues.types, ['labeled']);
+    assert.deepEqual(doc.on.issues.types, ['labeled', 'unlabeled']);
     assert.equal(doc.concurrency['cancel-in-progress'], false);
   });
 });

@@ -5,7 +5,9 @@
     "welcome-pr",
     "feature/need-help",
     "good first issue",
-    "help wanted"
+    "help wanted",
+    "autofix/approved",
+    "autofix/in-progress"
   ],
   "areas": [
     {

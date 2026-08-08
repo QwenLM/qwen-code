@@ -7,19 +7,19 @@ name: 'Assign issue owner'
 # or comments, so untrusted issue text cannot select an assignee. Push access is
 # re-verified against the collaborator API before every write.
 #
-# Trigger note: the `labeled` event only fires for label writes made with a PAT.
+# Trigger note: label events only fire for label writes made with a PAT.
 # The triage agent labels with QWEN_CODE_BOT_TOKEN/CI_BOT_PAT (see
 # qwen-triage.yml), so this chains correctly. If triage ever falls back to the
 # default GITHUB_TOKEN for labelling, this workflow stops firing and must be
 # rehung on `workflow_run` instead — GITHUB_TOKEN writes do not trigger
 # downstream workflow runs.
 #
-# `labeled` fires once per label, so a triage run that applies five labels
+# Each label change fires once, so a triage run that applies five labels
 # queues five runs. Every run after the first sees an assignee and no-ops.
 
 on:
   issues:
-    types: ['labeled']
+    types: ['labeled', 'unlabeled']
   workflow_dispatch:
     inputs:
       number:
@@ -58,7 +58,7 @@ jobs:
 
       - name: 'Assign area owner'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           ISSUE_NUMBER: '${{ github.event.issue.number || inputs.number }}'
           DRY_RUN: "${{ inputs.dry_run || 'false' }}"
         run: 'node .github/scripts/assign-issue-owner.mjs'
