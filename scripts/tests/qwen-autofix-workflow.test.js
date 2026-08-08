@@ -413,11 +413,19 @@ describe('qwen-autofix workflow', () => {
     // that it exists AND still binds below MAX_TARGETS_PER_SCAN is pinned by
     // 'bounds fleet-wide simultaneity below the per-scan target budget'.
     // Asserting the literal number here only detected edits, not breakage.
-    expect(workflow).toMatch(/max-parallel: \d+/);
+    expect(workflow).toMatch(
+      /max-parallel: '\$\{\{ fromJSON\(vars\.QWEN_AUTOFIX_MAX_PARALLEL \|\| \d+\) \}\}'/,
+    );
     // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
     // bounds runtime and API usage, not just matrix size), the deferral is
     // LOGGED, and the next scan picks up the remainder.
-    expect(workflow).toContain("MAX_TARGETS_PER_SCAN: '10'");
+    // Operator-tunable via a repository variable so the loop can be re-sized
+    // as the takeover pool grows without a code change; the literal is the
+    // fallback. Both halves are asserted so the knob cannot silently lose
+    // either its variable or its default.
+    expect(workflow).toMatch(
+      /MAX_TARGETS_PER_SCAN: '\$\{\{ vars\.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN \|\| \d+ \}\}'/,
+    );
     expect(reviewScanJob).toContain(
       'deferring the remaining candidates to the next scan',
     );
@@ -1387,10 +1395,17 @@ describe('qwen-autofix workflow', () => {
     // raising it to the target budget, both let one backlog open every agent
     // run at once — which is the thing the cap exists to prevent, and neither
     // would fail any other test.
+    // Both are repository variables now, so what is checkable here is the
+    // FALLBACK pair — the values that apply until an operator sets them.
+    // Keeping the relation true for the fallbacks means an unconfigured repo
+    // is still correctly bounded; for configured ones it is an operator
+    // invariant, stated at both definitions.
     expect(reviewAddressJob).toContain('matrix:');
-    const parallel = Number(reviewAddressJob.match(/max-parallel: (\d+)/)?.[1]);
+    const parallel = Number(
+      reviewAddressJob.match(/max-parallel:.*?\|\|\s*(\d+)/)?.[1],
+    );
     const targetBudget = Number(
-      workflow.match(/MAX_TARGETS_PER_SCAN: '(\d+)'/)?.[1],
+      workflow.match(/MAX_TARGETS_PER_SCAN:.*?\|\|\s*(\d+)/)?.[1],
     );
     expect(Number.isInteger(parallel)).toBe(true);
     expect(parallel).toBeGreaterThan(0);
@@ -5101,10 +5116,10 @@ exit 1
     );
   });
 
-  it('switches to Critical-only feedback after ten change rounds', () => {
-    // ROUND counts change-producing rounds, so 9 still starts the tenth
-    // suggestion-capable change while 10 starts the first Critical-only round.
-    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '10'");
+  it('switches to Critical-only feedback after five change rounds', () => {
+    // ROUND counts change-producing rounds, so 4 still starts the fifth
+    // suggestion-capable change while 5 starts the first Critical-only round.
+    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '5'");
     expect(workflow).not.toContain('TAKEOVER_CRITICAL_ONLY_AFTER_ROUND');
     expect(prepareBranchAndFeedbackStep).toContain(
       '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
@@ -5118,12 +5133,12 @@ exit 1
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=10\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(9)).toBe('false');
-    expect(modeAt(10)).toBe('true');
+    expect(modeAt(4)).toBe('false');
+    expect(modeAt(5)).toBe('true');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and

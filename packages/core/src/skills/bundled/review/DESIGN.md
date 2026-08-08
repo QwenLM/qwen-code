@@ -932,3 +932,7 @@ Every one of six measured CI reviews (2026-08-05/06) spent 1.5–3 minutes at St
 ### The one-command-per-turn tail
 
 Measured across the same six CI reviews: the post-verdict bookkeeping — Markdown report, cost-ledger, save-artifact, `record_artifact`, the incremental-cache write, cleanup — ran one command per model turn, 4–6 minutes of wall clock after the review's outcome was already decided (and, on posting runs, already on the PR), stretching past 7 minutes when the qwen-home fumbling above joined it. Every command in the tail is cheap; the turns are not — the same arithmetic that batches the Step 1 setup calls, unapplied to the other end of the run.
+
+### The forty-one minute wave
+
+Two measured runs of the same 14-agent Step 3A fan-out, on diffs of comparable size, took 11.7 and 41 minutes — and the wave's wall clock is its slowest agent, so the whole review inherited the difference. The slow wave's tail was not review depth: individual agents spent 40-100 model calls exploring the tree (the pattern a sibling PR had already named as the next optimization target), while healthy agents on the same class of diff settle at 25-45 calls with indistinguishable findings. The budget that answers this is soft on purpose: a hard cap would convert the pathology into silent truncation, so the brief tells the agent to stop exploring at the ceiling, file what it holds, and disclose the checks it did not get to — the disclosure lands in the same receipt machinery that already judges whiffs.
