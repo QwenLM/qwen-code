@@ -69,6 +69,16 @@ function normalize(model: string): string {
   s = s.replace(/^.*\//, '');
   s = s.split('|').pop() ?? s;
   s = s.split(':').pop() ?? s;
+
+  // Mirror core: rewrite dotted-minor Claude aliases (LiteLLM/Vertex/Bedrock
+  // convention, e.g. `claude-opus-4.8`) to the canonical hyphenated form
+  // BEFORE the trailing-suffix strip eats them. See
+  // packages/core/src/core/tokenLimits.ts::normalize for the full rationale.
+  s = s.replace(
+    /^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+)/,
+    '$1-$2',
+  );
+
   s = s.replace(/\s+/g, '-');
   s = s.replace(/-preview/g, '');
 
@@ -101,6 +111,7 @@ const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['200k']],
 
   // Anthropic Claude
+  [/^claude-opus-(?:4-(?:6|7|8)|5)/, LIMITS['1m']],
   [/^claude-/, LIMITS['200k']],
 
   // Alibaba / Qwen
@@ -145,7 +156,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^gpt-/, LIMITS['16k']],
   [/^o\d/, LIMITS['128k']],
 
-  [/^claude-opus-4-6/, LIMITS['128k']],
+  [/^claude-opus-(?:4-(?:6|7|8)|5)/, LIMITS['128k']],
   [/^claude-sonnet-4-6/, LIMITS['64k']],
   [/^claude-/, LIMITS['64k']],
 

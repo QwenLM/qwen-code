@@ -159,6 +159,28 @@ describe('tokenLimit', () => {
       expect(tokenLimit('vertex/claude-opus-4-8')).toBe(1_000_000);
     });
 
+    it('should return 1M for dotted-minor Opus 4.6-4.8 aliases (LiteLLM/Vertex/Bedrock convention)', () => {
+      // Model Group aliases exposed by LiteLLM/Vertex/Bedrock-style proxies
+      // frequently use `.` between major and minor. normalize() rewrites
+      // these to the canonical hyphenated form so a single downstream
+      // pattern matches both conventions.
+      expect(tokenLimit('claude-opus-4.6')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4.7')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4.8')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-4.8')).toBe(1_000_000);
+      expect(tokenLimit('bedrock/claude-opus-4.8')).toBe(1_000_000);
+    });
+
+    it('should return 1M for Opus 5.x (bare major and dotted/hyphenated minors)', () => {
+      expect(tokenLimit('claude-opus-5')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5-0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5-1')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5.0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5.1')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-5')).toBe(1_000_000);
+      expect(tokenLimit('bedrock/claude-opus-5-0')).toBe(1_000_000);
+    });
+
     it('should return 200K for other Claude models', () => {
       expect(tokenLimit('claude-sonnet-4-6')).toBe(200000);
       expect(tokenLimit('claude-sonnet-4')).toBe(200000);
@@ -356,6 +378,24 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('vertex/claude-opus-4-8', 'output')).toBe(128_000);
       expect(tokenLimit('claude-sonnet-4-6', 'output')).toBe(65536);
     });
+
+    it('should return 128K output for dotted-minor Opus 4.6-4.8 aliases', () => {
+      expect(tokenLimit('claude-opus-4.6', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4.7', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('bedrock/claude-opus-4.8', 'output')).toBe(128_000);
+    });
+
+    it('should return 128K output for Opus 5.x (bare major and dotted/hyphenated minors)', () => {
+      expect(tokenLimit('claude-opus-5', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5-0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5-1', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5.0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5.1', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-5', 'output')).toBe(128_000);
+      expect(tokenLimit('bedrock/claude-opus-5-0', 'output')).toBe(128_000);
+    });
   });
 
   describe('legacy model output fallbacks', () => {
@@ -514,6 +554,21 @@ describe('defaultOutputCeiling', () => {
     expect(defaultOutputCeiling('claude-opus-4-6')).toBe(128_000);
     expect(defaultOutputCeiling('claude-opus-4-7')).toBe(128_000);
     expect(defaultOutputCeiling('vertex/claude-opus-4-8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to dotted-minor Opus 4.6-4.8 aliases', () => {
+    expect(defaultOutputCeiling('claude-opus-4.6')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4.7')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4.8')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-4.8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to Opus 5.x', () => {
+    expect(defaultOutputCeiling('claude-opus-5')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5-0')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5-1')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5.0')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-5')).toBe(128_000);
   });
 
   it('uses the default output limit for an unknown model', () => {

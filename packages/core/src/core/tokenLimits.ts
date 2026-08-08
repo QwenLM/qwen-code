@@ -138,6 +138,20 @@ export function normalize(model: string): string {
 
   s = s.split(':').pop() ?? s;
 
+  // Anthropic Claude Model Group aliases from LiteLLM / Vertex / Bedrock-style
+  // proxies frequently use a dotted minor version (`claude-opus-4.8`) rather
+  // than the canonical hyphenated form (`claude-opus-4-8`). The trailing-
+  // suffix strip below treats `-4.8` as a dashed-word version tag and eats
+  // it, collapsing the id to `claude-opus` which then falls through to the
+  // generic Claude fallback (200K input / 64K output) and defeats the 1M /
+  // 128K carve-outs for Opus 4.6+. Rewrite the dotted minor to hyphenated
+  // up front so every downstream regex sees the canonical form regardless
+  // of which alias the proxy exposed.
+  s = s.replace(
+    /^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+)/,
+    '$1-$2',
+  );
+
   // collapse whitespace to single hyphen
   s = s.replace(/\s+/g, '-');
 
@@ -191,7 +205,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Anthropic Claude
   // -------------------
-  [/^claude-opus-4-(?:6|7|8)/, LIMITS['1m']], // Opus 4.6-4.8: 1M
+  [/^claude-opus-(?:4-(?:6|7|8)|5)/, LIMITS['1m']], // Opus 4.6-4.8, Opus 5.x: 1M
   [/^claude-/, LIMITS['200k']], // All Claude models: 200K
 
   // -------------------
@@ -262,7 +276,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-(?:6|7|8)/, 128_000 as TokenCount], // Opus 4.6-4.8: 128K
+  [/^claude-opus-(?:4-(?:6|7|8)|5)/, 128_000 as TokenCount], // Opus 4.6-4.8, Opus 5.x: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
@@ -358,7 +372,7 @@ export function tokenLimit(
  */
 export function defaultOutputCeiling(model: Model): TokenCount {
   const outputLimit = tokenLimit(model, 'output');
-  if (/^claude-opus-4-(?:6|7|8)/.test(normalize(model))) {
+  if (/^claude-opus-(?:4-(?:6|7|8)|5)/.test(normalize(model))) {
     return outputLimit;
   }
   return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);
