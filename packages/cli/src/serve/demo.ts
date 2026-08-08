@@ -97,6 +97,7 @@ export function getDemoHtml(_port: number): string {
       <div class="session-info" id="sessionInfo" style="display:none">
         Session: <span id="sessionIdDisplay"></span>
       </div>
+      <div class="session-info" id="contextUsage" style="display:none"></div>
     </div>
 
     <div class="panel">
@@ -184,6 +185,8 @@ export function getDemoHtml(_port: number): string {
   const requestLog = $('#requestLog');
   const sessionInfo = $('#sessionInfo');
   const sessionIdDisplay = $('#sessionIdDisplay');
+  const contextUsage = $('#contextUsage');
+  let lastLoggedContextPct = -1;
   const permissionPanel = $('#permissionPanel');
   const permissionList = $('#permissionList');
 
@@ -307,6 +310,8 @@ export function getDemoHtml(_port: number): string {
       sessionId = r.data.sessionId;
       sessionInfo.style.display = 'block';
       sessionIdDisplay.textContent = sessionId;
+      contextUsage.style.display = 'none';
+      lastLoggedContextPct = -1;
       enablePrompt(true);
       chatArea.innerHTML = '';
       currentAssistantBubble = null;
@@ -424,6 +429,24 @@ export function getDemoHtml(_port: number): string {
         const text = update.content?.text || '';
         currentThought += text;
         logEvent('THINK', text);
+      } else if (kind === 'usage_update') {
+        // One frame per model round: a long agentic turn (/review) emits
+        // hundreds, and the raw-JSON fallthrough below turned the Events tab
+        // into a scroll of identical lines. Render an in-place meter instead,
+        // and log only when the integer percentage moves — the transitions
+        // stay on record without the flood.
+        const used = update.used;
+        const size = update.size;
+        if (typeof used === 'number' && typeof size === 'number' && size > 0) {
+          const pct = Math.round((used / size) * 100);
+          contextUsage.style.display = 'block';
+          contextUsage.textContent =
+            'Context: ' + used.toLocaleString() + ' / ' + size.toLocaleString() + ' (' + pct + '%)';
+          if (pct !== lastLoggedContextPct) {
+            lastLoggedContextPct = pct;
+            logEvent('CTX', used + ' / ' + size + ' (' + pct + '%)');
+          }
+        }
       } else {
         logEvent(kind || type, JSON.stringify(update));
       }
