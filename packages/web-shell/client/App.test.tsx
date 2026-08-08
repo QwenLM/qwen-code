@@ -2563,18 +2563,52 @@ describe('App plan todos', () => {
       }),
     ];
 
-    const { rerender } = renderApp();
+    const { container, rerender } = renderApp();
     await flush();
 
     expect(testState.latestToolApprovalPlanTodos).toEqual([]);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
 
     testState.settings = [sessionWorkflowSetting()];
     rerender();
     await flush();
 
     expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector('[data-testid="split-approval-notice"] button')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(
       testState.latestToolApprovalPlanTodos.map((todo) => todo.id),
     ).toEqual(['prepare', 'ship']);
+    expect(
+      container.querySelector('[data-testid="workflow-page"]'),
+    ).not.toBeNull();
+
+    testState.blocks = [
+      makePendingPermissionBlock({
+        resolved: true,
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+        todoPlan: { planId: 'plan-1', sourceCallId: 'todo-approved' },
+      }),
+    ];
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-page"]'),
+    ).not.toBeNull();
   });
 
   it('refreshes dependencies when only blockedBy changes', async () => {
@@ -2619,13 +2653,23 @@ describe('App plan todos', () => {
     expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
   });
 
-  it('opens the workflow dialog with plan todos and linked agents', async () => {
+  it('opens the workflow page with plan todos and linked agents', async () => {
     testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
       {
         id: 'plan',
-        role: 'plan',
-        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-start',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: { plan: { id: 'plan-1' } },
+          },
+        ],
       },
       {
         id: 'agents',
@@ -2634,13 +2678,14 @@ describe('App plan todos', () => {
           {
             callId: 'agent-call',
             toolName: 'Agent',
+            title: 'Worker agent',
             status: 'in_progress',
             args: { todo_id: 'work' },
           },
         ],
       },
     ];
-    renderApp();
+    const { container, rerender } = renderApp();
     await flush();
 
     await act(async () => {
@@ -2649,11 +2694,75 @@ describe('App plan todos', () => {
     });
 
     expect(
-      testState.latestTasksStatusProps?.planTodos?.map((todo) => todo.id),
-    ).toEqual(['work']);
+      container.querySelector('[data-testid="workflow-page"]'),
+    ).not.toBeNull();
     expect(
-      testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
-    ).toEqual(['agent-call']);
+      container.querySelector('[data-plan-node-id="work"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('Worker agent');
+    expect(document.activeElement).toBe(
+      container.querySelector(
+        '[data-testid="workflow-page"] button[aria-label="back"]',
+      ),
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="workflow-page"] button[aria-label="back"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    testState.messages = [
+      ...testState.messages.map((message) => {
+        if (message.id !== 'agents' || message.role !== 'tool_group') {
+          return message;
+        }
+        return {
+          ...message,
+          tools: message.tools.map((tool) => ({
+            ...tool,
+            status: 'completed' as const,
+          })),
+        };
+      }),
+      {
+        id: 'plan-complete',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-complete',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'completed' }],
+            },
+            rawOutput: { plan: { id: 'plan-1' } },
+          },
+        ],
+      },
+      { id: 'follow-up', role: 'user', content: 'What happened?' },
+      { id: 'reply', role: 'assistant', content: 'The work completed.' },
+    ];
+    rerender();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-workflow"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('100%');
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('Worker agent');
   });
 
   it('keeps the tasks dialog plain when Session Workflow is off', async () => {

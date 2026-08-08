@@ -13,7 +13,13 @@ import type {
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import { useI18n } from '../../i18n';
-import { getAgentDisplayStatus, isAgentCancelled } from './toolFormatting';
+import { formatRuntime } from '../../utils/formatRuntime';
+import {
+  getAgentDescription,
+  getAgentDisplayStatus,
+  isAgentCancelled,
+  sanitizeControlChars,
+} from './toolFormatting';
 import styles from './PlanExecutionView.module.css';
 
 export type PlanNodeStatus =
@@ -325,6 +331,37 @@ export function PlanExecutionView({
     grouped.push(tool);
     toolsByTodo.set(todoId, grouped);
   }
+  const statesByTodo = new Map(
+    todos.map((todo) => [
+      todo.id,
+      getPlanNodeStateFromIndex(
+        todo,
+        todosById,
+        toolsByTodo.get(todo.id) ?? [],
+        taskIndex,
+      ),
+    ]),
+  );
+  const completedCount = todos.filter(
+    (todo) => todo.status === 'completed',
+  ).length;
+  const progressPercent =
+    todos.length === 0 ? 0 : Math.round((completedCount / todos.length) * 100);
+  const activeAgentCount = tools.reduce((count, tool) => {
+    const root = taskForTool(tool, taskIndex);
+    if (!root) return count;
+    return (
+      count +
+      [
+        root,
+        ...nestedTasksFromIndex(tool, taskIndex).map(({ task }) => task),
+      ].filter((task) => task.status === 'running' || task.status === 'paused')
+        .length
+    );
+  }, 0);
+  const attentionCount = [...statesByTodo.values()].filter(
+    (state) => state.attention,
+  ).length;
   const topology = todos.map((todo): [string, string[]] => [
     todo.id,
     [...new Set(todo.blockedBy ?? [])].filter(
@@ -341,9 +378,17 @@ export function PlanExecutionView({
     hasDependencies && dependencyCount <= MAX_RENDERED_PLAN_EDGES;
   const layers = hasDependencies ? layerPlanTodos(todos) : [todos.slice()];
   const layerByTodo = new Map<string, number>();
+  const dependentsByTodo = new Map<string, string[]>();
   layers.forEach((layer, index) => {
     for (const todo of layer) layerByTodo.set(todo.id, index);
   });
+  for (const [todoId, dependencies] of topology) {
+    for (const dependencyId of dependencies) {
+      const dependents = dependentsByTodo.get(dependencyId) ?? [];
+      dependents.push(todoId);
+      dependentsByTodo.set(dependencyId, dependents);
+    }
+  }
   const graphId = useId().replaceAll(':', '');
   const markerId = `plan-arrow-${graphId}`;
   const graphRef = useRef<HTMLDivElement>(null);
@@ -456,18 +501,34 @@ export function PlanExecutionView({
     ? (toolsByTodo.get(selectedTodo.id) ?? [])
     : [];
   const selectedState = selectedTodo
-    ? getPlanNodeStateFromIndex(
-        selectedTodo,
-        todosById,
-        selectedExecutions,
-        taskIndex,
-      )
+    ? statesByTodo.get(selectedTodo.id)
     : undefined;
+  const selectedDependents = selectedTodo
+    ? (dependentsByTodo.get(selectedTodo.id) ?? [])
+    : [];
   const detailsId = `plan-step-details-${graphId}`;
 
-  const renderExecution = (tool: ACPToolCall) => {
+  const renderExecution = (tool: ACPToolCall, expanded = false) => {
     const status = executionStatus(tool, taskIndex);
     const label = tool.title || String(tool.args?.description ?? tool.toolName);
+    const liveTask = taskForTool(tool, taskIndex);
+    const description = liveTask?.description || getAgentDescription(tool);
+    const latestActivity = liveTask?.recentActivities?.at(-1);
+    const metrics = liveTask
+      ? [
+          formatRuntime(liveTask.runtimeMs),
+          liveTask.stats?.toolUses === undefined
+            ? ''
+            : t('planExecution.toolCalls', {
+                count: liveTask.stats.toolUses,
+              }),
+          liveTask.stats?.totalTokens === undefined
+            ? ''
+            : t('planExecution.tokens', {
+                count: liveTask.stats.totalTokens.toLocaleString(),
+              }),
+        ].filter(Boolean)
+      : [];
     const nestedTasks = nestedTasksFromIndex(tool, taskIndex);
     const transcriptNestedTools = nestedAgentToolsForTool(tool);
     const nestedToolByCallId = new Map(
@@ -488,16 +549,41 @@ export function PlanExecutionView({
       <div className={styles.executionGroup} key={tool.callId}>
         <button
           type="button"
-          className={styles.execution}
+          className={`${styles.execution}${
+            expanded ? ` ${styles.executionExpanded}` : ''
+          }`}
           data-plan-interactive
           onClick={() => onOpenSubagent?.(tool)}
           disabled={!onOpenSubagent}
           title={t('planExecution.openDetails')}
         >
-          <span className={styles.executionLabel}>{label}</span>
-          <span className={styles.executionStatus}>
-            {t(executionStatusKey(status))}
+          <span className={styles.executionHeading}>
+            <span className={styles.executionLabel}>{label}</span>
+            <span className={styles.executionStatus}>
+              {t(executionStatusKey(status))}
+            </span>
           </span>
+          {expanded && description && (
+            <span className={styles.executionDescription}>{description}</span>
+          )}
+          {expanded && latestActivity && (
+            <span className={styles.executionActivity}>
+              <span>{t('planExecution.currentActivity')}</span>
+              {sanitizeControlChars(
+                latestActivity.description || latestActivity.name,
+              )}
+            </span>
+          )}
+          {expanded && metrics.length > 0 && (
+            <span className={styles.executionMetrics}>
+              {metrics.join(' · ')}
+            </span>
+          )}
+          {expanded && onOpenSubagent && (
+            <span className={styles.executionOpen}>
+              {t('planExecution.openDetails')} →
+            </span>
+          )}
         </button>
         {nestedTasks.map(({ task, depth }) => {
           const nestedTool = task.toolUseId
@@ -566,6 +652,40 @@ export function PlanExecutionView({
         {t('planExecution.title')}{' '}
         <span className={styles.count}>({todos.length})</span>
       </div>
+      <div className={styles.overview} aria-label={t('planExecution.overview')}>
+        <div className={styles.progressCard}>
+          <div className={styles.progressHeading}>
+            <span>{t('planExecution.overallProgress')}</span>
+            <strong>{progressPercent}%</strong>
+          </div>
+          <div
+            className={styles.progressTrack}
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progressPercent}
+          >
+            <span style={{ width: `${progressPercent}%` }} />
+          </div>
+        </div>
+        <div className={styles.overviewStat}>
+          <strong>
+            {completedCount} / {todos.length}
+          </strong>
+          <span>{t('planExecution.stepsCompleted')}</span>
+        </div>
+        <div className={styles.overviewStat}>
+          <strong>{activeAgentCount}</strong>
+          <span>{t('planExecution.activeAgents')}</span>
+        </div>
+        <div
+          className={styles.overviewStat}
+          data-attention={attentionCount > 0 || undefined}
+        >
+          <strong>{attentionCount}</strong>
+          <span>{t('planExecution.needsAttention')}</span>
+        </div>
+      </div>
       <div
         className={hasDependencies ? styles.dagViewport : styles.flatList}
         {...(hasDependencies ? { 'data-plan-workflow': true } : {})}
@@ -614,12 +734,7 @@ export function PlanExecutionView({
             <div className={styles.layer} key={index}>
               {layer.map((todo) => {
                 const executions = toolsByTodo.get(todo.id) ?? [];
-                const state = getPlanNodeStateFromIndex(
-                  todo,
-                  todosById,
-                  executions,
-                  taskIndex,
-                );
+                const state = statesByTodo.get(todo.id)!;
                 return (
                   <article
                     className={styles.node}
@@ -674,7 +789,7 @@ export function PlanExecutionView({
                     </button>
                     {executions.length > 0 && (
                       <div className={styles.executions}>
-                        {executions.map(renderExecution)}
+                        {executions.map((tool) => renderExecution(tool))}
                       </div>
                     )}
                   </article>
@@ -712,14 +827,24 @@ export function PlanExecutionView({
               {selectedTodo.blockedBy!.join(', ')}
             </div>
           )}
+          {selectedDependents.length > 0 && (
+            <div className={styles.dependencies}>
+              {t('planExecution.unblocks')} {selectedDependents.join(', ')}
+            </div>
+          )}
           {selectedExecutions.length > 0 && (
             <div className={styles.stepExecutions}>
               <div className={styles.stepExecutionsTitle}>
                 {t('planExecution.subagents')}
               </div>
               <div className={styles.executions}>
-                {selectedExecutions.map(renderExecution)}
+                {selectedExecutions.map((tool) => renderExecution(tool, true))}
               </div>
+            </div>
+          )}
+          {selectedExecutions.length === 0 && (
+            <div className={styles.emptyExecutions}>
+              {t('planExecution.noSubagents')}
             </div>
           )}
         </section>
@@ -730,7 +855,7 @@ export function PlanExecutionView({
             {t('planExecution.unassigned')}
           </div>
           <div className={styles.executions}>
-            {unassigned.map(renderExecution)}
+            {unassigned.map((tool) => renderExecution(tool))}
           </div>
         </div>
       )}

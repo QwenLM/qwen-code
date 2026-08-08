@@ -224,6 +224,7 @@ import {
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
+import { PlanExecutionView } from './components/messages/PlanExecutionView';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -259,6 +260,7 @@ import {
   computeTodoTimeline,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   isExitPlanApprovalRequest,
   todoDetailSignature,
@@ -3266,6 +3268,10 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
+  const sessionWorkflowTodosState = useMemo(
+    () => getSessionWorkflowTodos(messages),
+    [messages],
+  );
   const approvalPlanTodos = useMemo(
     () =>
       isExitPlanApprovalRequest(pendingToolApproval)
@@ -3310,6 +3316,16 @@ export function App({
   }, [messages]);
   const floatingTodos = useStableArray(floatingTodosState.todos, (todo) =>
     JSON.stringify([todo.id, todo.status, todo.content, todo.blockedBy ?? []]),
+  );
+  const sessionWorkflowTodos = useStableArray(
+    sessionWorkflowTodosState.todos,
+    (todo) =>
+      JSON.stringify([
+        todo.id,
+        todo.status,
+        todo.content,
+        todo.blockedBy ?? [],
+      ]),
   );
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
@@ -3664,9 +3680,10 @@ export function App({
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
   const [mainView, setMainView] = useState<
-    'chat' | 'scheduledTasks' | 'goals' | 'split'
+    'chat' | 'workflow' | 'scheduledTasks' | 'goals' | 'split'
   >('chat');
   const mainViewRef = useRef(mainView);
+  const workflowBackRef = useRef<HTMLButtonElement>(null);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
   // Sessions to seed the split view with (e.g. the selection from the overview).
@@ -4012,7 +4029,15 @@ export function App({
     // the same reason. The split view is deliberately NOT dismissed: each pane
     // owns and renders its own session's approval, so an approval on the (outer)
     // main session must not yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+    const workflowCanShowApproval =
+      mainView === 'workflow' &&
+      isExitPlanApprovalRequest(pendingToolApproval) &&
+      approvalPlanTodos.length > 0;
+    if (
+      mainView === 'scheduledTasks' ||
+      mainView === 'goals' ||
+      (mainView === 'workflow' && !workflowCanShowApproval)
+    ) {
       setMainView('chat');
     }
   }, [
@@ -4021,6 +4046,8 @@ export function App({
     modelDialogMode,
     showApprovalModeDialog,
     mainView,
+    pendingToolApproval,
+    approvalPlanTodos,
   ]);
   // Whether each approval overlay is the topmost (visible, uncovered) one. The
   // overlay components consume this as `keyboardActive`: when it flips true — on
@@ -4136,13 +4163,21 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
-  const planAgentTools = useMemo(
-    () =>
-      tasksDialogMessage
-        ? getAgentToolsForPlan(messages, floatingTodosState)
-        : [],
-    [floatingTodosState, messages, tasksDialogMessage],
-  );
+  const planAgentTools = useMemo(() => {
+    if (tasksDialogMessage) {
+      return getAgentToolsForPlan(messages, floatingTodosState);
+    }
+    if (mainView === 'workflow') {
+      return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
+    }
+    return [];
+  }, [
+    floatingTodosState,
+    mainView,
+    messages,
+    sessionWorkflowTodosState,
+    tasksDialogMessage,
+  ]);
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
       setTasksDialogMessage(null);
@@ -6724,6 +6759,41 @@ export function App({
         reportError(error, 'Failed to load tasks');
       });
   }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
+  const openWorkflow = useCallback(() => {
+    if (!requireActiveSessionForLocalCommand()) return;
+    setActivePanel(null);
+    setTasksDialogMessage(null);
+    setMainView('workflow');
+  }, [requireActiveSessionForLocalCommand]);
+  const workflowApprovalRequest =
+    sessionWorkflowEnabled &&
+    isExitPlanApprovalRequest(pendingToolApproval) &&
+    approvalPlanTodos.length > 0
+      ? pendingToolApproval
+      : null;
+  const autoOpenedWorkflowApprovalRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!workflowApprovalRequest) {
+      autoOpenedWorkflowApprovalRef.current = null;
+      return;
+    }
+    if (mainView === 'split') return;
+    if (autoOpenedWorkflowApprovalRef.current === workflowApprovalRequest.id) {
+      return;
+    }
+    autoOpenedWorkflowApprovalRef.current = workflowApprovalRequest.id;
+    openWorkflow();
+  }, [mainView, openWorkflow, workflowApprovalRequest]);
+  useEffect(() => {
+    if (mainView === 'workflow' && !sessionWorkflowEnabled) {
+      setMainView('chat');
+    }
+  }, [mainView, sessionWorkflowEnabled]);
+  useEffect(() => {
+    if (mainView === 'workflow' && !workflowApprovalRequest) {
+      workflowBackRef.current?.focus();
+    }
+  }, [mainView, workflowApprovalRequest]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     setEnvironmentPanelOpen(true);
@@ -9312,6 +9382,19 @@ export function App({
                       }
                     />
                   )}
+                  {sessionWorkflowEnabled &&
+                    sessionWorkflowTodos.length > 0 && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="mr-3"
+                      onClick={openWorkflow}
+                      data-testid="open-workflow"
+                    >
+                      {t('workflow.title')}
+                    </Button>
+                  )}
                 </div>
               )}
               <div
@@ -9753,6 +9836,55 @@ export function App({
                   </div>
                 </div>
               )}
+              {mainView === 'workflow' && (
+                <div className={styles.fullPage} data-testid="workflow-page">
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      ref={workflowBackRef}
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={() => setMainView('chat')}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('workflow.title')}
+                    </div>
+                  </div>
+                  <div className={styles.workflowPageBody}>
+                    {workflowApprovalRequest ? (
+                      <ToolApproval
+                        request={workflowApprovalRequest}
+                        onConfirm={handleConfirm}
+                        variant="inline"
+                        keyboardActive={true}
+                        planTodos={approvalPlanTodos}
+                      />
+                    ) : (
+                      <PlanExecutionView
+                        todos={sessionWorkflowTodos}
+                        tools={planAgentTools}
+                        tasks={sessionTasks}
+                        onOpenSubagent={openSubagentPanel}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
               {mainView === 'split' && (
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
@@ -10080,7 +10212,11 @@ export function App({
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
                             onOpen={
-                              showFloatingTodos ? openTasksPanel : undefined
+                              showFloatingTodos
+                                ? sessionWorkflowEnabled
+                                  ? openWorkflow
+                                  : openTasksPanel
+                                : undefined
                             }
                           />
                         </div>

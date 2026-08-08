@@ -11,6 +11,71 @@
   font-weight: 700;
 }
 
+.overview {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(110px, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+}
+
+.progressCard,
+.overviewStat {
+  display: flex;
+  min-width: 0;
+  padding: 12px;
+}
+
+.progressCard {
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.progressHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.progressHeading strong,
+.overviewStat strong {
+  color: var(--foreground);
+  font-size: 16px;
+}
+
+.progressTrack {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--secondary);
+}
+
+.progressTrack span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--success-color);
+  transition: width 160ms ease;
+}
+
+.overviewStat {
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  border-left: 1px solid var(--border);
+}
+
+.overviewStat span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.overviewStat[data-attention='true'] strong {
+  color: var(--warning-color);
+}
 
 .count,
 .dependencies,
@@ -235,6 +300,56 @@
   text-align: left;
 }
 
+.executionHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.executionExpanded {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+}
+
+.executionDescription,
+.executionActivity,
+.executionMetrics,
+.executionOpen,
+.emptyExecutions {
+  font-size: 11px;
+}
+
+.executionDescription {
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.executionActivity {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.executionActivity span {
+  margin-right: 4px;
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.executionMetrics,
+.emptyExecutions {
+  color: var(--muted-foreground);
+}
+
+.executionOpen {
+  align-self: flex-end;
+  color: var(--agent-blue-500);
+}
+
 .execution:disabled {
   cursor: default;
 }
@@ -326,4 +441,26 @@ button.nestedExecution:not(:disabled):focus-visible {
   color: var(--muted-foreground);
   font-size: 11px;
   font-weight: 600;
+}
+
+.emptyExecutions {
+  padding-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .overview {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .progressCard {
+    grid-column: 1 / -1;
+  }
+
+  .overviewStat {
+    border-top: 1px solid var(--border);
+  }
+
+  .overviewStat:nth-child(2) {
+    border-left: 0;
+  }
 }
