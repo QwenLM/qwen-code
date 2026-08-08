@@ -747,11 +747,31 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     maxTransportPasses?: number;
     /** Simulates a stub/embedder config without the accessor. */
     noProcessingConfig?: boolean;
+    /** Resolved model window for the session.* snapshot. */
+    contextWindowSize?: number;
+    /** Current chat's last prompt token count for the session.* snapshot. */
+    lastPromptTokenCount?: number;
   }): Config {
     return {
       isOmniEnabled: vi.fn().mockReturnValue(true),
       isTrustedFolder: vi.fn().mockReturnValue(true),
-      getContentGeneratorConfig: vi.fn().mockReturnValue(DASHSCOPE_CGC),
+      getContentGeneratorConfig: vi.fn().mockReturnValue(
+        overrides?.contextWindowSize !== undefined
+          ? {
+              ...DASHSCOPE_CGC,
+              contextWindowSize: overrides.contextWindowSize,
+            }
+          : DASHSCOPE_CGC,
+      ),
+      ...(overrides?.lastPromptTokenCount !== undefined
+        ? {
+            getGeminiClient: () => ({
+              getChat: () => ({
+                getLastPromptTokenCount: () => overrides.lastPromptTokenCount,
+              }),
+            }),
+          }
+        : {}),
       getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
       getOmniMaxUploadFileBytes: vi
         .fn()
@@ -870,6 +890,84 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(result.recognized).toBe(DEGRADED_RECOGNIZED);
     expect(result.disclosure).toBe('downsampled to 1568px');
     expect(result.degraded).toBe(true);
+  });
+
+  // ── session.* condition namespace snapshot (policy design §8.3) ───────
+  it('threads a stub-config session snapshot (reserved tokens only) into the orchestrator', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    await expect(
+      mod.processMediaForOmniDelivery(
+        await realFile('pic.png'),
+        policyConfig(),
+      ),
+    ).rejects.toThrow();
+    // Window size and prompt count are unknown on the stub config: the
+    // snapshot must carry ONLY the reserved-output limit — absent fields
+    // read as `unavailable`, never as zero.
+    expect(runMock.mock.calls[0][2].conditionContext).toEqual({
+      session: { reservedOutputTokens: 8192 },
+    });
+  });
+
+  it('snapshots the full session namespace once and reuses it for the guard pass', async () => {
+    const preprocessedPath = path.join(tmpDir, 'objects', 'pre.jpg');
+    const guardedPath = path.join(tmpDir, 'objects', 'guarded.jpg');
+    const runMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: preprocessedPath,
+            recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+            sha256: 'b'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      })
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: guardedPath,
+            recognized: DEGRADED_RECOGNIZED,
+            sha256: 'c'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      });
+    const { mod } = await armPipeline(runMock);
+    await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [{ id: 'img-guard', mediaTypes: ['image'] }],
+        contextWindowSize: 131072,
+        lastPromptTokenCount: 20000,
+      }),
+    );
+
+    expect(runMock).toHaveBeenCalledTimes(2);
+    expect(runMock.mock.calls[0][2].conditionContext).toEqual({
+      session: {
+        reservedOutputTokens: 8192,
+        contextWindowTokens: 131072,
+        promptTokenCount: 20000,
+        availableContextTokens: 131072 - 20000 - 8192,
+      },
+    });
+    // The guard pass receives the SAME snapshot object — taken once per
+    // delivery, constant across every pass of that delivery.
+    expect(runMock.mock.calls[1][2].conditionContext).toBe(
+      runMock.mock.calls[0][2].conditionContext,
+    );
   });
 
   it('skips the orchestrator entirely when no fixed policies are configured', async () => {

@@ -25,6 +25,7 @@ import type { OmniObjectStore } from '../storage.js';
 import {
   evaluateFixedPolicyCondition,
   type FixedPolicyConditionContext,
+  type RequestConditionField,
   type ResourceConditionField,
 } from './conditions.js';
 import {
@@ -106,8 +107,11 @@ export interface RunFixedPoliciesOptions {
   store: OmniObjectStore;
   policies: NormalizedFixedPolicy[];
   signal?: AbortSignal;
-  /** Request/session condition namespaces, when the caller has them. The
-   * resource namespace is always derived from each item's recognition. */
+  /** Request/session condition namespaces from the caller. The resource
+   * namespace is always derived from each item's recognition, and
+   * `request.totalEstimatedMediaTokens` is computed internally from the
+   * pending delivery set unless the caller supplies its own `request`
+   * (a future multi-root caller that knows the full request set). */
   conditionContext?: Pick<FixedPolicyConditionContext, 'request' | 'session'>;
   /** Injectable for tests; defaults to the store-rooted cache. */
   degradationCache?: OmniDegradationCache;
@@ -225,6 +229,28 @@ function resourceConditionContext(
     set('estimatedTokenCount', estimate.estimatedTokenCount);
   }
   return { resource, ...shared };
+}
+
+/**
+ * `request.totalEstimatedMediaTokens` (policy design §8.3): the estimated
+ * token sum over ALL media currently pending delivery for this root.
+ * Computed when an item enters matching (pass start) — and therefore
+ * recomputed as derivatives join or replace the delivery set. Undefined
+ * (→ `unavailable`) when any pending resource cannot be estimated: a
+ * partial sum silently reading as a smaller total would flip threshold
+ * conditions the permissive way.
+ */
+function requestConditionNamespace(
+  items: WorkItem[],
+): Partial<Record<RequestConditionField, number>> | undefined {
+  let total = 0;
+  for (const item of items) {
+    if (!item.deliver) continue;
+    const estimate = estimateRawResourceTokens(item.recognized);
+    if (estimate.status !== 'ok') return undefined;
+    total += estimate.estimatedTokenCount;
+  }
+  return { totalEstimatedMediaTokens: total };
 }
 
 /** Deterministic execution order: priority descending, id ascending. */
@@ -422,6 +448,18 @@ async function runFixedPoliciesUnbounded(
       );
       continue;
     }
+    // Pass-start condition snapshot (policy design §8.3): the request
+    // namespace is recomputed as each item enters matching so it reflects
+    // derivatives added by earlier passes; the session namespace is the
+    // caller's per-delivery snapshot and never changes mid-run.
+    const sharedConditionContext: Pick<
+      FixedPolicyConditionContext,
+      'request' | 'session'
+    > = {
+      request:
+        options.conditionContext?.request ?? requestConditionNamespace(items),
+      session: options.conditionContext?.session,
+    };
     for (const policy of policies) {
       if (!policy.mediaTypes.includes(item.recognized.modality)) continue;
       if (!policy.origins.includes(item.origin)) continue;
@@ -430,7 +468,7 @@ async function runFixedPoliciesUnbounded(
       if (policy.when) {
         const evaluation = evaluateFixedPolicyCondition(
           policy.when,
-          resourceConditionContext(item.recognized, options.conditionContext),
+          resourceConditionContext(item.recognized, sharedConditionContext),
         );
         if (evaluation.outcome === 'no_match') continue;
         if (

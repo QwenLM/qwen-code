@@ -48,6 +48,7 @@ import {
   type PolicyDeliveryResource,
   type PolicyFileDelivery,
 } from './policy/orchestrator.js';
+import { buildSessionConditionNamespace } from './policy/session-context.js';
 import type { OmniProcessingConfigView } from './policy/types.js';
 
 export {
@@ -389,6 +390,19 @@ export async function processMediaForOmniDelivery(
   const processingConfig = (
     config as OmniProcessingConfigView
   ).getOmniProcessingConfig?.();
+  // Session-namespace snapshot for `when` conditions (policy design §8.3):
+  // taken ONCE before any policy executes and reused across the
+  // preprocessing run and every transport-guard pass of this delivery.
+  // The request namespace is computed inside the orchestrator from the
+  // pending delivery set.
+  const conditionContext = processingConfig
+    ? {
+        session: buildSessionConditionNamespace(
+          config,
+          processingConfig.limits.reservedOutputTokens,
+        ),
+      }
+    : undefined;
   let final: PolicyDeliveryResource = { filePath, recognized };
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
   // across preprocessing and guard passes; threaded into every return.
@@ -411,7 +425,13 @@ export async function processMediaForOmniDelivery(
           displayName,
           origin: options?.origin ?? 'user',
         },
-        { store, policies, signal, limits: processingConfig?.limits },
+        {
+          store,
+          policies,
+          signal,
+          limits: processingConfig?.limits,
+          conditionContext,
+        },
       ));
     } catch (err) {
       if (signal?.aborted) throw err;
@@ -488,6 +508,7 @@ export async function processMediaForOmniDelivery(
             policies: guardPolicies,
             signal,
             limits: processingConfig.limits,
+            conditionContext,
           },
         ));
       } catch (err) {

@@ -579,6 +579,138 @@ describe('runFixedPolicies', () => {
     expect(records[0]).toMatchObject({ outcome: 'succeeded' });
   });
 
+  describe('condition namespaces (request./session., policy design §8.3)', () => {
+    // The 4000×3000 root estimates to ceil(4000*3000/2048) = 5860 tokens;
+    // the 1568×1176 derivative to ceil(1568*1176/2048) = 901.
+    const requestWhen = (operator: 'gt' | 'eq', value: number) => ({
+      left: { field: 'request.totalEstimatedMediaTokens' as const },
+      operator,
+      right: { value },
+    });
+
+    it('computes request.totalEstimatedMediaTokens from the pending delivery set', async () => {
+      mockToolSuccess();
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy({ when: requestWhen('gt', 5859) })],
+      });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+      expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+    });
+
+    it('does not match when the pending total is not above the threshold', async () => {
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy({ when: requestWhen('gt', 5860) })],
+      });
+      expect(records).toEqual([]);
+      expect(executeToolCallMock).not.toHaveBeenCalled();
+    });
+
+    it('prefers a caller-supplied request namespace over the internal sum', async () => {
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy({ when: requestWhen('gt', 5859) })],
+        conditionContext: { request: { totalEstimatedMediaTokens: 1 } },
+      });
+      expect(records).toEqual([]);
+      expect(executeToolCallMock).not.toHaveBeenCalled();
+    });
+
+    it('reads unavailable (never a partial sum) when a pending resource is unestimable', async () => {
+      source = { ...source, recognized: recognizedImage({ metadata: {} }) };
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy({ when: requestWhen('gt', 0) })],
+      });
+      expect(records).toEqual([
+        {
+          policyId: 'img-downsample',
+          toolName: 'omni_downsample_image',
+          outcome: 'condition_unavailable',
+          resource: 'photo.png',
+          missingFields: ['request.totalEstimatedMediaTokens'],
+        },
+      ]);
+      expect(executeToolCallMock).not.toHaveBeenCalled();
+    });
+
+    it('recomputes the request namespace as derivatives enter the next pass', async () => {
+      mockToolSuccess();
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [
+          makePolicy({
+            id: 'a-derive',
+            output: {
+              reprocessMedia: true,
+              source: 'omit',
+              artifacts: { '*': 'include' },
+            },
+          }),
+          // Runs only on the derivative pass: eq 901 is the DERIVATIVE
+          // total after the root left the delivery set — the root pass
+          // total was 5860, so a start-of-run snapshot would never match.
+          makePolicy({
+            id: 'b-on-derivative',
+            origins: ['policy'],
+            arguments: { maxDimension: 800 },
+            when: requestWhen('eq', 901),
+          }),
+        ],
+      });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(2);
+      // b-on-derivative EXECUTED (its `when` matched the recomputed total);
+      // the mock returns bytes identical to its input, so the run records
+      // as a no-op rather than a degradation — execution is the assertion.
+      expect(records.map((r) => [r.policyId, r.outcome])).toEqual([
+        ['a-derive', 'succeeded'],
+        ['b-on-derivative', 'no_op'],
+      ]);
+    });
+
+    it('evaluates session.* from the caller-supplied per-delivery snapshot', async () => {
+      mockToolSuccess();
+      const sessionWhen = {
+        left: { field: 'session.availableContextTokens' as const },
+        operator: 'lte' as const,
+        right: { value: 700 },
+      };
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy({ when: sessionWhen })],
+        conditionContext: { session: { availableContextTokens: 700 } },
+      });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+      expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+    });
+
+    it('reads session.* as unavailable when no snapshot was supplied', async () => {
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [
+          makePolicy({
+            when: {
+              left: { field: 'session.availableContextTokens' },
+              operator: 'lte',
+              right: { value: 700 },
+            },
+          }),
+        ],
+      });
+      expect(records).toEqual([
+        {
+          policyId: 'img-downsample',
+          toolName: 'omni_downsample_image',
+          outcome: 'condition_unavailable',
+          resource: 'photo.png',
+          missingFields: ['session.availableContextTokens'],
+        },
+      ]);
+      expect(executeToolCallMock).not.toHaveBeenCalled();
+    });
+  });
+
   it('caps re-derivation per lineage via maxRunsPerLineage', async () => {
     mockToolSuccess();
     const { deliveries } = await runFixedPolicies(config, source, {
