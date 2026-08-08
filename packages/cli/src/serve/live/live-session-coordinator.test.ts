@@ -760,7 +760,7 @@ describe('LiveSessionCoordinator', () => {
     );
   });
 
-  it('starts the steering request as the next turn on the same session if the first turn just settled', async () => {
+  it('starts the steering request as the next turn when mid-turn admission is rejected', async () => {
     const harness = makeHarness({ enqueueAccepted: false });
     await harness.coordinator.start({
       epoch: 1,

@@ -2377,9 +2377,11 @@ This rule is live-session-only and does not make every workspace-less session ro
 
 ### Mid-turn messages
 
-`POST /session/:id/mid-turn-message` accepts `{ "message": "..." }` while a turn is active. A successful admission returns `{ "accepted": true, "messageId": "<uuid>" }`; an idle session or full mid-turn queue returns `{ "accepted": false }`, and the client should retain the message for ordinary next-turn submission. When the message is drained into the running turn, `mid_turn_message_injected` includes aligned `messages` and `messageIds` arrays plus the originating client id.
+`POST /session/:id/mid-turn-message` accepts `{ "message": "...", "messageId": "<optional-message-id>" }`. A successful admission returns `{ "accepted": true, "messageId": "<id>" }` and transfers ownership to the daemon: the message is drained into the active turn or promoted into the normal prompt FIFO when the session becomes idle. Clients using `session_mid_turn_message_query` send a stable `messageId`; repeating it is idempotent while it remains queued, pending, or in the bounded reconciliation rings. A full queue rejects a new request without taking ownership. New clients connected to an older daemon detect the missing capability and retain their legacy local fallback.
 
-When `session_mid_turn_message_mutation` is advertised, the originating client may call `DELETE /session/:id/mid-turn-messages/:messageId`. It returns `{ "removed": true }` only while that message is still waiting in the daemon queue. `{ "removed": false }` means it was not found, belonged to another client, or had already been drained.
+`GET /session/:id/mid-turn-messages` returns the session-wide daemon-owned queue plus bounded `settledMessageIds` and `promotedMessageIds` rings. Settled ids were injected or explicitly deleted; promoted ids entered the normal prompt FIFO. An id in either ring must not be resent.
+
+When `session_mid_turn_message_mutation` is advertised, an attached session client may call `DELETE /session/:id/mid-turn-messages/:messageId`. It removes the message from either the mid-turn queue or its promoted pending-prompt state; removing a promoted message that is already running aborts that turn, matching ordinary pending-prompt removal. Daemon-owned queue additions and removals publish the existing `pending_prompt_added` and `pending_prompt_completed` session events so attached clients refresh both authoritative queue snapshots. `{ "removed": false }` means the message was already injected, completed, or not found.
 
 ### `POST /session/:id/prompt`
 

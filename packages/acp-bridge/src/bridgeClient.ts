@@ -30,6 +30,7 @@ import {
   ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   type ActiveWorkHoldV1,
@@ -615,6 +616,13 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /**
+   * Bounded ring of drained mid-turn message ids. Owned by the full
+   * `SessionEntry` in `bridge.ts`; surfaced on this narrowed view so the
+   * drain in `extMethod` can record what it handed to the child. See
+   * `SessionEntry.settledMidTurnMessageIds`.
+   */
+  settledMidTurnMessageIds: string[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
@@ -1221,6 +1229,25 @@ export class BridgeClient implements Client {
     const entry = this.resolveEntry(sessionId);
     if (!entry) return { messages: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
+    if (drained.length > 0) {
+      // Record the handoff so clients that lost their bookkeeping (page
+      // refresh) or missed the echo frame below can reconcile via
+      // `getMidTurnMessages` instead of resending an already-injected
+      // message as the next turn. Ring is bounded; oldest ids evicted.
+      for (const item of drained) {
+        entry.settledMidTurnMessageIds.push(item.messageId);
+      }
+      if (
+        entry.settledMidTurnMessageIds.length >
+        MID_TURN_RECONCILIATION_RING_SIZE
+      ) {
+        entry.settledMidTurnMessageIds.splice(
+          0,
+          entry.settledMidTurnMessageIds.length -
+            MID_TURN_RECONCILIATION_RING_SIZE,
+        );
+      }
+    }
     const messages = drained.map((item) => item.text);
     const hasQueuedPrompt = entry.pendingPromptList.some(
       (prompt) =>
@@ -1231,38 +1258,21 @@ export class BridgeClient implements Client {
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
       // around publish()"). Capture the result instead. A dropped frame is
       // teardown-only: the child still gets the spliced messages below, but the
-      // browser won't receive the echo and would resend them next turn — so log
-      // it.
-      //
-      // Publish ONE frame per originator client. The frame is broadcast to every
-      // SSE subscriber on the session, so it carries `originatorClientId` for
-      // clients to filter on — a peer that didn't queue the message must not
-      // dedupe its own coincidentally-equal entry. A mixed-originator batch (two
-      // clients pushing in the same window) is rare but still routed correctly.
-      const byOriginator = new Map<string | undefined, MidTurnQueueEntry[]>();
-      for (const item of drained) {
-        const group = byOriginator.get(item.originatorClientId);
-        if (group) group.push(item);
-        else byOriginator.set(item.originatorClientId, [item]);
-      }
-      for (const [originatorClientId, items] of byOriginator) {
-        const texts = items.map((item) => item.text);
-        const published = entry.events.publish({
-          type: MID_TURN_MESSAGE_INJECTED_EVENT,
-          ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
-          data: {
-            sessionId: entry.sessionId,
-            messages: texts,
-            messageIds: items.map((item) => item.messageId),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-        writeStderrLine(
-          published
-            ? `[mid-turn] session=${entry.sessionId} drained=${texts.length}${originatorClientId ? ` originator=${originatorClientId}` : ''} injected into running turn`
-            : `[mid-turn] session=${entry.sessionId} drained=${texts.length} echo frame dropped (bus closed); browser may resend next turn`,
-        );
-      }
+      // browser must recover the handoff from the reconciliation ring.
+      const published = entry.events.publish({
+        type: MID_TURN_MESSAGE_INJECTED_EVENT,
+        ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
+        data: {
+          sessionId: entry.sessionId,
+          messages,
+          messageIds: drained.map((item) => item.messageId),
+        },
+      });
+      writeStderrLine(
+        published
+          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} injected into running turn`
+          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echo frame dropped (bus closed); reconciliation required`,
+      );
     }
     return { messages, hasQueuedPrompt };
   }

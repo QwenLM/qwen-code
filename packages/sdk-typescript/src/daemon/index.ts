@@ -391,6 +391,8 @@ export type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessageSummary,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,

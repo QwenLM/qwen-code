@@ -1867,9 +1867,8 @@ describe('DaemonSessionProvider', () => {
     ).resolves.toEqual({ removed: true });
 
     expect(removeMidTurnMessage).toHaveBeenCalledWith('mid-current');
-    // The cross-session branch must forward our clientId: the bridge removes a
-    // mid-turn message only on an exact originator match, so a removal issued
-    // without one could never match the id stamped at enqueue.
+    // The cross-session branch must forward an id attached to the target
+    // session so the bridge authorizes the mutation.
     expect(sdkMocks.removeMidTurnMessage).toHaveBeenCalledWith(
       'session-old',
       'mid-old',
@@ -1886,11 +1885,8 @@ describe('DaemonSessionProvider', () => {
       removeMidTurnMessage,
     });
     sdkMocks.sessions.push(session);
-    // The message was queued under session-old's OWN client id; the bridge
-    // removes only on an exact originator match, so after switching to
-    // session-current the removal must forward session-old's persisted id —
-    // forwarding the current session's id would resolve to a foreign originator
-    // and the bridge would reject a valid removal.
+    // After switching sessions, forward session-old's persisted id because the
+    // current session's id is not attached to the target session.
     persistStableClientId('client-old', 'session-old');
     let actions: DaemonSessionActions | undefined;
 

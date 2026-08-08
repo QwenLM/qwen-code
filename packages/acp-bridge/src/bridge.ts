@@ -118,6 +118,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
+  MID_TURN_RECONCILIATION_RING_SIZE,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
@@ -580,13 +581,17 @@ interface SessionEntry {
    * drains these between tool batches via the `craft/drainMidTurnQueue`
    * ext-method so the model sees them before the turn ends. The queue is
    * accepted into only while the session is busy (`pendingPromptCount > 0`)
-   * and emptied when the session next goes idle — see the settle handler in
-   * `sendPrompt`. The browser keeps its own copy as the next-turn fallback,
-   * so a message left undrained here is NOT lost: it is dropped server-side
-   * (preventing a stale next-turn re-injection) and resent by the browser as
-   * a fresh prompt.
+   * and reconciled when the session next goes idle — see the settle handler in
+   * `sendPrompt`. Every accepted entry is daemon-owned and promoted into the
+   * normal prompt FIFO if it remains undrained at idle.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /**
+   * Bounded ids either handed to the ACP child or explicitly deleted.
+   */
+  settledMidTurnMessageIds: string[];
+  /** Bounded ids promoted into the normal prompt FIFO. */
+  promotedMidTurnMessageIds: string[];
   /**
    * Per-session model-change FIFO. Prevents two concurrent
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
@@ -1396,10 +1401,10 @@ const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // Per-session cap on undrained mid-turn messages: a busy turn with no drain
 // point (a long tool-free generation) must not let a client pin unbounded
 // messages in the in-memory queue. Past the cap, `enqueueMidTurnMessage`
-// returns `{ accepted: false }` and the browser keeps the message for the next
-// turn. Intentionally a fixed const for now; if this ever needs tuning, promote
-// it to a `BridgeOptions` knob the same way `maxPendingPromptsPerSession`
-// (the analogous bound `/prompt` enforces, default 5) is wired.
+// rejects without taking ownership.
+// Intentionally a fixed const for now; if this ever needs tuning, promote it to
+// a `BridgeOptions` knob the same way `maxPendingPromptsPerSession` (the
+// analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
 const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
@@ -4356,6 +4361,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingAgentNotificationCount: 0,
       pendingPromptList: [],
       midTurnMessageQueue: [],
+      settledMidTurnMessageIds: [],
+      promotedMidTurnMessageIds: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -5513,6 +5520,41 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   startSessionReaper();
 
+  const rememberMidTurnId = (ring: string[], messageId: string) => {
+    ring.push(messageId);
+    if (ring.length > MID_TURN_RECONCILIATION_RING_SIZE) {
+      ring.splice(0, ring.length - MID_TURN_RECONCILIATION_RING_SIZE);
+    }
+  };
+
+  const promoteMidTurnMessage = (
+    entry: SessionEntry,
+    messageId: string,
+    text: string,
+    originatorClientId?: string,
+  ) => {
+    // sendPrompt owns its FIFO slot synchronously before returning its promise.
+    rememberMidTurnId(entry.promotedMidTurnMessageIds, messageId);
+    void bridgeApi
+      .sendPrompt(
+        entry.sessionId,
+        {
+          sessionId: entry.sessionId,
+          prompt: [{ type: 'text', text }],
+        },
+        undefined,
+        {
+          promptId: messageId,
+          promotedMidTurn: { originatorClientId },
+        },
+      )
+      .catch((error: unknown) => {
+        writeStderrLine(
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+        );
+      });
+  };
+
   const bridgeApi: AcpSessionBridge = {
     setLiveScreenContextCaptureHandler(handler) {
       liveScreenContextCaptureHandler = handler;
@@ -5953,10 +5995,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ),
         );
       }
-      const originatorClientId = resolveTrustedClientId(
-        entry,
-        context?.clientId,
-      );
+      const promotedMidTurn = context?.promotedMidTurn;
+      const isPromotedMidTurn = promotedMidTurn !== undefined;
+      const originatorClientId = promotedMidTurn
+        ? promotedMidTurn.originatorClientId
+        : resolveTrustedClientId(entry, context?.clientId);
       const modelPrompt = context?.modelPrompt;
       if (
         modelPrompt !== undefined &&
@@ -5974,7 +6017,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (signal?.aborted) {
         throw new DOMException('Prompt aborted', 'AbortError');
       }
-      if (entry.pendingPromptCount >= maxPendingPromptsPerSession) {
+      if (
+        !isPromotedMidTurn &&
+        entry.pendingPromptCount >= maxPendingPromptsPerSession
+      ) {
         throw new PromptQueueFullError(
           maxPendingPromptsPerSession,
           entry.pendingPromptCount,
@@ -6017,6 +6063,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+        ...(isPromotedMidTurn ? { promotedMidTurn: true } : {}),
         text: extractPromptText(req.prompt),
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
@@ -6483,27 +6530,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               }
             }
           }
-          releasePromptSlot();
-          // Mid-turn messages are scoped to the turn the user typed them
-          // during. Once the session goes fully idle with some still
-          // undrained, drop the server-side copy: the browser still holds
-          // them in its own queue and resends them as the next turn. Leaving
-          // them here would let the NEXT turn's first tool batch inject a
-          // stale message the browser ALSO resends — double delivery. The
-          // `pendingPromptCount === 0` guard keeps queued messages intact
-          // across a back-to-back FIFO of prompts (still "one turn" to the
-          // user) and only clears at the true idle boundary.
-          if (
-            entry.pendingPromptCount === 0 &&
-            entry.midTurnMessageQueue.length > 0
-          ) {
-            // One line when we actually drop something — makes the
-            // "queued-but-never-drained, browser will resend" path visible.
-            writeStderrLine(
-              `[mid-turn] session=${entry.sessionId} dropped ${entry.midTurnMessageQueue.length} undrained message(s) at idle; browser resends next turn`,
-            );
-            entry.midTurnMessageQueue.length = 0;
+          // When the last active prompt settles, atomically move every
+          // daemon-owned undrained message into the normal FIFO before
+          // releasing this prompt's slot. That makes each promoted prompt a
+          // queued successor (with the normal added/started events) and keeps
+          // the session alive after its originating client detaches.
+          if (entry.pendingPromptCount === 1 && !entry.closing) {
+            for (const message of entry.midTurnMessageQueue.splice(0)) {
+              promoteMidTurnMessage(
+                entry,
+                message.messageId,
+                message.text,
+                message.originatorClientId,
+              );
+            }
           }
+          releasePromptSlot();
           // DAEMON-005: deferred close-on-prompt-complete. Lives here (not
           // in `promptPromise.finally`) so the terminal broadcast — the
           // `result.then` registered above on this same promise — runs
@@ -8310,80 +8352,150 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return { removed: true };
     },
 
-    enqueueMidTurnMessage(sessionId, message, context) {
+    enqueueMidTurnMessage(sessionId, message, context, requestedMessageId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       // Authorize the caller against THIS session before doing anything —
       // mirrors `/prompt` and `/btw`. Throws `InvalidClientIdError` when the
       // client-declared id isn't bound to the session, so a token-holding
       // client attached to another session can't push into this turn. Returns
-      // the trusted id (or undefined for anonymous callers) — recorded as the
-      // message's originator so the drain's SSE echo only dedupes that client.
+      // the trusted id (or undefined for anonymous callers) for diagnostics.
+      // Queue ownership is session-wide.
       const originatorClientId = resolveTrustedClientId(
         entry,
         context?.clientId,
       );
-      const trimmed = message.trim();
-      // Reject empty messages and — critically — messages that arrive while
-      // the session is idle. The browser only pushes here when it believes a
-      // turn is running, but the turn may have settled in the small window
-      // before its turn-complete frame landed. Accepting an idle message
-      // would strand it until the NEXT turn's first tool batch drained it,
-      // by which point the browser has already resent it as a fresh prompt —
-      // double delivery. Rejecting keeps the browser's next-turn fallback the
-      // single delivery path in that race.
-      if (trimmed.length === 0 || entry.pendingPromptCount === 0) {
-        // Rejects are low-volume (the browser only pushes when it believes a
-        // turn is running) but the silent path made "why wasn't my mid-turn
-        // message injected?" undiagnosable. Empty is a client bug; idle is the
-        // settle-window race the browser recovers from via its next-turn queue.
+      if (entry.closing) {
         writeStderrLine(
-          `[mid-turn] session=${entry.sessionId} rejected: ${
-            trimmed.length === 0 ? 'empty message' : 'session idle'
-          }; browser keeps it for next turn`,
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected: session closing`,
         );
         return { accepted: false };
       }
-      // Bound queue depth (see MAX_MID_TURN_QUEUE_DEPTH). Full → reject so the
-      // browser keeps the message in its own queue for the next turn rather than
-      // pinning it here unboundedly when the turn has no drain point.
+      const trimmed = message.trim();
+      if (trimmed.length === 0) {
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} rejected: empty`,
+        );
+        return { accepted: false };
+      }
+      if (requestedMessageId !== undefined) {
+        const existing = entry.midTurnMessageQueue.find(
+          (queued) => queued.messageId === requestedMessageId,
+        );
+        if (existing) {
+          if (existing.text === trimmed) {
+            return { accepted: true, messageId: requestedMessageId };
+          }
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(requestedMessageId)}: text mismatch`,
+          );
+          return { accepted: false };
+        }
+        const promoted = entry.pendingPromptList.find(
+          (pending) => pending.promptId === requestedMessageId,
+        );
+        if (promoted) {
+          if (promoted.text === trimmed) {
+            return { accepted: true, messageId: requestedMessageId };
+          }
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text mismatch`,
+          );
+          return { accepted: false };
+        }
+        if (entry.settledMidTurnMessageIds.includes(requestedMessageId)) {
+          return { accepted: true, messageId: requestedMessageId };
+        }
+        if (entry.promotedMidTurnMessageIds.includes(requestedMessageId)) {
+          return { accepted: true, messageId: requestedMessageId };
+        }
+      }
+      const messageId = requestedMessageId ?? randomUUID();
+      // If the turn settled while the POST was in flight, start it through the
+      // normal prompt path. A client-supplied id keeps retries idempotent.
+      if (entry.pendingPromptCount === 0) {
+        promoteMidTurnMessage(entry, messageId, trimmed, originatorClientId);
+        return { accepted: true, messageId };
+      }
+      // Bound the drain queue. Rejected requests remain unowned.
       if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
         writeStderrLine(
-          `[mid-turn] session=${entry.sessionId} rejected: queue full (depth ${entry.midTurnMessageQueue.length} >= ${MAX_MID_TURN_QUEUE_DEPTH}); browser keeps it for next turn`,
+          `[mid-turn] session=${entry.sessionId} rejected: queue full (depth ${entry.midTurnMessageQueue.length} >= ${MAX_MID_TURN_QUEUE_DEPTH})`,
         );
         return { accepted: false };
       }
-      const messageId = randomUUID();
-      entry.midTurnMessageQueue.push({
+      const queuedMessage: MidTurnQueueEntry = {
         messageId,
         text: trimmed,
         originatorClientId,
-      });
+      };
+      entry.midTurnMessageQueue.push(queuedMessage);
+      try {
+        entry.events.publish({
+          type: 'pending_prompt_added',
+          promptId: messageId,
+          data: {
+            sessionId,
+            promptId: messageId,
+            text: trimmed,
+            queuedAt: Date.now(),
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch {
+        /* bus may be closed during session teardown */
+      }
       return { accepted: true, messageId };
     },
 
     removeMidTurnMessage(sessionId, messageId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      const originatorClientId = resolveTrustedClientId(
-        entry,
-        context?.clientId,
-      );
+      resolveTrustedClientId(entry, context?.clientId);
       const index = entry.midTurnMessageQueue.findIndex(
-        (message) =>
-          message.messageId === messageId &&
-          message.originatorClientId === originatorClientId,
+        (message) => message.messageId === messageId,
       );
       if (index === -1) {
-        // A miss is the interesting race (already drained mid-turn, or the
-        // caller's clientId doesn't match the queued originator) — log it
-        // like the enqueue / pending-removal siblings so it shows in daemon logs.
+        const isPromoted = entry.pendingPromptList.some(
+          (pending) =>
+            pending.promptId === messageId && pending.promotedMidTurn === true,
+        );
+        if (!isPromoted) {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or completed)`,
+          );
+          return { removed: false };
+        }
+        const promoted = bridgeApi.removePendingPrompt(
+          sessionId,
+          messageId,
+          context,
+        );
+        if (promoted.removed) {
+          rememberMidTurnId(entry.settledMidTurnMessageIds, messageId);
+          return promoted;
+        }
         writeStderrLine(
-          `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or originator mismatch)`,
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} remove missed messageId=${JSON.stringify(messageId)} (already drained or completed)`,
         );
         return { removed: false };
       }
-      entry.midTurnMessageQueue.splice(index, 1);
+      const [removed] = entry.midTurnMessageQueue.splice(index, 1);
+      rememberMidTurnId(entry.settledMidTurnMessageIds, messageId);
+      if (removed) {
+        try {
+          entry.events.publish({
+            type: 'pending_prompt_completed',
+            promptId: messageId,
+            data: { sessionId, promptId: messageId, state: 'removed' },
+            ...(removed.originatorClientId
+              ? { originatorClientId: removed.originatorClientId }
+              : {}),
+          });
+        } catch {
+          /* bus may be closed during session teardown */
+        }
+      }
       return { removed: true };
     },
 
@@ -8413,6 +8525,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
         void maybeCloseIdleSession(entry, 'agent_notification_settled');
       }
+    },
+
+    getMidTurnMessages(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Authorize the caller against THIS session — mirrors the sibling
+      // mid-turn routes and `getPendingPrompts`. The queue is session-global,
+      // so a refreshed client with a newly-issued id can still restore and
+      // mutate it.
+      resolveTrustedClientId(entry, context?.clientId);
+      return {
+        messages: entry.midTurnMessageQueue.map((message) => ({
+          messageId: message.messageId,
+          text: message.text,
+        })),
+        settledMessageIds: [...entry.settledMidTurnMessageIds],
+        promotedMessageIds: [...entry.promotedMidTurnMessageIds],
+      };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {

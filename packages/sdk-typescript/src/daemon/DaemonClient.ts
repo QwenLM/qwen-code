@@ -152,6 +152,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -2993,18 +2994,18 @@ export class DaemonClient {
   /**
    * Queue a user message typed while the session's turn is still running. The
    * ACP child drains it between tool batches so the model sees it before the
-   * turn ends. Resolves `{ accepted: false }` when the session is idle — the
-   * caller should then send the message as a normal next-turn prompt.
+   * turn ends. Every accepted request is daemon-owned; a caller-supplied id
+   * makes ambiguous retries idempotent.
    */
   async enqueueMidTurnMessage(
     sessionId: string,
     message: string,
-    opts?: { signal?: AbortSignal; clientId?: string },
+    opts?: { signal?: AbortSignal; clientId?: string; messageId?: string },
   ): Promise<DaemonMidTurnMessageResult> {
     // Route through `fetchWithTimeout` like every other method so a hung daemon
     // can't wedge this promise forever (the caller in `actions.ts` awaits it).
-    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
-    // timeout controller, so the mid-turn-settle abort still propagates.
+    // The helper composes any caller signal with its timeout controller. Legacy
+    // callers use this to cancel a push when the active turn settles.
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-message`,
       {
@@ -3013,7 +3014,7 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, messageId: opts?.messageId }),
         signal: opts?.signal,
       },
       async (res) => {
@@ -3047,6 +3048,37 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonRemoveMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * Fetch the mid-turn reconciliation snapshot for a session: messages still
+   * waiting in the daemon queue plus bounded terminal id rings.
+   * Callers reconcile against this
+   * instead of resending accepted messages at the idle boundary. Only available
+   * when the daemon advertises `session_mid_turn_message_query` — older
+   * daemons answer 404 and callers keep the legacy behavior.
+   */
+  async getMidTurnMessages(
+    sessionId: string,
+    opts?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessagesResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/mid-turn-messages',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessagesResult;
       },
     );
   }

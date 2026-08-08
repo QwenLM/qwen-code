@@ -1768,8 +1768,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connected',
               sessionId: activeSession.sessionId,
-              // Surface the bound client id so consumers can recognize their own
-              // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+              // Surface the bound client id for consumers of legacy
+              // originator-stamped frames.
               ...(activeSession.clientId
                 ? { clientId: activeSession.clientId }
                 : {}),

@@ -4746,6 +4746,10 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_mutation',
     ) === true;
+  const canQueryMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_query',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -4759,6 +4763,7 @@ export function App({
     sessionId: connection.sessionId,
     clientId: connection.clientId,
     canMutateMidTurn,
+    canQueryMidTurn,
     streamingState,
     sessionActions,
     store,

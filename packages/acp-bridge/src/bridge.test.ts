@@ -20045,9 +20045,8 @@ describe('createAcpSessionBridge — background notifications', () => {
  * `enqueueMidTurnMessage` backs the web-shell mid-turn drain: the browser
  * pushes a message typed during a turn, the ACP child drains it via
  * `craft/drainMidTurnQueue` (answered by BridgeClient.extMethod). The accept
- * gate is the exactly-once linchpin — it must reject when the session is idle
- * so the browser's own next-turn queue stays the single delivery path in the
- * settle-window race.
+ * gate is the exactly-once linchpin: accepted requests are daemon-owned, and a
+ * caller-supplied id makes retries idempotent.
  */
 describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessage)', () => {
   function hangingPromptFactory(): {
@@ -20067,46 +20066,87 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     return { factory, release: () => release?.() };
   }
 
-  it('rejects (accepted:false) when the session is idle', async () => {
-    const bridge = makeBridge({
-      channelFactory: async () => makeChannel().channel,
-    });
-    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'later')).toEqual({
-      accepted: false,
-    });
-    await bridge.shutdown();
-  });
-
-  it('accepts while a turn is in flight, then rejects again once it settles', async () => {
+  it('owns and promotes a request without a caller-supplied id', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const promptPromise = bridge
-      .sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'run tools' }],
-        },
-        undefined,
-        { clientId: session.clientId },
-      )
-      .catch(() => {});
-
-    // Let the FIFO worker pick up the (hanging) prompt before asserting.
+    const result = bridge.enqueueMidTurnMessage(session.sessionId, 'later');
+    expect(result).toEqual({
+      accepted: true,
+      messageId: expect.any(String),
+    });
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+      expect.objectContaining({ promptId: result.messageId, text: 'later' }),
+    ]);
     await new Promise((r) => setTimeout(r, 10));
-    expect(
-      bridge.enqueueMidTurnMessage(session.sessionId, 'also check tests'),
-    ).toEqual({ accepted: true, messageId: expect.any(String) });
-
-    // Settle the turn → the queue flips back to idle and the undrained copy is
-    // dropped server-side (the browser resends it as the next turn).
     release();
-    await promptPromise;
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    await bridge.shutdown();
+  });
+
+  it('rejects admission while the session is closing', async () => {
+    const closeStarted = deferred<void>();
+    const closeGate = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method !== 'qwen/control/session/close') return {};
+        closeStarted.resolve();
+        return closeGate.promise;
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const close = bridge.closeSession(session.sessionId);
+    await closeStarted.promise;
     expect(
-      bridge.enqueueMidTurnMessage(session.sessionId, 'next time'),
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'too late',
+        { clientId: session.clientId },
+        'closing-message',
+      ),
     ).toEqual({ accepted: false });
+
+    closeGate.resolve({});
+    await close;
+    await bridge.shutdown();
+  });
+
+  it('promotes a stable-id request that reaches an idle session', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'late request',
+        { clientId: session.clientId },
+        'client-mid-late',
+      ),
+    ).toEqual({ accepted: true, messageId: 'client-mid-late' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'late request',
+        { clientId: session.clientId },
+        'client-mid-late',
+      ),
+    ).toEqual({ accepted: true, messageId: 'client-mid-late' });
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+      expect.objectContaining({
+        promptId: 'client-mid-late',
+        text: 'late request',
+      }),
+    ]);
+
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
     await bridge.shutdown();
   });
 
@@ -20144,7 +20184,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('removes an undrained message only for its originating client', async () => {
+  it('lets another attached client remove an undrained session message', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -20170,12 +20210,10 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       accepted: true,
       messageId: expect.any(String),
     });
-    expect(
-      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!),
-    ).toEqual({ removed: false });
+    const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     expect(
       bridge.removeMidTurnMessage(session.sessionId, admission.messageId!, {
-        clientId: session.clientId,
+        clientId: attached.clientId,
       }),
     ).toEqual({ removed: true });
     expect(
@@ -20184,6 +20222,89 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       }),
     ).toEqual({ removed: false });
 
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('does not recreate a deleted stable id when its admission is retried', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const abort = new AbortController();
+    const events: BridgeEvent[] = [];
+    const collecting = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      })) {
+        events.push(event);
+      }
+    })();
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'delete me',
+        { clientId: session.clientId },
+        'stable-deleted',
+      ),
+    ).toEqual({ accepted: true, messageId: 'stable-deleted' });
+    const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, 'stable-deleted', {
+        clientId: attached.clientId,
+      }),
+    ).toEqual({ removed: true });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'delete me',
+        { clientId: session.clientId },
+        'stable-deleted',
+      ),
+    ).toEqual({ accepted: true, messageId: 'stable-deleted' });
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({
+      messages: [],
+      settledMessageIds: ['stable-deleted'],
+      promotedMessageIds: [],
+    });
+    await vi.waitFor(() => {
+      expect(
+        events.some(
+          (event) =>
+            event.type === 'pending_prompt_added' &&
+            event.promptId === 'stable-deleted',
+        ),
+      ).toBe(true);
+      expect(
+        events.some(
+          (event) =>
+            event.type === 'pending_prompt_completed' &&
+            event.promptId === 'stable-deleted' &&
+            (event.data as { state?: string }).state === 'removed',
+        ),
+      ).toBe(true);
+    });
+
+    abort.abort();
+    await collecting;
     release();
     await promptPromise;
     await bridge.shutdown();
@@ -20293,7 +20414,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('clears undrained messages at settle — not re-drained on the next turn', async () => {
+  it('promotes every undrained message at settle', async () => {
     const releases: Array<() => void> = [];
     const handle = makeChannel({
       promptImpl: async () => {
@@ -20314,32 +20435,200 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
           { clientId: session.clientId },
         )
         .catch(() => {});
-    const drain = () =>
-      handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
-        sessionId: session.sessionId,
-      });
-
-    // Turn 1: enqueue, do NOT drain, then settle.
     const t1 = send('t1');
     await new Promise((r) => setTimeout(r, 10));
-    expect(bridge.enqueueMidTurnMessage(session.sessionId, 'leftover')).toEqual(
-      { accepted: true, messageId: expect.any(String) },
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'leftover',
     );
+    expect(admission).toEqual({
+      accepted: true,
+      messageId: expect.any(String),
+    });
     releases[0]!();
     await t1;
 
-    // Turn 2: the drain must be empty — the leftover was dropped at turn-1
-    // settle, NOT carried into turn 2's first batch. (Deleting the settle-clear
-    // line makes this return ['leftover'].)
-    const t2 = send('t2');
-    await new Promise((r) => setTimeout(r, 10));
-    expect(await drain()).toEqual({
-      messages: [],
-      hasQueuedPrompt: false,
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+      expect.objectContaining({
+        promptId: admission.messageId,
+        text: 'leftover',
+      }),
+    ]);
+    releases[1]!();
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    await bridge.shutdown();
+  });
+
+  it('promotes messages after their client detaches without reapplying the cap', async () => {
+    const prompts: string[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(
+          (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
+        );
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+        return { stopReason: 'end_turn' };
+      },
     });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxPendingPromptsPerSession: 1,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'first-id' },
+    );
+    await vi.waitFor(() => expect(prompts).toEqual(['first']));
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'follow up',
+        { clientId: session.clientId },
+        'webui-follow-up',
+      ),
+    ).toEqual({ accepted: true, messageId: 'webui-follow-up' });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'follow up',
+        { clientId: session.clientId },
+        'webui-follow-up',
+      ),
+    ).toEqual({ accepted: true, messageId: 'webui-follow-up' });
+    await bridge.detachClient(session.sessionId, session.clientId);
+
+    releases[0]!();
+    await first;
+    await vi.waitFor(() => expect(prompts).toEqual(['first', 'follow up']));
+    expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
+      messages: [],
+      settledMessageIds: [],
+      promotedMessageIds: ['webui-follow-up'],
+    });
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([
+      expect.objectContaining({
+        promptId: 'webui-follow-up',
+        text: 'follow up',
+        state: 'running',
+      }),
+    ]);
+    releases[1]!();
+    await vi.waitFor(() => {
+      expect(() => bridge.getSessionSummary(session.sessionId)).toThrow(
+        SessionNotFoundError,
+      );
+    });
+    expect(prompts).toEqual(['first', 'follow up']);
+    await bridge.shutdown();
+  });
+
+  it('removes a promoted message through the shared mid-turn API', async () => {
+    const prompts: string[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(
+          (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
+        );
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    await vi.waitFor(() => expect(prompts).toEqual(['first']));
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'follow up',
+        { clientId: session.clientId },
+        'promoted-delete',
+      ),
+    ).toEqual({ accepted: true, messageId: 'promoted-delete' });
+
+    releases[0]!();
+    await first;
+    await vi.waitFor(() => expect(prompts).toEqual(['first', 'follow up']));
+    const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, 'promoted-delete', {
+        clientId: attached.clientId,
+      }),
+    ).toEqual({ removed: true });
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }).settledMessageIds,
+    ).toContain('promoted-delete');
 
     releases[1]!();
-    await t2;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    await bridge.shutdown();
+  });
+
+  it('does not remove an ordinary pending prompt through the mid-turn API', async () => {
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const ordinary = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'ordinary queued prompt' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'ordinary-pending' },
+    );
+
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, 'ordinary-pending', {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: false });
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ promptId: 'ordinary-pending' }),
+      ]),
+    );
+
+    releases[0]!();
+    await first;
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]!();
+    await ordinary;
     await bridge.shutdown();
   });
 
@@ -20499,7 +20788,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     // The route forwards the client-declared id; the bridge must authorize it
     // against THIS session before queuing — a token-holding client bound to
     // another session must not push into this turn. The check runs before the
-    // idle/empty gates, so it throws even on an idle session.
+    // message validation, so it throws even on an idle session.
     const bridge = makeBridge({
       channelFactory: async () => makeChannel().channel,
     });
@@ -20512,10 +20801,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
-  it('stamps the drained injection frame with the originator client id', async () => {
-    // End-to-end: the trusted client id passed to enqueue is recorded on the
-    // queue entry and surfaces as the published frame's `originatorClientId`, so
-    // only that client dedupes its own pending queue (a peer must keep its copy).
+  it('publishes a session-wide injection frame', async () => {
     let release: (() => void) | undefined;
     const handle = makeChannel({
       promptImpl: async () => {
@@ -20564,7 +20850,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const next = await it.next();
     expect(next.value?.type).toBe('mid_turn_message_injected');
     expect(next.value?.promptId).toBe('prompt-mid-turn');
-    expect(next.value?.originatorClientId).toBe(session.clientId);
+    expect(next.value?.originatorClientId).toBeUndefined();
     expect(next.value?.data).toMatchObject({
       messages: ['hi'],
       messageIds: [admission.messageId],
@@ -20598,19 +20884,83 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
 
-    // First 20 accepted, 21st rejected (browser keeps it for the next turn).
+    const acceptedIds: string[] = [];
     for (let i = 0; i < 20; i++) {
-      expect(bridge.enqueueMidTurnMessage(session.sessionId, `m${i}`)).toEqual({
+      const result = bridge.enqueueMidTurnMessage(session.sessionId, `m${i}`);
+      expect(result).toEqual({
         accepted: true,
         messageId: expect.any(String),
       });
+      acceptedIds.push(result.messageId!);
     }
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'overflow')).toEqual(
       { accepted: false },
     );
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'stable overflow',
+        { clientId: session.clientId },
+        'stable-overflow',
+      ),
+    ).toEqual({ accepted: false });
 
+    for (const messageId of acceptedIds) {
+      bridge.removeMidTurnMessage(session.sessionId, messageId);
+    }
     release();
     await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('uses a caller message id idempotently', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'go' }],
+      })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'note',
+        { clientId: session.clientId },
+        'client-mid-1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'client-mid-1' });
+    const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'different note',
+        { clientId: attached.clientId },
+        'client-mid-1',
+      ),
+    ).toEqual({ accepted: false });
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'note',
+        { clientId: attached.clientId },
+        'client-mid-1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'client-mid-1' });
+
+    const snapshot = bridge.getMidTurnMessages(session.sessionId);
+    expect(snapshot.messages).toEqual([
+      {
+        messageId: 'client-mid-1',
+        text: 'note',
+      },
+    ]);
+
+    release();
+    await prompt;
     await bridge.shutdown();
   });
 
@@ -20653,6 +21003,143 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
     release?.();
     await prompt;
+    await bridge.shutdown();
+  });
+
+  it('getMidTurnMessages returns every shared message', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'still waiting',
+      { clientId: session.clientId },
+      'client-mid-waiting',
+    );
+    expect(admission.accepted).toBe(true);
+    const generated = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'server-generated id',
+      { clientId: session.clientId },
+    );
+    expect(generated.accepted).toBe(true);
+
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({
+      messages: [
+        {
+          messageId: admission.messageId,
+          text: 'still waiting',
+        },
+        {
+          messageId: generated.messageId,
+          text: 'server-generated id',
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+
+    await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+      sessionId: session.sessionId,
+    });
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('getMidTurnMessages moves drained stable ids into the settled ring', async () => {
+    // The reconciliation contract: after a drain, a client that missed the
+    // SSE echo (or refreshed the page) sees its messageId under
+    // `settledMessageIds` and must NOT resend the message.
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'note',
+      { clientId: session.clientId },
+      'client-mid-drained',
+    );
+    expect(admission.accepted).toBe(true);
+
+    await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+      sessionId: session.sessionId,
+    });
+
+    expect(
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({
+      messages: [],
+      settledMessageIds: [admission.messageId],
+      promotedMessageIds: [],
+    });
+
+    release?.();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('getMidTurnMessages throws for unknown sessions and unbound client ids', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(() => bridge.getMidTurnMessages('nope')).toThrow(
+      SessionNotFoundError,
+    );
+    expect(() =>
+      bridge.getMidTurnMessages(session.sessionId, {
+        clientId: 'not-bound-to-this-session',
+      }),
+    ).toThrow(InvalidClientIdError);
     await bridge.shutdown();
   });
 });

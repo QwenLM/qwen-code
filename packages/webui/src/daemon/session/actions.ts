@@ -14,6 +14,7 @@ import type {
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
@@ -1066,19 +1067,18 @@ export function createDaemonSessionActions({
 
     async enqueueMidTurnMessage(
       message: string,
-      opts?: { signal?: AbortSignal },
+      opts?: { signal?: AbortSignal; messageId?: string },
     ): Promise<DaemonMidTurnMessageResult> {
-      // Best-effort and silent: no session / idle session / transport failure /
-      // abort all resolve `{ accepted: false }` so the caller falls back to its
-      // own next-turn queue. Never raises a user-facing notice — a queued
-      // message typed mid-turn is an optimization, not a user-initiated action.
-      // `opts.signal` lets the caller abort a still-in-flight push when the turn
-      // it was meant for settles, so a late arrival can't land in the next turn.
+      // Calls without an id are the old-daemon compatibility path and fall back
+      // locally. With a stable id, transport failure is ambiguous (the POST may
+      // already have committed), so let the caller reconcile instead of
+      // reporting a false rejection.
       const session = sessionRef.current;
       if (!session) return { accepted: false };
       try {
         return await session.enqueueMidTurnMessage(message, opts);
       } catch (err) {
+        if (opts?.messageId) throw err;
         // An abort is the designed settle-time cancel (the message stays in the
         // browser queue for the next turn), not a failure — stay silent. Any
         // OTHER error (daemon down, 4xx/5xx, network, timeout) silently disables
@@ -1086,7 +1086,7 @@ export function createDaemonSessionActions({
         // without raising a user-facing notice.
         if (!(err instanceof DOMException && err.name === 'AbortError')) {
           console.debug(
-            '[enqueueMidTurnMessage] push failed; kept for next turn',
+            '[enqueueMidTurnMessage] legacy push failed; kept for next turn',
             err,
           );
         }
@@ -1101,15 +1101,8 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
-        // The bridge removes a mid-turn message only on an exact originator
-        // match. The originator is the client id that was attached to the
-        // TARGET session when the message was queued — with per-session client
-        // ids that differs from the currently selected session's id, so
-        // forwarding our own id would resolve to a foreign originator and the
-        // bridge would reject a valid removal after a session switch. Prefer
-        // the target session's persisted id; fall back to our own when nothing
-        // is persisted (a shared caller-provided client id covers every
-        // session).
+        // Authenticate against the target session when editing a row restored
+        // after a session switch.
         const targetClientId =
           getPersistedClientId(opts.sessionId) ?? session.clientId;
         return await session.client.removeMidTurnMessage(
@@ -1121,6 +1114,28 @@ export function createDaemonSessionActions({
         );
       }
       return await session.removeMidTurnMessage(messageId);
+    },
+
+    async getMidTurnMessages(opts?: {
+      signal?: AbortSignal;
+    }): Promise<DaemonMidTurnMessagesResult | undefined> {
+      // Best-effort and silent, like `enqueueMidTurnMessage`: reconciliation
+      // is a bookkeeping recovery aid (page refresh / missed echo), not a
+      // user-initiated action. `undefined` means callers preserve their
+      // current state because delivery is unknown.
+      const session = sessionRef.current;
+      if (!session) return undefined;
+      try {
+        return await session.getMidTurnMessages(opts);
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.debug(
+            '[getMidTurnMessages] reconciliation query failed; keeping current state',
+            err,
+          );
+        }
+        return undefined;
+      }
     },
 
     async getPendingPrompts(opts) {

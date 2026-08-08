@@ -16,6 +16,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -56,9 +57,8 @@ export interface DaemonConnectionState {
   /**
    * Daemon-confirmed client identity bound to this session (the value sent as
    * `X-Qwen-Client-Id`). Consumers use it to recognize their OWN
-   * originator-stamped frames — e.g. the web-shell dedupes a
-   * `mid_turn_message_injected` batch only when its `originatorClientId`
-   * matches this id (a peer on the same session must keep its own entry).
+   * originator-stamped legacy frames. Stable-id mid-turn queues are shared by
+   * the session and do not use this id as an ownership boundary.
    */
   clientId?: string;
   workspaceCwd?: string;
@@ -412,19 +412,29 @@ export interface DaemonSessionActions {
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
   /**
-   * Best-effort: queue a message typed while a turn is running so the daemon
-   * can drain it mid-turn. Resolves `{ accepted: false }` (never throws/raises
-   * a notice) when there is no session, the session is idle, or the push
-   * fails — the caller then keeps the message in its own next-turn queue.
+   * Queue a message typed while a turn is running. Calls without an id support
+   * old daemons and are best-effort; calls with a stable `messageId` may reject
+   * on an ambiguous transport failure so the caller can reconcile.
    */
   enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; messageId?: string },
   ): Promise<DaemonMidTurnMessageResult>;
   removeMidTurnMessage(
     messageId: string,
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
+  /**
+   * Best-effort reconciliation snapshot (queue + delivery-state rings) from the
+   * daemon. Resolves `undefined` (never throws/raises a notice) when there
+   * is no session or the query fails — callers preserve current state.
+   * Pre-flight the
+   * `session_mid_turn_message_query` capability before relying on it: older
+   * daemons lack the route.
+   */
+  getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult | undefined>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonPendingPromptsResult>;
