@@ -7,17 +7,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
-import {
+import type {
   AgentEventEmitter,
-  type Config,
-  type ToolRegistry,
-  type AgentToolCallEvent,
-  type AgentToolResultEvent,
-  type AgentApprovalRequestEvent,
-  type AgentStreamTextEvent,
-  type AgentUsageEvent,
-  type ToolEditConfirmationDetails,
-  type ToolInfoConfirmationDetails,
+  Config,
+  ToolRegistry,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentApprovalRequestEvent,
+  AgentStreamTextEvent,
+  AgentUsageEvent,
+  ToolEditConfirmationDetails,
+  ToolInfoConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentEventType,
