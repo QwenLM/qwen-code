@@ -31,10 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 
 // Import from the monorepo channel packages
-import {
-  AcpBridge,
-  SessionRouter,
-} from '../packages/channels/base/src/index.js';
+import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
 import {
   MockPluginChannel,
   createMockServer,

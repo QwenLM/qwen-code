@@ -126,11 +126,29 @@
       "@qwen-code/webui/daemon-react-sdk": [
         "../packages/webui/src/daemon-react-sdk.ts"
       ],
-      // channel-plugin.test.ts imports plugin-example sources, whose
-      // `@qwen-code/channel-base` imports must resolve to the same source
-      // declarations as the test's own relative import — mixing src and dist
-      // declarations produces duplicate-private-class errors.
+      // channel-plugin.test.ts and the plugin-example sources it imports
+      // both import `@qwen-code/channel-base`. Map it to source so the
+      // typecheck does not depend on channel-base's dist and both import
+      // sites share one declaration — mixing src and dist declarations
+      // produces duplicate-private-class errors.
       "@qwen-code/channel-base": ["../packages/channels/base/src/index.ts"],
+      // cli's channel-registry.ts imports the eight builtin channel
+      // adapters and html.ts imports web-templates; without entries they
+      // resolve through their exports maps to dist, leaving the typecheck
+      // dependent on those packages being built.
+      "@qwen-code/channel-telegram": [
+        "../packages/channels/telegram/src/index.ts"
+      ],
+      "@qwen-code/channel-weixin": ["../packages/channels/weixin/src/index.ts"],
+      "@qwen-code/channel-dingtalk": [
+        "../packages/channels/dingtalk/src/index.ts"
+      ],
+      "@qwen-code/channel-wecom": ["../packages/channels/wecom/src/index.ts"],
+      "@qwen-code/channel-feishu": ["../packages/channels/feishu/src/index.ts"],
+      "@qwen-code/channel-qqbot": ["../packages/channels/qqbot/src/index.ts"],
+      "@qwen-code/channel-github": ["../packages/channels/github/src/index.ts"],
+      "@qwen-code/channel-gitlab": ["../packages/channels/gitlab/src/index.ts"],
+      "@qwen-code/web-templates": ["../packages/web-templates/src/index.ts"],
       // node-pty declares `types` at the top level but its `exports` map is a
       // bare string with no `types` condition, so nodenext resolution never
       // reaches the declarations and every pty handle degrades to `any` —
