@@ -281,25 +281,29 @@ export interface InheritedLoaderEnvScrubHandle {
   release(): void;
 }
 
-// Scrubs loader vars from the live `process.env`, reference-counted so it is
-// safe to call from overlapping daemon instances in one process. Use this at
-// process-env boundaries; `scrubAndReportInheritedLoaderEnv` remains for
-// one-shot scrubs of a private env object (ACP child / channel worker boot).
+// Scrubs loader vars from a shared, live env (the daemon passes its own
+// `process.env`), reference-counted so it is safe to call from overlapping
+// daemon instances in one process. The caller owns the `process.env`
+// reference so the serve-surface process.env guard still sees the access;
+// `scrubAndReportInheritedLoaderEnv` remains for one-shot scrubs of a private
+// env object (ACP child / channel worker boot). Concurrent callers must pass
+// the same shared env object for the snapshot/restore refcount to be correct.
 export function acquireInheritedLoaderEnvScrub(
+  env: NodeJS.ProcessEnv,
   commandLabel: string,
   processLabel: string,
 ): InheritedLoaderEnvScrubHandle {
   if (sharedProcessEnvScrubDepth === 0) {
     sharedProcessEnvScrubOriginals.clear();
-    for (const key of Object.keys(process.env)) {
+    for (const key of Object.keys(env)) {
       if (!isLoaderEnvKey(key)) continue;
-      const value = process.env[key];
+      const value = env[key];
       if (value !== undefined) sharedProcessEnvScrubOriginals.set(key, value);
     }
   }
   sharedProcessEnvScrubDepth++;
   const removedKeys = scrubAndReportInheritedLoaderEnv(
-    process.env,
+    env,
     commandLabel,
     processLabel,
   );
@@ -313,7 +317,7 @@ export function acquireInheritedLoaderEnvScrub(
       if (sharedProcessEnvScrubDepth > 0) return;
       for (const [key, value] of sharedProcessEnvScrubOriginals) {
         // A later legitimate assignment wins over the restore.
-        if (!Object.hasOwn(process.env, key)) process.env[key] = value;
+        if (!Object.hasOwn(env, key)) env[key] = value;
       }
       sharedProcessEnvScrubOriginals.clear();
     },

@@ -489,12 +489,20 @@ describe('acquireInheritedLoaderEnvScrub', () => {
       .mockImplementation(() => true);
     try {
       // Daemon A boots and scrubs the shared env.
-      const daemonA = acquireInheritedLoaderEnvScrub('qwen serve', 'daemon');
+      const daemonA = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
       expect(daemonA.removedKeys).toContain('NODE_OPTIONS');
       expect(process.env['NODE_OPTIONS']).toBeUndefined();
 
       // Daemon B boots into the already-scrubbed env: nothing left to remove.
-      const daemonB = acquireInheritedLoaderEnvScrub('qwen serve', 'daemon');
+      const daemonB = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
       expect(daemonB.removedKeys).toEqual([]);
       expect(process.env['NODE_OPTIONS']).toBeUndefined();
 
@@ -518,7 +526,11 @@ describe('acquireInheritedLoaderEnvScrub', () => {
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
     try {
-      const handle = acquireInheritedLoaderEnvScrub('qwen serve', 'daemon');
+      const handle = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
       expect(process.env['LD_PRELOAD']).toBeUndefined();
       // A legitimate re-assignment before release must survive the restore.
       process.env['LD_PRELOAD'] = '/legit.so';

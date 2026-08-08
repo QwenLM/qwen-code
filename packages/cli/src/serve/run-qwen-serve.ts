@@ -2141,7 +2141,11 @@ async function runQwenServeImpl(
   // process do not restore each other's loader vars mid-flight, and reverted
   // on close() so an embedded caller reusing the host process gets its launch
   // environment back.
-  const loaderEnvScrub = acquireInheritedLoaderEnvScrub('qwen serve', 'daemon');
+  const loaderEnvScrub = acquireInheritedLoaderEnvScrub(
+    process.env,
+    'qwen serve',
+    'daemon',
+  );
   const scrubbedLoaderEnvKeys = loaderEnvScrub.removedKeys;
   const restoreScrubbedLoaderEnv = (): void => {
     loaderEnvScrub.release();
