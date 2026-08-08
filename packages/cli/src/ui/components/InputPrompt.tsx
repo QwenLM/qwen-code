@@ -52,6 +52,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -263,6 +264,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
+  const { menu: contextMenu, closeMenu: closeContextMenu } = useContextMenu();
   const {
     entries: bgEntries,
     dialogOpen: bgDialogOpen,
@@ -878,6 +880,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      // While the right-click context menu is open it owns navigation keys
+      // (the menu overlay handles them); any other key closes the menu and is
+      // then processed normally — mirroring click-away dismissal.
+      if (contextMenu !== null) {
+        if (
+          key.name === 'up' ||
+          key.name === 'down' ||
+          key.name === 'return' ||
+          key.name === 'escape'
+        ) {
+          return true;
+        }
+        closeContextMenu();
+        return false;
+      }
+
       // When the Background tasks dialog is open, swallow every key so
       // nothing reaches the composer buffer — the dialog's own keypress
       // handler owns selection, open/close, and stop actions. Keep this ahead
@@ -1886,6 +1904,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       parsePlaceholder,
       freePlaceholderId,
       agentTabBarFocused,
+      contextMenu,
+      closeContextMenu,
       bgDialogOpen,
       bgPillFocused,
       hasAgents,

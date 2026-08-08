@@ -64,6 +64,7 @@ import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
   measureElementPosition,
@@ -131,7 +132,10 @@ const ClickableThinkMessage: React.FC<{
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled;
-  const isActive = !isPending;
+  // Quiet while the context menu owns the pointer so a click on the menu
+  // overlay can't also toggle the thought underneath it.
+  const { menu: contextMenu } = useContextMenu();
+  const isActive = !isPending && contextMenu === null;
 
   useMouseEvents(
     useCallback(

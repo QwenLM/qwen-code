@@ -4,18 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, type MutableRefObject } from 'react';
 import { useStdout, type ReadonlyFrame } from 'ink';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
-import { SelectionState } from './selection-state.js';
+import { SelectionState, type NormalizedSelection } from './selection-state.js';
 import { getSelectedText } from './selection-text.js';
 import { wordSpanAt, lineSpanAt } from './selection-span.js';
 import {
   terminalToGrid,
+  snapWideChar,
   pointInViewport,
   clampToViewport,
   type ViewportRect,
@@ -61,13 +62,34 @@ const sameViewportRect = (
   previous.width === current.width &&
   previous.height === current.height;
 
+/**
+ * Read-only view of the controller's live selection, for consumers that must
+ * not own the state (the context-menu "Copy Selection" item). The ref is
+ * populated on mount and cleared on unmount; `null` while no controller is
+ * mounted.
+ */
+export interface SelectionQuery {
+  /** Reading-order range of the current selection, or null when none. */
+  getRange: () => NormalizedSelection | null;
+}
+
 export interface TextSelectionControllerProps {
   /** Selection is only handled while active (VP mode, no dialog, focused). */
   isActive: boolean;
+  /**
+   * Temporarily ignore mouse events WITHOUT clearing the current selection.
+   * Used while the context menu owns the pointer: the existing selection must
+   * survive (the menu's "Copy Selection" offers it), but new presses must not
+   * start or extend a selection underneath the menu. Deactivation
+   * (`isActive`) still clears; pausing does not.
+   */
+  eventsPaused?: boolean;
   /** Reads from the history viewport; called at event time (may be null early). */
   getViewportRect: () => ViewportRect | null;
   getScrollState: () => ScrollState;
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
+  /** Optional sink exposing the live selection range to other components. */
+  selectionQueryRef?: MutableRefObject<SelectionQuery | null>;
 }
 
 /** Max gap between clicks (ms) to count as a double/triple click. */
@@ -171,14 +193,7 @@ export function TextSelectionController(
         terminalHeight,
         frameHeight,
       );
-      const row = buffer.frame?.cells[point.y];
-      const snappedPoint =
-        point.x > 0 &&
-        row?.[point.x]?.value === '' &&
-        row[point.x - 1]?.fullWidth
-          ? { ...point, x: point.x - 1 }
-          : point;
-      return { point: snappedPoint, rect };
+      return { point: snapWideChar(buffer.frame, point), rect };
     },
     [getBuffer, stdout],
   );
@@ -190,6 +205,13 @@ export function TextSelectionController(
       // Any scroll drops the selection (B1: visible-region only).
       if (event.name.startsWith('scroll-')) {
         clearSelection();
+        return;
+      }
+
+      // While paused (context menu owns the pointer) ignore press/move/release
+      // so they can't start or extend a selection under the menu — but do NOT
+      // clear: the existing selection is what the menu's Copy Selection offers.
+      if (propsRef.current.eventsPaused) {
         return;
       }
 
@@ -330,6 +352,28 @@ export function TextSelectionController(
       clearSelection();
     }
   }, [props.isActive, clearSelection]);
+
+  // Expose the live selection to an external query ref (context menu "Copy
+  // Selection"). Collapsed point-selections are reported as none — they carry
+  // no text.
+  const selectionQueryRef = props.selectionQueryRef;
+  useEffect(() => {
+    if (!selectionQueryRef) {
+      return;
+    }
+    selectionQueryRef.current = {
+      getRange: () => {
+        const selection = selectionRef.current;
+        if (selection.isEmpty || selection.isCollapsed) {
+          return null;
+        }
+        return selection.normalized();
+      },
+    };
+    return () => {
+      selectionQueryRef.current = null;
+    };
+  }, [selectionQueryRef]);
 
   return null;
 }
