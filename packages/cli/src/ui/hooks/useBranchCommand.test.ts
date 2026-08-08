@@ -32,6 +32,7 @@ describe('useBranchCommand', () => {
   let addItem: ReturnType<typeof vi.fn>;
   let backgroundTaskRegistry: {
     hasRunningTasks: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   let monitorRegistry: {
@@ -40,10 +41,12 @@ describe('useBranchCommand', () => {
   };
   let backgroundShellRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   let workflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
@@ -103,6 +106,7 @@ describe('useBranchCommand', () => {
     addItem = vi.fn();
     backgroundTaskRegistry = {
       hasRunningTasks: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
     };
     monitorRegistry = {
@@ -111,10 +115,12 @@ describe('useBranchCommand', () => {
     };
     backgroundShellRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
     };
     workflowRunRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
       abortAll: vi.fn(),
     };
@@ -141,6 +147,15 @@ describe('useBranchCommand', () => {
 
   it('refuses to branch while background work is running', async () => {
     backgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
+    backgroundTaskRegistry.getAll.mockReturnValue([
+      {
+        agentId: 'bg_ab12cd34',
+        isBackgrounded: true,
+        status: 'running',
+        description: 'long-running research',
+        startTime: Date.now(),
+      },
+    ]);
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -154,6 +169,14 @@ describe('useBranchCommand', () => {
       expect.objectContaining({
         type: 'error',
         text: expect.stringContaining('running background tasks'),
+      }),
+      expect.any(Number),
+    );
+    // #8741: the blocked error names the blocking entry so the user can
+    // stop it without guessing what is still running.
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('[bg_ab12cd34]'),
       }),
       expect.any(Number),
     );

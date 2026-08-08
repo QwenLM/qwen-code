@@ -9,6 +9,8 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   hasBlockingBackgroundWork,
   resetBackgroundStateForSessionSwitch,
+  describeBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
 } from './backgroundWorkUtils.js';
 
 function createMockConfig(overrides?: {
@@ -142,5 +144,244 @@ describe('resetBackgroundStateForSessionSwitch', () => {
     // after reset would find nothing and leak the gated script.
     expect(abortWorkflows).toHaveBeenCalledOnce();
     expect(abortWorkflows).toHaveBeenCalledBefore(resetWorkflows);
+  });
+});
+
+function createEnumeratingMockConfig(overrides?: {
+  agents?: unknown[];
+  monitors?: unknown[];
+  shells?: unknown[];
+  workflows?: unknown[];
+}): Config {
+  return {
+    getBackgroundTaskRegistry: () => ({
+      getAll: () => overrides?.agents ?? [],
+    }),
+    getMonitorRegistry: () => ({
+      getRunning: () => overrides?.monitors ?? [],
+    }),
+    getBackgroundShellRegistry: () => ({
+      getAll: () => overrides?.shells ?? [],
+    }),
+    getWorkflowRunRegistry: () => ({
+      list: () => overrides?.workflows ?? [],
+    }),
+  } as unknown as Config;
+}
+
+describe('describeBlockingBackgroundWork (#8741)', () => {
+  const now = Date.now();
+
+  it('returns undefined when no entry is running', () => {
+    const config = createEnumeratingMockConfig({
+      agents: [
+        {
+          agentId: 'bg_done',
+          isBackgrounded: true,
+          status: 'completed',
+          description: 'done',
+          startTime: now,
+        },
+      ],
+      shells: [
+        {
+          shellId: 'shell_done',
+          status: 'completed',
+          command: 'echo hi',
+          startTime: now,
+        },
+      ],
+      workflows: [
+        { runId: 'wf_done', status: 'completed', meta: null, startTime: now },
+      ],
+    });
+    expect(describeBlockingBackgroundWork(config)).toBeUndefined();
+  });
+
+  it('lists running backgrounded agents, skipping foreground and paused ones', () => {
+    const config = createEnumeratingMockConfig({
+      agents: [
+        {
+          agentId: 'bg_run',
+          isBackgrounded: true,
+          status: 'running',
+          description: 'research the codebase',
+          startTime: now,
+        },
+        {
+          agentId: 'fg_run',
+          isBackgrounded: false,
+          status: 'running',
+          description: 'foreground work',
+          startTime: now,
+        },
+        {
+          agentId: 'bg_paused',
+          isBackgrounded: true,
+          status: 'paused',
+          description: 'paused work',
+          startTime: now,
+        },
+      ],
+    });
+    const summary = describeBlockingBackgroundWork(config);
+    expect(summary?.lines).toHaveLength(1);
+    expect(summary?.lines[0]).toContain('[bg_run]');
+    expect(summary?.lines[0]).toContain('research the codebase');
+    expect(summary?.hasTaskEntries).toBe(true);
+    expect(summary?.hasWorkflowRuns).toBe(false);
+  });
+
+  it('lists monitors, running shells, and running/pausing workflow runs', () => {
+    const config = createEnumeratingMockConfig({
+      monitors: [
+        {
+          monitorId: 'mon_1',
+          status: 'running',
+          description: 'tail -f app.log',
+          startTime: now,
+        },
+      ],
+      shells: [
+        {
+          shellId: 'shell_1',
+          status: 'running',
+          command: 'npm run dev',
+          startTime: now,
+        },
+        {
+          shellId: 'shell_2',
+          status: 'cancelled',
+          command: 'echo gone',
+          startTime: now,
+        },
+      ],
+      workflows: [
+        {
+          runId: 'wf_1',
+          status: 'running',
+          meta: { name: 'nightly' },
+          startTime: now,
+        },
+        { runId: 'wf_2', status: 'pausing', meta: null, startTime: now },
+        { runId: 'wf_3', status: 'paused', meta: null, startTime: now },
+      ],
+    });
+    const summary = describeBlockingBackgroundWork(config);
+    expect(summary?.count).toBe(4);
+    const joined = summary?.lines.join('\n');
+    expect(joined).toContain('[mon_1]');
+    expect(joined).toContain('[shell_1]');
+    expect(joined).toContain('npm run dev');
+    expect(joined).toContain('[wf_1]');
+    expect(joined).toContain('nightly');
+    // meta-less runs fall back to the runId as their label
+    expect(joined).toContain('[wf_2]');
+    expect(joined).not.toContain('shell_2');
+    expect(joined).not.toContain('wf_3');
+    expect(summary?.hasTaskEntries).toBe(true);
+    expect(summary?.hasWorkflowRuns).toBe(true);
+  });
+
+  it('sorts lines by start time', () => {
+    const config = createEnumeratingMockConfig({
+      shells: [
+        {
+          shellId: 'shell_new',
+          status: 'running',
+          command: 'new',
+          startTime: now - 1_000,
+        },
+        {
+          shellId: 'shell_old',
+          status: 'running',
+          command: 'old',
+          startTime: now - 60_000,
+        },
+      ],
+    });
+    const summary = describeBlockingBackgroundWork(config);
+    expect(summary?.lines[0]).toContain('[shell_old]');
+    expect(summary?.lines[1]).toContain('[shell_new]');
+  });
+
+  it('sanitizes user-supplied labels', () => {
+    const config = createEnumeratingMockConfig({
+      shells: [
+        {
+          shellId: 'shell_evil',
+          status: 'running',
+          command: 'npm run dev\u001b[31m\u0007',
+          startTime: now,
+        },
+      ],
+    });
+    const summary = describeBlockingBackgroundWork(config);
+    expect(summary?.lines[0]).toContain('npm run dev');
+    expect(summary?.lines[0]).not.toContain('\u001b');
+    expect(summary?.lines[0]).not.toContain('\u0007');
+  });
+});
+
+describe('buildBackgroundWorkBlockedMessage (#8741)', () => {
+  const base = 'base blocked message';
+  const now = Date.now();
+
+  it('returns the bare base message when nothing is enumerated', () => {
+    expect(
+      buildBackgroundWorkBlockedMessage(createEnumeratingMockConfig(), base),
+    ).toBe(base);
+  });
+
+  it('appends the entries and a /tasks hint for task-kind blockers', () => {
+    const config = createEnumeratingMockConfig({
+      shells: [
+        {
+          shellId: 'shell_1',
+          status: 'running',
+          command: 'npm run dev',
+          startTime: now,
+        },
+      ],
+    });
+    const message = buildBackgroundWorkBlockedMessage(config, base);
+    expect(message.startsWith(base)).toBe(true);
+    expect(message).toContain('[shell_1]');
+    expect(message).toContain(
+      'Use /tasks to inspect and stop them, then retry.',
+    );
+  });
+
+  it('points at /workflows when only workflow runs block', () => {
+    const config = createEnumeratingMockConfig({
+      workflows: [
+        { runId: 'wf_1', status: 'running', meta: null, startTime: now },
+      ],
+    });
+    const message = buildBackgroundWorkBlockedMessage(config, base);
+    expect(message).toContain(
+      'Use /workflows to inspect and stop them, then retry.',
+    );
+    expect(message).not.toContain('/tasks');
+  });
+
+  it('points at both surfaces when both kinds block', () => {
+    const config = createEnumeratingMockConfig({
+      monitors: [
+        {
+          monitorId: 'mon_1',
+          status: 'running',
+          description: 'watch',
+          startTime: now,
+        },
+      ],
+      workflows: [
+        { runId: 'wf_1', status: 'running', meta: null, startTime: now },
+      ],
+    });
+    const message = buildBackgroundWorkBlockedMessage(config, base);
+    expect(message).toContain(
+      'Use /tasks and /workflows to inspect and stop them, then retry.',
+    );
   });
 });

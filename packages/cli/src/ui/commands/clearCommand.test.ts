@@ -405,6 +405,15 @@ describe('clearCommand', () => {
           config: {
             getBackgroundTaskRegistry: vi.fn().mockReturnValue({
               hasRunningTasks: vi.fn().mockReturnValue(true),
+              getAll: vi.fn().mockReturnValue([
+                {
+                  agentId: 'bg_ab12cd34',
+                  isBackgrounded: true,
+                  status: 'running',
+                  description: 'long-running research',
+                  startTime: Date.now(),
+                },
+              ]),
               reset: vi.fn(),
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
@@ -418,6 +427,7 @@ describe('clearCommand', () => {
             }),
             getWorkflowRunRegistry: vi.fn().mockReturnValue({
               hasRunningEntries: vi.fn().mockReturnValue(false),
+              list: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),
@@ -441,12 +451,21 @@ describe('clearCommand', () => {
 
       const result = await clearCommand.action(blockedContext, '');
 
-      expect(result).toEqual({
+      // #8741: the error must name the blocking entries, not just say
+      // "stop your tasks" — the user may not know which tasks exist.
+      expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
-        content:
-          "Stop the current session's running background tasks before starting a new session.",
       });
+      const content = (result as { content: string }).content;
+      expect(content).toContain(
+        "Stop the current session's running background tasks before starting a new session.",
+      );
+      expect(content).toContain('[bg_ab12cd34]');
+      expect(content).toContain('long-running research');
+      expect(content).toContain(
+        'Use /tasks to inspect and stop them, then retry.',
+      );
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
     });
@@ -463,6 +482,15 @@ describe('clearCommand', () => {
           config: {
             getBackgroundTaskRegistry: vi.fn().mockReturnValue({
               hasRunningTasks: vi.fn().mockReturnValue(true),
+              getAll: vi.fn().mockReturnValue([
+                {
+                  agentId: 'bg_ab12cd34',
+                  isBackgrounded: true,
+                  status: 'running',
+                  description: 'long-running research',
+                  startTime: Date.now(),
+                },
+              ]),
               reset: vi.fn(),
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
@@ -476,6 +504,7 @@ describe('clearCommand', () => {
             }),
             getWorkflowRunRegistry: vi.fn().mockReturnValue({
               hasRunningEntries: vi.fn().mockReturnValue(false),
+              list: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),
@@ -499,12 +528,20 @@ describe('clearCommand', () => {
 
       const result = await clearCommand.action(blockedContext, '');
 
-      expect(result).toEqual({
+      // #8741: same enumerated error in interactive mode — the visible
+      // message is what tells the user which task to stop.
+      expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
-        content:
-          "Stop the current session's running background tasks before starting a new session.",
       });
+      const content = (result as { content: string }).content;
+      expect(content).toContain(
+        "Stop the current session's running background tasks before starting a new session.",
+      );
+      expect(content).toContain('[bg_ab12cd34]');
+      expect(content).toContain(
+        'Use /tasks to inspect and stop them, then retry.',
+      );
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
     });
@@ -519,6 +556,7 @@ describe('clearCommand', () => {
           config: {
             getBackgroundTaskRegistry: vi.fn().mockReturnValue({
               hasRunningTasks: vi.fn().mockReturnValue(false),
+              getAll: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
             }),
             getBackgroundShellRegistry: vi.fn().mockReturnValue({
@@ -531,68 +569,15 @@ describe('clearCommand', () => {
                 {
                   monitorId: 'mon_123',
                   status: 'running',
+                  description: 'tail -f /var/log/app.log',
+                  startTime: Date.now(),
                 },
               ]),
-              reset: vi.fn(),
-            }),
-            getHookSystem: mockGetHookSystem,
-            startNewSession: mockStartNewSession,
-            getGeminiClient: vi.fn().mockReturnValue({
-              resetChat: mockResetChat,
-            } as unknown as GeminiClient),
-            getModel: vi.fn().mockReturnValue('test-model'),
-            getApprovalMode: vi.fn().mockReturnValue('default'),
-            getToolRegistry: vi.fn().mockReturnValue({
-              getAllTools: vi.fn().mockReturnValue([]),
-            }),
-            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
-          },
-        },
-        session: {
-          startNewSession: vi.fn(),
-        },
-      });
-
-      const result = await clearCommand.action(blockedContext, '');
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content:
-          "Stop the current session's running background tasks before starting a new session.",
-      });
-      expect(mockStartNewSession).not.toHaveBeenCalled();
-      expect(mockResetChat).not.toHaveBeenCalled();
-    });
-
-    it('blocks session clearing while a background shell is still running', async () => {
-      if (!clearCommand.action)
-        throw new Error('clearCommand must have an action.');
-
-      const blockedContext = createMockCommandContext({
-        executionMode: 'non_interactive',
-        services: {
-          config: {
-            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
-              hasRunningTasks: vi.fn().mockReturnValue(false),
-              reset: vi.fn(),
-            }),
-            getBackgroundShellRegistry: vi.fn().mockReturnValue({
-              getAll: vi.fn().mockReturnValue([
-                {
-                  shellId: 'shell_123',
-                  status: 'running',
-                },
-              ]),
-              hasRunningEntries: vi.fn().mockReturnValue(true),
-              reset: vi.fn(),
-            }),
-            getMonitorRegistry: vi.fn().mockReturnValue({
-              getRunning: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
             }),
             getWorkflowRunRegistry: vi.fn().mockReturnValue({
               hasRunningEntries: vi.fn().mockReturnValue(false),
+              list: vi.fn().mockReturnValue([]),
               reset: vi.fn(),
               abortAll: vi.fn(),
             }),
@@ -616,12 +601,91 @@ describe('clearCommand', () => {
 
       const result = await clearCommand.action(blockedContext, '');
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
-        content:
-          "Stop the current session's running background tasks before starting a new session.",
       });
+      const content = (result as { content: string }).content;
+      expect(content).toContain(
+        "Stop the current session's running background tasks before starting a new session.",
+      );
+      expect(content).toContain('[mon_123]');
+      expect(content).toContain('tail -f /var/log/app.log');
+      expect(content).toContain(
+        'Use /tasks to inspect and stop them, then retry.',
+      );
+      expect(mockStartNewSession).not.toHaveBeenCalled();
+      expect(mockResetChat).not.toHaveBeenCalled();
+    });
+
+    it('blocks session clearing while a background shell is still running', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      const blockedContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasRunningTasks: vi.fn().mockReturnValue(false),
+              getAll: vi.fn().mockReturnValue([]),
+              reset: vi.fn(),
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([
+                {
+                  shellId: 'shell_123',
+                  status: 'running',
+                  command: 'npm run dev',
+                  startTime: Date.now(),
+                },
+              ]),
+              hasRunningEntries: vi.fn().mockReturnValue(true),
+              reset: vi.fn(),
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([]),
+              reset: vi.fn(),
+            }),
+            getWorkflowRunRegistry: vi.fn().mockReturnValue({
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              list: vi.fn().mockReturnValue([]),
+              reset: vi.fn(),
+              abortAll: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getGeminiClient: vi.fn().mockReturnValue({
+              resetChat: mockResetChat,
+            } as unknown as GeminiClient),
+            getModel: vi.fn().mockReturnValue('test-model'),
+            getApprovalMode: vi.fn().mockReturnValue('default'),
+            getToolRegistry: vi.fn().mockReturnValue({
+              getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      const result = await clearCommand.action(blockedContext, '');
+
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+      });
+      const content = (result as { content: string }).content;
+      expect(content).toContain(
+        "Stop the current session's running background tasks before starting a new session.",
+      );
+      expect(content).toContain('[shell_123]');
+      expect(content).toContain('npm run dev');
+      expect(content).toContain(
+        'Use /tasks to inspect and stop them, then retry.',
+      );
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
     });

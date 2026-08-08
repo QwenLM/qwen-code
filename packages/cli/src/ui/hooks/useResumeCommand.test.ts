@@ -602,6 +602,15 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(true),
+        getAll: vi.fn().mockReturnValue([
+          {
+            agentId: 'bg_ab12cd34',
+            isBackgrounded: true,
+            status: 'running',
+            description: 'long-running research',
+            startTime: Date.now(),
+          },
+        ]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -615,6 +624,7 @@ describe('useResumeCommand', () => {
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -650,7 +660,14 @@ describe('useResumeCommand', () => {
     expect(historyManager.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+        text: expect.stringContaining(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE),
+      }),
+      expect.any(Number),
+    );
+    // #8741: the blocked error names the blocking entry.
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('[bg_ab12cd34]'),
       }),
       expect.any(Number),
     );
@@ -667,6 +684,7 @@ describe('useResumeCommand', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
+        getAll: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -679,12 +697,15 @@ describe('useResumeCommand', () => {
           {
             monitorId: 'mon_123',
             status: 'running',
+            description: 'tail -f /var/log/app.log',
+            startTime: Date.now(),
           },
         ]),
         reset: vi.fn(),
       }),
       getWorkflowRunRegistry: () => ({
         hasRunningEntries: vi.fn().mockReturnValue(false),
+        list: vi.fn().mockReturnValue([]),
         reset: vi.fn(),
         abortAll: vi.fn(),
       }),
@@ -720,7 +741,14 @@ describe('useResumeCommand', () => {
     expect(historyManager.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
-        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+        text: expect.stringContaining(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE),
+      }),
+      expect.any(Number),
+    );
+    // #8741: the blocked error names the blocking monitor.
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('[mon_123]'),
       }),
       expect.any(Number),
     );
