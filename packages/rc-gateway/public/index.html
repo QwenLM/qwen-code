@@ -441,7 +441,8 @@
         toolEls.clear();
         resetTurn();
         ctxInfo = null;
-        liveInputTokens = 0;
+        liveIn = 0;
+        liveOut = 0;
         renderFooter();
       }
       function makeBubble(cls, roleLabel) {
@@ -528,18 +529,20 @@
           .join('\n');
         if (lines) addSystem('Plan:\n' + lines, false);
       }
-      // ---- Session status footer (model · context · mode · cwd) -------------
-      // Static bits (model name, context-window limit, approval mode, cwd) come
-      // from GET /session/:id/context; the live context-fill % comes from the
-      // stream — agent_message_chunk frames carry _meta.usage.inputTokens (the
-      // current prompt-token count), same value the terminal footer shows.
-      let ctxInfo = null; // { modelName, contextLimit, modeName, cwd }
-      let liveInputTokens = 0;
+      // ---- Session status footer (model · tokens · mode · cwd) --------------
+      // Model / approval mode / cwd come from GET /session/:id/context; live
+      // per-turn token counts come from the stream (agent_message_chunk frames
+      // carry _meta.usage). The running daemon doesn't expose the context-window
+      // size for an env-configured model, so we show raw in/out token counts
+      // (no context-fill %). The model name updates on `model_switched` too.
+      let ctxInfo = null; // { modelName, modeName, cwd }
+      let liveIn = 0; // last turn's prompt (input) tokens
+      let liveOut = 0; // last turn's completion (output) tokens
 
       const fmtK = (n) =>
-        typeof n === 'number' && n > 0
+        typeof n === 'number' && n >= 1000
           ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
-          : '0';
+          : String(typeof n === 'number' && n > 0 ? n : 0);
 
       function renderFooter() {
         const f = $('session-footer');
@@ -549,22 +552,8 @@
         }
         const parts = [];
         parts.push('🧠 ' + ctxInfo.modelName);
-        if (ctxInfo.contextLimit) {
-          let ctx = fmtK(ctxInfo.contextLimit) + ' ctx';
-          if (liveInputTokens > 0) {
-            const pct = (
-              (liveInputTokens / ctxInfo.contextLimit) *
-              100
-            ).toFixed(1);
-            ctx =
-              fmtK(liveInputTokens) +
-              ' / ' +
-              fmtK(ctxInfo.contextLimit) +
-              ' ctx (' +
-              pct +
-              '%)';
-          }
-          parts.push(ctx);
+        if (liveIn > 0 || liveOut > 0) {
+          parts.push(fmtK(liveIn) + ' in / ' + fmtK(liveOut) + ' out');
         }
         if (ctxInfo.modeName) parts.push(ctxInfo.modeName);
         if (ctxInfo.cwd) parts.push(ctxInfo.cwd);
@@ -572,35 +561,57 @@
         f.style.display = '';
       }
 
-      function updateLiveTokens(n) {
-        if (typeof n === 'number' && n >= 0 && n !== liveInputTokens) {
-          liveInputTokens = n;
-          renderFooter();
+      // A usage-bearing frame (_meta.usage) updates the live token counts. The
+      // footer only shows once we know a model, so an early usage frame is kept.
+      function updateLiveTokens(usage) {
+        if (!usage) return;
+        const i = usage.inputTokens;
+        const o = usage.outputTokens;
+        let changed = false;
+        if (typeof i === 'number' && i >= 0 && i !== liveIn) {
+          liveIn = i;
+          changed = true;
         }
+        if (typeof o === 'number' && o >= 0 && o !== liveOut) {
+          liveOut = o;
+          changed = true;
+        }
+        if (changed && ctxInfo) renderFooter();
       }
 
-      // Pull the current model (name + context-window limit) and approval mode
-      // out of the daemon's context status, defensively (state.models/modes are
-      // typed as opaque across the daemon boundary).
+      // Pull the current model name and approval mode out of the daemon's
+      // context status, defensively (state.* is opaque across the boundary).
+      // Model id lives in different places depending on setup: the picker list
+      // (multi-model), `models.current`, or the `model` config option; fall
+      // through them. Single env-model setups may leave it unknown until a
+      // `model_switched` frame arrives.
       function parseContext(ctx) {
         const cwd = (ctx && ctx.workspaceCwd) || '';
         const st = (ctx && ctx.state) || {};
         const models = st.models || {};
         let cur = null;
-        for (const p of (models.providers || []))
-          for (const m of (p.models || [])) if (m && m.isCurrent) cur = m;
-        const modelName = cur
-          ? cur.name || cur.modelId
-          : (models.current && models.current.modelId) || '(unknown model)';
-        const contextLimit =
-          cur && typeof cur.contextLimit === 'number' ? cur.contextLimit : null;
+        for (const p of models.providers || [])
+          for (const m of p.models || []) if (m && m.isCurrent) cur = m;
+        let modelOpt = null;
+        if (Array.isArray(st.configOptions)) {
+          const mo = st.configOptions.find((o) => o && o.id === 'model');
+          if (mo && mo.currentValue) modelOpt = mo.currentValue;
+        }
+        const modelName =
+          (cur && (cur.name || cur.modelId)) ||
+          modelOpt ||
+          (models.current && models.current.modelId) ||
+          '(model unknown until switched)';
         const modes = st.modes || {};
-        let modeName = '';
         const found = (modes.availableModes || []).find(
           (x) => x && x.id === modes.currentModeId,
         );
-        modeName = found ? found.name : modes.currentModeId || '';
-        return { modelName: clean(modelName), contextLimit, modeName: clean(modeName), cwd: clean(cwd) };
+        const modeName = found ? found.name : modes.currentModeId || '';
+        return {
+          modelName: clean(modelName),
+          modeName: clean(modeName),
+          cwd: clean(cwd),
+        };
       }
 
       async function fetchContext(id) {
@@ -623,9 +634,7 @@
         const su = u.sessionUpdate;
         // Token usage rides on agent_message_chunk _meta.usage (the frame may
         // carry empty text), so read it before the text guard below.
-        const usage = u._meta && u._meta.usage;
-        if (usage && typeof usage.inputTokens === 'number')
-          updateLiveTokens(usage.inputTokens);
+        updateLiveTokens(u._meta && u._meta.usage);
         const text = u.content && u.content.text;
         if (su === 'agent_message_chunk' && text) return appendAssistant(text);
         if (su === 'agent_thought_chunk' && text) return appendThought(text);
@@ -658,14 +667,17 @@
                 strOr(ev.data && ev.data.reason, 'client_evicted'),
               true,
             );
-          case 'model_switched':
-            // The context-window limit changes with the model — refresh the
-            // footer's static bits from the daemon.
-            void fetchContext(watchedSessionId);
-            return addSystem(
-              'model switched to ' + strOr(ev.data && ev.data.modelId, '?'),
-              false,
-            );
+          case 'model_switched': {
+            // The freshest model id — update the footer directly (the daemon's
+            // /context doesn't reliably carry it for env-configured models).
+            const mid = strOr(ev.data && ev.data.modelId, '');
+            if (mid) {
+              if (!ctxInfo) ctxInfo = { modelName: '', modeName: '', cwd: '' };
+              ctxInfo.modelName = mid;
+              renderFooter();
+            }
+            return addSystem('model switched to ' + (mid || '?'), false);
+          }
           // suppressed noise (still in raw JSON): client_joined, client_left,
           // usage_tick, permission_* (rendered as cards)
           default:
