@@ -246,11 +246,6 @@ export class TestRig {
     mkdirSync(join(this.testDir!, dir), { recursive: true });
   }
 
-  sync() {
-    // ensure file system is done before spawning
-    execSync('sync', { cwd: this.testDir! });
-  }
-
   /**
    * The command and args to use to invoke Qwen Code CLI. Allows us to switch
    * between using the bundled gemini.js (the default) and using the installed

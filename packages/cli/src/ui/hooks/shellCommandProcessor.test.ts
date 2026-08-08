@@ -282,6 +282,29 @@ describe('useShellCommandProcessor', () => {
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 
+  it('should treat PTY clean-exit signal 0 as a successful command', async () => {
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'pty-clean-exit',
+        new AbortController().signal,
+      );
+    });
+    const execPromise = onExecMock.mock.calls[0][0];
+
+    act(() => {
+      resolveExecutionPromise(createMockServiceResult({ signal: 0 }));
+    });
+    await act(async () => await execPromise);
+
+    const finalHistoryItem = addItemToHistoryMock.mock.calls[1][0];
+    expect(finalHistoryItem.tools[0].status).toBe(ToolCallStatus.Success);
+    expect(finalHistoryItem.tools[0].resultDisplay).not.toContain(
+      'terminated by signal',
+    );
+  });
+
   describe('UI Streaming and Throttling', () => {
     beforeEach(() => {
       vi.useFakeTimers({ toFake: ['Date'] });
