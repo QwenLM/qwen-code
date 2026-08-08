@@ -10628,6 +10628,7 @@ class QwenAgent implements Agent {
         >;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
+        this.settings = loadSettings(settingsCwd);
         const oldMerged = structuredClone(this.settings.merged);
 
         this.settings.reloadScopeFromDisk(SettingScope.User);

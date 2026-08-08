@@ -1928,6 +1928,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     stdoutDestroySpy.mockRestore();
   });
 
+  afterEach(() => {
+    mockExistsSync.mockReturnValue(true);
+  });
+
   it('initialize response includes mcpCapabilities with sse and http', async () => {
     const mockSettings = {
       merged: { mcpServers: {} },
@@ -9234,10 +9238,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const sessionId = newResult.sessionId;
 
     mockExistsSync.mockReturnValue(false);
-    vi.mocked(loadSettings).mockClear();
-    await agent.extMethod('qwen/settings/getCore', { sessionId });
-    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(process.cwd());
-    mockExistsSync.mockReturnValue(true);
+    try {
+      vi.mocked(loadSettings).mockClear();
+      await agent.extMethod('qwen/settings/getCore', { sessionId });
+      expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(process.cwd());
+    } finally {
+      mockExistsSync.mockReturnValue(true);
+    }
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -9267,10 +9274,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockExistsSync.mockImplementation(
       (p: string | Buffer | URL) => p === ACTIVE_WT,
     );
-    vi.mocked(loadSettings).mockClear();
-    await agent.extMethod('qwen/settings/getCore', { sessionId });
-    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(ACTIVE_WT);
-    mockExistsSync.mockReturnValue(true);
+    try {
+      vi.mocked(loadSettings).mockClear();
+      await agent.extMethod('qwen/settings/getCore', { sessionId });
+      expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(ACTIVE_WT);
+    } finally {
+      mockExistsSync.mockReturnValue(true);
+    }
 
     mockConnectionState.resolve();
     await agentPromise;
