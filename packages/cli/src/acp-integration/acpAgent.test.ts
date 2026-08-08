@@ -192,6 +192,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ),
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
+  // The real helper: the goal get/clear fallbacks return its exact shape and
+  // the assertions below compare against it.
+  emptyGoalSnapshot: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).emptyGoalSnapshot,
   // The real class: `acpAgent` narrows on it with `instanceof`, so a stand-in
   // would make the goal get/clear fallbacks untestable.
   GoalPersistenceUnavailableError: (

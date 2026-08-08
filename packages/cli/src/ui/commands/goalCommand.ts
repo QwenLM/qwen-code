@@ -10,6 +10,10 @@ import type {
   GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import {
+  emptyGoalSnapshot,
+  GoalPersistenceUnavailableError,
+} from '@qwen-code/qwen-code-core';
+import {
   CommandKind,
   type CommandContext,
   type GoalCommandOperation,
@@ -164,6 +168,22 @@ export const goalCommand: SlashCommand = {
         request.action,
       );
     } catch (error) {
+      // A session that cannot persist goals has no goal, which is a
+      // describable answer for the operations that only read or reduce
+      // state — and the one the sibling `sessionGoalGet`/`sessionGoalClear`
+      // ext methods already give. Failing instead is worse here than
+      // anywhere else: in ACP an error return throws out of
+      // `#processSlashCommandResult`, so a sticky `recoveryError` (or plain
+      // `general.chatRecording: false`) would fail the user's whole prompt
+      // request, and keep doing so for the rest of the session, while
+      // `GET /goals` answers the same question fine. `set`/`edit`/`resume`
+      // still fail: those genuinely need persistence.
+      if (
+        error instanceof GoalPersistenceUnavailableError &&
+        (operation.kind === 'status' || operation.kind === 'clear')
+      ) {
+        return goalControl(operation, { snapshot: emptyGoalSnapshot() });
+      }
       return errorMessage(
         error instanceof Error ? error.message : String(error),
       );

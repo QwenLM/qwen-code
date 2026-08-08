@@ -480,6 +480,12 @@ async function claimGoalTurn(
   turnKey: string,
   signal: AbortSignal,
 ): Promise<GoalTurnPermit | undefined> {
+  // Checked before the immediate path, not only inside the wait: a prompt
+  // aborted while its preempted turn settles as a handoff would otherwise
+  // claim the permit the handoff just promoted to it, and then take
+  // `prompt()`'s aborted early-exit — which releases only when no goal
+  // turn was claimed. The permit would be held by nobody, forever.
+  if (signal.aborted) return undefined;
   const immediate =
     runtime.permitForTurn(turnKey) ?? runtime.beginTurn(turnKey);
   if (immediate || runtime.getSnapshot().goal?.status !== 'active') {
@@ -1748,7 +1754,22 @@ export class Session implements SessionContext {
         return;
       }
 
-      await this.config.getChatRecordingService()?.flush();
+      // Settling has to survive a failed flush. `ChatRecordingService`
+      // latches a write failure permanently (a taken-over transcript lease,
+      // for one), so from then on every `flush()` re-throws it — and an
+      // exception here would skip finishTurn/pause/releaseTurn and strand
+      // the runtime's current permit, hanging every later goal turn. The
+      // headless path (`failClosedActiveGoalTurn`) already isolates the
+      // same flush for the same reason.
+      try {
+        await this.config.getChatRecordingService()?.flush();
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to flush ACP Goal turn: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
       const cancelledByUser =
         result?.stopReason === 'cancelled' &&
         turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
@@ -3692,8 +3713,18 @@ export class Session implements SessionContext {
             // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
+            // A runtime continuation is machine-generated, not a user
+            // submission — the same reason `isContinue` is exempt. Firing
+            // the hook on one is also unrecoverable: a block returns before
+            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
+            // branch, which re-queues the identical continuation. Nothing in
+            // that cycle can change the goal state, so it spins — no model
+            // call, one persisted transcript record per lap — until someone
+            // pauses or clears the goal.
+            const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             if (
               !isContinue &&
+              !isRuntimeContinuation &&
               hooksEnabled &&
               messageBus &&
               this.config.hasHooksForEvent?.('UserPromptSubmit')

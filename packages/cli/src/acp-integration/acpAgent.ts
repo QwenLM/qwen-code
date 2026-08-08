@@ -92,7 +92,7 @@ import {
   refreshMemoryInstruction,
   extractDaemonTraceContext,
   withDaemonSpan,
-  GOAL_STATE_VERSION,
+  emptyGoalSnapshot,
   GoalPersistenceUnavailableError,
   type GoalSnapshotV2,
   type AgentParams,
@@ -494,18 +494,6 @@ function mapSessionWriterRequestError(error: unknown): unknown {
         errorKind: writerError.errorKind,
       })
     : error;
-}
-
-/**
- * What a session with no reachable Goal runtime looks like on the wire.
- *
- * `getGoalRuntimeReady()` rejects when goal persistence is unavailable —
- * permanently, once a malformed transcript record has set a sticky recovery
- * error. The honest answer for goal get/clear is "no goal", not a failed
- * request: the caller asked what the goal is, and the answer is nothing.
- */
-function emptyGoalSnapshot(): GoalSnapshotV2 {
-  return { v: GOAL_STATE_VERSION, goal: null, activity: 'idle' };
 }
 
 async function shutdownSessionConfig(config: Config): Promise<void> {

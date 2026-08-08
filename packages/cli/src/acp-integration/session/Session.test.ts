@@ -13521,6 +13521,54 @@ describe('Session', () => {
         ).not.toHaveBeenCalled();
       });
 
+      it('settles a completed Goal turn even when the transcript flush fails', async () => {
+        // `ChatRecordingService` latches a write failure permanently — a
+        // taken-over transcript lease, for one — so every later `flush()`
+        // re-throws it. Letting that abort settlement leaks the runtime's
+        // current permit: `activity` stays 'running', `queueContinuation`
+        // never flushes, and every later prompt hangs in `claimGoalTurn`.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-flush-fails',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-flush-fails' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        mockChatRecordingService.flush.mockRejectedValue(
+          new Error('session writer lost'),
+        );
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(mockChatRecordingService.flush).toHaveBeenCalled();
+      });
+
       it('releases the permit when the prompt rejects before the model starts', async () => {
         // `prompt()` can reject before reaching the try whose finally settles
         // the turn. The turn is already off `goalQueue` by then, so failing to

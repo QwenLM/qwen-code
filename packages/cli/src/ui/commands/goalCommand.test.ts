@@ -11,6 +11,10 @@ import type {
   GoalSnapshotV2,
   GoalStateResponse,
 } from '@qwen-code/qwen-code-core';
+import {
+  emptyGoalSnapshot,
+  GoalPersistenceUnavailableError,
+} from '@qwen-code/qwen-code-core';
 import { goalCommand, parseGoalCommand } from './goalCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
@@ -475,6 +479,54 @@ describe('goalCommand', () => {
     });
     expect(result).not.toHaveProperty('response');
     expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  describe('goal persistence unavailable', () => {
+    // In ACP an error return throws out of `#processSlashCommandResult`, so
+    // failing here fails the user's whole prompt request — and a sticky
+    // `recoveryError` keeps failing it for the rest of the session, while
+    // `GET /goals` answers the same question fine. The sibling
+    // `sessionGoalGet`/`sessionGoalClear` ext methods already degrade.
+    function unavailableContext() {
+      const getGoalRuntimeReady = vi
+        .fn()
+        .mockRejectedValue(
+          new GoalPersistenceUnavailableError('no transcript'),
+        );
+      const config = {
+        getGoalRuntimeReady,
+        isTrustedFolder: () => true,
+      } as unknown as Config;
+      return createMockCommandContext({
+        executionMode: 'acp',
+        services: { config },
+      });
+    }
+
+    it.each(['', 'clear'])(
+      'answers %j with an empty snapshot instead of failing',
+      async (args) => {
+        const result = await goalCommand.action!(unavailableContext(), args);
+
+        expect(result).toEqual({
+          type: 'goal_control',
+          operation: parseGoalCommand(args),
+          response: { snapshot: emptyGoalSnapshot() },
+        });
+      },
+    );
+
+    it.each(['Ship it', 'edit revised', 'resume'])(
+      'still fails %j, which genuinely needs persistence',
+      async (args) => {
+        const result = await goalCommand.action!(unavailableContext(), args);
+
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'error',
+        });
+      },
+    );
   });
 
   it('rejects when config is missing', async () => {
