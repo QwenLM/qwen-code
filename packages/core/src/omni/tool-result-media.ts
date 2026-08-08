@@ -11,7 +11,11 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isOmniDeliveryActive, processMediaForOmniDelivery } from './index.js';
-import { formatDisclosureText, formatOmissionText } from './disclosure.js';
+import {
+  formatDisclosureText,
+  formatOmissionText,
+  formatTranscriptText,
+} from './disclosure.js';
 import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore } from './storage.js';
 import { sniffMediaType } from './recognition.js';
@@ -109,6 +113,21 @@ export async function processToolResultOmniMedia(
         displayName,
         origin: 'tool',
       });
+      // Transcript text Parts (§6.2) follow the media Part (or the
+      // omission notice), each preceded by its own disclosure (D8
+      // adjacency). Present when fixed policies produced text derivatives
+      // selected for delivery.
+      const transcriptParts: Part[] = [];
+      for (const t of delivery.transcripts ?? []) {
+        if (t.disclosure) {
+          transcriptParts.push({
+            text: formatDisclosureText(displayName, t.disclosure),
+          });
+        }
+        transcriptParts.push({
+          text: formatTranscriptText(displayName, t.text),
+        });
+      }
       if (delivery.omission) {
         // Explicit omission (policy design §10.2): the transport guard
         // could not bring the part within limits even after the guard
@@ -117,7 +136,15 @@ export async function processToolResultOmniMedia(
         changed = true;
         return [
           { text: formatOmissionText(displayName, delivery.omission.reason) },
+          ...transcriptParts,
         ];
+      }
+      if (!delivery.fileUri && transcriptParts.length > 0) {
+        // Pure-transcript delivery (§6.2): the policies replaced the media
+        // with text-only deliverables — nothing was uploaded, budgets are
+        // untouched.
+        changed = true;
+        return transcriptParts;
       }
       changed = true;
       uploadsRemaining--;
@@ -133,8 +160,9 @@ export async function processToolResultOmniMedia(
         ? [
             { text: formatDisclosureText(displayName, delivery.disclosure) },
             fileDataPart,
+            ...transcriptParts,
           ]
-        : [fileDataPart];
+        : [fileDataPart, ...transcriptParts];
     } catch (err) {
       if (signal.aborted) throw err;
       if (err instanceof OmniTransportGuardError) {

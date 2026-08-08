@@ -44,3 +44,17 @@ export function formatOmissionText(
 ): string {
   return `${OMNI_OMISSION_TEXT_PREFIX}${displayName}：${reason}`;
 }
+
+/** Marks a text Part as a media transcript: a text derivative (upstream P
+ * §6.2 transcript protocol, `metadata.omniRole: 'transcript'`) produced by
+ * a fixed policy and delivered as text instead of (or alongside) the media
+ * Part. */
+export const OMNI_TRANSCRIPT_TEXT_PREFIX = '【媒体转写】';
+
+/** Model-facing transcript text for one media resource. */
+export function formatTranscriptText(
+  displayName: string,
+  transcript: string,
+): string {
+  return `${OMNI_TRANSCRIPT_TEXT_PREFIX}${displayName}：${transcript}`;
+}

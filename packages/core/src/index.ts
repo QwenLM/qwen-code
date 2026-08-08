@@ -677,6 +677,7 @@ export {
   recognizeMediaFile,
   formatDisclosureText,
   formatOmissionText,
+  formatTranscriptText,
   OmniObjectStore,
   OmniDeliveryError,
   OmniDownloadError,

@@ -169,7 +169,11 @@ describe('normalizeOmniProcessingConfig', () => {
         arguments: { maxDimension: 1024 },
         maxRunsPerLineage: 1,
         onFailure: 'continue',
-        output: { reprocessMedia: false, source: 'omit' },
+        output: {
+          reprocessMedia: false,
+          source: 'omit',
+          artifacts: { '*': 'include' },
+        },
         stage: 'preprocessing',
       });
     });
@@ -395,7 +399,11 @@ describe('normalizeOmniProcessingConfig', () => {
         },
       });
       const p = config.fixedPolicies.find((x) => x.id === 'p');
-      expect(p?.output).toEqual({ reprocessMedia: true, source: 'keep' });
+      expect(p?.output).toEqual({
+        reprocessMedia: true,
+        source: 'keep',
+        artifacts: { '*': 'include' },
+      });
     });
 
     it('rejects reprocessMedia when no policy in the set accepts origin "policy"', () => {
@@ -470,6 +478,207 @@ describe('normalizeOmniProcessingConfig', () => {
           },
         }),
       ).toThrow(/omni\.processing\.fixedPolicies\.p\.when/);
+    });
+  });
+
+  describe('output.artifacts selectors (§13 #22/#24)', () => {
+    /** Media tool whose descriptor declares producible mime types, so
+     * `kind:` selectors have something to match. */
+    const mediaToolWithMimes = () =>
+      makeTool(['image'], {
+        outputs: [
+          {
+            kind: 'media',
+            role: 'preview',
+            mimeTypes: ['image/jpeg'],
+            required: true,
+            lossy: true,
+          },
+          { kind: 'text', role: 'disclosure', required: true },
+        ],
+      });
+
+    /** Transcript-protocol tool (§6.2): bounded UTF-8 text/plain file. */
+    const transcribeLikeTool = () =>
+      makeTool(['audio'], {
+        outputs: [
+          {
+            kind: 'file',
+            role: 'transcript',
+            mimeTypes: ['text/plain'],
+            required: true,
+            lossy: true,
+          },
+          { kind: 'text', role: 'disclosure', required: true },
+        ],
+      });
+
+    const withTool = (tool: ToolStub) => ({
+      ...defaultTools(),
+      tool_under_test: tool,
+    });
+
+    const policyWith = (
+      artifacts: Record<string, unknown>,
+      tool: ToolStub,
+      mediaTypes: OmniModality[] = ['image'],
+    ) =>
+      normalize(
+        {
+          fixedPolicies: {
+            p: {
+              mediaTypes,
+              toolName: 'tool_under_test',
+              output: { artifacts },
+            },
+          },
+        },
+        withTool(tool),
+      );
+
+    it('defaults an unconfigured artifacts map to include-all', () => {
+      const config = normalize({
+        fixedPolicies: {
+          p: { mediaTypes: ['image'], toolName: 'omni_downsample_image' },
+        },
+      });
+      expect(config.fixedPolicies[0].output.artifacts).toEqual({
+        '*': 'include',
+      });
+    });
+
+    it('preserves an explicit selector map verbatim', () => {
+      const config = policyWith(
+        { 'role:preview': 'include', 'kind:image': 'retain', '*': 'retain' },
+        mediaToolWithMimes(),
+      );
+      expect(config.fixedPolicies[0].output.artifacts).toEqual({
+        'role:preview': 'include',
+        'kind:image': 'retain',
+        '*': 'retain',
+      });
+    });
+
+    it('rejects actions other than include/retain', () => {
+      expect(() => policyWith({ '*': 'drop' }, mediaToolWithMimes())).toThrow(
+        'omni.processing.fixedPolicies.p.output.artifacts["*"]: must be "include" or "retain" (got "drop")',
+      );
+    });
+
+    it('rejects unknown selector shapes', () => {
+      expect(() =>
+        policyWith({ preview: 'include' }, mediaToolWithMimes()),
+      ).toThrow(
+        'omni.processing.fixedPolicies.p.output.artifacts["preview"]: unknown selector (expected "*", "kind:<kind>", or "role:<role>")',
+      );
+    });
+
+    it('rejects unknown kind targets', () => {
+      expect(() =>
+        policyWith({ 'kind:text': 'include' }, mediaToolWithMimes()),
+      ).toThrow(/unknown artifact kind "text"/);
+    });
+
+    it('rejects malformed role tokens', () => {
+      expect(() =>
+        policyWith({ 'role:no spaces!': 'include' }, mediaToolWithMimes()),
+      ).toThrow(/invalid role token "no spaces!"/);
+    });
+
+    it('rejects a kind selector the descriptor cannot produce (§13 #22)', () => {
+      expect(() =>
+        policyWith({ 'kind:video': 'retain' }, mediaToolWithMimes()),
+      ).toThrow(
+        'omni.processing.fixedPolicies.p.output.artifacts["kind:video"]: tool "tool_under_test" declares no output of kind "video"',
+      );
+    });
+
+    it('rejects a role selector no artifact output declares (§13 #22)', () => {
+      expect(() =>
+        policyWith({ 'role:thumbnail': 'include' }, mediaToolWithMimes()),
+      ).toThrow(
+        'omni.processing.fixedPolicies.p.output.artifacts["role:thumbnail"]: tool "tool_under_test" declares no artifact output with role "thumbnail"',
+      );
+    });
+
+    it('accepts role:transcript and kind:file against a transcript-protocol descriptor (§13 #24)', () => {
+      const config = policyWith(
+        { 'role:transcript': 'include', 'kind:file': 'include' },
+        transcribeLikeTool(),
+        ['audio'],
+      );
+      expect(config.fixedPolicies[0].output.artifacts).toEqual({
+        'role:transcript': 'include',
+        'kind:file': 'include',
+      });
+    });
+
+    it('rejects role:transcript when the declared output is not bounded text/plain file (§13 #24)', () => {
+      const wrongMime = makeTool(['audio'], {
+        outputs: [
+          {
+            kind: 'file',
+            role: 'transcript',
+            mimeTypes: ['text/markdown'],
+            required: true,
+            lossy: true,
+          },
+          { kind: 'text', role: 'disclosure', required: true },
+        ],
+      });
+      expect(() =>
+        policyWith({ 'role:transcript': 'include' }, wrongMime, ['audio']),
+      ).toThrow(
+        'omni.processing.fixedPolicies.p.output.artifacts["role:transcript"]: a transcript selector must point at a bounded UTF-8 text/plain file output, but tool "tool_under_test" declares role "transcript" differently',
+      );
+
+      const mediaTranscript = makeTool(['audio'], {
+        outputs: [
+          {
+            kind: 'media',
+            role: 'transcript',
+            mimeTypes: ['audio/wav'],
+            required: true,
+            lossy: true,
+          },
+          { kind: 'text', role: 'disclosure', required: true },
+        ],
+      });
+      expect(() =>
+        policyWith({ 'role:transcript': 'include' }, mediaTranscript, [
+          'audio',
+        ]),
+      ).toThrow(/a transcript selector must point at a bounded UTF-8/);
+    });
+
+    it('accepts the REAL transcribe tool as a fixed-policy target with role:transcript', async () => {
+      const { OmniTranscribeAudioTool } = await import(
+        './tools/transcribe-audio.js'
+      );
+      const tools: Record<string, ToolStub> = {
+        ...defaultTools(),
+        omni_transcribe_audio: new OmniTranscribeAudioTool({}),
+      };
+      const config = normalize(
+        {
+          fixedPolicies: {
+            'audio-transcribe': {
+              mediaTypes: ['audio'],
+              toolName: 'omni_transcribe_audio',
+              output: {
+                source: 'omit',
+                artifacts: { 'role:transcript': 'include' },
+              },
+            },
+          },
+        },
+        tools,
+      );
+      expect(config.fixedPolicies[0].output).toEqual({
+        reprocessMedia: false,
+        source: 'omit',
+        artifacts: { 'role:transcript': 'include' },
+      });
     });
   });
 

@@ -66,7 +66,10 @@ const POLICY_ENTRY_KEYS = new Set([
   'onFailure',
   'output',
 ]);
-const OUTPUT_KEYS = new Set(['reprocessMedia', 'source']);
+const OUTPUT_KEYS = new Set(['reprocessMedia', 'source', 'artifacts']);
+/** Valid `kind:<…>` selector targets in `output.artifacts` — the media
+ * modalities plus the non-media `file` artifact kind (transcripts). */
+const ARTIFACT_SELECTOR_KINDS = new Set(['image', 'video', 'audio', 'file']);
 const MODALITIES: readonly OmniModality[] = ['image', 'video', 'audio'];
 const ORIGINS: readonly FixedPolicyOrigin[] = ['user', 'tool', 'policy'];
 /** io params are harness-injected per invocation — fixed `arguments`
@@ -327,6 +330,49 @@ function normalizePolicy(
         `"omit" (the over-limit source cannot stay in the delivery set)`,
     );
   }
+  // `output.artifacts` selector map (upstream P): selector → action.
+  // Unconfigured defaults to include-all — the historical "every
+  // derivative delivers" behavior of this stage. Selector producibility
+  // (§13 #22/#24) is checked below, once the descriptor is known.
+  const rawArtifacts = rawOutput['artifacts'];
+  let artifacts: Record<string, 'include' | 'retain'>;
+  if (rawArtifacts === undefined) {
+    artifacts = { '*': 'include' };
+  } else {
+    if (!isPlainRecord(rawArtifacts)) {
+      fail(`${where}.${id}.output.artifacts: must be an object`);
+    }
+    artifacts = {};
+    for (const [selector, action] of Object.entries(rawArtifacts)) {
+      const at = `${where}.${id}.output.artifacts["${selector}"]`;
+      if (action !== 'include' && action !== 'retain') {
+        fail(
+          `${at}: must be "include" or "retain" (got ${JSON.stringify(action)})`,
+        );
+      }
+      if (selector === '*') {
+        // Default action for artifacts no other selector matches.
+      } else if (selector.startsWith('kind:')) {
+        const kind = selector.slice('kind:'.length);
+        if (!ARTIFACT_SELECTOR_KINDS.has(kind)) {
+          fail(
+            `${at}: unknown artifact kind "${kind}" ` +
+              `(expected one of ${[...ARTIFACT_SELECTOR_KINDS].join(', ')})`,
+          );
+        }
+      } else if (selector.startsWith('role:')) {
+        const role = selector.slice('role:'.length);
+        if (!POLICY_ID_PATTERN.test(role)) {
+          fail(`${at}: invalid role token ${JSON.stringify(role)}`);
+        }
+      } else {
+        fail(
+          `${at}: unknown selector (expected "*", "kind:<kind>", or "role:<role>")`,
+        );
+      }
+      artifacts[selector] = action;
+    }
+  }
 
   // §13 #5: when-condition structure and field names.
   let when: FixedPolicyCondition | undefined;
@@ -401,6 +447,62 @@ function normalizePolicy(
     }
   }
 
+  // §13 #22/#24: every configured artifact selector must correspond to an
+  // output the tool's descriptor can actually produce — a selector that
+  // can never match is a configuration error, not a silent no-op. #24 in
+  // full: a `role:transcript` selector must point at a bounded, managed
+  // UTF-8 text/plain file output.
+  {
+    const producibleKinds = new Set<string>();
+    const producibleRoles = new Set<string>();
+    for (const o of descriptor.outputs) {
+      if (o.kind === 'media') {
+        for (const mimeType of o.mimeTypes ?? []) {
+          producibleKinds.add(mimeType.split('/')[0]);
+        }
+        if (o.role) producibleRoles.add(o.role);
+      } else if (o.kind === 'file') {
+        producibleKinds.add('file');
+        if (o.role) producibleRoles.add(o.role);
+      }
+    }
+    for (const selector of Object.keys(artifacts)) {
+      const at = `${where}.${id}.output.artifacts["${selector}"]`;
+      if (selector === '*') continue;
+      if (selector.startsWith('kind:')) {
+        const kind = selector.slice('kind:'.length);
+        if (!producibleKinds.has(kind)) {
+          fail(
+            `${at}: tool "${toolName}" declares no output of kind "${kind}"`,
+          );
+        }
+        continue;
+      }
+      const role = selector.slice('role:'.length);
+      const spec = descriptor.outputs.find(
+        (o) => o.kind !== 'text' && o.role === role,
+      );
+      if (!spec) {
+        fail(
+          `${at}: tool "${toolName}" declares no artifact output with ` +
+            `role "${role}"`,
+        );
+      }
+      if (
+        role === 'transcript' &&
+        (spec.kind !== 'file' ||
+          spec.mimeTypes?.length !== 1 ||
+          spec.mimeTypes[0] !== 'text/plain')
+      ) {
+        fail(
+          `${at}: a transcript selector must point at a bounded UTF-8 ` +
+            `text/plain file output, but tool "${toolName}" declares ` +
+            `role "transcript" differently`,
+        );
+      }
+    }
+  }
+
   // §13 #11: fixed arguments validate against the tool's io-stripped
   // tunable schema; the harness-injected io keys are reserved.
   const args = entry['arguments'] ?? {};
@@ -436,7 +538,7 @@ function normalizePolicy(
     arguments: args,
     maxRunsPerLineage,
     onFailure,
-    output: { reprocessMedia, source },
+    output: { reprocessMedia, source, artifacts },
     stage,
   };
 }

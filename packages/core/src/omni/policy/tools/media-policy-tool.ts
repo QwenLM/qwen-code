@@ -244,6 +244,9 @@ export function mediaPolicyToolSuccess(args: {
   mimeType: string;
   sizeBytes: number;
   disclosure: string;
+  /** `metadata.omniRole` label (e.g. 'transcript' for the §6.2 transcript
+   * protocol); omitted for plain media derivatives. */
+  role?: string;
 }): ToolResult {
   const artifact: ToolArtifact = {
     kind: args.artifactKind,
@@ -254,7 +257,10 @@ export function mediaPolicyToolSuccess(args: {
     workspacePath: args.outputFileName,
     mimeType: args.mimeType,
     sizeBytes: args.sizeBytes,
-    metadata: { omniDisclosure: args.disclosure },
+    metadata:
+      args.role === undefined
+        ? { omniDisclosure: args.disclosure }
+        : { omniDisclosure: args.disclosure, omniRole: args.role },
   };
   return {
     llmContent: `${args.title}: ${args.disclosure}`,

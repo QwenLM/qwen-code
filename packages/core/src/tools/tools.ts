@@ -155,11 +155,13 @@ export type AnyToolInvocation = ToolInvocation<object, ToolResult>;
 /** One declared output of a media-policy tool (see
  * {@link MediaPolicyToolDescriptor}). */
 export interface MediaPolicyToolOutputSpec {
-  /** What the output is: a derived media artifact or a disclosure text. */
-  kind: 'media' | 'text';
-  /** Role label for text outputs (e.g. 'disclosure'). */
+  /** What the output is: a derived media artifact, a disclosure text, or
+   * a non-media file artifact (e.g. a `role: 'transcript'` UTF-8
+   * text/plain file — policy design §6.2). */
+  kind: 'media' | 'text' | 'file';
+  /** Role label for text/file outputs (e.g. 'disclosure', 'transcript'). */
   role?: string;
-  /** MIME types the output may carry (media outputs). */
+  /** MIME types the output may carry (media and file outputs). */
   mimeTypes?: string[];
   /** Whether a successful run MUST produce this output. */
   required: boolean;

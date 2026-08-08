@@ -74,6 +74,16 @@ export interface NormalizedFixedPolicy {
     /** Whether the source stays in the delivery set alongside the
      * derivatives (`keep`) or is replaced by them (`omit`). */
     source: 'keep' | 'omit';
+    /**
+     * Per-artifact delivery decision (upstream P output.artifacts):
+     * selector → action. Selectors are `role:<role>` (matches the
+     * artifact's `metadata.omniRole`), `kind:<image|audio|video|file>`,
+     * or `*`; most-specific wins (role > kind > `*`), and an artifact no
+     * selector matches is retained (registered but not delivered).
+     * Defaults to `{'*': 'include'}` when unconfigured — the historical
+     * "every derivative delivers" behavior.
+     */
+    artifacts: Record<string, 'include' | 'retain'>;
   };
   /** Pipeline stage the policy runs in. Transport-guard policies fail
    * closed regardless of `onFailure`. */

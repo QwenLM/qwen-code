@@ -8163,6 +8163,12 @@ export class Config {
         );
         return new OmniConvertImageTool(this);
       });
+      await registerLazy(ToolNames.OMNI_TRANSCRIBE_AUDIO, async () => {
+        const { OmniTranscribeAudioTool } = await import(
+          '../omni/policy/tools/transcribe-audio.js'
+        );
+        return new OmniTranscribeAudioTool(this);
+      });
     }
 
     await registerLazy(ToolNames.MONITOR, async () => {

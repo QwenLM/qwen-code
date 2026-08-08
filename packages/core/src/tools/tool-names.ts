@@ -78,6 +78,7 @@ export const ToolNames = {
   OMNI_EXTRACT_AUDIO: 'omni_extract_audio',
   OMNI_CLIP_VIDEO: 'omni_clip_video',
   OMNI_CONVERT_IMAGE: 'omni_convert_image',
+  OMNI_TRANSCRIBE_AUDIO: 'omni_transcribe_audio',
 } as const;
 
 /**
@@ -139,6 +140,7 @@ export const ToolDisplayNames = {
   OMNI_EXTRACT_AUDIO: 'ExtractAudio',
   OMNI_CLIP_VIDEO: 'ClipVideo',
   OMNI_CONVERT_IMAGE: 'ConvertImage',
+  OMNI_TRANSCRIBE_AUDIO: 'TranscribeAudio',
 } as const;
 
 // Migration from old tool names to new tool names

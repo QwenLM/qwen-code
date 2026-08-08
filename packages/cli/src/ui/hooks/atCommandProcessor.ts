@@ -623,6 +623,21 @@ export async function resolveAtCommandQuery({
           // the opaque staging path the download landed under.
           { signal, displayName: urlBase },
         );
+        // Transcript text Parts (§6.2) follow the media Part (or the
+        // omission notice), each preceded by its own disclosure (D8
+        // adjacency). Present when fixed policies produced text
+        // derivatives selected for delivery.
+        const transcriptParts: Array<{ text: string }> = [];
+        for (const t of delivery.transcripts ?? []) {
+          if (t.disclosure) {
+            transcriptParts.push({
+              text: core.formatDisclosureText(urlBase, t.disclosure),
+            });
+          }
+          transcriptParts.push({
+            text: core.formatTranscriptText(urlBase, t.text),
+          });
+        }
         if (delivery.omission) {
           // Explicit omission (policy design §10.2): the media is withheld
           // and the omission notice text stands in its place — mirroring
@@ -631,6 +646,7 @@ export async function resolveAtCommandQuery({
           urlMediaParts.push({
             text: core.formatOmissionText(urlBase, delivery.omission.reason),
           });
+          urlMediaParts.push(...transcriptParts);
           urlMediaLabels.push(ref.url);
           urlMediaDisplays.push({
             callId,
@@ -638,6 +654,21 @@ export async function resolveAtCommandQuery({
             description: `Downloaded ${ref.url}`,
             status: ToolCallStatus.Success,
             resultDisplay: `Media omitted by the omni transport guard: ${urlBase}`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
+        if (!delivery.fileUri && transcriptParts.length > 0) {
+          // Pure-transcript delivery (§6.2): the policies replaced the
+          // media with text-only deliverables — no media Part is emitted.
+          urlMediaParts.push(...transcriptParts);
+          urlMediaLabels.push(ref.url);
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Downloaded ${ref.url}`,
+            status: ToolCallStatus.Success,
+            resultDisplay: `Localized ${urlBase} and delivered as transcript (omni policy).`,
             confirmationDetails: undefined,
           });
           continue;
@@ -656,6 +687,7 @@ export async function resolveAtCommandQuery({
             displayName: urlBase,
           },
         });
+        urlMediaParts.push(...transcriptParts);
         urlMediaLabels.push(ref.url);
         urlMediaDisplays.push({
           callId,

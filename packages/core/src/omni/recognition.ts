@@ -148,6 +148,8 @@ export function extensionForMime(mimeType: string): string {
     'audio/flac': '.flac',
     'audio/ogg': '.ogg',
     'audio/mp4': '.m4a',
+    // Non-media policy artifacts (transcripts) promoted into objects/.
+    'text/plain': '.txt',
   };
   return sniffTable[mimeType] ?? '.bin';
 }

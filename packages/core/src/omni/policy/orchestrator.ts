@@ -55,6 +55,32 @@ export interface PolicyDeliveryResource {
   degraded?: boolean;
 }
 
+/** Size ceiling for non-media (`kind: 'file'`) policy artifacts — the
+ * "bounded" in upstream P's transcript protocol. Text this size is far
+ * beyond any real transcript; anything bigger is a runaway tool. */
+export const MAX_FILE_ARTIFACT_BYTES = 256 * 1024;
+
+/**
+ * One included non-media file artifact (upstream P §6.2 transcript
+ * protocol): NOT a media resource — it skipped media recognition, was
+ * validated as bounded UTF-8 text instead, and is delivered as a text
+ * Part rather than uploaded. `text` carries the full content, read within
+ * {@link MAX_FILE_ARTIFACT_BYTES} at validation time, so delivery never
+ * re-reads the file.
+ */
+export interface PolicyFileDelivery {
+  /** Promoted object path (registration/record; content is in `text`). */
+  filePath: string;
+  /** `metadata.omniRole` of the artifact (e.g. 'transcript'). */
+  role?: string;
+  mimeType: string;
+  text: string;
+  sha256: string;
+  sizeBytes: number;
+  /** Disclosure that must accompany the text (lossy derivations). */
+  disclosure?: string;
+}
+
 /** Debug/telemetry record of one policy decision that did real work (or
  * failed to). Pure matching misses are deliberately unrecorded — with the
  * system defaults active on every delivery, zero-policy runs must stay
@@ -140,7 +166,31 @@ interface PolicyExecution {
     sha256: string;
     disclosure?: string;
     degraded: boolean;
+    /** `metadata.omniRole`, when the tool labeled the artifact. */
+    role?: string;
   }>;
+  /** Non-media file artifacts (transcripts). Never re-enter matching. */
+  derivedFiles: PolicyFileDelivery[];
+}
+
+/**
+ * Delivery decision for one artifact under the policy's
+ * `output.artifacts` selector map: most-specific selector wins
+ * (`role:` > `kind:` > `*`); an artifact nothing matches is retained
+ * (upstream P default).
+ */
+function resolveArtifactSelector(
+  artifacts: Record<string, 'include' | 'retain'>,
+  kind: string,
+  role: string | undefined,
+): 'include' | 'retain' {
+  if (role !== undefined) {
+    const byRole = artifacts[`role:${role}`];
+    if (byRole) return byRole;
+  }
+  const byKind = artifacts[`kind:${kind}`];
+  if (byKind) return byKind;
+  return artifacts['*'] ?? 'retain';
 }
 
 function resourceConditionContext(
@@ -268,6 +318,9 @@ export async function runFixedPolicies(
   options: RunFixedPoliciesOptions,
 ): Promise<{
   deliveries: PolicyDeliveryResource[];
+  /** Included non-media file artifacts (transcripts), delivered as text
+   * Parts by the caller — never uploaded. */
+  fileDeliveries: PolicyFileDelivery[];
   records: PolicyRunRecord[];
 }> {
   const policies = sortPolicies(options.policies);
@@ -301,6 +354,7 @@ async function runFixedPoliciesUnbounded(
   },
 ): Promise<{
   deliveries: PolicyDeliveryResource[];
+  fileDeliveries: PolicyFileDelivery[];
   records: PolicyRunRecord[];
 }> {
   const { policies, limits } = normalized;
@@ -308,6 +362,7 @@ async function runFixedPoliciesUnbounded(
     options.degradationCache ??
     new OmniDegradationCache(options.store.getOmniRootDir());
   const records: PolicyRunRecord[] = [];
+  const fileDeliveries: PolicyFileDelivery[] = [];
   const items: WorkItem[] = [
     {
       filePath: source.filePath,
@@ -437,9 +492,32 @@ async function runFixedPoliciesUnbounded(
             origin: 'policy',
             lineageRuns: new Map(item.lineageRuns),
             depth: childDepth,
-            deliver: true,
+            // `output.artifacts` selector decides delivery (upstream P):
+            // an included derivative enters the delivery set, a retained
+            // one is only registered in objects/.
+            deliver:
+              resolveArtifactSelector(
+                policy.output.artifacts,
+                derived.recognized.modality,
+                derived.role,
+              ) === 'include',
             process: policy.output.reprocessMedia && depthAllowsReprocess,
           });
+        }
+        for (const file of execution.derivedFiles) {
+          // File artifacts (transcripts) count against the same budgets
+          // but never re-enter policy matching — they are not media.
+          artifactsProduced++;
+          derivedBytesProduced += file.sizeBytes;
+          if (
+            resolveArtifactSelector(
+              policy.output.artifacts,
+              'file',
+              file.role,
+            ) === 'include'
+          ) {
+            fileDeliveries.push(file);
+          }
         }
         if (artifactsProduced > limits.maxArtifactsPerRoot) {
           stopOnBudget(
@@ -496,18 +574,38 @@ async function runFixedPoliciesUnbounded(
         disclosure: item.disclosure,
         degraded: item.degraded,
       })),
+    fileDeliveries,
     records,
   };
 }
 
-/** Validated view of one artifact after descriptor/staging checks. */
-interface ValidatedArtifact {
+/** Validated view of one media artifact after descriptor/staging checks. */
+interface ValidatedMediaArtifact {
+  kind: 'media';
   absolutePath: string;
   recognized: RecognizedMedia;
   sha256: string;
   disclosure?: string;
   lossy: boolean;
+  /** `metadata.omniRole`, when the tool labeled the artifact. */
+  role?: string;
 }
+
+/** Validated view of one non-media file artifact (transcript protocol,
+ * upstream P §6.2): bounded UTF-8 text, never probed as media. */
+interface ValidatedFileArtifact {
+  kind: 'file';
+  absolutePath: string;
+  mimeType: string;
+  text: string;
+  sizeBytes: number;
+  sha256: string;
+  disclosure?: string;
+  lossy: boolean;
+  role?: string;
+}
+
+type ValidatedArtifact = ValidatedMediaArtifact | ValidatedFileArtifact;
 
 /**
  * Tool-level tunable defaults from
@@ -594,6 +692,7 @@ async function executePolicy(
                 degraded: true,
               },
             ],
+            derivedFiles: [],
           };
         }
       }
@@ -670,31 +769,53 @@ async function executePolicy(
     // deliver the source and stop deriving (no cache entry either; a no-op
     // is a property of this input, re-derivable cheaply).
     if (validated.every((a) => a.sha256 === item.sha256)) {
-      return { outcome: 'no_op', derived: [] };
+      return { outcome: 'no_op', derived: [], derivedFiles: [] };
     }
 
     // Promotion first (D12): once an artifact is in objects/ it is
     // content-addressed and immutable; only then substitute + cache.
     const derived: PolicyExecution['derived'] = [];
+    const derivedFiles: PolicyExecution['derivedFiles'] = [];
     for (const artifact of validated) {
-      const extension = extensionForMime(artifact.recognized.detectedMimeType);
+      const mimeType =
+        artifact.kind === 'media'
+          ? artifact.recognized.detectedMimeType
+          : artifact.mimeType;
       const put = await store.putFile(
         artifact.absolutePath,
         artifact.sha256,
-        extension,
+        extensionForMime(mimeType),
         signal,
       );
-      derived.push({
-        filePath: put.objectPath,
-        recognized: artifact.recognized,
-        sha256: artifact.sha256,
-        disclosure: artifact.disclosure,
-        degraded: artifact.lossy,
-      });
+      if (artifact.kind === 'media') {
+        derived.push({
+          filePath: put.objectPath,
+          recognized: artifact.recognized,
+          sha256: artifact.sha256,
+          disclosure: artifact.disclosure,
+          degraded: artifact.lossy,
+          role: artifact.role,
+        });
+      } else {
+        derivedFiles.push({
+          filePath: put.objectPath,
+          role: artifact.role,
+          mimeType: artifact.mimeType,
+          text: artifact.text,
+          sha256: artifact.sha256,
+          sizeBytes: artifact.sizeBytes,
+          disclosure: artifact.disclosure,
+        });
+      }
     }
-    // The cache maps one input to ONE derivative; multi-output tools are
-    // simply not cached (re-run instead of guessing which output to key).
-    if (validated.length === 1 && validated[0].disclosure) {
+    // The cache maps one input to ONE media derivative; multi-output tools
+    // and file artifacts (whose cache-hit path depends on media
+    // re-recognition) are simply not cached — re-run instead of guessing.
+    if (
+      validated.length === 1 &&
+      validated[0].kind === 'media' &&
+      validated[0].disclosure
+    ) {
       await cache.put(item.sha256, fingerprint, {
         degradedSha256: validated[0].sha256,
         extension: extensionForMime(validated[0].recognized.detectedMimeType),
@@ -702,7 +823,7 @@ async function executePolicy(
         mimeType: validated[0].recognized.detectedMimeType,
       });
     }
-    return { outcome: 'succeeded', derived };
+    return { outcome: 'succeeded', derived, derivedFiles };
   } catch (err) {
     failure = err;
     throw err;
@@ -734,8 +855,9 @@ async function executePolicy(
  * Validate one artifact against the staging contract (§5) and the tool's
  * descriptor (D8): workspace-storage with a path strictly inside the
  * staging dir, a regular non-symlink file, recognized content matching a
- * declared media output, and — for lossy outputs — a non-empty
- * `metadata.omniDisclosure`.
+ * declared media output — or, for `kind: 'file'` artifacts (transcript
+ * protocol), bounded strict-UTF-8 text matching a declared file output —
+ * and, for lossy outputs, a non-empty `metadata.omniDisclosure`.
  */
 async function validateArtifact(
   artifact: ToolArtifact,
@@ -760,6 +882,65 @@ async function validateArtifact(
       `policy artifact "${artifact.title}" is missing or not a regular file`,
     );
   }
+  const rawRole = artifact.metadata?.['omniRole'];
+  const role = typeof rawRole === 'string' && rawRole ? rawRole : undefined;
+  const rawDisclosure = artifact.metadata?.['omniDisclosure'];
+  const disclosure =
+    typeof rawDisclosure === 'string' && rawDisclosure
+      ? rawDisclosure
+      : undefined;
+
+  if (artifact.kind === 'file') {
+    // Non-media artifact (upstream P §6.2): validated as bounded strict
+    // UTF-8 text against a declared `kind: 'file'` output — no media
+    // probe. Only tools whose descriptor declares a file output can pass
+    // here, and the declared mimeType must be one the spec allows.
+    const spec = descriptor.outputs.find(
+      (o) =>
+        o.kind === 'file' &&
+        (o.role === undefined || o.role === role) &&
+        artifact.mimeType !== undefined &&
+        o.mimeTypes?.includes(artifact.mimeType),
+    );
+    if (!spec) {
+      throw new Error(
+        `policy artifact "${artifact.title}" (file, role ${role ?? 'none'}, ` +
+          `${artifact.mimeType ?? 'no mimeType'}) matches no declared file output`,
+      );
+    }
+    if (stat.size > MAX_FILE_ARTIFACT_BYTES) {
+      throw new Error(
+        `policy artifact "${artifact.title}" exceeds the file-artifact ` +
+          `size budget (${stat.size} > ${MAX_FILE_ARTIFACT_BYTES} bytes)`,
+      );
+    }
+    const bytes = await fs.readFile(absolutePath);
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error(
+        `policy artifact "${artifact.title}" is not valid UTF-8 text`,
+      );
+    }
+    if (spec.lossy && !disclosure) {
+      throw new Error(
+        `policy artifact "${artifact.title}" is lossy but carries no omniDisclosure`,
+      );
+    }
+    return {
+      kind: 'file',
+      absolutePath,
+      mimeType: artifact.mimeType as string,
+      text,
+      sizeBytes: bytes.byteLength,
+      sha256: await hashFileSha256(absolutePath, signal),
+      disclosure,
+      lossy: spec.lossy === true,
+      role,
+    };
+  }
+
   // Authoritative recognition of the actual bytes — the tool's declared
   // mimeType/kind are cross-checked, never trusted.
   const recognized = await recognizeMediaFile(absolutePath, { signal });
@@ -777,37 +958,54 @@ async function validateArtifact(
       `policy artifact "${artifact.title}" declares kind ${String(artifact.kind)} but contains ${recognized.modality} content`,
     );
   }
-  const disclosure = artifact.metadata?.['omniDisclosure'];
-  if (spec.lossy && (typeof disclosure !== 'string' || disclosure === '')) {
+  if (spec.lossy && !disclosure) {
     throw new Error(
       `policy artifact "${artifact.title}" is lossy but carries no omniDisclosure`,
     );
   }
   return {
+    kind: 'media',
     absolutePath,
     recognized,
     sha256: await hashFileSha256(absolutePath, signal),
-    disclosure:
-      typeof disclosure === 'string' && disclosure ? disclosure : undefined,
+    disclosure,
     lossy: spec.lossy === true,
+    role,
   };
 }
 
-/** Every required media output declared by the descriptor must have been
- * produced (§5 completeness check). */
+/** Every required media/file output declared by the descriptor must have
+ * been produced (§5 completeness check). */
 function assertRequiredOutputsPresent(
   descriptor: MediaPolicyToolDescriptor,
   validated: ValidatedArtifact[],
   toolName: string,
 ): void {
   for (const spec of descriptor.outputs) {
-    if (spec.kind !== 'media' || !spec.required) continue;
-    const produced = validated.some((a) =>
-      spec.mimeTypes?.includes(a.recognized.detectedMimeType),
-    );
+    if (!spec.required) continue;
+    let produced: boolean;
+    if (spec.kind === 'media') {
+      produced = validated.some(
+        (a) =>
+          a.kind === 'media' &&
+          spec.mimeTypes?.includes(a.recognized.detectedMimeType),
+      );
+    } else if (spec.kind === 'file') {
+      produced = validated.some(
+        (a) =>
+          a.kind === 'file' &&
+          (spec.role === undefined || a.role === spec.role) &&
+          spec.mimeTypes?.includes(a.mimeType),
+      );
+    } else {
+      // Text outputs (disclosures) travel as artifact metadata, not as
+      // artifacts of their own — validated per lossy artifact above.
+      continue;
+    }
     if (!produced) {
       throw new Error(
-        `tool ${toolName} did not produce its required ${spec.mimeTypes?.join('/') ?? 'media'} output`,
+        `tool ${toolName} did not produce its required ${spec.kind} ` +
+          `${spec.mimeTypes?.join('/') ?? spec.role ?? ''} output`,
       );
     }
   }

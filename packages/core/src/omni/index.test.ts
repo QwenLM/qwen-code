@@ -835,6 +835,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         },
       ],
       records: [],
+      fileDeliveries: [],
     });
     const { putFileMock, hashFileMock, mod } = await armPipeline(runMock);
     const filePath = await realFile('pic.png');
@@ -898,6 +899,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         },
       ],
       records: [],
+      fileDeliveries: [],
     });
     const { mod } = await armPipeline(runMock);
     const result = await mod.processMediaForOmniDelivery(
@@ -921,6 +923,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         },
       ],
       records: [],
+      fileDeliveries: [],
     });
     const { putFileMock, uploadFileMock, mod } = await armPipeline(runMock);
     const result = await mod.processMediaForOmniDelivery(
@@ -974,7 +977,9 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
   });
 
   it('rejects a delivery set that is not exactly one resource', async () => {
-    const runMock = vi.fn().mockResolvedValue({ deliveries: [], records: [] });
+    const runMock = vi
+      .fn()
+      .mockResolvedValue({ deliveries: [], records: [], fileDeliveries: [] });
     const { mod } = await armPipeline(runMock);
     await expect(
       mod.processMediaForOmniDelivery(
@@ -984,7 +989,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     ).rejects.toMatchObject({
       name: 'OmniDeliveryError',
       message:
-        'Fixed policies produced 0 deliverables for pic.png; exactly one is supported.',
+        'Fixed policies produced 0 media deliverables for pic.png; exactly one is supported.',
     });
   });
 
@@ -1000,6 +1005,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         },
       ],
       records: [],
+      fileDeliveries: [],
     });
     const { mod } = await armPipeline(runMock);
     const result = await mod.readMediaViaOmniDelivery({
@@ -1025,6 +1031,157 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     });
   });
 
+  // ── Transcript delivery (§6.2) ────────────────────────────────────────
+  const TRANSCRIPT_FILE_DELIVERY = {
+    filePath: '/tmp/objects/t.txt',
+    role: 'transcript',
+    mimeType: 'text/plain',
+    text: '你好，世界',
+    sha256: 'c'.repeat(64),
+    sizeBytes: 15,
+    disclosure: '原 63s 音频 → 转写文本 5 字',
+  };
+
+  it('returns a pure-transcript delivery without storing or uploading anything', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { putFileMock, uploadFileMock, mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig(),
+    );
+
+    // No media deliverable → nothing enters objects/ or the upload channel.
+    expect(putFileMock).not.toHaveBeenCalled();
+    expect(uploadFileMock).not.toHaveBeenCalled();
+    expect(result.fileUri).toBe('');
+    expect(result.sha256).toBe('');
+    expect(result.mimeType).toBe('image/png');
+    expect(result.degraded).toBe(true);
+    expect(result.transcripts).toEqual([
+      { text: '你好，世界', disclosure: '原 63s 音频 → 转写文本 5 字' },
+    ]);
+  });
+
+  it('threads transcripts alongside a media deliverable into the upload result', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig(),
+    );
+    expect(result.fileUri).toBe('oss://bucket/degraded');
+    expect(result.transcripts).toEqual([
+      { text: '你好，世界', disclosure: '原 63s 音频 → 转写文本 5 字' },
+    ]);
+  });
+
+  it('readMediaViaOmniDelivery renders a pure-transcript delivery as text parts only', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig(),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    // Disclosure precedes its transcript (D8 adjacency); no fileData part.
+    expect(result.llmContent).toEqual([
+      { text: '【媒体降质】pic.png：原 63s 音频 → 转写文本 5 字' },
+      { text: '【媒体转写】pic.png：你好，世界' },
+    ]);
+    expect(result.returnDisplay).toBe(
+      'Read image as transcript (omni policy): pic.png',
+    );
+    expect(result.error).toBeUndefined();
+  });
+
+  it('readMediaViaOmniDelivery appends transcript parts after the media part', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig(),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(5);
+    expect(parts[0]!['text']).toContain('1568x1176'); // zoom hint
+    expect(parts[1]!['text']).toBe(
+      '【媒体降质】pic.png：downsampled to 1568px',
+    );
+    expect(parts[2]!['fileData']).toBeDefined();
+    expect(parts[3]!['text']).toBe(
+      '【媒体降质】pic.png：原 63s 音频 → 转写文本 5 字',
+    );
+    expect(parts[4]!['text']).toBe('【媒体转写】pic.png：你好，世界');
+  });
+
+  it('readMediaViaOmniDelivery keeps transcripts when the media itself is omitted', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+          sha256: 'b'.repeat(64),
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig({ maxUploadFileBytes: 500 }),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(3);
+    expect(parts[0]!['text']).toMatch(/^【媒体省略】pic\.png：/);
+    expect(parts[1]!['text']).toBe(
+      '【媒体降质】pic.png：原 63s 音频 → 转写文本 5 字',
+    );
+    expect(parts[2]!['text']).toBe('【媒体转写】pic.png：你好，世界');
+    expect(result.error).toBeUndefined();
+  });
+
   // ── Stage B transport-guard pass loop ────────────────────────────────
   // With `policies: []` the fixed-policy stage is skipped entirely, so
   // every runFixedPolicies call in these tests is a GUARD pass on the
@@ -1044,6 +1201,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         },
       ],
       records: [],
+      fileDeliveries: [],
     });
     const { mod } = await armPipeline(runMock);
     const filePath = await realFile('pic.png');
@@ -1096,6 +1254,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
           },
         ],
         records: [],
+        fileDeliveries: [],
       })
       .mockResolvedValueOnce({
         deliveries: [
@@ -1108,6 +1267,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
           },
         ],
         records: [],
+        fileDeliveries: [],
       });
     const { mod } = await armPipeline(runMock);
     const result = await mod.processMediaForOmniDelivery(
@@ -1147,6 +1307,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
           },
         ],
         records: [],
+        fileDeliveries: [],
       };
     });
     const { mod } = await armPipeline(runMock);
@@ -1172,6 +1333,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         { filePath: resource.filePath, recognized: resource.recognized },
       ],
       records: [],
+      fileDeliveries: [],
     }));
     const { mod } = await armPipeline(runMock);
     const result = await mod.processMediaForOmniDelivery(
@@ -1217,6 +1379,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         },
       ],
       records: [],
+      fileDeliveries: [],
     });
     const { mod } = await armPipeline(runMock);
     const result = await mod.readMediaViaOmniDelivery({
@@ -1251,6 +1414,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         },
       ],
       records: [],
+      fileDeliveries: [],
     });
     const { mod } = await armPipeline(runMock);
     const config = {

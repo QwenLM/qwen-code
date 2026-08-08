@@ -19,6 +19,7 @@ import {
   OmniDegradationCache,
 } from './degradation-cache.js';
 import {
+  MAX_FILE_ARTIFACT_BYTES,
   OmniPolicyExecutionError,
   runFixedPolicies,
   type PolicySourceResource,
@@ -91,7 +92,11 @@ function makePolicy(
     arguments: { maxDimension: 1568 },
     maxRunsPerLineage: 1,
     onFailure: 'continue',
-    output: { reprocessMedia: false, source: 'omit' },
+    output: {
+      reprocessMedia: false,
+      source: 'omit',
+      artifacts: { '*': 'include' },
+    },
     stage: 'preprocessing',
     ...overrides,
   };
@@ -308,7 +313,13 @@ describe('runFixedPolicies', () => {
     const { deliveries } = await runFixedPolicies(config, source, {
       store,
       policies: [
-        makePolicy({ output: { reprocessMedia: false, source: 'keep' } }),
+        makePolicy({
+          output: {
+            reprocessMedia: false,
+            source: 'keep',
+            artifacts: { '*': 'include' },
+          },
+        }),
       ],
     });
     expect(deliveries.map((d) => d.filePath)).toEqual([
@@ -576,7 +587,11 @@ describe('runFixedPolicies', () => {
         makePolicy({
           origins: ['user', 'tool', 'policy'],
           maxRunsPerLineage: 1,
-          output: { reprocessMedia: true, source: 'omit' },
+          output: {
+            reprocessMedia: true,
+            source: 'omit',
+            artifacts: { '*': 'include' },
+          },
         }),
       ],
     });
@@ -817,7 +832,7 @@ describe('runFixedPolicies', () => {
     );
     expect(records[0]).toMatchObject({ outcome: 'failed' });
     expect(records[0].error).toContain(
-      'did not produce its required image/jpeg output',
+      'did not produce its required media image/jpeg output',
     );
     expect(deliveries[0].filePath).toBe(sourcePath);
   });
@@ -842,19 +857,31 @@ describe('runFixedPolicies', () => {
           id: 'b-low',
           priority: 1,
           arguments: { maxDimension: 100 },
-          output: { reprocessMedia: false, source: 'keep' },
+          output: {
+            reprocessMedia: false,
+            source: 'keep',
+            artifacts: { '*': 'include' },
+          },
         }),
         makePolicy({
           id: 'a-high',
           priority: 10,
           arguments: { maxDimension: 300 },
-          output: { reprocessMedia: false, source: 'keep' },
+          output: {
+            reprocessMedia: false,
+            source: 'keep',
+            artifacts: { '*': 'include' },
+          },
         }),
         makePolicy({
           id: 'a-low',
           priority: 1,
           arguments: { maxDimension: 200 },
-          output: { reprocessMedia: false, source: 'keep' },
+          output: {
+            reprocessMedia: false,
+            source: 'keep',
+            artifacts: { '*': 'include' },
+          },
         }),
       ],
     });
@@ -875,12 +902,20 @@ describe('runFixedPolicies', () => {
         makePolicy({
           id: 'a-first',
           arguments: { maxDimension: 100 },
-          output: { reprocessMedia: false, source: 'keep' },
+          output: {
+            reprocessMedia: false,
+            source: 'keep',
+            artifacts: { '*': 'include' },
+          },
         }),
         makePolicy({
           id: 'b-second',
           arguments: { maxDimension: 200 },
-          output: { reprocessMedia: false, source: 'keep' },
+          output: {
+            reprocessMedia: false,
+            source: 'keep',
+            artifacts: { '*': 'include' },
+          },
         }),
       ],
       limits: limitsWith({ maxPolicyRunsPerRoot: 1 }),
@@ -1000,7 +1035,11 @@ describe('runFixedPolicies', () => {
         makePolicy({
           origins: ['user', 'tool', 'policy'],
           maxRunsPerLineage: 10,
-          output: { reprocessMedia: true, source: 'omit' },
+          output: {
+            reprocessMedia: true,
+            source: 'omit',
+            artifacts: { '*': 'include' },
+          },
         }),
       ],
       limits: limitsWith({ maxLineageDepth: 2 }),
@@ -1193,6 +1232,302 @@ describe('runFixedPolicies', () => {
       'Downsampled from 4000x3000 to 1568x1176.',
     );
     await expect(fs.readFile(objectPath, 'utf8')).resolves.toBe(DEGRADED_BYTES);
+  });
+
+  describe('file artifacts (transcript protocol, §6.2)', () => {
+    const TRANSCRIPT_TEXT = '你好，世界';
+    const TRANSCRIPT_DISCLOSURE = '原 63s 音频 → 转写文本 5 字';
+
+    const TRANSCRIPT_DESCRIPTOR: MediaPolicyToolDescriptor = {
+      kind: 'media_policy',
+      inputMediaTypes: ['image'],
+      outputs: [
+        {
+          kind: 'file',
+          role: 'transcript',
+          mimeTypes: ['text/plain'],
+          required: true,
+          lossy: true,
+        },
+        { kind: 'text', role: 'disclosure', required: true },
+      ],
+    };
+
+    /** Tool mock producing one `kind: 'file'` artifact. */
+    function mockFileArtifact(
+      options: {
+        bytes?: Buffer | string;
+        mimeType?: string;
+        role?: string;
+        disclosure?: string | undefined;
+      } = {},
+    ): void {
+      const bytes = options.bytes ?? TRANSCRIPT_TEXT;
+      const mimeType = options.mimeType ?? 'text/plain';
+      const role = options.role ?? 'transcript';
+      const disclosure =
+        'disclosure' in options ? options.disclosure : TRANSCRIPT_DISCLOSURE;
+      executeToolCallMock.mockImplementation(
+        async (_config: Config, request: ToolCallRequestInfo) => {
+          const outputDir = request.args['outputDir'] as string;
+          await fs.writeFile(path.join(outputDir, 'transcript.txt'), bytes);
+          return {
+            callId: request.callId,
+            responseParts: [],
+            resultDisplay: undefined,
+            error: undefined,
+            errorType: undefined,
+            policyArtifacts: {
+              toolName: request.name,
+              invocationId: request.callId,
+              executionOrigin: request.executionOrigin,
+              artifacts: [
+                {
+                  kind: 'file',
+                  storage: 'workspace',
+                  title: 'Audio transcript',
+                  workspacePath: 'transcript.txt',
+                  mimeType,
+                  metadata: {
+                    ...(disclosure !== undefined
+                      ? { omniDisclosure: disclosure }
+                      : {}),
+                    omniRole: role,
+                  },
+                },
+              ],
+            },
+          };
+        },
+      );
+    }
+
+    function transcriptPolicy(
+      overrides: Partial<NormalizedFixedPolicy> = {},
+    ): NormalizedFixedPolicy {
+      return makePolicy({
+        id: 'img-transcribe',
+        toolName: 'omni_transcribe_stub',
+        arguments: {},
+        output: {
+          reprocessMedia: false,
+          source: 'omit',
+          artifacts: { 'role:transcript': 'include' },
+        },
+        ...overrides,
+      });
+    }
+
+    beforeEach(() => {
+      config = makeConfig({ omni_transcribe_stub: TRANSCRIPT_DESCRIPTOR });
+    });
+
+    it('validates and promotes the transcript into fileDeliveries with text + disclosure', async () => {
+      mockFileArtifact();
+      const { deliveries, fileDeliveries, records } = await runFixedPolicies(
+        config,
+        source,
+        { store, policies: [transcriptPolicy()] },
+      );
+
+      // source omitted, no media derivative — pure-transcript outcome.
+      expect(deliveries).toEqual([]);
+      expect(records).toEqual([
+        {
+          policyId: 'img-transcribe',
+          toolName: 'omni_transcribe_stub',
+          outcome: 'succeeded',
+          resource: 'photo.png',
+        },
+      ]);
+      const transcriptSha = sha256Of(TRANSCRIPT_TEXT);
+      expect(fileDeliveries).toEqual([
+        {
+          filePath: store.objectPathFor(transcriptSha, '.txt'),
+          role: 'transcript',
+          mimeType: 'text/plain',
+          text: TRANSCRIPT_TEXT,
+          sha256: transcriptSha,
+          sizeBytes: Buffer.byteLength(TRANSCRIPT_TEXT, 'utf-8'),
+          disclosure: TRANSCRIPT_DISCLOSURE,
+        },
+      ]);
+      // Promoted (content-addressed, immutable) — not left in staging.
+      await expect(
+        fs.readFile(store.objectPathFor(transcriptSha, '.txt'), 'utf-8'),
+      ).resolves.toBe(TRANSCRIPT_TEXT);
+    });
+
+    it('a retain selector keeps the transcript out of fileDeliveries', async () => {
+      mockFileArtifact();
+      const { fileDeliveries, records } = await runFixedPolicies(
+        config,
+        source,
+        {
+          store,
+          policies: [
+            transcriptPolicy({
+              output: {
+                reprocessMedia: false,
+                source: 'omit',
+                artifacts: { 'role:transcript': 'retain', '*': 'include' },
+              },
+            }),
+          ],
+        },
+      );
+      expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+      expect(fileDeliveries).toEqual([]);
+    });
+
+    it('an artifact no selector matches defaults to retain (no "*" entry)', async () => {
+      mockFileArtifact();
+      const { fileDeliveries, records } = await runFixedPolicies(
+        config,
+        source,
+        {
+          store,
+          policies: [
+            transcriptPolicy({
+              output: { reprocessMedia: false, source: 'omit', artifacts: {} },
+            }),
+          ],
+        },
+      );
+      expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+      expect(fileDeliveries).toEqual([]);
+    });
+
+    it('rejects a file artifact that is not valid UTF-8', async () => {
+      mockFileArtifact({ bytes: Buffer.from([0xff, 0xfe, 0x80, 0x00]) });
+      const { fileDeliveries, records } = await runFixedPolicies(
+        config,
+        source,
+        { store, policies: [transcriptPolicy()] },
+      );
+      expect(records[0]).toMatchObject({
+        outcome: 'failed',
+        error: expect.stringContaining('is not valid UTF-8 text'),
+      });
+      expect(fileDeliveries).toEqual([]);
+    });
+
+    it('rejects a file artifact over MAX_FILE_ARTIFACT_BYTES', async () => {
+      mockFileArtifact({ bytes: 'a'.repeat(MAX_FILE_ARTIFACT_BYTES + 1) });
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [transcriptPolicy()],
+      });
+      expect(records[0]).toMatchObject({
+        outcome: 'failed',
+        error: expect.stringContaining(
+          `exceeds the file-artifact size budget (${MAX_FILE_ARTIFACT_BYTES + 1} > ${MAX_FILE_ARTIFACT_BYTES} bytes)`,
+        ),
+      });
+    });
+
+    it('rejects a lossy file artifact without omniDisclosure', async () => {
+      mockFileArtifact({ disclosure: undefined });
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [transcriptPolicy()],
+      });
+      expect(records[0]).toMatchObject({
+        outcome: 'failed',
+        error: expect.stringContaining(
+          'is lossy but carries no omniDisclosure',
+        ),
+      });
+    });
+
+    it('rejects a file artifact whose mimeType matches no declared file output', async () => {
+      mockFileArtifact({ mimeType: 'text/markdown' });
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [transcriptPolicy()],
+      });
+      expect(records[0]).toMatchObject({
+        outcome: 'failed',
+        error: expect.stringContaining('matches no declared file output'),
+      });
+    });
+
+    it('fails the run when the required file output was not produced (§5 completeness)', async () => {
+      // Descriptor requires BOTH a media and a transcript output; the tool
+      // only produces the media derivative.
+      config = makeConfig({
+        omni_transcribe_stub: {
+          kind: 'media_policy',
+          inputMediaTypes: ['image'],
+          outputs: [
+            {
+              kind: 'media',
+              mimeTypes: ['image/jpeg'],
+              required: true,
+              lossy: true,
+            },
+            {
+              kind: 'file',
+              role: 'transcript',
+              mimeTypes: ['text/plain'],
+              required: true,
+              lossy: true,
+            },
+            { kind: 'text', role: 'disclosure', required: true },
+          ],
+        },
+      });
+      mockToolSuccess();
+      const { records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [transcriptPolicy()],
+      });
+      expect(records[0]).toMatchObject({
+        outcome: 'failed',
+        error: expect.stringContaining(
+          'did not produce its required file text/plain output',
+        ),
+      });
+    });
+
+    it('never serves file artifacts from the degradation cache (re-runs the tool)', async () => {
+      mockFileArtifact();
+      await runFixedPolicies(config, source, {
+        store,
+        policies: [transcriptPolicy()],
+      });
+      const second = await runFixedPolicies(config, source, {
+        store,
+        policies: [transcriptPolicy()],
+      });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(2);
+      expect(second.records[0]).toMatchObject({ outcome: 'succeeded' });
+      expect(second.fileDeliveries).toHaveLength(1);
+    });
+
+    it('counts file artifacts toward maxArtifactsPerRoot', async () => {
+      mockFileArtifact();
+      const { records, fileDeliveries } = await runFixedPolicies(
+        config,
+        source,
+        {
+          store,
+          policies: [
+            transcriptPolicy({ id: 'transcribe-a' }),
+            transcriptPolicy({ id: 'transcribe-b' }),
+          ],
+          limits: limitsWith({ maxArtifactsPerRoot: 1 }),
+        },
+      );
+      // The second run tips the count over the budget: its delivery stands
+      // but derivation stops with an explicit budget_exhausted record.
+      expect(records.map((r) => r.outcome)).toEqual([
+        'succeeded',
+        'succeeded',
+        'budget_exhausted',
+      ]);
+      expect(fileDeliveries).toHaveLength(2);
+    });
   });
 
   describe('maxConcurrentResources gates concurrent runs per omni root', () => {
