@@ -1385,6 +1385,125 @@ describe('useVim hook', () => {
     });
   });
 
+  describe('INSERT mode completion key pass-through (#8069)', () => {
+    it('should pass through tab and Ctrl+Tab in INSERT mode', () => {
+      // Completion handling owns the tab keys; InputPrompt relies on this
+      // pass-through so Ctrl+Tab can switch completion categories.
+      mockVimContext.vimMode = 'INSERT';
+      const { result } = renderVimHook();
+
+      expect(result.current.handleInput(makeKey('\t', 'tab'))).toBe(false);
+      expect(
+        result.current.handleInput({ ...makeKey('\t', 'tab'), ctrl: true }),
+      ).toBe(false);
+    });
+
+    it('should consume bare left/right arrows in INSERT mode', () => {
+      // The bare arrows belong to buffer editing here, which keeps them away
+      // from completion category switching in InputPrompt.
+      mockVimContext.vimMode = 'INSERT';
+      const { result } = renderVimHook();
+
+      let handled = false;
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[C', 'right'));
+      });
+      expect(handled).toBe(true);
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[D', 'left'));
+      });
+      expect(handled).toBe(true);
+    });
+  });
+
+  describe('NORMAL mode completion key pass-through (#8069)', () => {
+    it('should pass through Ctrl+Tab and Ctrl+Shift+Tab in NORMAL mode', () => {
+      // The bare arrows are vim movement in NORMAL mode, so the documented
+      // Ctrl+Tab alternatives must stay live for category switching.
+      mockVimContext.vimMode = 'NORMAL';
+      const { result } = renderVimHook();
+
+      expect(
+        result.current.handleInput({ ...makeKey('\t', 'tab'), ctrl: true }),
+      ).toBe(false);
+      expect(
+        result.current.handleInput({
+          ...makeKey('\t', 'tab'),
+          ctrl: true,
+          shift: true,
+        }),
+      ).toBe(false);
+    });
+
+    it('should keep consuming bare Tab and bare arrows in NORMAL mode', () => {
+      mockVimContext.vimMode = 'NORMAL';
+      const { result } = renderVimHook();
+
+      let handled = false;
+      act(() => {
+        handled = result.current.handleInput(makeKey('\t', 'tab'));
+      });
+      expect(handled).toBe(true);
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[C', 'right'));
+      });
+      expect(handled).toBe(true);
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[D', 'left'));
+      });
+      expect(handled).toBe(true);
+    });
+
+    it('should clear a pending operator when passing through Ctrl+Tab', () => {
+      // Before this pass-through existed the key hit the default catch-all,
+      // which zeroes pending state; keep an abandoned `d` from firing on the
+      // next motion.
+      mockVimContext.vimMode = 'NORMAL';
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderVimHook(buffer);
+
+      act(() => {
+        result.current.handleInput(makeKey('d'));
+      });
+      let passedThrough = true;
+      act(() => {
+        passedThrough = result.current.handleInput({
+          ...makeKey('\t', 'tab'),
+          ctrl: true,
+        });
+      });
+      expect(passedThrough).toBe(false);
+      act(() => {
+        result.current.handleInput(makeKey('w'));
+      });
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear a partial count when passing through Ctrl+Shift+Tab', () => {
+      mockVimContext.vimMode = 'NORMAL';
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderVimHook(buffer);
+
+      act(() => {
+        result.current.handleInput(makeKey('3'));
+      });
+      let passedThrough = true;
+      act(() => {
+        passedThrough = result.current.handleInput({
+          ...makeKey('\t', 'tab'),
+          ctrl: true,
+          shift: true,
+        });
+      });
+      expect(passedThrough).toBe(false);
+      act(() => {
+        result.current.handleInput(makeKey('l'));
+      });
+      expect(buffer.vimMoveRight).toHaveBeenCalledWith(1);
+    });
+  });
+
   // Line operations (dd, cc) are tested in text-buffer.test.ts
 
   describe('Reducer-based integration tests', () => {

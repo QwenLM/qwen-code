@@ -185,19 +185,33 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'n', ctrl: true },
   ],
   // Completion category tab switching (for the tabbed @ completion UI).
-  // Bound to Ctrl+arrows rather than plain arrows so the bare arrow keys keep
-  // moving the caret in the editable input buffer (plain arrows only switch
-  // tabs in modal dialogs, which have no text buffer). Alt/Option+arrows still
-  // perform word movement.
-  // Ctrl+←/→ is the primary binding but many terminals intercept it for
-  // word-jump. Ctrl+Tab / Ctrl+Shift+Tab are alternatives that are less
-  // commonly intercepted (#8069).
+  // Bound to the BARE arrow keys: Ctrl+←/→ was the original binding but many
+  // terminals intercept it for word-jump, and on macOS the system claims it
+  // for Mission Control, so the documented gesture was unreachable for most
+  // users (#8069).
+  //
+  // Tradeoff, accepted deliberately: while the `@` completion menu is open the
+  // bare arrows no longer move the caret in the input buffer — press Esc to
+  // dismiss the menu first. The consuming branch in InputPrompt is gated on
+  // the tab bar actually being rendered (menu visible, more than two
+  // categories, no history search) and not in attachment mode, so outside
+  // that window ←/→ keep their normal caret behaviour.
+  //
+  // Modifiers are pinned false so Alt/Option+arrow word movement and any
+  // Ctrl+arrow terminal binding fall through untouched.
+  //
+  // Ctrl+Tab / Ctrl+Shift+Tab are kept as alternatives: with Vim keybindings
+  // enabled, vimHandleInput consumes the bare arrows before completion
+  // handling runs, but tab keys pass through Vim insert mode, so these keep
+  // a keyboard path to switch categories for Vim users. They need a terminal
+  // that reports modifiers on Tab (Kitty keyboard protocol); without it
+  // Ctrl+Tab arrives as plain Tab and accepts the suggestion instead.
   [Command.COMPLETION_TAB_LEFT]: [
-    { key: 'left', shift: false, ctrl: true, command: false },
+    { key: 'left', shift: false, ctrl: false, meta: false },
     { key: 'tab', shift: true, ctrl: true, command: false },
   ],
   [Command.COMPLETION_TAB_RIGHT]: [
-    { key: 'right', shift: false, ctrl: true, command: false },
+    { key: 'right', shift: false, ctrl: false, meta: false },
     { key: 'tab', shift: false, ctrl: true, command: false },
   ],
 

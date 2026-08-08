@@ -7,7 +7,11 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  MAX_WIDTH,
+  hasCategoryTabs,
+} from './SuggestionsDisplay.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
@@ -382,6 +386,21 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   );
   const showCompletionSuggestions =
     completion.showSuggestions && !isHistoryRestoredText;
+
+  const shouldUseExportSuggestions =
+    !commandSearchActive && !reverseSearchActive && !isHistoryRestoredText;
+  const suggestionsFromExport =
+    shouldUseExportSuggestions && !!exportCompletion.suggestionDisplayProps;
+
+  // Whether the completion category tab bar is actually rendered. The key
+  // gate in handleInput and the SuggestionsDisplay props must agree on
+  // this: consuming the arrows while the bar is hidden would freeze caret
+  // movement with no visible UI to explain it.
+  const categoryTabsVisible =
+    !suggestionsFromExport &&
+    !commandSearchActive &&
+    !reverseSearchActive &&
+    hasCategoryTabs(completion.availableCategories);
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{
@@ -1441,12 +1460,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      if (showCompletionSuggestions) {
-        // Category tab switching for the tabbed `@` completion UI. Only consume
-        // Ctrl+←/→ (per the COMPLETION_TAB_* bindings) and only when there are
-        // more than two tabs (at least 3 entries including 'all'). Plain ←/→ are
-        // never consumed here, so they always move the caret in the editable buffer.
-        if ((completion.availableCategories?.length ?? 0) > 2) {
+      if (showCompletionSuggestions && !commandSearchActive) {
+        // Category tab switching for the tabbed `@` completion UI. Consumes
+        // the bare ←/→ and the Ctrl+Tab alternatives (COMPLETION_TAB_*) only
+        // while the tab bar is rendered (categoryTabsVisible keeps this gate
+        // in sync with the render side). In attachment mode ←/→ navigate the
+        // chip row, leaving only the Ctrl+Tab alternatives. While the menu is
+        // open the arrows do NOT move the caret — Esc dismisses it first.
+        // Command search is skipped above so the modifier-agnostic tab accept
+        // cannot silently write a suggestion into the search query.
+        if (categoryTabsVisible && (!isAttachmentMode || key.name === 'tab')) {
           if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
             completion.switchCategory(1);
             setExpandedSuggestionIndex(-1);
@@ -1907,6 +1930,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       exportCompletion,
       isHistoryRestoredText,
       showCompletionSuggestions,
+      categoryTabsVisible,
       voiceInput,
       targetDir,
     ],
@@ -2031,8 +2055,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   };
 
   const activeCompletion = getActiveCompletion();
-  const shouldUseExportSuggestions =
-    !commandSearchActive && !reverseSearchActive && !isHistoryRestoredText;
   const suggestionDisplayProps =
     shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
       ? exportCompletion.suggestionDisplayProps
@@ -2053,8 +2075,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // that controller and exits search mode, mirroring keyboard acceptance.
   // Export completion has no index-based handler, so mouse selection is left
   // disabled for it (handlers are undefined when its suggestions are shown).
-  const suggestionsFromExport =
-    shouldUseExportSuggestions && !!exportCompletion.suggestionDisplayProps;
   const handleSuggestionHover = useCallback(
     (index: number) => {
       if (commandSearchActive) {
@@ -2308,11 +2328,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 : completion.activeCategory
             }
             availableCategories={
-              suggestionsFromExport ||
-              commandSearchActive ||
-              reverseSearchActive
-                ? undefined
-                : completion.availableCategories
+              categoryTabsVisible ? completion.availableCategories : undefined
             }
             onHoverIndex={
               suggestionsFromExport ? undefined : handleSuggestionHover
