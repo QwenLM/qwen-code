@@ -89,6 +89,19 @@ class MockProcessExitError extends Error {
 }
 
 // Mock dependencies
+// startInteractiveUI announces the session in the machine-wide registry, which
+// writes under the real global Qwen dir. Stub it so the suite leaves no record
+// behind; the registry has its own tests in core.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    registerSession: vi.fn().mockResolvedValue(true),
+    unregisterSession: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 vi.mock('./config/settings.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./config/settings.js')>();
   return {
@@ -1420,6 +1433,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      getTargetDir: () => '/test/dir',
       isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
@@ -1545,6 +1559,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      getTargetDir: () => '/test/dir',
       isTelemetryInitializationDeferred: () => false,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
@@ -1669,6 +1684,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      getTargetDir: () => '/test/dir',
       isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
@@ -1920,6 +1936,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getProxy: () => undefined,
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      getTargetDir: () => '/test/dir',
       isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
     vi.mocked(
@@ -2312,6 +2329,8 @@ describe('startInteractiveUI', () => {
   // Mock dependencies
   const mockConfig = {
     getProjectRoot: () => '/root',
+    getSessionId: () => 'test-session-id',
+    getTargetDir: () => '/root',
     getScreenReader: () => false,
     isTelemetryInitializationDeferred: () => true,
     getChatRecordingService: () => undefined,
