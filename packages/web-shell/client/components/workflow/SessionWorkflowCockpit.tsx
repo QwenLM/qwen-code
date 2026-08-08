@@ -535,47 +535,46 @@ export function SessionWorkflowCockpit({
     );
   }
 
+  const headingActions = (
+    <div className={styles.headingActions}>
+      <nav aria-label={t('workflow.tabs.label')} className={styles.cockpitTabs}>
+        <button
+          aria-label={t('workflow.tabs.task')}
+          data-active={section === 'task' || undefined}
+          onClick={() => setSection('task')}
+          type="button"
+        >
+          <LayoutDashboard aria-hidden="true" />
+          <span>{t('workflow.tabs.task')}</span>
+        </button>
+        <button
+          aria-label={t('workflow.tabs.attention')}
+          data-active={section === 'attention' || undefined}
+          onClick={() => setSection('attention')}
+          type="button"
+        >
+          <CircleAlert aria-hidden="true" />
+          <span>{t('workflow.tabs.attention')}</span>
+          {attentionCount > 0 && <b>{attentionCount}</b>}
+        </button>
+      </nav>
+      <span
+        className={styles.environment}
+        data-connected={connected || undefined}
+      >
+        <i />
+        {t(
+          connected
+            ? 'workflow.connection.connected'
+            : 'workflow.connection.reconnecting',
+        )}
+      </span>
+    </div>
+  );
+
   return (
     <div className={styles.cockpit} data-testid="session-workflow-cockpit">
       <main className={styles.main}>
-        <div className={styles.viewBar}>
-          <nav
-            aria-label={t('workflow.tabs.label')}
-            className={styles.cockpitTabs}
-          >
-            <button
-              aria-label={t('workflow.tabs.task')}
-              data-active={section === 'task' || undefined}
-              onClick={() => setSection('task')}
-              type="button"
-            >
-              <LayoutDashboard aria-hidden="true" />
-              <span>{t('workflow.tabs.task')}</span>
-            </button>
-            <button
-              aria-label={t('workflow.tabs.attention')}
-              data-active={section === 'attention' || undefined}
-              onClick={() => setSection('attention')}
-              type="button"
-            >
-              <CircleAlert aria-hidden="true" />
-              <span>{t('workflow.tabs.attention')}</span>
-              {attentionCount > 0 && <b>{attentionCount}</b>}
-            </button>
-          </nav>
-          <span
-            className={styles.environment}
-            data-connected={connected || undefined}
-          >
-            <i />
-            {t(
-              connected
-                ? 'workflow.connection.connected'
-                : 'workflow.connection.reconnecting',
-            )}
-          </span>
-        </div>
-
         {section === 'attention' ? (
           <section className={styles.attentionPage}>
             <div className={styles.attentionHeading}>
@@ -586,6 +585,7 @@ export function SessionWorkflowCockpit({
                 <h1>{t('workflow.attention.title')}</h1>
                 <p>{t('workflow.attention.copy')}</p>
               </div>
+              {headingActions}
             </div>
             <div className={styles.attentionStats}>
               <div>
@@ -714,6 +714,7 @@ export function SessionWorkflowCockpit({
                   </span>
                 </div>
               </div>
+              {headingActions}
             </section>
 
             <section

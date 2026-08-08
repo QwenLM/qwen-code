@@ -77,16 +77,6 @@
   overflow: auto;
 }
 
-.viewBar {
-  display: flex;
-  width: min(1540px, 100%);
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 auto;
-  padding: 18px 28px 0;
-}
-
 .cockpitTabs {
   display: flex;
   height: 38px;
@@ -178,7 +168,25 @@
 
 .taskHeading,
 .attentionHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  min-width: 0;
   margin-bottom: 20px;
+}
+
+.taskHeading > div:first-child,
+.attentionHeading > div:first-child {
+  min-width: 0;
+}
+
+.headingActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
 }
 
 .titleLine {
@@ -351,7 +359,7 @@
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(200px, 0.75fr) minmax(420px, 1.7fr) minmax(
+  grid-template-columns: minmax(200px, 0.75fr) minmax(420px, 2fr) minmax(
       230px,
       0.85fr
     );
@@ -403,10 +411,20 @@
   font-size: 11px;
 }
 
+.workspace > aside:first-child {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
 .phases {
   display: grid;
+  flex: 1;
   gap: 3px;
+  min-height: 0;
+  overflow-y: auto;
   padding: 10px;
+  align-content: start;
 }
 
 .phase {
@@ -513,6 +531,8 @@
 }
 
 .stage {
+  display: flex;
+  flex-direction: column;
   min-height: 620px;
 }
 
@@ -563,6 +583,7 @@
 }
 
 .workStage {
+  flex: 1;
   min-height: 560px;
   background: linear-gradient(180deg, var(--muted), var(--card) 28%);
 }
@@ -820,6 +841,7 @@
 
 .activityStage {
   display: grid;
+  flex: 1;
   gap: 0;
   padding: 12px 18px;
 }
@@ -1627,7 +1649,6 @@ button.activityRow:hover {
     display: none;
   }
 
-  .viewBar,
   .content,
   .attentionPage {
     padding-right: 14px;
@@ -1636,6 +1657,16 @@ button.activityRow:hover {
 
   .reviewHeading {
     display: block;
+  }
+
+  .taskHeading,
+  .attentionHeading {
+    flex-direction: column;
+  }
+
+  .headingActions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .planFacts {
@@ -1655,6 +1686,11 @@ button.activityRow:hover {
   .collaborationBody,
   .reviewGrid {
     grid-template-columns: 1fr;
+  }
+
+  .stage,
+  .workStage {
+    min-height: 0;
   }
 
   .reviewStepList {

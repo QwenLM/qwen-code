@@ -2,7 +2,6 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  container-type: inline-size;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
 }
@@ -116,9 +115,9 @@
 .dagCanvas {
   position: relative;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
-  gap: 56px;
+  gap: 64px;
   width: max-content;
   min-width: 100%;
   padding: 8px 10px 32px;
@@ -204,10 +203,11 @@
 
 .dagCanvas .node::before,
 .dagCanvas .node::after {
+  display: none;
   position: absolute;
   top: 50%;
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border: 1px solid var(--agent-blue-500);
   border-radius: 999px;
   background: var(--background);
@@ -215,12 +215,14 @@
   transform: translateY(-50%);
 }
 
-.dagCanvas .node::before {
-  left: -5px;
+.dagCanvas .node[data-plan-input='true']::before {
+  left: -4px;
+  display: block;
 }
 
-.dagCanvas .node::after {
-  right: -5px;
+.dagCanvas .node[data-plan-output='true']::after {
+  right: -4px;
+  display: block;
 }
 
 .node[data-status='running'],
@@ -261,10 +263,13 @@
   text-align: left;
 }
 
-.nodeSummary:focus-visible {
-  border-radius: 4px;
+.node:has(.nodeSummary:focus-visible) {
   outline: 2px solid var(--node-ring);
   outline-offset: 2px;
+}
+
+.nodeSummary:focus-visible {
+  outline: none;
 }
 
 .nodeTop {
@@ -492,7 +497,7 @@ button.nestedExecution:not(:disabled):focus-visible {
   padding-top: 4px;
 }
 
-@container (max-width: 760px) {
+@media (max-width: 760px) {
   .overview {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

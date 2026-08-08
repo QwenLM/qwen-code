@@ -369,6 +369,7 @@ export function PlanExecutionView({
       (dependencyId) => dependencyId !== todo.id && knownIds.has(dependencyId),
     ),
   ]);
+  const dependencyIdsByTodo = new Map(topology);
   const topologyKey = JSON.stringify(topology);
   const dependencyCount = topology.reduce(
     (total, entry) => total + entry[1].length,
@@ -457,6 +458,8 @@ export function PlanExecutionView({
 
     const measure = () => {
       const graphRect = graphElement.getBoundingClientRect();
+      const graphWidth = Math.max(1, graphElement.offsetWidth);
+      const graphHeight = Math.max(1, graphElement.offsetHeight);
       const scaleX =
         graphElement.offsetWidth > 0
           ? graphRect.width / graphElement.offsetWidth
@@ -488,16 +491,16 @@ export function PlanExecutionView({
         for (const dependencyId of dependencies) {
           const sourceRect = measuredNodes.get(dependencyId);
           if (!sourceRect) continue;
-          const startX = sourceRect.right;
+          const startX = sourceRect.right + 4;
           const startY = sourceRect.top + sourceRect.height / 2;
-          const endX = targetRect.left;
+          const endX = targetRect.left - 4;
           const endY = targetRect.top + targetRect.height / 2;
           const spansLayers =
             (layerByTodoRef.current.get(todoId) ?? 0) -
               (layerByTodoRef.current.get(dependencyId) ?? 0) >
             1;
           const controlX = startX + Math.max(24, (endX - startX) / 2);
-          const routeY = maxNodeBottom + 16;
+          const routeY = Math.min(maxNodeBottom + 16, graphHeight - 16);
           const d = spansLayers
             ? `M ${startX} ${startY} H ${startX + 28} V ${routeY} H ${endX - 28} V ${endY} H ${endX}`
             : `M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`;
@@ -509,12 +512,8 @@ export function PlanExecutionView({
         }
       }
       const next = {
-        width: Math.max(1, graphElement.scrollWidth, graphRect.width / scaleX),
-        height: Math.max(
-          1,
-          graphElement.scrollHeight,
-          graphRect.height / scaleY,
-        ),
+        width: graphWidth,
+        height: graphHeight,
         edges,
       };
       const signature = `${next.width}:${next.height}:${edges.map((edge) => edge.d).join('|')}`;
@@ -762,7 +761,8 @@ export function PlanExecutionView({
                   id={markerId}
                   markerWidth="7"
                   markerHeight="7"
-                  refX="6"
+                  markerUnits="userSpaceOnUse"
+                  refX="7"
                   refY="3.5"
                   orient="auto"
                 >
@@ -794,6 +794,16 @@ export function PlanExecutionView({
                   <article
                     className={styles.node}
                     data-status={state.status}
+                    data-plan-input={
+                      (drawsDependencyEdges &&
+                        (dependencyIdsByTodo.get(todo.id)?.length ?? 0) > 0) ||
+                      undefined
+                    }
+                    data-plan-output={
+                      (drawsDependencyEdges &&
+                        (dependentsByTodo.get(todo.id)?.length ?? 0) > 0) ||
+                      undefined
+                    }
                     data-selected={selectedTodoId === todo.id || undefined}
                     key={todo.id}
                     ref={(node) => {

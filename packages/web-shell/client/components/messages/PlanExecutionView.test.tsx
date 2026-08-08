@@ -663,7 +663,7 @@ describe('PlanExecutionView', () => {
       container
         .querySelector('[data-from="plan"][data-to="build-api"]')
         ?.getAttribute('d'),
-    ).toBe('M 210 50 C 255 50, 255 50, 300 50');
+    ).toBe('M 214 50 C 255 50, 255 50, 296 50');
 
     act(() => root.unmount());
     container.remove();
@@ -746,7 +746,7 @@ describe('PlanExecutionView', () => {
       container
         .querySelector('[data-from="docs"][data-to="release"]')
         ?.getAttribute('d'),
-    ).toBe('M 500 160 H 528 V 216 H 852 V 50 H 880');
+    ).toBe('M 504 160 H 532 V 216 H 848 V 50 H 876');
 
     act(() => root.unmount());
     container.remove();
@@ -920,6 +920,9 @@ describe('PlanExecutionView', () => {
 
     expect(container.querySelector('[data-plan-workflow]')).not.toBeNull();
     expect(container.querySelectorAll('[data-plan-edge]')).toHaveLength(0);
+    expect(
+      container.querySelectorAll('[data-plan-input], [data-plan-output]'),
+    ).toHaveLength(0);
     expect(container.textContent).toContain('Dense 32');
 
     act(() => root.unmount());
