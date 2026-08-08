@@ -891,6 +891,124 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
+  // A quoted payload can relocate through `cd` instead of a Git flag, and an
+  // unrecognized program word hides which of them runs.
+  it.each([
+    () => `su -c 'cd ${outsideRepo} && git reset --hard'`,
+    () => `xargs -I{} sh -c 'cd ${outsideRepo} && git reset --hard'`,
+    // `executableBaseName` lowercases, so an uppercase program word resolves
+    // to the same binary on a case-insensitive filesystem.
+    () => `cd ${outsideRepo} && nice GIT reset --hard`,
+  ])(
+    'denies a relocated mutation concealed in an unrecognized program %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  // A program word the daemon cannot read is as opaque as an unrecognized one.
+  it.each([
+    () => `cd ${outsideRepo} && $CMD git reset --hard`,
+    () => `cd ${outsideRepo} && command $CMD git reset --hard`,
+  ])(
+    'denies a dynamic program running Git after a cwd shift %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.each([
+    // `export NAME` with no `=` exports an earlier shell-local assignment.
+    () =>
+      `GIT_WORK_TREE=${outsideRepo}; export GIT_WORK_TREE; git reset --hard`,
+    () =>
+      `GIT_DIR=${path.join(outsideRepo, '.git')}\nexport GIT_DIR\ngit commit -m x`,
+    // `eval` runs in the current shell, so its exports outlive the payload.
+    () => `eval 'export GIT_WORK_TREE=${outsideRepo}' && git reset --hard`,
+    () => `eval 'set -a' && GIT_WORK_TREE=${outsideRepo} && git reset --hard`,
+    // `set -o $OPT` can request allexport without naming it.
+    () => `set -o $OPT && GIT_WORK_TREE=${outsideRepo} && git reset --hard`,
+    // `+=` appends to an unknown previous value.
+    () =>
+      `GIT_WORK_TREE+=${outsideRepo} && export GIT_WORK_TREE && git reset --hard`,
+  ])(
+    'denies a mutation after a deferred or unresolvable export %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('keeps shell-local assignments shell-local', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(request(`GIT_WORK_TREE=${outsideRepo}; echo done`)),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      guard(request('FOO=bar; export FOO; git commit -m x')),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  // Config keys are case-insensitive and several beyond the alias set run a
+  // program of the target repository's choosing.
+  it.each([
+    () => `git -c core.sshCommand='touch /tmp/x' -C ${outsideRepo} rev-parse`,
+    () => `git -c CORE.SSHCOMMAND='touch /tmp/x' -C ${outsideRepo} rev-parse`,
+    () => `git -c diff.d.textconv='touch /tmp/x' -C ${outsideRepo} rev-parse`,
+    () => `git -c merge.d.driver='touch /tmp/x' -C ${outsideRepo} rev-parse`,
+    () => `git -c sequence.editor='touch /tmp/x' -C ${outsideRepo} rev-parse`,
+  ])(
+    'denies relocated commands carrying command-executing config %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  // An unmodelled value-taking global option makes its value look like the
+  // subcommand, which ends option parsing and hides the relocation after it.
+  it.each([
+    () => `git --shallow-file /tmp/shallow -C ${outsideRepo} reset --hard`,
+    () => `git --attr-source HEAD -C ${outsideRepo} reset --hard`,
+  ])(
+    'parses relocations after value-taking global options %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(outsideRepo),
+      });
+    },
+  );
+
+  it.each([
+    () => 'env -S "$CMD"',
+    () => `env -S'git -C ${outsideRepo} reset --hard'`,
+    () => `env -iS'git -C ${outsideRepo} reset --hard'`,
+  ])('handles env -S payload forms %#', async (buildCommand) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

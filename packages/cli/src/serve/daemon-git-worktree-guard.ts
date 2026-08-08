@@ -52,21 +52,33 @@ const RELOCATED_READ_ONLY_DISQUALIFYING_FLAGS = new Set([
 // `--exec-path` and `--list-cmds` are deliberately absent: real git only
 // accepts their `=<value>` form (a bare `--exec-path` prints and exits), so
 // modelling them as value-taking would swallow the token that follows them.
+// An unmodelled value-taking option is not merely ignored: its value is read
+// as the subcommand, which ends option parsing and hides every relocation
+// after it (`git --shallow-file <p> -C <outside> reset --hard`).
 const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set([
+  '--attr-source',
   '--namespace',
+  '--shallow-file',
   '--super-prefix',
 ]);
 
 // `-c`/`--config-env` keys whose values git executes through a shell. A
 // relocated mutation can be embedded in such a value with no relocation in
-// the outer argv, so these mark a mutating invocation unresolved.
+// the outer argv, so these mark a mutating invocation unresolved. Git config
+// keys are case-insensitive, so these are matched against a lowercased key.
 const GIT_COMMAND_CONFIG_KEY_PATTERNS = [
   /^alias\./,
-  /^core\.(editor|pager|fsmonitor)$/,
+  /^core\.(askpass|editor|fsmonitor|pager|sshcommand)$/,
   /^credential\.helper$/,
+  /^diff\..+\.(command|textconv)$/,
   /^difftool\./,
   /^filter\./,
+  /^gpg\.program$/,
+  /^merge\..+\.driver$/,
   /^mergetool\./,
+  /^pager\./,
+  /^sequence\.editor$/,
+  /^uploadpack\.packobjectshook$/,
 ];
 
 // Environment assignments that redirect git's repository selection (mirrors
@@ -207,9 +219,16 @@ function isDynamicPathValue(token: GuardToken | undefined): boolean {
   );
 }
 
+// `+=` appends to whatever the variable already holds, so the resulting value
+// cannot be resolved from this token alone; it is reported like any other
+// assignment and `recordEnvAssignment` marks it unresolved.
 function leadingEnvAssignmentKey(token: string): string | null {
-  const match = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token);
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(token);
   return match ? match[1]! : null;
+}
+
+function isAppendAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*\+=/.test(token);
 }
 
 function executableBaseName(token: GuardToken): string {
@@ -330,16 +349,24 @@ function hasGitRelocationMarker(tokens: GuardToken[]): boolean {
 // When the run still references git and carries a relocation marker —
 // possibly inside a quoted payload such as `su -c 'git -C ...'` — fail
 // closed instead of letting the program word short-circuit the analysis.
-const GIT_WORD_PATTERN = /\bgit\b/;
+// Case-insensitive because `executableBaseName` lowercases too, so on a
+// case-insensitive filesystem `nice GIT …` runs the same binary.
+const GIT_WORD_PATTERN = /\bgit\b/i;
+// A `cd`/`pushd` inside such a payload relocates the git that follows it just
+// as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
 const TEXT_RELOCATION_MARKER_PATTERN =
-  /(^|\s)(-C|--git-dir=?|--work-tree=?)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)=/;
+  /(^|\s)(-C|--git-dir=?|--work-tree=?)|(^|\s)(cd|pushd)(\s|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)\+?=/;
 
 function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
   const key = leadingEnvAssignmentKey(token.text);
   if (key === null) return;
   if (!GIT_DIR_ENV_KEYS.has(key) && !GIT_WORK_TREE_ENV_KEYS.has(key)) return;
   const value = token.text.slice(token.text.indexOf('=') + 1);
-  if (token.dynamic || isDynamicPathValue({ text: value, dynamic: false })) {
+  if (
+    token.dynamic ||
+    isAppendAssignment(token.text) ||
+    isDynamicPathValue({ text: value, dynamic: false })
+  ) {
     state.unresolved = true;
     return;
   }
@@ -385,6 +412,7 @@ function recordChdirValue(
 interface WrapperScan {
   next: number;
   payload?: string;
+  undecidable?: boolean;
 }
 
 function consumeEnvWrapper(
@@ -422,11 +450,26 @@ function consumeEnvWrapper(
     if (token.text === '-S' || token.text === '--split-string') {
       const payloadToken = run[index + 1];
       if (payloadToken === undefined) return { next: run.length };
+      // Mirrors the `-c` payload rule: a payload the daemon cannot read is
+      // undecidable, not absent.
+      if (payloadToken.dynamic) return { next: run.length, undecidable: true };
       const rest = joinTokenTexts(run.slice(index + 2));
       return {
         next: run.length,
         payload: rest ? `${payloadToken.text} ${rest}` : payloadToken.text,
       };
+    }
+    // `env -S'cmd'` / `env -iS'cmd'`: the payload is fused into the flag
+    // token after the `S`, exactly as `sh -c'cmd'` fuses its own.
+    if (/^-[A-Za-z]*S/.test(token.text) && !token.text.startsWith('--')) {
+      const fused = token.text.slice(token.text.indexOf('S') + 1);
+      if (fused.length > 0) {
+        const rest = joinTokenTexts(run.slice(index + 1));
+        return {
+          next: run.length,
+          payload: rest ? `${fused} ${rest}` : fused,
+        };
+      }
     }
     if (ENV_VALUE_FLAGS.has(token.text)) {
       index += 2;
@@ -572,7 +615,7 @@ type RunAnalysis =
       target?: GuardToken;
     }
   | { kind: 'dynamic-program'; rest: GuardToken[]; state: PrefixState }
-  | { kind: 'export'; state: PrefixState }
+  | { kind: 'export'; state: PrefixState; operands: GuardToken[] }
   | { kind: 'all-export' }
   | { kind: 'undecidable' }
   | { kind: 'other'; state: PrefixState; assignmentsOnly: boolean };
@@ -647,7 +690,10 @@ function findChdirTarget(
 // environment, so plain `GIT_DIR=…` runs stop being shell-local.
 function requestsAllExport(run: GuardToken[], start: number): boolean {
   for (let index = start; index < run.length; index++) {
-    const text = run[index]!.text;
+    const token = run[index]!;
+    const text = token.text;
+    // `set -o $OPT` can request allexport without naming it.
+    if (token.dynamic) return true;
     if (text === '-o' || text === '--') {
       if (run[index + 1]?.text === 'allexport') return true;
       continue;
@@ -685,16 +731,16 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
       continue;
     }
     if (EXPORT_BUILTINS.has(program)) {
-      for (const operand of run.slice(index + 1)) {
-        recordEnvAssignment(operand, state);
-      }
-      return { kind: 'export', state };
+      const operands = run.slice(index + 1);
+      for (const operand of operands) recordEnvAssignment(operand, state);
+      return { kind: 'export', state, operands };
     }
     if (program === 'set' && requestsAllExport(run, index + 1)) {
       return { kind: 'all-export' };
     }
     if (program === 'env') {
       const scan = consumeEnvWrapper(run, index, state);
+      if (scan.undecidable) return { kind: 'undecidable' };
       if (scan.payload !== undefined) {
         return {
           kind: 'payload',
@@ -780,7 +826,9 @@ function readGitInvocation(tokens: GuardToken[]): GitInvocation {
 
   const recordConfigAssignment = (value: string): void => {
     const separator = value.indexOf('=');
-    const key = separator >= 0 ? value.slice(0, separator) : value;
+    const key = (
+      separator >= 0 ? value.slice(0, separator) : value
+    ).toLowerCase();
     const assignment = separator >= 0 ? value.slice(separator + 1) : '';
     if (
       GIT_COMMAND_CONFIG_KEY_PATTERNS.some((pattern) => pattern.test(key)) ||
@@ -1191,6 +1239,10 @@ async function evaluateUnrecognizedRun(
 interface CommandEvaluation {
   readonly denial?: GuardDenial;
   readonly cwdAfter: string | undefined;
+  // Environment state the payload leaves behind. Only a construct that runs
+  // in the current shell (`eval`) propagates it back to the caller.
+  readonly exportedAfter?: PrefixState;
+  readonly allExportAfter?: boolean;
 }
 
 async function evaluateCommandWithCwd(
@@ -1205,6 +1257,9 @@ async function evaluateCommandWithCwd(
   // runs after them, and whether `set -a` made plain assignments exported.
   const exported: PrefixState = { relocations: [], unresolved: false };
   let allExport = false;
+  // GIT_* assignments made without `export`. They stay shell-local until a
+  // name-only `export GIT_DIR` promotes them into the environment.
+  const shellLocals = new Map<string, GuardToken>();
   // Exported relocations reach every later command, including the ones nested
   // inside a wrapper payload or a substitution body.
   const activeContext = (): GuardEvaluationContext =>
@@ -1297,7 +1352,14 @@ async function evaluateCommandWithCwd(
             return { denial: nested.denial, cwdAfter: trackedCwd };
           }
           if (analysis.propagatesCwd) {
+            // `eval` runs in the current shell, so everything it changed —
+            // the cwd, exported relocations and `set -a` — outlives it.
             trackedCwd = nested.cwdAfter;
+            if (nested.exportedAfter) {
+              exported.relocations.push(...nested.exportedAfter.relocations);
+              if (nested.exportedAfter.unresolved) exported.unresolved = true;
+            }
+            if (nested.allExportAfter) allExport = true;
           }
           break;
         }
@@ -1324,6 +1386,16 @@ async function evaluateCommandWithCwd(
           ) {
             return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
           }
+          // A program word the daemon cannot read is at least as opaque as an
+          // unrecognized one, so it answers to the same containment rule.
+          const denial = await evaluateUnrecognizedRun(
+            analysis.rest,
+            analysis.state,
+            trackedCwd,
+            entryCwd,
+            inherited,
+          );
+          if (denial) return { denial, cwdAfter: trackedCwd };
           break;
         }
         case 'undecidable':
@@ -1334,6 +1406,13 @@ async function evaluateCommandWithCwd(
         case 'export': {
           exported.relocations.push(...analysis.state.relocations);
           if (analysis.state.unresolved) exported.unresolved = true;
+          // `export GIT_DIR` with no `=` exports whatever an earlier
+          // shell-local assignment left in that name.
+          for (const operand of analysis.operands) {
+            if (leadingEnvAssignmentKey(operand.text) !== null) continue;
+            const pending = shellLocals.get(operand.text);
+            if (pending) recordEnvAssignment(pending, exported);
+          }
           const denial = await evaluateUnrecognizedRun(
             run,
             analysis.state,
@@ -1348,10 +1427,18 @@ async function evaluateCommandWithCwd(
           allExport = true;
           break;
         case 'other': {
-          if (allExport && analysis.assignmentsOnly) {
-            // `set -a` turned this shell-local assignment into an exported one.
-            exported.relocations.push(...analysis.state.relocations);
-            if (analysis.state.unresolved) exported.unresolved = true;
+          if (analysis.assignmentsOnly) {
+            if (allExport) {
+              // `set -a` turned this shell-local assignment into an exported
+              // one straight away.
+              exported.relocations.push(...analysis.state.relocations);
+              if (analysis.state.unresolved) exported.unresolved = true;
+            } else {
+              for (const token of run) {
+                const key = leadingEnvAssignmentKey(token.text);
+                if (key !== null) shellLocals.set(key, token);
+              }
+            }
           }
           const denial = await evaluateUnrecognizedRun(
             run,
@@ -1371,7 +1458,11 @@ async function evaluateCommandWithCwd(
       }
     }
   }
-  return { cwdAfter: trackedCwd };
+  return {
+    cwdAfter: trackedCwd,
+    exportedAfter: exported,
+    allExportAfter: allExport,
+  };
 }
 
 async function evaluateBuiltInGuard(

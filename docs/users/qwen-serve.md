@@ -465,12 +465,17 @@ target that cannot be fully resolved before execution — a dynamic target
 (`$VAR`, backticks, `~`, globs), a path that does not exist yet, or an
 unreadable indirection — is denied for mutating or unclassifiable subcommands.
 Relocated commands whose subcommand is one of a small verified read-only set
-(`rev-parse`, `ls-files`, `describe`, `cat-file`) remain allowed, unless they
-carry a `--output`, `--textconv`, or `--filters` flag: those write a file or
-run the target repository's configured drivers. Commands with no recognized
+(`rev-parse`, `ls-files`, `describe`, `cat-file`) remain allowed, unless the
+target is unresolvable, the command carries command-executing `-c` config, or
+it carries a `--output`, `--textconv`, or `--filters` flag: those write a file
+or run the target repository's configured drivers. Commands with no recognized
 relocation keep their existing behavior.
 Denials are final and are reported to the model as
-`Daemon shell guard denied a mutating Git command…`.
+`Daemon shell guard denied a mutating Git command…` for a resolved, dynamic,
+or unresolvable repository location, and as
+`Daemon shell guard denied a shell command…` when the command could not be
+parsed, its payload could not be resolved, or an unrecognized program may run
+a relocated Git command.
 
 The guard is a static best-effort policy: it does not interpret script files,
 track environment variable values across commands, or analyze heredoc bodies

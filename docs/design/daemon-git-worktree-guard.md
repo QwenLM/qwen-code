@@ -37,7 +37,10 @@ changed by literal forms of:
   assignments
 - the same assignments made through `export`/`declare`/`typeset`/`readonly`
   (or plain assignments under `set -a`), which stay in the environment of
-  every later command in the same chain rather than only their own run
+  every later command in the same chain rather than only their own run. A
+  name-only `export GIT_DIR` exports the value an earlier shell-local
+  assignment left in that name, and an unresolvable assignment (`+=`, a
+  dynamic value, `set -o $OPT`) is recorded as an unresolved relocation
 - directory-shifting wrapper flags `env -C`/`--chdir` and `sudo -D`/`--chdir`
 - `cd`, `pushd`, or `popd` builtins earlier in the same command chain, whose
   targets become the containment basis for later Git invocations in that chain
@@ -56,14 +59,22 @@ and leading shell keywords and reserved words (`{`, `}`, `!`, `if`, `then`,
 what executes. `cd`/`pushd` option words (`-L`, `-P`, `-e`, `-@`, `--`) are
 skipped when locating the directory operand, so containment is evaluated
 against the directory the shell actually enters. A segment whose program token
-cannot be classified fails closed when the segment still references Git and
-carries a relocation marker (token-level or inside a quoted payload), a
+cannot be classified — including one the daemon cannot read at all (`$CMD`) —
+fails closed when the segment still references Git and
+carries a relocation marker (token-level or inside a quoted payload, where a
+`cd`/`pushd` counts as one because `su -c 'cd <outside> && git reset --hard'`
+relocates just as effectively as `-C`), a
 recorded relocation, an unresolved prefix, or a tracked working directory that
 is unknown or already outside the boundary — `cd <outside> && nice git reset
---hard` is denied on that last clause. A `-c` payload that is dynamic
+--hard` is denied on that last clause. The Git word is matched
+case-insensitively, because the program-word classification lowercases and a
+case-insensitive filesystem runs `GIT` and `git` alike. A `-c` payload that is
+dynamic
 (`sh -c "$CMD"`) or fused
 into the flag token (`bash -c'cmd'`, read from the same token) is analyzed
-after extraction; an undecidable payload is denied rather than allowed.
+after extraction; `env -S` payloads follow the same rules in both their spaced
+and fused (`env -S'cmd'`) forms; an undecidable payload is denied rather than
+allowed.
 
 Command substitutions (`$(…)` and backticks) execute before the command they
 are embedded in, so their bodies are extracted from the raw segment and
@@ -105,13 +116,22 @@ allowlisted subcommand (`git -C <outside> cat-file --textconv --path=f HEAD:f`
 executes its `diff.<driver>.textconv` command). Commands with no recognized
 relocation retain existing behavior.
 Dynamic relocation targets (`$` expansions, backticks, leading `~`, globs)
-and command-executing `-c`/`--config-env` assignments (`alias.*`,
-`core.editor`, `core.pager`, `credential.helper`, `filter.*`, `difftool.*`,
-`mergetool.*`, `core.fsmonitor`, or values starting with `!`) are denied
-regardless of the subcommand — the check runs before the read-only allowance
-because even `status` executes a target-repo-configured `core.fsmonitor` —
-because the daemon cannot prove that the target remains inside the effective
-working directory.
+and command-executing `-c`/`--config-env` assignments are denied regardless of
+the subcommand — the check runs before the read-only allowance because even
+`status` executes a target-repo-configured `core.fsmonitor` — because the
+daemon cannot prove that the target remains inside the effective working
+directory. The command-executing keys are `alias.*`, `core.askPass`,
+`core.editor`, `core.fsmonitor`, `core.pager`, `core.sshCommand`,
+`credential.helper`, `diff.<driver>.command`, `diff.<driver>.textconv`,
+`difftool.*`, `filter.*`, `gpg.program`, `merge.<driver>.driver`,
+`mergetool.*`, `pager.*`, `sequence.editor`, and
+`uploadpack.packObjectsHook`, matched case-insensitively because Git config
+keys are; any value starting with `!` counts too.
+
+Git global options that consume the next argv entry (`--namespace`,
+`--super-prefix`, `--shallow-file`, `--attr-source`) are modelled as such:
+leaving one out would make its value look like the subcommand, ending option
+parsing and hiding every relocation after it.
 
 `--git-dir` is evaluated by the repository git operates on, with
 canonicalization before basename handling: a target whose canonical form ends
@@ -162,12 +182,19 @@ execution semantics.
 ## Non-goals
 
 - No changes to core `ShellTool`, `ShellToolInvocation`, shell AST parsing,
-  `PermissionManager`, `evaluatePermissionFlow`, or `CoreToolScheduler`.
+  `PermissionManager`, or `evaluatePermissionFlow`. `CoreToolScheduler` and
+  `speculation.ts` gain one additive field — the scheduler-owned `sessionId`
+  on the guard context — and no behavior change: hosts that ignore it see
+  exactly the previous flow.
 - No new confirmation flow or linked-worktree exception.
 - No restriction on direct user-entered daemon shell commands.
 - No general shell interpreter or environment-variable analysis: script files
   run by `bash script.sh` or `source` are not read, and variable values are
   not tracked across commands.
+- No revocation of a recorded relocation: `unset GIT_DIR` and `env -u GIT_DIR`
+  later in the same chain do not clear an exported GIT\_\* relocation, so such a
+  chain can be denied even though the real shell would run it inside the
+  session (a fail-closed false positive, not a bypass).
 - No heredoc body analysis: Git-shaped text inside a heredoc is scanned as
   executable lines and can be denied even though the shell never executes it
   (a fail-closed false positive, not a bypass).
