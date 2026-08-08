@@ -149,7 +149,9 @@ import {
   LoopDetectedEvent,
   LoopType,
   acquireSleepInhibitor,
+  didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
+  refreshMemoryInstruction,
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
@@ -1414,6 +1416,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
   /**
@@ -3339,6 +3342,9 @@ export class Session implements SessionContext {
             );
             const inputText = firstTextBlock?.text || '';
             const isSlashInput = !isContinue && isSlashCommand(inputText);
+            if (!isSlashInput && !isContinue && !isRetry) {
+              this.refreshContextFilesOnWrite = false;
+            }
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
@@ -7600,6 +7606,25 @@ export class Session implements SessionContext {
       await refreshMemoryAfterManagedWrite(this.config, memoryWriteCandidates, {
         logContext: `ACP session ${this.sessionId} memory tool batch`,
       });
+      if (!this.refreshContextFilesOnWrite) {
+        return;
+      }
+      const matchedContextFileWrite = didWriteProjectContextFile(
+        memoryWriteCandidates,
+        this.config.getProjectRoot(),
+      );
+      debugLogger.debug(
+        `ACP session ${this.sessionId} checked marked context-file memory tool batch; matched=${matchedContextFileWrite}`,
+      );
+      if (!matchedContextFileWrite) {
+        return;
+      }
+      debugLogger.debug(
+        `ACP session ${this.sessionId} refreshing memory after context-file memory write`,
+      );
+      await refreshMemoryInstruction(this.config, {
+        logContext: `ACP session ${this.sessionId} context-file memory tool batch`,
+      });
     };
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
@@ -9828,6 +9853,9 @@ export class Session implements SessionContext {
     onFullTurnModel: (model: string) => boolean,
   ): Promise<Part[] | null> {
     this.#emitGoalStatusItems(result);
+    this.refreshContextFilesOnWrite =
+      result.type === 'submit_prompt' &&
+      Boolean(result.refreshContextFilesOnWrite);
 
     switch (result.type) {
       case 'submit_prompt':

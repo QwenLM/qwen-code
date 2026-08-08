@@ -13713,7 +13713,7 @@ describe('createAcpSessionBridge', () => {
       );
     });
 
-    it('publishes session_update events to subscribers when the agent sends them', async () => {
+    it('publishes ACP usage updates to subscribers unchanged', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
         // Build a channel pair where we capture the agent-side connection
@@ -13743,8 +13743,9 @@ describe('createAcpSessionBridge', () => {
       void capturedConn!.sessionUpdate({
         sessionId: session.sessionId,
         update: {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'hi' },
+          sessionUpdate: 'usage_update',
+          used: 42,
+          size: 128_000,
         },
       });
 
@@ -13755,6 +13756,14 @@ describe('createAcpSessionBridge', () => {
       }
       expect(collected[0]?.type).toBe('session_update');
       expect(collected[0]?.id).toBe(1);
+      expect(collected[0]?.data).toMatchObject({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 42,
+          size: 128_000,
+        },
+      });
 
       abort.abort();
       await bridge.shutdown();

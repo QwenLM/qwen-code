@@ -65,6 +65,7 @@ const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const bridgeToolResultImagesSpy = vi.hoisted(() => vi.fn());
 const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
+const refreshMemoryInstructionSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 const startToolSpanSpy = vi.hoisted(() => vi.fn());
 const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
@@ -92,6 +93,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     runVisionBridge: runVisionBridgeSpy,
     bridgeToolResultImages: bridgeToolResultImagesSpy,
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
+    refreshMemoryInstruction: refreshMemoryInstructionSpy,
     startToolSpan: (...args: Parameters<typeof actual.startToolSpan>) => {
       startToolSpanSpy(...args);
       return actual.startToolSpan(...args);
@@ -531,6 +533,8 @@ describe('Session', () => {
     );
     refreshMemoryAfterManagedWriteSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
+    refreshMemoryInstructionSpy.mockReset();
+    refreshMemoryInstructionSpy.mockResolvedValue(undefined);
     transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -20570,6 +20574,149 @@ describe('Session', () => {
           logContext: 'ACP session test-session-id memory tool batch',
         },
       );
+    });
+
+    async function markAcpContextRefreshIntent() {
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [{ text: 'Remember this fact.' }],
+        refreshContextFilesOnWrite: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/remember fact' }],
+      });
+    }
+
+    function allowAcpWriteFile() {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote file',
+        returnDisplay: 'wrote file',
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.WRITE_FILE, execute),
+      );
+    }
+
+    async function runAcpWriteFile(
+      filePath: string,
+      promptId: string,
+      callId = 'write_context',
+    ) {
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        promptId,
+        [
+          {
+            id: callId,
+            name: core.ToolNames.WRITE_FILE,
+            args: { file_path: filePath },
+          },
+        ],
+      );
+    }
+
+    it('refreshes context-file instructions after ACP bare remember writes QWEN.md', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryAfterManagedWriteSpy.mockClear();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile('/repo/QWEN.md', 'prompt-context-write');
+
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryInstructionSpy).toHaveBeenCalledWith(mockConfig, {
+        logContext:
+          'ACP session test-session-id context-file memory tool batch',
+      });
+    });
+
+    it('keeps refreshing context-file instructions for later ACP writes in a marked turn', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/QWEN.md',
+        'prompt-context-write-1',
+        'write_context_1',
+      );
+      await runAcpWriteFile(
+        '/repo/QWEN.md',
+        'prompt-context-write-2',
+        'write_context_2',
+      );
+
+      expect(refreshMemoryInstructionSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not refresh context-file instructions for marked ACP writes to other files', async () => {
+      await markAcpContextRefreshIntent();
+      refreshMemoryAfterManagedWriteSpy.mockClear();
+      refreshMemoryInstructionSpy.mockClear();
+
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/notes.md',
+        'prompt-notes-write',
+        'write_notes',
+      );
+
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
+    });
+
+    it('clears unmatched context-file refresh intent on the next ordinary ACP turn', async () => {
+      await markAcpContextRefreshIntent();
+      allowAcpWriteFile();
+      await runAcpWriteFile(
+        '/repo/notes.md',
+        'prompt-notes-write',
+        'write_notes',
+      );
+
+      refreshMemoryInstructionSpy.mockClear();
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ordinary turn' }],
+      });
+      await runAcpWriteFile('/repo/QWEN.md', 'prompt-ordinary-context-write');
+
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh context-file instructions for ordinary ACP QWEN.md writes', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote context',
+        returnDisplay: 'wrote context',
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.WRITE_FILE, execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-ordinary-context-write',
+        [
+          {
+            id: 'write_context',
+            name: core.ToolNames.WRITE_FILE,
+            args: { file_path: '/repo/QWEN.md' },
+          },
+        ],
+      );
+
+      expect(refreshMemoryAfterManagedWriteSpy).toHaveBeenCalledTimes(1);
+      expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
     });
 
     it('does not fire PostToolBatch hooks from the ACP session path', async () => {
