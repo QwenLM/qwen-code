@@ -38,6 +38,16 @@ const TRACKED_ENV = [
   'Node_Options',
   'ZDOTDIR',
   'BASH_FUNC_id%%',
+  'OPENSSL_CONF',
+  'NODE_REPL_EXTERNAL_MODULE',
+  'npm_config_node_gyp',
+  'npm_config_init_module',
+  'SSL_CERT_FILE',
+  'GIT_SSH_COMMAND',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_KEY_0',
+  'GIT_CONFIG_VALUE_0',
+  'PYTHON',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'NODE_EXTRA_CA_CERTS',
@@ -304,6 +314,61 @@ describe('loadEnvironment', () => {
     expect(process.env['npm_config_node_options']).toBeUndefined();
     expect(process.env['NODE_PATH']).toBeUndefined();
     expect(process.env['LD_PRELOAD']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // #8663 follow-up: pure-injection loader keys (dlopen/require/exec redirects)
+  // join the scrubbed loader set and are rejected from every .env scope.
+  it('never applies the follow-up code-injection loader keys from .env', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'OPENSSL_CONF=/workspace-a/evil.cnf',
+        'NODE_REPL_EXTERNAL_MODULE=/workspace-a/hook.js',
+        'npm_config_node_gyp=/workspace-a/evil-gyp.js',
+        'npm_config_init_module=/workspace-a/evil-init.js',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['OPENSSL_CONF']).toBeUndefined();
+    expect(process.env['NODE_REPL_EXTERNAL_MODULE']).toBeUndefined();
+    expect(process.env['npm_config_node_gyp']).toBeUndefined();
+    expect(process.env['npm_config_init_module']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // #8663 follow-up: TLS trust anchors, the git command-exec family (incl.
+  // numbered GIT_CONFIG_KEY_/VALUE_ pairs), and node-gyp interpreter selection
+  // join the hardcoded reject-from-project-.env tier.
+  it('never applies the follow-up TLS/git/interpreter keys from a project .env', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'SSL_CERT_FILE=/workspace-a/evil-ca.pem',
+        'GIT_SSH_COMMAND=/workspace-a/evil-ssh.sh',
+        'GIT_CONFIG_COUNT=1',
+        'GIT_CONFIG_KEY_0=core.hooksPath',
+        'GIT_CONFIG_VALUE_0=/workspace-a/evil-hooks',
+        'PYTHON=/workspace-a/evil-python',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['SSL_CERT_FILE']).toBeUndefined();
+    expect(process.env['GIT_SSH_COMMAND']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_COUNT']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_KEY_0']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBeUndefined();
+    expect(process.env['PYTHON']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 

@@ -4,17 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  acquireInheritedLoaderEnvScrub,
+  clearLoaderKeyRejectionReporterIfCurrent,
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
+  type LoaderKeyRejectionReporter,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
+  resetInheritedLoaderEnvScrubForTesting,
   resetLoaderKeyRejectionReportingForTesting,
   scrubAndReportInheritedLoaderEnv,
   scrubInheritedLoaderEnv,
+  setLoaderKeyRejectionReporter,
 } from './shared-env-keys.js';
 
 describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
@@ -68,6 +73,49 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('DEV');
   });
 
+  // The non-Node TLS trust-anchor vars reach the same MITM outcome as
+  // NODE_EXTRA_CA_CERTS for the curl/git/openssl/python tools a session
+  // shells out to; a project .env must not inject an attacker CA.
+  it('excludes the non-Node TLS trust-anchor vars', () => {
+    for (const key of [
+      'SSL_CERT_FILE',
+      'SSL_CERT_DIR',
+      'CURL_CA_BUNDLE',
+      'REQUESTS_CA_BUNDLE',
+      'GIT_SSL_CAINFO',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  // git executes these on any session git invocation (SSH command, external
+  // diff, config-injected core.hooksPath); a project .env setting them is
+  // code execution as the daemon user.
+  it('excludes the git command-execution env family', () => {
+    for (const key of [
+      'GIT_SSH_COMMAND',
+      'GIT_EXTERNAL_DIFF',
+      'GIT_CONFIG_GLOBAL',
+      'GIT_CONFIG_SYSTEM',
+      'GIT_CONFIG_COUNT',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  // node-gyp interpreter selection runs the pointed-at file as the build
+  // Python; a project .env must not redirect it.
+  it('excludes the node-gyp interpreter-selection and git-binary vars', () => {
+    for (const key of [
+      'NODE_GYP_FORCE_PYTHON',
+      'npm_config_python',
+      'PYTHON',
+      'npm_config_git',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
   // Workspace settings.env QWEN_SERVER_TOKEN is an intentional fast-path
   // feature (fast-path.test.ts loads it without the full settings loader);
   // it stays reload-only rather than hardcoded-excluded.
@@ -94,6 +142,28 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('dev')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('QWEN_SERVER_TOKEN')).toBe(false);
     expect(isHardcodedProjectEnvExclusion('NODE_OPTIONS')).toBe(false);
+  });
+
+  it('matches the newly added hardcoded exclusions case-insensitively', () => {
+    expect(isHardcodedProjectEnvExclusion('SSL_CERT_FILE')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('ssl_cert_file')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_SSH_COMMAND')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_ssh_command')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('PYTHON')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('python')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('npm_config_python')).toBe(true);
+  });
+
+  // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded
+  // index, matched by prefix rather than literal membership.
+  it('matches numbered GIT_CONFIG_KEY_/VALUE_ pairs by prefix', () => {
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_KEY_0')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_VALUE_0')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_config_key_12')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_VALUE_7')).toBe(true);
+    // A key that merely starts with GIT_CONFIG but is not a KEY_/VALUE_ pair
+    // (and not a listed literal) is not excluded.
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_PARAMETERS')).toBe(false);
   });
 });
 
@@ -135,6 +205,29 @@ describe('isLoaderEnvKey', () => {
     expect(isLoaderEnvKey('BASH_FUNC_id%%')).toBe(true);
     expect(isLoaderEnvKey('BASH_FUNC_anything()')).toBe(true);
     expect(isLoaderEnvKey('bash_func_id%%')).toBe(true);
+  });
+
+  // Pure code-injection vectors with no benign cross-workspace inheritance:
+  // OPENSSL_CONF (dlopen an engine at crypto init), NODE_REPL_EXTERNAL_MODULE
+  // (require at REPL start), and the npm node-gyp/init script redirects.
+  it('matches the pure-injection loader keys added for the #8653 follow-up', () => {
+    expect(isLoaderEnvKey('OPENSSL_CONF')).toBe(true);
+    expect(isLoaderEnvKey('openssl_conf')).toBe(true);
+    expect(isLoaderEnvKey('NODE_REPL_EXTERNAL_MODULE')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_node_gyp')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_node-gyp')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_init_module')).toBe(true);
+    expect(isLoaderEnvKey('npm_config_init-module')).toBe(true);
+  });
+
+  // The interpreter-selection vars stay in the reject-only hardcoded tier
+  // (they have a legitimate operator-shell use), NOT the scrubbed loader set.
+  it('does not scrub interpreter-selection or TLS-anchor keys', () => {
+    expect(isLoaderEnvKey('PYTHON')).toBe(false);
+    expect(isLoaderEnvKey('npm_config_python')).toBe(false);
+    expect(isLoaderEnvKey('NODE_GYP_FORCE_PYTHON')).toBe(false);
+    expect(isLoaderEnvKey('SSL_CERT_FILE')).toBe(false);
+    expect(isLoaderEnvKey('GIT_SSH_COMMAND')).toBe(false);
   });
 
   // Library search paths and the interactive-sh-only ENV are deliberately
@@ -247,8 +340,12 @@ describe('scrubInheritedLoaderEnv', () => {
       'LD_PRELOAD',
       'NODE_OPTIONS',
       'NODE_PATH',
+      'NODE_REPL_EXTERNAL_MODULE',
+      'OPENSSL_CONF',
       'ZDOTDIR',
       'npm_config_globalconfig',
+      'npm_config_init_module',
+      'npm_config_node_gyp',
       'npm_config_node_options',
       'npm_config_prefix',
       'npm_config_script_shell',
@@ -368,5 +465,104 @@ describe('scrubAndReportInheritedLoaderEnv', () => {
     });
 
     expect(breadcrumb).toBe('');
+  });
+});
+
+// #8663 follow-up (concurrency): overlapping embedded daemons in one process
+// share process.env; a per-daemon scrub+restore races and re-poisons the
+// survivor. acquireInheritedLoaderEnvScrub reference-counts so only the last
+// release restores.
+describe('acquireInheritedLoaderEnvScrub', () => {
+  afterEach(() => {
+    resetInheritedLoaderEnvScrubForTesting();
+    delete process.env['NODE_OPTIONS'];
+    delete process.env['LD_PRELOAD'];
+  });
+
+  it('does not restore loader vars while a second holder is still active', () => {
+    resetInheritedLoaderEnvScrubForTesting();
+    const poison = '--import file:///workspace-a/register.mjs';
+    process.env['NODE_OPTIONS'] = poison;
+
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      // Daemon A boots and scrubs the shared env.
+      const daemonA = acquireInheritedLoaderEnvScrub('qwen serve', 'daemon');
+      expect(daemonA.removedKeys).toContain('NODE_OPTIONS');
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      // Daemon B boots into the already-scrubbed env: nothing left to remove.
+      const daemonB = acquireInheritedLoaderEnvScrub('qwen serve', 'daemon');
+      expect(daemonB.removedKeys).toEqual([]);
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      // A closes first. Its restore must NOT re-poison B's still-live
+      // session subprocesses — the regression this guard closes.
+      daemonA.release();
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      // Only when the last holder releases is the original value restored.
+      daemonB.release();
+      expect(process.env['NODE_OPTIONS']).toBe(poison);
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('release is idempotent and a later assignment wins over the restore', () => {
+    resetInheritedLoaderEnvScrubForTesting();
+    process.env['LD_PRELOAD'] = '/evil.so';
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const handle = acquireInheritedLoaderEnvScrub('qwen serve', 'daemon');
+      expect(process.env['LD_PRELOAD']).toBeUndefined();
+      // A legitimate re-assignment before release must survive the restore.
+      process.env['LD_PRELOAD'] = '/legit.so';
+      handle.release();
+      handle.release(); // idempotent
+      expect(process.env['LD_PRELOAD']).toBe('/legit.so');
+    } finally {
+      write.mockRestore();
+    }
+  });
+});
+
+describe('clearLoaderKeyRejectionReporterIfCurrent', () => {
+  afterEach(() => {
+    setLoaderKeyRejectionReporter(undefined);
+    resetLoaderKeyRejectionReportingForTesting();
+  });
+
+  it('clears only when the given reporter is still the active one', () => {
+    resetLoaderKeyRejectionReportingForTesting();
+    const calls: string[] = [];
+    const reporterA: LoaderKeyRejectionReporter = () => calls.push('A');
+    const reporterB: LoaderKeyRejectionReporter = () => calls.push('B');
+
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      // Two co-resident daemons install their reporters in turn.
+      setLoaderKeyRejectionReporter(reporterA);
+      setLoaderKeyRejectionReporter(reporterB);
+
+      // Daemon A's close must not drop daemon B's reporter.
+      clearLoaderKeyRejectionReporterIfCurrent(reporterA);
+      reportRejectedLoaderKeys('/ws-b/.env', ['NODE_OPTIONS']);
+      expect(calls).toEqual(['B']);
+
+      // Daemon B's close clears it; further rejections fall back to stderr.
+      clearLoaderKeyRejectionReporterIfCurrent(reporterB);
+      resetLoaderKeyRejectionReportingForTesting();
+      reportRejectedLoaderKeys('/ws-b/.env', ['LD_PRELOAD']);
+      expect(calls).toEqual(['B']);
+    } finally {
+      write.mockRestore();
+    }
   });
 });

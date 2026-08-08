@@ -43,6 +43,47 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // NODE_EXTRA_CA_CERTS reaches the same outcome by adding a TLS trust
   // anchor instead of disabling verification.
   'NODE_EXTRA_CA_CERTS',
+  // The non-Node TLS trust-anchor vars reach the SAME MITM outcome for the
+  // curl/git/openssl/python tools a session subprocess routinely shells out
+  // to: they are honored unconditionally as a CA bundle/dir. A project `.env`
+  // pointing any of them at an attacker CA lets an untrusted repo silently
+  // intercept token-bearing traffic (git/npm/pip fetches) for every
+  // workspace's sessions — the exact outcome NODE_EXTRA_CA_CERTS is blocked
+  // for. Like NODE_EXTRA_CA_CERTS these stay reject-from-project-`.env` only:
+  // a value the operator set in their own login shell or home `.env` is their
+  // trusted choice and is preserved.
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'CURL_CA_BUNDLE',
+  'REQUESTS_CA_BUNDLE',
+  'GIT_SSL_CAINFO',
+  // The git command-execution env family: git runs these on any invocation in
+  // a session subprocess. GIT_SSH_COMMAND / GIT_EXTERNAL_DIFF execute a
+  // shell command directly; GIT_CONFIG_* injects arbitrary config
+  // (`core.hooksPath`, `core.fsmonitor`, …) that turns a routine `git commit`
+  // into attacker-code execution as the daemon user. core/utils/git-branches.ts
+  // already scrubs exactly these from the repo's own git invocations, so a
+  // project `.env` setting them contradicts that model. Numbered
+  // GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are matched by prefix below.
+  'GIT_SSH_COMMAND',
+  'GIT_EXTERNAL_DIFF',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_COUNT',
+  // node-gyp interpreter selection: node-gyp's find-python.js executes
+  // NODE_GYP_FORCE_PYTHON / npm_config_python / PYTHON as the build Python,
+  // so a project `.env` pointing them at an attacker script is code execution
+  // during any native-addon `npm install` in another workspace's session.
+  // Unlike the pure-injection loader keys these have a legitimate
+  // operator-shell use (selecting a real interpreter), so they are
+  // reject-from-project-`.env` only, not scrubbed from the launch env.
+  'NODE_GYP_FORCE_PYTHON',
+  'npm_config_python',
+  'PYTHON',
+  // npm runs `$npm_config_git` as the git binary for install-from-git and
+  // similar flows, so a project `.env` pointing it at an attacker script is
+  // the same exec redirect as the interpreter keys above.
+  'npm_config_git',
   // QWEN_CLI_ENTRY is the script path daemon-spawned session processes run.
   // A project `.env` or settings.env fixing it turns
   // `cd <untrusted repo> && qwen serve` into code execution as the daemon
@@ -64,8 +105,22 @@ const HARDCODED_PROJECT_ENV_EXCLUSIONS: ReadonlySet<string> = new Set(
   PROJECT_ENV_HARDCODED_EXCLUSIONS.map((key) => key.toLowerCase()),
 );
 
+// Command-scope git config injection uses numbered GIT_CONFIG_KEY_<n> /
+// GIT_CONFIG_VALUE_<n> pairs read up to GIT_CONFIG_COUNT — an unbounded index,
+// so match them by prefix rather than listing literals (mirrors
+// core/utils/git-branches.ts). GIT_CONFIG_COUNT alone already neutralizes the
+// pairs, but stripping the pairs too matches the repo's existing git scrub.
+const HARDCODED_PROJECT_ENV_EXCLUSION_PREFIXES = [
+  'git_config_key_',
+  'git_config_value_',
+] as const;
+
 export function isHardcodedProjectEnvExclusion(key: string): boolean {
-  return HARDCODED_PROJECT_ENV_EXCLUSIONS.has(key.toLowerCase());
+  const lowerKey = key.toLowerCase();
+  if (HARDCODED_PROJECT_ENV_EXCLUSIONS.has(lowerKey)) return true;
+  return HARDCODED_PROJECT_ENV_EXCLUSION_PREFIXES.some((prefix) =>
+    lowerKey.startsWith(prefix),
+  );
 }
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [
@@ -122,6 +177,20 @@ export const INHERITED_LOADER_ENV_KEYS = [
   'npm_config_script_shell',
   'npm_config_prefix',
   'NODE_PATH',
+  // OPENSSL_CONF points Node's startup crypto init at an attacker `.cnf`
+  // whose `nodejs_conf` section can dlopen an arbitrary engine/provider `.so`
+  // before any user code runs — a pure code-injection vector with no benign
+  // cross-workspace inheritance, so it is scrubbed like NODE_OPTIONS.
+  'OPENSSL_CONF',
+  // NODE_REPL_EXTERNAL_MODULE makes a spawned `node` REPL require() an
+  // attacker file at startup. npm_config_node_gyp overrides the node-gyp
+  // *script* npm's shim runs verbatim (`"$npm_config_node_gyp" "$@"`), and
+  // npm_config_init_module is require()d by `npm init` (even `-y`). All three
+  // are executable/module redirects with no legitimate login-shell use, so
+  // they join the scrubbed loader set rather than the reject-only tier.
+  'NODE_REPL_EXTERNAL_MODULE',
+  'npm_config_node_gyp',
+  'npm_config_init_module',
   'LD_PRELOAD',
   'LD_AUDIT',
   'DYLD_INSERT_LIBRARIES',
@@ -192,6 +261,71 @@ export function scrubAndReportInheritedLoaderEnv(
   return removedKeys;
 }
 
+// Concurrent embedded daemons in one process (a documented supported config —
+// see acp-bridge/src/bridgeOptions.ts `childEnvOverrides`) share this
+// process's `process.env`. A per-daemon scrub+restore over that shared object
+// races: the second daemon boots into an already-scrubbed env (nothing to
+// scrub, nothing to restore), then the first daemon's close() restores the
+// loader vars into the shared env and re-poisons the survivor's session
+// subprocesses — reopening #8653 for the still-live daemon. Coordinate the
+// scrub of `process.env` process-globally: the first acquire snapshots the
+// pre-scrub values, and only the last release (refcount back to zero) restores
+// them.
+let sharedProcessEnvScrubDepth = 0;
+const sharedProcessEnvScrubOriginals = new Map<string, string>();
+
+export interface InheritedLoaderEnvScrubHandle {
+  /** Loader keys this acquire removed from the shared env (empty for a nested acquire whose env was already scrubbed). */
+  readonly removedKeys: readonly string[];
+  /** Idempotent; restores the snapshotted originals only when the last holder releases. */
+  release(): void;
+}
+
+// Scrubs loader vars from the live `process.env`, reference-counted so it is
+// safe to call from overlapping daemon instances in one process. Use this at
+// process-env boundaries; `scrubAndReportInheritedLoaderEnv` remains for
+// one-shot scrubs of a private env object (ACP child / channel worker boot).
+export function acquireInheritedLoaderEnvScrub(
+  commandLabel: string,
+  processLabel: string,
+): InheritedLoaderEnvScrubHandle {
+  if (sharedProcessEnvScrubDepth === 0) {
+    sharedProcessEnvScrubOriginals.clear();
+    for (const key of Object.keys(process.env)) {
+      if (!isLoaderEnvKey(key)) continue;
+      const value = process.env[key];
+      if (value !== undefined) sharedProcessEnvScrubOriginals.set(key, value);
+    }
+  }
+  sharedProcessEnvScrubDepth++;
+  const removedKeys = scrubAndReportInheritedLoaderEnv(
+    process.env,
+    commandLabel,
+    processLabel,
+  );
+  let released = false;
+  return {
+    removedKeys,
+    release() {
+      if (released) return;
+      released = true;
+      sharedProcessEnvScrubDepth--;
+      if (sharedProcessEnvScrubDepth > 0) return;
+      for (const [key, value] of sharedProcessEnvScrubOriginals) {
+        // A later legitimate assignment wins over the restore.
+        if (!Object.hasOwn(process.env, key)) process.env[key] = value;
+      }
+      sharedProcessEnvScrubOriginals.clear();
+    },
+  };
+}
+
+/** Test-only: reset the shared process-env scrub refcount/snapshot. */
+export function resetInheritedLoaderEnvScrubForTesting(): void {
+  sharedProcessEnvScrubDepth = 0;
+  sharedProcessEnvScrubOriginals.clear();
+}
+
 // Loader keys rejected from .env/settings.env used to apply on some
 // application paths before the denylist existed; dropping them silently
 // would send upgrade investigations everywhere except here. Report once per
@@ -216,6 +350,19 @@ export function setLoaderKeyRejectionReporter(
   reporter: LoaderKeyRejectionReporter | undefined,
 ): void {
   loaderKeyRejectionReporter = reporter;
+}
+
+// Overlapping daemons in one process each install their own reporter at boot
+// and clear it on close. An unconditional clear lets the first daemon's
+// close() drop the survivor's reporter, silently routing its fresh rejections
+// to the stderr fallback. Clear only when we are still the active reporter, so
+// a co-resident daemon that installed after us keeps its own.
+export function clearLoaderKeyRejectionReporterIfCurrent(
+  reporter: LoaderKeyRejectionReporter,
+): void {
+  if (loaderKeyRejectionReporter === reporter) {
+    loaderKeyRejectionReporter = undefined;
+  }
 }
 
 // candidateKeys is the raw key list of a parsed source (e.g.
