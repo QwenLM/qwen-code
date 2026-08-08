@@ -229,6 +229,28 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('an inline disclosure cannot lend the receipt its substance', () => {
+    // A one-line return puts the disclosure AFTER the receipt separator,
+    // where the line-based strip cannot see it — and the clause capture
+    // would absorb the gap text and pass the substance check on it. The
+    // clause is cut at the inline marker first: with nothing before the
+    // disclosure, the receipt is bare and the chunk stays due. A zh
+    // disclosure counts the same — the receipt regex accepts zh receipts,
+    // so the guard must too.
+    const INLINE = 'No new issues found — Budget gap: the remaining traces';
+    const INLINE_ZH = '未发现新问题——预算缺口：其余调用点追踪';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), INLINE);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), INLINE);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), INLINE_ZH);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk'), INLINE_ZH);
+    record(1, 15, 'chunk 15 round 1 territory walk');
+    record(2, 15, 'chunk 15 round 2 territory walk');
+
+    const r3 = schedule(3);
+    expect(r3.due).toEqual([13, 14, 15]);
+    expect(r3.skipped).toEqual([]);
+  });
+
   it('a chunk twice dry retires on the odd round and cold-checks on the even one', () => {
     transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
     transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);

@@ -203,6 +203,15 @@ describe('launchToolBudget — the per-launch ceiling', () => {
     expect(launchToolBudget(-5, -40, -3)).toBe(30);
     expect(launchToolBudget(42, 100, Number.POSITIVE_INFINITY)).toBe(35);
   });
+
+  it('caps the TOTAL — the reads term must not erase the clamped ceiling', () => {
+    // The reads come from the same unchecked-cast plan as the allowance:
+    // a garbled chars of 1e9 flowed through as a forty-thousand-call
+    // brief while the same plan's inflated allowance was dutifully
+    // clamped to 60. Legitimate reading lists stay untouched.
+    expect(launchToolBudget(60, 400, 40_004)).toBe(200);
+    expect(launchToolBudget(60, 25_000, 63)).toBe(123);
+  });
 });
 
 describe('budgetGapDisclosures — the one parser of the disclosure format', () => {
@@ -231,6 +240,10 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       '**Budget gap:** the check',
       '`Budget gap: the check`',
       'Budget gap：the check',
+      // A zh-narrating agent's budget stop must be as visible as an
+      // English one — the receipt regex next door accepts zh receipts.
+      '预算缺口：the check',
+      '预算不足: the check',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual(['the check']);
     }

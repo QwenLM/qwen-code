@@ -48,7 +48,7 @@ import {
   promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
-import { stripBudgetGapLines } from './budget.js';
+import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
@@ -338,12 +338,21 @@ function classifyReturn(
   // exploration that did not.
   const judged = stripBudgetGapLines(text);
   const receipt = DRY_RECEIPT_RE.exec(judged);
+  // The clause is cut at any INLINE disclosure marker before its substance
+  // is judged: a one-line return (`No new issues found — …; Budget gap: X`)
+  // slips past the line-based strip, and the `[\s\S]*` capture would
+  // otherwise absorb the gap text and get its substantiveness from it —
+  // the admission doubling as the receipt again, one line lower.
+  const clause = receipt?.[1] ?? '';
+  const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
+  const judgedClause =
+    inlineGap === null ? clause : clause.slice(0, inlineGap.index);
   if (
     rec.successfulToolCalls > 0 &&
     rec.diffToolCalls > 0 &&
     openedTheTerritory(rec.diffReads, territory) &&
     receipt !== null &&
-    substantiveClause(receipt[1] ?? '')
+    substantiveClause(judgedClause)
   ) {
     return 'dry';
   }

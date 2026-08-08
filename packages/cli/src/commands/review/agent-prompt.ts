@@ -299,6 +299,31 @@ const FINDINGS_LIST_READS = 3;
 const LINES_PER_FILE_READ = 500;
 
 /**
+ * The reads a whole-diff assignment actually takes: each chunk costs its
+ * PAGES, not a flat one — an oversized chunk's `read_file` comes back
+ * `isTruncated` and the extra pages were being paid out of the analysis
+ * allowance.
+ */
+function wholeDiffReadPages(report: PlanReport): number {
+  return (Array.isArray(report.chunks) ? report.chunks : []).reduce(
+    (n: number, c) => {
+      const chars = (c as { chars?: number })?.chars;
+      return (
+        n +
+        Math.max(
+          1,
+          Math.ceil(
+            (typeof chars === 'number' && Number.isFinite(chars) ? chars : 0) /
+              READ_FILE_CHAR_CAP,
+          ),
+        )
+      );
+    },
+    0,
+  );
+}
+
+/**
  * A chunk's territory in the same source-weighted units the plan-level
  * budget is derived from. `reviewBudget` reads `effective = max(src,
  * total/8)` because prose and generated lines carry less a reviewer can
@@ -676,9 +701,7 @@ export function buildWholeDiffBlock(
   // Its domain brief is appended inline by the orchestrator, not read from
   // disk, so the reading list is the diff pages alone.
   parts.push(
-    ...toolBudgetBlock(report, {
-      mandatoryReads: Array.isArray(report.chunks) ? report.chunks.length : 0,
-    }),
+    ...toolBudgetBlock(report, { mandatoryReads: wholeDiffReadPages(report) }),
   );
   parts.push(...tail(rules));
   return parts.join('\n');
@@ -1069,7 +1092,7 @@ export function buildRoleBrief(
         }),
       );
     } else {
-      // A whole-diff role is assigned one read per chunk, plus its brief —
+      // A whole-diff role is assigned every chunk's PAGES, plus its brief —
       // plus, for a findings-bearing role (the chunkless Step 3A reverse
       // auditor), the cumulative findings list its brief orders read in
       // full, exactly as the chunk-scoped branch counts it. Keyed on the
@@ -1078,7 +1101,7 @@ export function buildRoleBrief(
         ...toolBudgetBlock(report, {
           mandatoryReads:
             1 +
-            chunks.length +
+            wholeDiffReadPages(report) +
             (brief.acceptsFindings ? FINDINGS_LIST_READS : 0),
         }),
       );

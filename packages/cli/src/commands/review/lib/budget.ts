@@ -189,6 +189,17 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
  * `territoryLines: null` is a whole-diff launch — no territory smaller
  * than the plan's, so the clamped plan allowance is used as-is.
  */
+/**
+ * The hard ceiling on the TOTAL a brief may state. The allowance is
+ * clamped, but the reads term comes from the same unchecked-cast plan —
+ * a garbled `chars` of 1e9 flowed through as a forty-thousand-call
+ * brief, the exact number the clamp exists to make impossible. High
+ * enough that no legitimate reading list reaches it (a 63-chunk 3B
+ * fan-out with paged chunks and the findings list sits well under),
+ * low enough that a garbled plan cannot erase the ceiling.
+ */
+export const MAX_TOTAL_TOOL_CALLS = 200;
+
 export function launchToolBudget(
   planBudget: number,
   territoryLines: number | null,
@@ -211,7 +222,10 @@ export function launchToolBudget(
             MAX_AGENT_TOOL_BUDGET,
           ),
         );
-  return allowance + Math.max(0, Math.floor(sane(mandatoryReads)));
+  return Math.min(
+    MAX_TOTAL_TOOL_CALLS,
+    allowance + Math.max(0, Math.floor(sane(mandatoryReads))),
+  );
 }
 
 /**
@@ -241,10 +255,22 @@ export function launchToolBudget(
  *    nothing downstream can tell "no gaps" from "gaps we failed to parse".
  */
 const BUDGET_GAP_LINE_RE =
-  /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*(`?)[*_~]{0,3}budget gap[*_~]{0,3}[ \t]*[:：][*_~]{0,3}[ \t]*(.+?)[ \t]*$/i;
+  /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*(`?)[*_~]{0,3}(?:budget gap|预算(?:缺口|不足|用尽))[*_~]{0,3}[ \t]*[:：][*_~]{0,3}[ \t]*(.+?)[ \t]*$/i;
 
 /** A cheap pre-filter so the line walk skips returns with nothing to find. */
-const GAP_HINT_RE = /budget gap/i;
+const GAP_HINT_RE = /budget gap|预算(?:缺口|不足|用尽)/i;
+
+/**
+ * The disclosure marker ANYWHERE in a line — for the one consumer that
+ * cannot rely on the own-line format: a receipt clause with the disclosure
+ * appended after the separator (`No new issues found — …; Budget gap: X`)
+ * would otherwise absorb the gap text as its own substance. The general
+ * parser deliberately stays line-anchored (a mid-line mention is how the
+ * format is QUOTED); this is only for cutting a clause, never for minting
+ * gaps.
+ */
+export const INLINE_BUDGET_GAP_RE =
+  /(?:budget gap|预算(?:缺口|不足|用尽))[*_~`]{0,3}[ \t]*[:：]/i;
 
 /**
  * Templates and non-answers that must not become gaps someone rules on.

@@ -3721,17 +3721,19 @@ describe('the tool budget in the briefs', () => {
   });
 
   it('gives a whole-diff role the plan allowance plus its reading list', () => {
-    // 42 from the plan + its brief + one read per chunk (3).
+    // 42 from the plan + its brief + every chunk's PAGES (1 + 2 + 3 = 6
+    // for the fixture's 9k/40k/60k-char chunks) — an oversized chunk's
+    // `isTruncated` paging must not be paid out of the analysis allowance.
     for (const role of ['1a', '2', '6b'] as const) {
       expect(buildRoleBrief(budgetPlan, role)).toContain(
-        'About **46 tool calls**',
+        'About **49 tool calls**',
       );
     }
     // The chunkless (Step 3A) reverse auditor also owes the cumulative
     // findings list its brief orders read in full — same three pages the
     // chunk-scoped branch counts, keyed on `acceptsFindings`.
     expect(buildRoleBrief(budgetPlan, 'reverse-audit')).toContain(
-      'About **49 tool calls**',
+      'About **52 tool calls**',
     );
   });
 
@@ -3868,9 +3870,9 @@ describe('the tool budget in the briefs', () => {
     // Specialists launch through buildWholeDiffBlock (its one consumer);
     // without this they were the one launch class that could still wander
     // unbudgeted. Its domain brief is appended inline, so its reading list
-    // is the diff pages alone.
+    // is the diff pages alone — all six of them, per chunk size.
     expect(buildWholeDiffBlock(budgetPlan)).toContain(
-      'About **45 tool calls**',
+      'About **48 tool calls**',
     );
   });
 
@@ -3922,8 +3924,8 @@ describe('the tool budget in the briefs', () => {
     // A version-skewed or hand-edited plan: a positive-but-absurd value is
     // clamped into the budget's own band, in both directions — 0.5 must not
     // become a three-call brief, 100000 must not remove the ceiling.
-    ['a fraction', 0.5, 34],
-    ['oversized', 100_000, 64],
+    ['a fraction', 0.5, 37],
+    ['oversized', 100_000, 67],
   ])(
     'a plan whose ceiling is %s is clamped, not obeyed',
     (_name, value, expected) => {
