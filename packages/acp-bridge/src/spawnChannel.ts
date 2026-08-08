@@ -147,6 +147,9 @@ export function createSpawnChannelFactory(
       childEnvOverrides,
     );
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    // Marks the child as daemon-spawned so its ACP channel fallback reports
+    // channel=daemon in usage statistics (see cli/src/config/acp-channel-fallback.ts).
+    childEnv['QWEN_CODE_SERVE'] = '1';
 
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),

@@ -27,10 +27,11 @@ export default defineConfig({
     ],
     retry: 2,
     fileParallelism: true,
+    pool: 'forks',
     poolOptions: {
-      threads: {
-        minThreads: 2,
-        maxThreads: 4,
+      forks: {
+        minForks: 2,
+        maxForks: 4,
       },
     },
   },
