@@ -16,7 +16,7 @@
  * per-UserQuery extract notifies that have no dialog surface.
  *
  * Surfaces that only care about live work (the footer pill, the
- * composer's Down-arrow route) filter for `running` themselves.
+ * composer's Down-arrow route) filter for active states themselves.
  *
  * Intentionally ignores activity updates (appendActivity). Tool-call
  * traffic from a running background agent would otherwise churn the
@@ -117,7 +117,7 @@ export interface UseBackgroundTaskViewResult {
  * — the user opens the dialog wanting to check the running work, and finds
  * it buried under noise.
  *
- *   bucket 1 — active (running + paused), sorted by startTime DESC so the
+ *   bucket 1 — active (running + pausing + paused), sorted by startTime DESC so the
  *              most recent launch sits at the very top.
  *   bucket 2 — terminal (completed / failed / cancelled), sorted by
  *              endTime DESC so the most recently FINISHED entry is the
@@ -134,8 +134,10 @@ export function compareActiveThenTerminal(
   a: { status: string; startTime: number; endTime?: number },
   b: { status: string; startTime: number; endTime?: number },
 ): number {
-  const aActive = a.status === 'running' || a.status === 'paused';
-  const bActive = b.status === 'running' || b.status === 'paused';
+  const aActive =
+    a.status === 'running' || a.status === 'pausing' || a.status === 'paused';
+  const bActive =
+    b.status === 'running' || b.status === 'pausing' || b.status === 'paused';
   if (aActive !== bActive) return aActive ? -1 : 1;
   if (aActive) return b.startTime - a.startTime;
   // Terminal bucket: fall back to startTime when an entry has no endTime
