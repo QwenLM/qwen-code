@@ -81,7 +81,10 @@ export function isAutoConnectChromeDevToolsServer(
     command.includes('chrome-devtools-mcp');
   if (!matchesAdapter) return false;
   const args = cfg.args ?? [];
-  return args.includes('--autoConnect') && !args.includes('--wsEndpoint');
+  const hasExplicitEndpoint = args.some(
+    (a) => a === '--wsEndpoint' || a.startsWith('--wsEndpoint='),
+  );
+  return args.includes('--autoConnect') && !hasExplicitEndpoint;
 }
 
 /**

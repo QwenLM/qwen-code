@@ -455,9 +455,23 @@ async function handleCommand(
 function handleRelease(frame: CdpReleaseFrame): void {
   const linkId = linkIdOf(frame);
   if (attachInFlight) {
-    // The attachment hasn't landed yet (whether this link initiated it or is
-    // joining it); record the release so handleAttach drops the link the
-    // moment it finishes wiring up.
+    if (attachedLinks.has(linkId)) {
+      // Already landed: drop the ref now. Recording it in releasedDuringAttach
+      // would leave a phantom ref — the completing handleAttach only consumes
+      // its own linkId, so this link would stay in attachedLinks and keep
+      // chrome.debugger attached after the last real client disconnects.
+      attachedLinks.delete(linkId);
+      console.log(
+        LOG_PREFIX,
+        'cdp_release for landed link during attach',
+        linkId || '(default)',
+        '; remaining links =',
+        attachedLinks.size,
+      );
+      return;
+    }
+    // Not landed yet (the in-flight link or a joiner): record the release so
+    // handleAttach drops the link the moment it finishes wiring up.
     releasedDuringAttach.add(linkId);
     return;
   }

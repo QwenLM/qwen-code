@@ -55,6 +55,15 @@ describe('isAutoConnectChromeDevToolsServer', () => {
     ).toBe(false);
   });
 
+  it('ignores servers pinned via the --wsEndpoint= equals form', () => {
+    expect(
+      isAutoConnectChromeDevToolsServer('chrome-devtools', {
+        command: 'npx',
+        args: ['--autoConnect', '--wsEndpoint=ws://127.0.0.1:9222/dev'],
+      }),
+    ).toBe(false);
+  });
+
   it('ignores unrelated stdio servers', () => {
     expect(
       isAutoConnectChromeDevToolsServer('filesystem', {

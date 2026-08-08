@@ -20,8 +20,13 @@ interface ChromeHarness {
 
 function installChromeHarness(options?: {
   deferAttach?: boolean;
-}): ChromeHarness & { finishAttach(): void } {
+  deferTabQuery?: boolean;
+}): ChromeHarness & {
+  finishAttach(): void;
+  finishTabQuery(): void;
+} {
   let attachCallback: (() => void) | undefined;
+  const tabQueryResolvers: Array<(tabs: Array<{ id: number }>) => void> = [];
   const debuggerEventListeners: ChromeHarness['debuggerEventListeners'] = [];
   const debuggerDetachListeners: ChromeHarness['debuggerDetachListeners'] = [];
   const attach = vi.fn(
@@ -63,7 +68,11 @@ function installChromeHarness(options?: {
       },
     },
     tabs: {
-      query: vi.fn().mockResolvedValue([{ id: 7 }]),
+      query: vi.fn(() =>
+        options?.deferTabQuery
+          ? new Promise((res) => tabQueryResolvers.push(res))
+          : Promise.resolve([{ id: 7 }]),
+      ),
       get: vi.fn().mockResolvedValue({
         id: 7,
         url: 'https://example.test',
@@ -84,6 +93,11 @@ function installChromeHarness(options?: {
     debuggerDetachListeners,
     finishAttach() {
       attachCallback?.();
+    },
+    finishTabQuery() {
+      while (tabQueryResolvers.length) {
+        tabQueryResolvers.shift()!([{ id: 7 }]);
+      }
     },
   };
 }
@@ -409,6 +423,55 @@ describe('CDP bridge', () => {
     // One link still holds the attachment: no debugger detach.
     expect(chromeHarness.detach).not.toHaveBeenCalled();
 
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 }),
+    );
+  });
+
+  it('releasing a landed link while another attach is in flight leaves no phantom ref', async () => {
+    const chromeHarness = installChromeHarness({ deferTabQuery: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    // Land link 1 on tab 7.
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    chromeHarness.finishTabQuery();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'cdp_attached', id: 1 }),
+      ),
+    );
+
+    // Start link 2's attach on the same tab; hold it in flight at getActiveTabId.
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    // attachInFlight is now set while link 1 is still landed.
+
+    // Release the already-landed link 1 while link 2's attach is in flight.
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-1' }),
+      send,
+    );
+    expect(chromeHarness.detach).not.toHaveBeenCalled();
+
+    // Link 2's attach lands on the same tab.
+    chromeHarness.finishTabQuery();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'cdp_attached', id: 2 }),
+      ),
+    );
+
+    // The last real client (link 2) disconnects: must detach, no phantom ref.
     bridge.handleCdpFrame(
       frame({ type: 'cdp_release', linkId: 'cdp-link-2' }),
       send,
