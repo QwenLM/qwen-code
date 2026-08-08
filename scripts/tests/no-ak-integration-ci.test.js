@@ -26,7 +26,7 @@ describe('no-AK integration CI wiring', () => {
 
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
-        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --maxWorkers 2',
+        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
         './cli/daemon-invocation-context.test.ts',

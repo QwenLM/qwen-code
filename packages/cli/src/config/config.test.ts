@@ -901,10 +901,22 @@ describe('parseArguments', () => {
     expect(argv.channel).toBe('desktop');
   });
 
-  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
-    process.argv = ['node', 'script.js', '--acp'];
+  it('should accept daemon as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'daemon'];
     const argv = await parseArguments();
-    expect(argv.channel).toBe('ACP');
+    expect(argv.channel).toBe('daemon');
+  });
+
+  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('ACP');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
@@ -914,6 +926,41 @@ describe('parseArguments', () => {
     // channel with the ACP default.
     expect(argv.channel).toBe('desktop');
     expect(argv.acp).toBe(true);
+  });
+
+  it('reports the daemon channel for daemon-spawned ACP children', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('daemon');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('reports the desktop channel for the Tauri desktop shell', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('desktop');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an explicit --channel over the daemon markers', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp', '--channel', 'VSCode'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('VSCode');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('should reject invalid --approval-mode values', async () => {
