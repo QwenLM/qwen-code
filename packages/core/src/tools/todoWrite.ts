@@ -60,7 +60,8 @@ const todoWriteToolSchemaData: FunctionDeclaration = {
               type: 'array',
               items: { type: 'string', maxLength: 500 },
               uniqueItems: true,
-              description: 'Todo IDs that must be completed before this item',
+              description:
+                'Todo IDs that must be completed before this item. Active-plan updates preserve omitted dependencies for existing IDs; use [] to remove them.',
             },
           },
           required: ['content', 'status', 'id'],
@@ -282,6 +283,12 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // 1. Read current todos (for change detection)
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
+      const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
+      const hasActivePlan = oldTodos.some(
+        (todo) => todo.status !== 'completed',
+      );
+      const workflowContextActive =
+        this.config.isSessionWorkflowTodoContextActive?.() === true;
 
       let candidateTodos: unknown;
 
@@ -290,8 +297,12 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
-        // Use the normal todo logic - simply replace with new todos
-        candidateTodos = todos;
+        candidateTodos = todos.map((todo) => {
+          const blockedBy =
+            todo.blockedBy ??
+            (hasActivePlan ? oldTodosMap.get(todo.id)?.blockedBy : undefined);
+          return blockedBy === undefined ? todo : { ...todo, blockedBy };
+        });
       }
 
       const validationError = validateTodos(candidateTodos);
@@ -300,7 +311,6 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
       // 2. Detect changes
       const changes = detectTodoChanges(oldTodos, finalTodos);
-      const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
 
       // 3. VALIDATION PHASE: Execute all hooks with Validation phase
       // Hooks should only check and return block/approve decisions, no side effects
@@ -458,6 +468,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const todoResultDisplay = {
         type: 'todo_list' as const,
         ...(resultPlanId ? { planId: resultPlanId } : {}),
+        ...(workflowContextActive ? { sessionWorkflow: true } : {}),
         todos: finalTodos,
         changes,
       };

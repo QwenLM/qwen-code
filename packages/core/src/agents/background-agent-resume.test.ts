@@ -255,9 +255,20 @@ describe('BackgroundAgentResumeService', () => {
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'completed',
       isBackgrounded: true,
+      sessionWorkflow: true,
       lastUpdatedAt: '2026-04-20T00:00:02.000Z',
       subagentName: 'researcher',
       resolvedApprovalMode: 'auto-edit',
+      stats: {
+        totalTokens: 42,
+        outputTokens: 17,
+        toolUses: 3,
+        durationMs: 1200,
+      },
+      recentActivities: [
+        { name: 'Read', description: 'read src/index.ts', at: 1 },
+        { name: 'Bash', description: 'npm test', at: 2 },
+      ],
     });
 
     fs.writeFileSync(
@@ -320,6 +331,16 @@ describe('BackgroundAgentResumeService', () => {
       notified: true,
       description: 'Already done',
       outputFile: getAgentJsonlPath(tempDir, sessionId, completedAgentId),
+      stats: {
+        totalTokens: 42,
+        outputTokens: 17,
+        toolUses: 3,
+        durationMs: 1200,
+      },
+      recentActivities: [
+        { name: 'Read', description: 'read src/index.ts', at: 1 },
+        { name: 'Bash', description: 'npm test', at: 2 },
+      ],
     });
     expect(registry.get(runningAgentId)?.status).toBe('paused');
     expect(registry.get(completedAgentId)?.status).toBe('completed');

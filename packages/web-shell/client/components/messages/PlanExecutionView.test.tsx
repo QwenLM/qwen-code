@@ -409,6 +409,17 @@ describe('PlanExecutionView', () => {
 
   it('groups executions by todo and keeps missing links unassigned', () => {
     const onOpen = vi.fn();
+    const runningRoot = task('running', {
+      runtimeMs: 65_000,
+      stats: { totalTokens: 1_200, toolUses: 4, durationMs: 65_000 },
+      recentActivities: [
+        {
+          name: 'read_file',
+          description: 'Inspecting the implementation',
+          at: 1,
+        },
+      ],
+    });
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -419,11 +430,15 @@ describe('PlanExecutionView', () => {
             todos={todos}
             tools={[agentTool('build'), agentTool()]}
             tasks={[
-              task('running'),
+              runningRoot,
               task('running', {
                 id: 'agent-child',
                 label: 'Child agent',
                 parentAgentId: 'agent-build',
+              }),
+              task('running', {
+                id: 'agent-unrelated',
+                toolUseId: 'call-unrelated',
               }),
             ]}
             onOpenSubagent={onOpen}
@@ -433,6 +448,9 @@ describe('PlanExecutionView', () => {
     });
 
     expect(container.textContent).toContain('Depends on: research');
+    expect(container.textContent).toContain('33%');
+    expect(container.textContent).toContain('1 / 3');
+    expect(container.textContent).toContain('2Active agents');
     expect(container.textContent).toContain('Child agent');
     expect(container.textContent).toContain('Unassigned executions');
     const step = container.querySelector<HTMLButtonElement>(
@@ -445,7 +463,15 @@ describe('PlanExecutionView', () => {
     expect(details?.textContent).toContain('Step details');
     expect(details?.textContent).toContain('Build');
     expect(details?.textContent).toContain('Depends on: research');
+    expect(details?.textContent).toContain('Unblocks: verify');
     expect(details?.textContent).toContain('Subagents');
+    expect(details?.textContent).toContain(
+      'Current activity:Inspecting the implementation',
+    );
+    expect(details?.textContent).toContain(
+      '1m 5s · 4 tool calls · 1,200 tokens',
+    );
+    expect(details?.textContent).toContain('Open subagent details →');
     const button = Array.from(details?.querySelectorAll('button') ?? []).find(
       (candidate) => candidate.textContent?.includes('Agent build'),
     );
@@ -486,6 +512,97 @@ describe('PlanExecutionView', () => {
 
     act(() => root.unmount());
     container.remove();
+  });
+
+  it('locates the active step once and exposes a manual locate action', () => {
+    const rect = (left: number, width: number) =>
+      ({
+        x: left,
+        y: 0,
+        left,
+        top: 0,
+        width,
+        height: 80,
+        right: left + width,
+        bottom: 80,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.hasAttribute('data-plan-workflow')) return rect(0, 300);
+        if (this.tagName === 'ARTICLE') {
+          const id = this.querySelector('[data-plan-node-id]')?.getAttribute(
+            'data-plan-node-id',
+          );
+          return rect(id === 'build-api' ? 600 : 0, 200);
+        }
+        return rect(0, 0);
+      });
+    const widthSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockReturnValue(300);
+    const scrollTo = vi.fn();
+    const originalScrollTo = HTMLElement.prototype.scrollTo;
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const animationSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => {
+        callback(0);
+        return 1;
+      });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={branchedTodos} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+    expect(scrollTo).toHaveBeenCalledWith({ left: 550, behavior: 'auto' });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={branchedTodos}
+            tools={[]}
+            tasks={[task('running')]}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Locate current step')
+        ?.click();
+    });
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 550,
+      behavior: 'smooth',
+    });
+
+    act(() => root.unmount());
+    container.remove();
+    animationSpy.mockRestore();
+    rectSpy.mockRestore();
+    widthSpy.mockRestore();
+    if (originalScrollTo) {
+      Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+        configurable: true,
+        value: originalScrollTo,
+      });
+    } else {
+      delete HTMLElement.prototype.scrollTo;
+    }
   });
 
   it('normalizes measured coordinates when the workflow is CSS-scaled', () => {
@@ -546,7 +663,7 @@ describe('PlanExecutionView', () => {
       container
         .querySelector('[data-from="plan"][data-to="build-api"]')
         ?.getAttribute('d'),
-    ).toBe('M 210 50 C 255 50, 255 50, 300 50');
+    ).toBe('M 214 50 C 255 50, 255 50, 296 50');
 
     act(() => root.unmount());
     container.remove();
@@ -629,7 +746,7 @@ describe('PlanExecutionView', () => {
       container
         .querySelector('[data-from="docs"][data-to="release"]')
         ?.getAttribute('d'),
-    ).toBe('M 500 160 H 528 V 216 H 852 V 50 H 880');
+    ).toBe('M 504 160 H 532 V 216 H 848 V 50 H 876');
 
     act(() => root.unmount());
     container.remove();
@@ -803,6 +920,9 @@ describe('PlanExecutionView', () => {
 
     expect(container.querySelector('[data-plan-workflow]')).not.toBeNull();
     expect(container.querySelectorAll('[data-plan-edge]')).toHaveLength(0);
+    expect(
+      container.querySelectorAll('[data-plan-input], [data-plan-output]'),
+    ).toHaveLength(0);
     expect(container.textContent).toContain('Dense 32');
 
     act(() => root.unmount());

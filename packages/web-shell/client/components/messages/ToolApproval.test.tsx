@@ -137,6 +137,28 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  it('localizes Workflow approval without changing ordinary approvals', () => {
+    const planTodos = [
+      { id: 'review', content: 'Review', status: 'pending' as const },
+    ];
+    render(undefined, planRequest, planTodos, 'zh-CN');
+
+    expect(container!.textContent).toContain('计划并审阅');
+    expect(container!.textContent).toContain('确认计划并开始协作？');
+    expect(optionLabels()).toEqual(['继续完善计划', '确认并开始']);
+
+    rerender(undefined, planRequest, planTodos, 'en');
+    expect(container!.textContent).toContain('Plan & Review');
+    expect(container!.textContent).toContain(
+      'Confirm the plan and start collaboration?',
+    );
+    expect(optionLabels()).toEqual(['Continue planning', 'Confirm and start']);
+
+    rerender(undefined, request, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('是否继续？');
+    expect(container!.textContent).not.toContain('确认计划并开始协作？');
+  });
+
   it('keeps the text-only Plan Mode approval when there are no Todos', () => {
     render(undefined, planRequest);
 
@@ -529,6 +551,21 @@ describe('ToolApproval accessibility', () => {
     act(() => optionButtons()[1]!.click());
     expect(onConfirm).toHaveBeenCalledTimes(2);
     expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+  });
+
+  it('re-enables confirmation when submission rejects', async () => {
+    onConfirm
+      .mockRejectedValueOnce(new Error('submit failed'))
+      .mockResolvedValueOnce(undefined);
+    render(undefined);
+
+    act(() => optionButtons()[1]!.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[1]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
   });
 
   it('does not re-arm the submit guard when the same request changes options', () => {

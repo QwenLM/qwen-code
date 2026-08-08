@@ -11,6 +11,93 @@
   font-weight: 700;
 }
 
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.locateButton {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--foreground);
+  background: var(--background);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.locateButton:hover {
+  background: var(--accent);
+}
+
+.overview {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(110px, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+}
+
+.progressCard,
+.overviewStat {
+  display: flex;
+  min-width: 0;
+  padding: 12px;
+}
+
+.progressCard {
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.progressHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.progressHeading strong,
+.overviewStat strong {
+  color: var(--foreground);
+  font-size: 16px;
+}
+
+.progressTrack {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--secondary);
+}
+
+.progressTrack span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--success-color);
+  transition: width 160ms ease;
+}
+
+.overviewStat {
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  border-left: 1px solid var(--border);
+}
+
+.overviewStat span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.overviewStat[data-attention='true'] strong {
+  color: var(--warning-color);
+}
 
 .count,
 .dependencies,
@@ -28,8 +115,9 @@
 .dagCanvas {
   position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 56px;
+  align-items: center;
+  justify-content: center;
+  gap: 64px;
   width: max-content;
   min-width: 100%;
   padding: 8px 10px 32px;
@@ -85,24 +173,41 @@
   min-width: 0;
 }
 
+/* Status drives one accent, and the accent drives every edge treatment on the
+   node: the border, and the selection ring. Before this, status set
+   `border-color` while selection stacked an always-blue ring on top, so a
+   completed (green) or blocked (amber) node picked up a second border in a
+   clashing hue the moment it was selected. */
 .node {
+  --node-accent: var(--border);
+  --node-ring: var(--agent-blue-500);
   position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-width: 0;
   padding: 9px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--node-accent);
   border-radius: 8px;
   background: var(--background);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node {
+    transition: none;
+  }
 }
 
 .dagCanvas .node::before,
 .dagCanvas .node::after {
+  display: none;
   position: absolute;
   top: 50%;
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border: 1px solid var(--agent-blue-500);
   border-radius: 999px;
   background: var(--background);
@@ -110,31 +215,38 @@
   transform: translateY(-50%);
 }
 
-.dagCanvas .node::before {
-  left: -5px;
+.dagCanvas .node[data-plan-input='true']::before {
+  left: -4px;
+  display: block;
 }
 
-.dagCanvas .node::after {
-  right: -5px;
+.dagCanvas .node[data-plan-output='true']::after {
+  right: -4px;
+  display: block;
 }
 
 .node[data-status='running'],
 .node[data-status='completed'] {
-  border-color: color-mix(in srgb, var(--success-color) 55%, var(--border));
+  --node-accent: color-mix(in srgb, var(--success-color) 55%, var(--border));
+  --node-ring: var(--success-color);
 }
 
 .node[data-status='blocked'],
 .node[data-status='paused'] {
-  border-color: color-mix(in srgb, var(--warning-color) 55%, var(--border));
+  --node-accent: color-mix(in srgb, var(--warning-color) 55%, var(--border));
+  --node-ring: var(--warning-color);
 }
 
 .node[data-status='in_progress'] {
-  border-color: color-mix(in srgb, var(--agent-blue-500) 55%, var(--border));
+  --node-accent: color-mix(in srgb, var(--agent-blue-500) 55%, var(--border));
+  --node-ring: var(--agent-blue-500);
 }
 
+/* Selection reads as "the same edge, turned up": the border goes to full
+   strength and the ring echoes it, rather than introducing a second colour. */
 .node[data-selected='true'] {
-  box-shadow: 0 0 0 2px
-    color-mix(in srgb, var(--agent-blue-500) 35%, transparent);
+  border-color: var(--node-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-ring) 32%, transparent);
 }
 
 .nodeSummary {
@@ -151,10 +263,13 @@
   text-align: left;
 }
 
-.nodeSummary:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--agent-blue-500);
+.node:has(.nodeSummary:focus-visible) {
+  outline: 2px solid var(--node-ring);
   outline-offset: 2px;
+}
+
+.nodeSummary:focus-visible {
+  outline: none;
 }
 
 .nodeTop {
@@ -233,6 +348,56 @@
   cursor: pointer;
   font: inherit;
   text-align: left;
+}
+
+.executionHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.executionExpanded {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+}
+
+.executionDescription,
+.executionActivity,
+.executionMetrics,
+.executionOpen,
+.emptyExecutions {
+  font-size: 11px;
+}
+
+.executionDescription {
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.executionActivity {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.executionActivity span {
+  margin-right: 4px;
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.executionMetrics,
+.emptyExecutions {
+  color: var(--muted-foreground);
+}
+
+.executionOpen {
+  align-self: flex-end;
+  color: var(--agent-blue-500);
 }
 
 .execution:disabled {
@@ -326,4 +491,26 @@ button.nestedExecution:not(:disabled):focus-visible {
   color: var(--muted-foreground);
   font-size: 11px;
   font-weight: 600;
+}
+
+.emptyExecutions {
+  padding-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .overview {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .progressCard {
+    grid-column: 1 / -1;
+  }
+
+  .overviewStat {
+    border-top: 1px solid var(--border);
+  }
+
+  .overviewStat:nth-child(2) {
+    border-left: 0;
+  }
 }

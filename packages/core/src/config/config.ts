@@ -926,6 +926,12 @@ export interface AgentsCollabSettings {
   };
 }
 
+export interface SessionWorkflowPlanRevision {
+  planId: string;
+  sourceCallId: string;
+  todoIds: readonly string[];
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -1108,6 +1114,8 @@ export interface ConfigParameters {
   cronRecurringMaxAgeDays?: number;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
+  /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
+  sessionWorkflowEnabled?: boolean;
   artifactEnabled?: boolean;
   artifactAutoOpen?: boolean;
   artifactPublisher?: 'local' | 'host' | 'oss';
@@ -1975,6 +1983,9 @@ export class Config {
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
   private workflowsEnabled = false;
+  private readonly sessionWorkflowEnabled: boolean;
+  private sessionWorkflowEnabledProvider?: () => boolean;
+  private sessionWorkflowPlanRevision?: SessionWorkflowPlanRevision;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly computerUseMaxImageDimension?: number;
@@ -2256,6 +2267,7 @@ export class Config {
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
@@ -6620,6 +6632,68 @@ export class Config {
 
   setWorkflowsEnabled(enabled: boolean): void {
     this.workflowsEnabled = enabled;
+  }
+
+  isSessionWorkflowEnabled(): boolean {
+    const enabled =
+      this.sessionWorkflowEnabledProvider?.() ?? this.sessionWorkflowEnabled;
+    if (!enabled) this.sessionWorkflowPlanRevision = undefined;
+    return enabled;
+  }
+
+  setSessionWorkflowEnabledProvider(provider?: () => boolean): void {
+    this.sessionWorkflowEnabledProvider = provider;
+    if (!this.isSessionWorkflowEnabled()) {
+      this.sessionWorkflowPlanRevision = undefined;
+    }
+  }
+
+  getSessionWorkflowPlanRevision(): SessionWorkflowPlanRevision | undefined {
+    if (!this.isSessionWorkflowEnabled()) return undefined;
+    return this.sessionWorkflowPlanRevision;
+  }
+
+  setSessionWorkflowPlanRevision(
+    revision: SessionWorkflowPlanRevision | undefined,
+  ): void {
+    if (
+      !this.isSessionWorkflowEnabled() ||
+      revision === undefined ||
+      revision.planId.trim() === '' ||
+      revision.sourceCallId.trim() === ''
+    ) {
+      this.sessionWorkflowPlanRevision = undefined;
+      return;
+    }
+
+    const todoIds = Array.from(
+      new Set(
+        revision.todoIds.filter(
+          (todoId): todoId is string =>
+            typeof todoId === 'string' && todoId.trim() !== '',
+        ),
+      ),
+    );
+    this.sessionWorkflowPlanRevision =
+      todoIds.length > 0
+        ? {
+            planId: revision.planId,
+            sourceCallId: revision.sourceCallId,
+            todoIds,
+          }
+        : undefined;
+  }
+
+  clearSessionWorkflowPlanRevision(): void {
+    this.sessionWorkflowPlanRevision = undefined;
+  }
+
+  isSessionWorkflowTodoContextActive(): boolean {
+    return (
+      this.isSessionWorkflowEnabled() &&
+      (this.approvalMode === ApprovalMode.PLAN ||
+        this.sessionWorkflowPlanRevision !== undefined)
+    );
   }
 
   /**

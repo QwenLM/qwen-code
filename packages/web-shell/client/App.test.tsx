@@ -8,6 +8,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionTaskStatus,
   DaemonSettingDescriptor,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
@@ -314,7 +315,7 @@ const {
         | ((error: unknown, fallback: string) => void)
         | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
-      backgroundTasks: [] as DaemonSessionMonitorTaskStatus[],
+      backgroundTasks: [] as DaemonSessionTaskStatus[],
       latestMonitorDetailsOnOpen: null as
         | ((tool: {
             callId: string;
@@ -328,8 +329,15 @@ const {
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
+      settingsLoading: false,
+      settingsError: undefined as Error | undefined,
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
+      } | null,
+      latestSplitViewProps: null as {
+        includeOtherWorkspaces?: boolean;
+        workspaceCwd?: string;
+        sessionWorkflowEnabled?: boolean;
       } | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
@@ -380,7 +388,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     settings: testState.settings,
     setValue: settingsSetValue,
     reload: settingsReload,
-    loading: false,
+    loading: testState.settingsLoading,
+    error: testState.settingsError,
+    status: testState.settingsLoading
+      ? undefined
+      : testState.settingsError
+        ? undefined
+        : { v: 1, settings: testState.settings },
   }),
   useProviders: () => ({
     providers: [],
@@ -939,7 +953,14 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
-      onPaneArtifactsChange?: (sessionId: string, artifacts: unknown[]) => void;
+      includeOtherWorkspaces?: boolean;
+      workspaceCwd?: string;
+      sessionWorkflowEnabled?: boolean;
+      onPaneArtifactsChange?: (
+        sessionId: string,
+        artifacts: unknown[],
+        workspaceActions: unknown,
+      ) => void;
       onRightPanelOpen?: (request: unknown) => void;
       onOpenMonitor?: (
         task: DaemonSessionMonitorTaskStatus,
@@ -952,6 +973,10 @@ vi.doMock('./components/SplitView', async () => {
       }) => unknown;
       voiceWorkspaces?: readonly unknown[];
     }) => {
+      testState.latestSplitViewProps = props;
+      const paneActions = {
+        readWorkspaceFile: vi.fn().mockResolvedValue('<p>pane</p>'),
+      };
       const artifact = {
         id: 'pane-artifact',
         kind: 'report',
@@ -1987,6 +2012,7 @@ describe('environment agent tasks', () => {
         id: 'general-purpose-internal-1',
         label: 'Review code',
         status: 'completed',
+        toolUseId: 'call-agent-1',
       },
     ]);
   });
@@ -2369,7 +2395,10 @@ beforeEach(() => {
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
+  testState.settingsLoading = false;
+  testState.settingsError = undefined;
   testState.latestSettingsState = null;
+  testState.latestSplitViewProps = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
@@ -2494,11 +2523,54 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  const url = new URL(window.location.href);
+  if (url.searchParams.has('view')) {
+    url.searchParams.delete('view');
+    window.history.replaceState(null, '', url);
+  }
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe('App plan todos', () => {
+  it('keeps a direct cockpit route and normal approval fail-closed when disabled', async () => {
+    testState.blocks = [makePendingPermissionBlock()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container } = renderApp();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    window.history.pushState(null, '', '/?view=cockpit');
+    act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not enter cockpit while settings are loading or after an error', async () => {
+    testState.settingsLoading = true;
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+
+    testState.settingsLoading = false;
+    testState.settingsError = new Error('settings unavailable');
+    rerender();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+  });
+
   it('gates the exit-plan workflow on the experimental setting', async () => {
     const approvedEntries = [
       {
@@ -2522,6 +2594,7 @@ describe('App plan todos', () => {
             toolName: 'todo_write',
             status: 'completed',
             rawOutput: {
+              sessionWorkflow: true,
               entries: approvedEntries,
               plan: { id: 'plan-1' },
             },
@@ -2538,6 +2611,7 @@ describe('App plan todos', () => {
             toolName: 'todo_write',
             status: 'completed',
             rawOutput: {
+              sessionWorkflow: true,
               entries: [
                 ...approvedEntries.map((entry) => ({
                   ...entry,
@@ -2563,18 +2637,60 @@ describe('App plan todos', () => {
       }),
     ];
 
-    const { rerender } = renderApp();
+    const { container, rerender } = renderApp();
     await flush();
 
     expect(testState.latestToolApprovalPlanTodos).toEqual([]);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
 
     testState.settings = [sessionWorkflowSetting()];
     rerender();
     await flush();
 
     expect(
-      testState.latestToolApprovalPlanTodos.map((todo) => todo.id),
-    ).toEqual(['prepare', 'ship']);
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector('[data-testid="split-approval-notice"] button')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="cockpit-plan-review"]'),
+    ).not.toBeNull();
+    expect(container.querySelectorAll('[data-plan-workflow]')).toHaveLength(1);
+    expect(
+      container.querySelector('[data-plan-node-id="prepare"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-plan-node-id="ship"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-plan-node-id="deploy"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    testState.blocks = [
+      makePendingPermissionBlock({
+        resolved: true,
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+        todoPlan: { planId: 'plan-1', sourceCallId: 'todo-approved' },
+      }),
+    ];
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="session-workflow-cockpit"]'),
+    ).not.toBeNull();
   });
 
   it('refreshes dependencies when only blockedBy changes', async () => {
@@ -2619,13 +2735,26 @@ describe('App plan todos', () => {
     expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
   });
 
-  it('opens the workflow dialog with plan todos and linked agents', async () => {
+  it('opens workflow and cockpit views with plan todos and linked agents', async () => {
     testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
       {
         id: 'plan',
-        role: 'plan',
-        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-start',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
       },
       {
         id: 'agents',
@@ -2634,13 +2763,14 @@ describe('App plan todos', () => {
           {
             callId: 'agent-call',
             toolName: 'Agent',
+            title: 'Worker agent',
             status: 'in_progress',
-            args: { todo_id: 'work' },
+            args: { todo_id: 'work', description: 'Inspect repository' },
           },
         ],
       },
     ];
-    renderApp();
+    const { container, rerender } = renderApp();
     await flush();
 
     await act(async () => {
@@ -2649,11 +2779,187 @@ describe('App plan todos', () => {
     });
 
     expect(
-      testState.latestTasksStatusProps?.planTodos?.map((todo) => todo.id),
-    ).toEqual(['work']);
+      container.querySelector('[data-testid="workflow-page"]'),
+    ).not.toBeNull();
     expect(
-      testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
-    ).toEqual(['agent-call']);
+      container.querySelector('[data-plan-node-id="work"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('Worker agent');
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="open-workflow"]'),
+    );
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-chat"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    testState.messages = [
+      ...testState.messages.map((message) => {
+        if (message.id !== 'agents' || message.role !== 'tool_group') {
+          return message;
+        }
+        return {
+          ...message,
+          tools: message.tools.map((tool) => ({
+            ...tool,
+            status: 'completed' as const,
+          })),
+        };
+      }),
+      {
+        id: 'plan-complete',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-complete',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'completed' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      { id: 'follow-up', role: 'user', content: 'What happened?' },
+      { id: 'reply', role: 'assistant', content: 'The work completed.' },
+    ];
+    rerender();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-cockpit"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).toContain('100%');
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).toContain('Worker agent');
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).toContain('Execution metrics unavailable');
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    const agentActivityButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="cockpit-page"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Agent activity'));
+    expect(agentActivityButton).toBeDefined();
+    await act(async () => {
+      agentActivityButton?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).toContain('Worker agent');
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).not.toContain('No Agent runs are linked to a Todo yet.');
+
+    testState.backgroundTasks = [
+      {
+        kind: 'agent',
+        id: 'restored-agent',
+        label: 'Restored worker',
+        description: 'Inspect repository',
+        status: 'completed',
+        startTime: 1,
+        endTime: 65_001,
+        runtimeMs: 65_000,
+        isBackgrounded: true,
+        stats: { totalTokens: 1_200, toolUses: 4, durationMs: 65_000 },
+        recentActivities: [
+          {
+            name: 'read_file',
+            description: 'Restored from daemon history',
+            at: 65_000,
+          },
+        ],
+      },
+    ];
+    rerender();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-workflow"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-page"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="work"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('Restored from daemon history');
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('1,200 tokens');
+
+    const completedMessages = testState.messages;
+    testState.messages = [];
+    rerender();
+    await flush();
+    expect(container.querySelector('[data-testid="workflow-page"]')).toBeNull();
+    testState.messages = completedMessages;
+    rerender();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-cockpit"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).get('view')).toBe(
+      'cockpit',
+    );
+
+    testState.messages = [];
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-empty"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="open-chat"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="open-workflow"]')).toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-chat"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
   });
 
   it('keeps the tasks dialog plain when Session Workflow is off', async () => {
